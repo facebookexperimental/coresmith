@@ -30,6 +30,7 @@ from orchestrator.langchain.agents.socmate_llm import (
     _CODEX_MODEL_MAP,
     _CLI_MODEL_MAP,
     _detect_provider,
+    _log_llm_call,
     _parse_codex_json,
     _resolve_model,
     _register_process,
@@ -119,6 +120,51 @@ class TestCodexJsonParsing:
         text, usage = _parse_codex_json(stdout)
         assert text == "hello"
         assert usage == {"input_tokens": 10, "output_tokens": 2}
+
+
+class TestLLMTelemetry:
+    def test_log_llm_call_backdates_otel_span(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SOCMATE_PROJECT_ROOT", str(tmp_path))
+        recorded = {}
+
+        class FakeSpan:
+            def set_attribute(self, *args):
+                pass
+
+            def set_status(self, *args):
+                pass
+
+            def end(self, end_time=None):
+                recorded["end_time"] = end_time
+
+        class FakeTracer:
+            def start_span(self, name, attributes=None, start_time=None):
+                recorded["name"] = name
+                recorded["attributes"] = attributes or {}
+                recorded["start_time"] = start_time
+                return FakeSpan()
+
+        start_ns = time.time_ns() - 2_500_000_000
+        with patch(
+            "orchestrator.langchain.agents.socmate_llm._get_llm_tracer",
+            return_value=FakeTracer(),
+        ):
+            _log_llm_call(
+                model="gpt-5.5",
+                provider="codex_cli",
+                system_prompt="system",
+                user_prompt="prompt",
+                response="response",
+                duration_s=2.5,
+                timeout=60,
+                start_ts_ns=start_ns,
+            )
+
+        assert recorded["name"] == "LLM gpt-5.5 (codex_cli)"
+        assert recorded["start_time"] == start_ns
+        assert recorded["end_time"] is not None
+        assert recorded["end_time"] - recorded["start_time"] >= 2_400_000_000
+        assert recorded["attributes"]["llm.duration_s"] == 2.5
 
 
 class TestProcessRegistry:
