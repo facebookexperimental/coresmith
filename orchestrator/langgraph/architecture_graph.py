@@ -123,6 +123,7 @@ class ArchGraphState(TypedDict):
     # PRD (Product Requirements Document) -- "What functionality is needed?"
     prd_spec: Optional[dict]       # Full PRD document (Phase 2 output)
     prd_questions: Optional[list]  # Sizing questions (Phase 1 output)
+    prd_answers: Optional[dict]    # Architect answers used to draft the PRD
 
     # SAD (System Architecture Document) -- "How do we get there and why?"
     sad_spec: Optional[dict]
@@ -285,6 +286,31 @@ def _persist_prd(
 
     md_path = arch_dir / "prd_spec.md"
     atomic_write(md_path, "\n".join(md_lines))
+
+
+def _feedback_revision_target(feedback: str) -> str:
+    """Route final-review feedback to the earliest document it criticizes."""
+    text = str(feedback or "").lower()
+    if any(
+        token in text
+        for token in (
+            "prd",
+            "product requirement",
+            "requirements document",
+            "sizing question",
+            "not answered",
+            "manual answer",
+            "target frame",
+            "frame rate",
+            "golden model path",
+        )
+    ):
+        return "Gather Requirements"
+    if any(token in text for token in ("sad", "system architecture")):
+        return "System Architecture"
+    if any(token in text for token in ("frd", "functional requirement")):
+        return "Functional Requirements"
+    return "Block Diagram"
 
 
 def _persist_sad(project_root: str, sad_result: dict) -> None:
@@ -770,6 +796,13 @@ async def gather_requirements_node(state: ArchGraphState) -> dict:
         previous_questions = state.get("prd_questions")
         if has_hr:
             user_answers = human_response.get("answers")
+            if (
+                not user_answers
+                and human_response.get("action") == "feedback"
+                and human_response.get("feedback")
+            ):
+                user_answers = dict(state.get("prd_answers") or {})
+                user_answers["architect_final_review_feedback"] = human_response.get("feedback", "")
 
         span.set_attribute("has_answers", user_answers is not None)
         if user_answers:
@@ -800,6 +833,8 @@ async def gather_requirements_node(state: ArchGraphState) -> dict:
                 )
 
             update["prd_spec"] = result
+            if user_answers:
+                update["prd_answers"] = user_answers
             update["requirements"] = enriched_requirements
 
             _persist_prd(state["project_root"], result, previous_questions, user_answers)
@@ -2042,8 +2077,7 @@ def route_after_final_review(state: ArchGraphState) -> str:
         # OK2DEV -- proceed to completion
         target = "Architecture Complete"
     elif action == "feedback":
-        # REVISE -- loop back to Block Diagram with feedback
-        target = "Block Diagram"
+        target = _feedback_revision_target(response.get("feedback", ""))
     else:
         # Default to accept
         target = "Architecture Complete"
@@ -2061,6 +2095,9 @@ def route_after_final_review(state: ArchGraphState) -> str:
 
 route_after_final_review.__edge_labels__ = {
     "Architecture Complete": "OK2DEV",
+    "Gather Requirements": "REVISE_PRD",
+    "System Architecture": "REVISE_SAD",
+    "Functional Requirements": "REVISE_FRD",
     "Block Diagram": "REVISE",
     "Abort": "ABORT",
 }

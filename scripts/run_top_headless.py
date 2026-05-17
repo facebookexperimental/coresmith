@@ -52,6 +52,41 @@ def _write_question_escalation(kind: str, state: dict) -> Path:
     return path
 
 
+def _question_answer_ids_from_escalation(payload: dict) -> list[str]:
+    """Return all answer IDs the outer agent must cover for this escalation."""
+    ask = payload.get("ask_question") or {}
+    ids: list[str] = []
+    seen: set[str] = set()
+    for section in ("questions", "remaining_choice_questions", "auto_answerable"):
+        for item in ask.get(section, []) or []:
+            qid = str(item.get("id", "") or "").strip()
+            if qid and qid not in seen:
+                seen.add(qid)
+                ids.append(qid)
+    return ids
+
+
+def _normalize_answer_payload(value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    nested = value.get("answers")
+    if isinstance(nested, dict):
+        # Accept either the documented raw mapping or a defensive wrapper.
+        return nested
+    return value
+
+
+def _validate_question_answers(answers: dict, escalation_payload: dict) -> tuple[list[str], list[str]]:
+    """Return (missing_required_ids, extra_answer_ids)."""
+    required = _question_answer_ids_from_escalation(escalation_payload)
+    if not required:
+        return [], []
+    answer_ids = {str(k) for k in answers.keys()}
+    missing = [qid for qid in required if qid not in answer_ids]
+    extras = sorted(answer_ids - set(required))
+    return missing, extras
+
+
 def _recent_text(path: Path, max_lines: int = 160, max_chars: int = 20000) -> str:
     if not path.exists():
         return ""
@@ -110,14 +145,41 @@ def _write_decision_escalation(kind: str, state: dict, allowed_actions: list[str
     return path
 
 
-async def _wait_for_question_answers(kind: str, poll_s: float) -> dict:
+async def _wait_for_question_answers(
+    kind: str,
+    poll_s: float,
+    escalation_path: Path | None = None,
+) -> dict:
     esc_dir = _project_root() / ".socmate" / "escalations"
     answers_path = esc_dir / f"{kind}.answers.json"
     print(f"[arch] escalation pending: write answers JSON to {answers_path}", flush=True)
     while True:
         if answers_path.exists():
-            answers = json.loads(answers_path.read_text())
+            raw_answers = json.loads(answers_path.read_text())
+            answers = _normalize_answer_payload(raw_answers)
             if isinstance(answers, dict):
+                if escalation_path and escalation_path.exists():
+                    payload = json.loads(escalation_path.read_text())
+                    missing, extras = _validate_question_answers(answers, payload)
+                    if missing:
+                        invalid_path = answers_path.with_name(
+                            f"{answers_path.name}.invalid-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}"
+                        )
+                        answers_path.replace(invalid_path)
+                        print(
+                            "[arch] rejected incomplete escalation answers; "
+                            f"missing {len(missing)} required id(s): {missing[:20]}. "
+                            f"Moved invalid file to {invalid_path}",
+                            flush=True,
+                        )
+                        await asyncio.sleep(max(5.0, poll_s))
+                        continue
+                    if extras:
+                        print(
+                            "[arch] escalation answers include extra context keys "
+                            f"not in current question set: {extras[:20]}",
+                            flush=True,
+                        )
                 print(f"[arch] loaded escalation answers from {answers_path}", flush=True)
                 return answers
             raise RuntimeError(f"Escalation answers at {answers_path} must be a JSON object")
@@ -376,7 +438,7 @@ async def run(args: argparse.Namespace) -> int:
                     else:
                         path = _write_question_escalation(itype, state)
                         print(f"[arch] wrote question escalation to {path}", flush=True)
-                        answers = await _wait_for_question_answers(itype, args.poll_s)
+                        answers = await _wait_for_question_answers(itype, args.poll_s, path)
                     print(await mcp.resume_architecture("continue", json.dumps(answers)), flush=True)
                 elif itype == "final_review":
                     payload_state = {
