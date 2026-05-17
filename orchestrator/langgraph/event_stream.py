@@ -43,6 +43,7 @@ RED = "\033[91m"
 RESET = "\033[0m"
 
 _LOG_RELPATH = ".socmate/pipeline_events.jsonl"
+_VALID_EXIT_STATUS = {"ok", "error", "skipped", "interrupted"}
 
 
 # ---------------------------------------------------------------------------
@@ -89,12 +90,16 @@ def write_graph_event(
     log_path = Path(project_root) / _LOG_RELPATH
     log_path.parent.mkdir(parents=True, exist_ok=True)
     ts = time.time()
+    payload = dict(data or {})
+    if event_type == "graph_node_exit":
+        payload["status"] = _derive_exit_status(payload)
+
     record = {
         "ts": ts,
         "iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ts)),
         "event": event_type,
         "node": node_name,
-        **(data or {}),
+        **payload,
     }
     line = json.dumps(record, default=str) + "\n"
     with _write_lock:
@@ -119,6 +124,57 @@ async def _safe_hook(
         await hook(project_root, node_name, record)
     except Exception:
         logger.exception("Exit hook %s failed for node %s", hook.__name__, node_name)
+
+
+def _derive_exit_status(data: dict) -> str:
+    """Return a uniform status for a graph-node exit event.
+
+    Historically most callers wrote ad hoc fields such as ``passed``,
+    ``success``, ``clean``, or ``error``.  Keeping this normalization in the
+    writer makes existing nodes observable without forcing every graph to be
+    migrated in one large patch.
+    """
+    explicit = str(data.get("status", "")).strip().lower()
+    aliases = {
+        "true": "ok",
+        "pass": "ok",
+        "passed": "ok",
+        "success": "ok",
+        "fail": "error",
+        "failed": "error",
+        "failure": "error",
+        "abort": "interrupted",
+        "aborted": "interrupted",
+    }
+    explicit = aliases.get(explicit, explicit)
+    if explicit in _VALID_EXIT_STATUS:
+        return explicit
+
+    if data.get("pipeline_aborted") or data.get("interrupted"):
+        return "interrupted"
+
+    if data.get("skipped") is True or data.get("skip") is True:
+        return "skipped"
+    result = str(data.get("result", "")).strip().lower()
+    if result in {"skip", "skipped"}:
+        return "skipped"
+
+    for key in (
+        "passed",
+        "success",
+        "clean",
+        "ok",
+        "synth_ok",
+        "integration_ok",
+        "validation_ok",
+    ):
+        if key in data and data.get(key) is False:
+            return "error"
+
+    if data.get("error") or data.get("exception") or data.get("failure"):
+        return "error"
+
+    return "ok"
 
 
 # ---------------------------------------------------------------------------
