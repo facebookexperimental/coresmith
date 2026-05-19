@@ -1,15 +1,17 @@
 # Codespaces-only extension of the published image. We can't modify the
 # published :latest until publish-image starts succeeding again, so we
-# layer the FHS sshd symlinks (PR #11's fix) on top at devcontainer
-# build time. The base image is otherwise unchanged.
+# layer PR #11's full sshd bootstrap on top at devcontainer build time.
+# This is a verbatim copy of the relevant block in the repo-root Dockerfile.
 FROM ghcr.io/facebookexperimental/socmate:latest
 
-RUN set -eux \
+RUN BASH_BIN="$(command -v bash)" \
  && SSHD_BIN="$(command -v sshd)" \
  && SSH_KEYGEN_BIN="$(command -v ssh-keygen)" \
+ && test -x "${BASH_BIN}" \
  && test -x "${SSHD_BIN}" \
  && test -x "${SSH_KEYGEN_BIN}" \
- && mkdir -p /usr/sbin /usr/bin /etc/ssh /var/run/sshd /run/sshd /var/empty \
+ && ln -sf "${BASH_BIN}" /bin/bash \
+ && mkdir -p /usr/sbin /usr/bin \
  && ln -sf "${SSHD_BIN}" /usr/sbin/sshd \
  && ln -sf "${SSH_KEYGEN_BIN}" /usr/bin/ssh-keygen \
  && if ! getent passwd sshd >/dev/null 2>&1; then \
@@ -20,5 +22,22 @@ RUN set -eux \
          && echo 'sshd:x:74:' >> /etc/group; \
         fi; \
     fi \
+ && mkdir -p /etc/ssh /var/run/sshd /run/sshd /root/.ssh /var/empty \
+ && chmod 700 /root/.ssh \
  && chmod 755 /var/empty \
- && ssh-keygen -A
+ && ssh-keygen -A \
+ && python3 -c "p='/etc/shadow'; t=open(p).read(); open(p,'w').write(t.replace('root:!:','root:*:',1))" \
+ && SFTP_SERVER="$(find /nix/store -path '*openssh*/libexec/sftp-server' -type f 2>/dev/null | head -1)" \
+ && test -x "${SFTP_SERVER}" \
+ && { \
+        echo "Port 22"; \
+        echo "PermitRootLogin prohibit-password"; \
+        echo "PasswordAuthentication no"; \
+        echo "PubkeyAuthentication yes"; \
+        echo "AuthorizedKeysFile /root/.ssh/authorized_keys"; \
+        echo "ChallengeResponseAuthentication no"; \
+        echo "UsePAM no"; \
+        echo "PrintMotd no"; \
+        echo "AcceptEnv LANG LC_*"; \
+        echo "Subsystem sftp ${SFTP_SERVER}"; \
+    } > /etc/ssh/sshd_config
