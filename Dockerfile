@@ -63,16 +63,23 @@ RUN nix-channel --add https://nixos.org/channels/nixos-24.05 nixpkgs \
  # C++ compiler on PATH for non-yosys subprocesses.
  && nix-env -iA nixos-unstable.verilator
 
-# nixpkgs.gcc's runtime libstdc++ lives under /root/.nix-profile/lib but
-# isn't on the dynamic loader's default search path. PyPI's manylinux
-# wheels for numpy 2.4+ are linked against libstdc++.so.6 at the standard
-# FHS location -- without LD_LIBRARY_PATH, the wavekit sdist build fails
-# its `import numpy as np` with
-#   ImportError: libstdc++.so.6: cannot open shared object file
-# Surface the nix-store libstdc++ at the loader's default search path.
-ENV LD_LIBRARY_PATH="/root/.nix-profile/lib:${LD_LIBRARY_PATH}"
-
 ENV PATH="/root/.nix-profile/bin:${PATH}"
+
+# PyPI manylinux wheels (numpy 2.4+, used by wavekit's pyproject build env)
+# dlopen libstdc++.so.6 via the loader's default FHS search paths. The
+# openlane2 nix-only base has no /usr/lib/x86_64-linux-gnu, and
+# nixpkgs.gcc's profile dir only contains the gcc *wrapper* -- libstdc++
+# itself lives in the gcc-unwrapped output under /nix/store. Find it and
+# symlink it into a path the loader actually searches.
+#   build error this fixes:
+#     ImportError: libstdc++.so.6: cannot open shared object file: No such file or directory
+RUN set -eux \
+ && mkdir -p /usr/lib \
+ && LIBSTDCPP="$(find /nix/store -name 'libstdc++.so.6.*' -type f -not -name '*.debug' 2>/dev/null | sort -V | tail -1)" \
+ && test -n "${LIBSTDCPP}" \
+ && ln -sf "${LIBSTDCPP}" /usr/lib/libstdc++.so.6 \
+ && ldconfig 2>/dev/null || true \
+ && python3 -c "import ctypes; ctypes.CDLL('libstdc++.so.6'); print('libstdc++ resolves')"
 
 # Verify the unstable-channel verilator is on PATH and >= 5.036
 # (cocotb >= 2.0 requires it). Fails the build loud if PATH ordering
