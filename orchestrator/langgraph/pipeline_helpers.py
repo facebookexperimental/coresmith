@@ -39,22 +39,20 @@ import yaml
 # Constants
 # ---------------------------------------------------------------------------
 
-SOURCE_ROOT = Path(
-    os.environ.get(
-        "SOCMATE_SOURCE_ROOT",
-        str(Path(__file__).resolve().parent.parent.parent),
-    )
-)
 PROJECT_ROOT = Path(
     os.environ.get(
         "SOCMATE_PROJECT_ROOT",
-        str(SOURCE_ROOT),
+        str(Path(__file__).resolve().parent.parent.parent),
     )
 )
+CODE_ROOT = Path(__file__).resolve().parent.parent.parent
 CONFIG_PATH = Path(
-    os.environ.get("SOCMATE_CONFIG_PATH", str(SOURCE_ROOT / "orchestrator" / "config.yaml"))
+    os.environ.get(
+        "SOCMATE_CONFIG_PATH",
+        str(PROJECT_ROOT / "orchestrator" / "config.yaml"),
+    )
 )
-PDK_ROOT = Path(os.environ.get("SOCMATE_PDK_ROOT", str(SOURCE_ROOT / ".pdk")))
+PDK_ROOT = PROJECT_ROOT / ".pdk"
 def _find_liberty_file() -> Path:
     """Locate the Sky130 liberty file, checking both sky130A and sky130B."""
     lib_name = "sky130_fd_sc_hd__tt_025C_1v80.lib"
@@ -230,7 +228,13 @@ def load_config() -> dict:
     nightly e2e job to swap in a small reference design without touching
     the canonical config.
     """
-    with open(CONFIG_PATH) as f:
+    config_path = CONFIG_PATH
+    if not config_path.exists():
+        repo_config = CODE_ROOT / "orchestrator" / "config.yaml"
+        if repo_config.exists():
+            config_path = repo_config
+
+    with open(config_path) as f:
         config = yaml.safe_load(f)
 
     blocks_override = os.environ.get("SOCMATE_BLOCKS_FILE")
@@ -367,68 +371,25 @@ async def generate_uarch_spec(
     spec_dir = PROJECT_ROOT / ARCH_DOC_DIR / "uarch_specs"
     spec_dir.mkdir(parents=True, exist_ok=True)
     spec_path = spec_dir / f"{block['name']}.md"
-    # Disk-first: if the agent wrote a richer spec via its write/edit tool,
-    # prefer that artifact over stdout. Codex may write inside an isolated
-    # codex-call-* workdir and return only a path/status message, so recover
-    # that per-call artifact before deciding what to persist canonically.
+    # Disk-first: if the agent wrote a richer spec via its write/edit tool
+    # (e.g. opencode), prefer that on-disk content over the text we got back
+    # through stdout. Only fall back to result["spec_text"] when the disk file
+    # is empty or much smaller than the model's stdout response.
     spec_returned = result.get("spec_text") or ""
-    recovered = _recover_codex_call_artifact(
-        PROJECT_ROOT,
-        Path(ARCH_DOC_DIR) / "uarch_specs" / f"{block['name']}.md",
-    )
-    candidates: list[str] = []
     if spec_path.exists():
-        candidates.append(spec_path.read_text())
-    if recovered:
-        candidates.append(recovered)
-    if spec_returned:
-        candidates.append(spec_returned)
-
-    spec_text = _choose_generated_markdown(candidates)
-    spec_path.write_text(spec_text)
-    result["spec_text"] = spec_text
+        on_disk = spec_path.read_text()
+        # If the on-disk file is meaningfully larger than the stdout text,
+        # the agent wrote a real spec via its tools -- keep the disk version
+        # and surface that as the canonical spec.
+        if len(on_disk) > max(len(spec_returned), 256):
+            result["spec_text"] = on_disk
+        else:
+            spec_path.write_text(spec_returned)
+    else:
+        spec_path.write_text(spec_returned)
     result["spec_path"] = str(spec_path)
 
     return result
-
-
-def _recover_codex_call_artifact(project_root: Path, rel_path: Path) -> str:
-    """Return newest matching artifact written in a Codex isolated workdir."""
-    try:
-        candidates = sorted(
-            project_root.glob(f"codex-call-*/{rel_path.as_posix()}"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-    except OSError:
-        return ""
-
-    for candidate in candidates:
-        try:
-            text = candidate.read_text(encoding="utf-8").strip()
-        except OSError:
-            continue
-        if text:
-            return text
-    return ""
-
-
-def _looks_like_uarch_markdown(text: str) -> bool:
-    lowered = text.lower()
-    return (
-        len(text) >= 512
-        and "interface" in lowered
-        and ("##" in text or "| port" in lowered or "module " in lowered)
-    )
-
-
-def _choose_generated_markdown(candidates: list[str]) -> str:
-    """Pick the richest generated Markdown artifact, avoiding path messages."""
-    non_empty = [c.strip() for c in candidates if c and c.strip()]
-    if not non_empty:
-        return ""
-    rich = [c for c in non_empty if _looks_like_uarch_markdown(c)]
-    return max(rich or non_empty, key=len)
 
 
 # ---------------------------------------------------------------------------

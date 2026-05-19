@@ -192,6 +192,7 @@ def _log_llm_call(
     error: str = "",
     timed_out: bool = False,
     usage: dict | None = None,
+    start_ts_ns: int | None = None,
 ) -> None:
     """Write an LLM call record to the JSONL log and an OTel span.
 
@@ -234,6 +235,8 @@ def _log_llm_call(
     if tracer is not None:
         try:
             from opentelemetry import trace
+            end_ns = _time_mod.time_ns()
+            start_ns = start_ts_ns or (end_ns - int(duration_s * 1_000_000_000))
             attrs = {
                 "llm.model_name": model,
                 "llm.provider": provider,
@@ -264,11 +267,12 @@ def _log_llm_call(
             span = tracer.start_span(
                 f"LLM {model} ({provider})",
                 attributes=attrs,
+                start_time=start_ns,
             )
             if error:
                 span.set_attribute("error", error[:1000])
                 span.set_status(trace.StatusCode.ERROR, error[:200])
-            span.end()
+            span.end(end_time=end_ns)
         except Exception:
             pass  # telemetry must never break the LLM call
 
@@ -695,6 +699,7 @@ class ClaudeLLM:
         project_root = _llm_log_root()
 
         t0 = _time_mod.monotonic()
+        span_start_ns = _time_mod.time_ns()
         max_retries = 3
 
         # ``_generate_via_cli`` is itself dispatched via
@@ -727,6 +732,7 @@ class ClaudeLLM:
                     duration_s=elapsed,
                     timeout=self.timeout,
                     error=error_msg,
+                    start_ts_ns=span_start_ns,
                 )
                 return output
 
@@ -751,6 +757,7 @@ class ClaudeLLM:
                     error=error_msg,
                     timed_out=True,
                     usage=usage,
+                    start_ts_ns=span_start_ns,
                 )
                 self._write_llm_event(project_root, f"llm_{reason}", {
                     "model": resolved_model,
@@ -775,6 +782,7 @@ class ClaudeLLM:
                 )
                 _time_mod.sleep(wait)
                 t0 = _time_mod.monotonic()
+                span_start_ns = _time_mod.time_ns()
                 continue
             break
 
@@ -813,6 +821,7 @@ class ClaudeLLM:
             duration_s=elapsed,
             timeout=self.timeout,
             usage=usage,
+            start_ts_ns=span_start_ns,
         )
 
         return output
@@ -860,6 +869,7 @@ class ClaudeLLM:
         logger.info("Codex CLI cmd (first 200): %s", " ".join(cmd)[:200])
 
         t0 = _time_mod.monotonic()
+        span_start_ns = _time_mod.time_ns()
         try:
             output, stderr_text, returncode, elapsed, timed_out, stalled, usage = (
                     self._run_cli_with_watchdog(
@@ -882,6 +892,7 @@ class ClaudeLLM:
                 duration_s=elapsed,
                 timeout=self.timeout,
                 error=error_msg,
+                start_ts_ns=span_start_ns,
             )
             return output
 
@@ -905,6 +916,7 @@ class ClaudeLLM:
                 error=error_msg,
                 timed_out=True,
                 usage=usage,
+                start_ts_ns=span_start_ns,
             )
             self._write_llm_event(log_root, f"llm_{reason}", {
                 "model": resolved_model,
@@ -950,6 +962,7 @@ class ClaudeLLM:
             duration_s=elapsed,
             timeout=self.timeout,
             usage=usage,
+            start_ts_ns=span_start_ns,
         )
 
         return output

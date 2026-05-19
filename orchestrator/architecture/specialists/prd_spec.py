@@ -39,6 +39,43 @@ SYSTEM_PROMPT = _PROMPT_FILE.read_text()
 
 
 # ---------------------------------------------------------------------------
+# Prompt context helpers
+# ---------------------------------------------------------------------------
+
+def _build_answers_context(
+    user_answers: dict[str, str] | None,
+    previous_questions: list[dict] | None = None,
+) -> str:
+    """Format architect answers without dropping unmatched manual context."""
+    if not user_answers:
+        return ""
+
+    lines = ["USER ANSWERS TO SIZING QUESTIONS:"]
+    seen: set[str] = set()
+
+    if previous_questions:
+        for q in previous_questions:
+            qid = str(q.get("id", "") or "")
+            if not qid:
+                continue
+            seen.add(qid)
+            answer = user_answers.get(qid, "(not answered)")
+            lines.append(f"  {qid}: {q.get('question', '')}")
+            lines.append(f"    Answer: {answer}")
+
+    extras = [(str(qid), answer) for qid, answer in user_answers.items()
+              if str(qid) not in seen]
+    if extras:
+        if previous_questions:
+            lines.append("")
+            lines.append("ADDITIONAL ARCHITECT ANSWERS AND REVIEW FEEDBACK:")
+        for qid, answer in extras:
+            lines.append(f"  {qid}: {answer}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -78,20 +115,7 @@ async def gather_prd(
         # Build context sections
         pdk_context = pdk_summary if pdk_summary else "No PDK information available."
 
-        answers_context = ""
-        if user_answers and previous_questions:
-            lines = ["USER ANSWERS TO SIZING QUESTIONS:"]
-            for q in previous_questions:
-                qid = q.get("id", "")
-                answer = user_answers.get(qid, "(not answered)")
-                lines.append(f"  {qid}: {q.get('question', '')}")
-                lines.append(f"    Answer: {answer}")
-            answers_context = "\n".join(lines)
-        elif user_answers:
-            lines = ["USER ANSWERS TO SIZING QUESTIONS:"]
-            for qid, answer in user_answers.items():
-                lines.append(f"  {qid}: {answer}")
-            answers_context = "\n".join(lines)
+        answers_context = _build_answers_context(user_answers, previous_questions)
 
         # Build the system prompt with template variables filled in
         system_prompt = SYSTEM_PROMPT.format(

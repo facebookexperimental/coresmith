@@ -821,7 +821,6 @@ async def generate_integration_testbench(
     connections: list[dict],
     block_rtl_paths: dict[str, str],
     prd_summary: str = "",
-    prior_failure: str = "",
 ) -> dict:
     """Generate a cocotb integration testbench via the Lead DV agent.
 
@@ -856,7 +855,6 @@ async def generate_integration_testbench(
         prd_summary=prd_summary,
         block_rtl_paths=block_rtl_paths,
         output_path=output_path,
-        prior_failure=prior_failure,
     )
 
     result["testbench_path"] = result.get("tb_path", output_path)
@@ -870,7 +868,6 @@ async def generate_validation_testbench(
     connections: list[dict],
     block_rtl_paths: dict[str, str],
     ers_context: str,
-    prior_failure: str = "",
 ) -> dict:
     """Generate an ERS/KPI validation cocotb testbench via Lead Validation DV.
 
@@ -906,7 +903,6 @@ async def generate_validation_testbench(
         ers_context=ers_context,
         block_rtl_paths=block_rtl_paths,
         output_path=output_path,
-        prior_failure=prior_failure,
     )
 
     result["testbench_path"] = result.get("tb_path", output_path)
@@ -929,7 +925,6 @@ def run_integration_simulation(
         dict with: passed (bool), log (str), returncode (int), log_path (str).
     """
     import os
-    import signal
     import shutil
     from orchestrator.langgraph.pipeline_helpers import (
         _normalize_cocotb_timing_keywords,
@@ -959,7 +954,12 @@ include $(shell cocotb-config --makefiles)/Makefile.sim
 """
     (sim_dir / "Makefile").write_text(makefile_content)
 
-    sim_tb_path = sim_dir / Path(tb_path).name
+    # Copy the TB under its ORIGINAL stem so the cocotb MODULE name (which is
+    # Path(tb_path).stem) resolves on PYTHONPATH=sim_dir.  Validation DV TBs
+    # are named test_<design>_validation.py, so the previous hardcoded
+    # f"test_{design_name}.py" copy renamed them to test_<design>.py and
+    # cocotb failed import at 0 ns with `No module named test_<design>_validation`.
+    sim_tb_path = sim_dir / f"{Path(tb_path).stem}.py"
     shutil.copy2(tb_path, sim_tb_path)
     _normalize_cocotb_timing_keywords(sim_tb_path)
 
@@ -972,46 +972,13 @@ include $(shell cocotb-config --makefiles)/Makefile.sim
 
     make_bin = shutil.which("make") or "make"
 
-    sim_timeout_s = int(
-        os.environ.get(
-            "SOCMATE_INTEGRATION_SIM_TIMEOUT",
-            os.environ.get("SOCMATE_VALIDATION_DV_TIMEOUT", "600"),
-        )
-    )
-
     try:
-        proc = subprocess.Popen(
+        result = subprocess.run(
             [make_bin, "-C", str(sim_dir)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
+            timeout=600,
             env=env,
-            start_new_session=True,
-        )
-        try:
-            stdout, stderr = proc.communicate(timeout=sim_timeout_s)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            stdout, stderr = proc.communicate()
-            cmd = [make_bin, "-C", str(sim_dir)]
-            msg = f"Integration simulation timed out ({sim_timeout_s} s)"
-            log_path = _write_step_log_error(
-                "integration", "integration_sim", cmd,
-                msg, attempt,
-            )
-            return {
-                "passed": False,
-                "log": msg + "\n" + (stdout or "")[-2500:] + "\n" + (stderr or "")[-2500:],
-                "log_path": log_path,
-            }
-        result = subprocess.CompletedProcess(
-            [make_bin, "-C", str(sim_dir)],
-            proc.returncode,
-            stdout,
-            stderr,
         )
         log_path = _write_step_log(
             "integration", "integration_sim", [make_bin, "-C", str(sim_dir)],
@@ -1061,6 +1028,13 @@ include $(shell cocotb-config --makefiles)/Makefile.sim
             "wavekit_audit_path": str(audit_path),
             "wavekit_audit": wavekit_audit,
         }
+    except subprocess.TimeoutExpired:
+        cmd = [make_bin, "-C", str(sim_dir)]
+        log_path = _write_step_log_error(
+            "integration", "integration_sim", cmd,
+            "Integration simulation timed out (10 min)", attempt,
+        )
+        return {"passed": False, "log": "Integration simulation timed out (10 min)", "log_path": log_path}
     except FileNotFoundError as e:
         cmd = [make_bin, "-C", str(sim_dir)]
         log_path = _write_step_log_error(

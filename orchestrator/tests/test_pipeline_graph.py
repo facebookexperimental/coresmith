@@ -654,7 +654,66 @@ class TestRouteAfterIntegrationReview:
         assert result["integration_review_failed"] is True
 
     @pytest.mark.asyncio
-    async def test_fixed_uarch_review_blocks_stale_artifact_approval(self, tmp_path, monkeypatch):
+    async def test_fixed_uarch_review_honors_explicit_approve_by_default(self, tmp_path, monkeypatch):
+        """Default mode: when issues_fixed>0 and the outer agent explicitly
+        approves, integration_review_node honors the approve. The previous
+        auto-revise on issues_fixed>0 caused a non-terminating loop because
+        the integration-review LLM agent edits specs on every run."""
+        monkeypatch.delenv("SOCMATE_STRICT_INTEGRATION_REVIEW", raising=False)
+        from orchestrator.langchain.agents import integration_review_agent
+
+        def fake_init(self, *args, **kwargs):
+            pass
+
+        async def fake_review(self, block_names, project_root):
+            spec_dir = tmp_path / "arch" / "uarch_specs"
+            spec_dir.mkdir(parents=True, exist_ok=True)
+            (spec_dir / "adder32.md").write_text("updated spec", encoding="utf-8")
+            return {
+                "summary": "Fixed status bus layout in adder32 uArch.",
+                "issues_found": 1,
+                "issues_fixed": 1,
+            }
+
+        captured_payload = {}
+
+        def fake_interrupt(payload):
+            captured_payload.update(payload)
+            return {"action": "approve"}
+
+        monkeypatch.setattr(
+            integration_review_agent.IntegrationReviewAgent,
+            "__init__",
+            fake_init,
+        )
+        monkeypatch.setattr(
+            integration_review_agent.IntegrationReviewAgent,
+            "review",
+            fake_review,
+        )
+        monkeypatch.setattr(pipeline_graph, "interrupt", fake_interrupt)
+
+        result = await pipeline_graph.integration_review_node({
+            "project_root": str(tmp_path),
+            "block_queue": [{"name": "adder32", "tier": 1}],
+            "tier_list": [1],
+            "current_tier_index": 0,
+            "completed_blocks": [{"name": "adder32", "success": True}],
+        })
+
+        # Payload still reports the failure for outer-agent visibility.
+        assert captured_payload["review_failed"] is True
+        assert captured_payload["issues_fixed"] == 1
+        assert "Blocking uArch edits" in captured_payload["review_summary"]
+        # But the explicit approve is honored.
+        assert result["integration_review_action"] == "approve"
+        assert result["integration_review_failed"] is True
+
+    @pytest.mark.asyncio
+    async def test_fixed_uarch_review_blocks_approve_under_strict_mode(self, tmp_path, monkeypatch):
+        """SOCMATE_STRICT_INTEGRATION_REVIEW=1 restores the original
+        approve->revise auto-conversion when issues_fixed>0."""
+        monkeypatch.setenv("SOCMATE_STRICT_INTEGRATION_REVIEW", "1")
         from orchestrator.langchain.agents import integration_review_agent
 
         def fake_init(self, *args, **kwargs):

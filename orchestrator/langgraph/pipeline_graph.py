@@ -1898,12 +1898,30 @@ async def integration_review_node(state: OrchestratorState) -> dict:
         )
         action = "revise"
     if action == "approve" and issues_fixed:
-        log(
-            "  [INTEGRATION REVIEW] Approval rejected because uArch specs "
-            "were edited after block artifacts were generated; treating as revise",
-            YELLOW,
-        )
-        action = "revise"
+        # NOTE: The integration_review agent edits specs on every run, even
+        # cosmetically, so this auto-revise creates an infinite loop:
+        # revise -> restart_block -> integration_review edits again -> revise...
+        # When the outer agent (human or run_top_headless auto-approve)
+        # explicitly approves, trust that decision; the integration_check
+        # node at RTL level will catch any real cross-block lint/wiring
+        # mismatch and surface it as a normal failure. Setting
+        # SOCMATE_STRICT_INTEGRATION_REVIEW=1 restores the old auto-revise.
+        import os as _os
+        if _os.environ.get("SOCMATE_STRICT_INTEGRATION_REVIEW") == "1":
+            log(
+                "  [INTEGRATION REVIEW] Approval rejected because uArch specs "
+                "were edited after block artifacts were generated; treating as revise "
+                "(SOCMATE_STRICT_INTEGRATION_REVIEW=1)",
+                YELLOW,
+            )
+            action = "revise"
+        else:
+            log(
+                "  [INTEGRATION REVIEW] Spec edits were made; honoring explicit "
+                "approve (integration_check at RTL level will catch real mismatches). "
+                "Export SOCMATE_STRICT_INTEGRATION_REVIEW=1 to force revise.",
+                YELLOW,
+            )
     if action == "revise" and issues_found == 0 and not review_failed:
         log(
             "  [INTEGRATION REVIEW] Clean review returned revise; "
