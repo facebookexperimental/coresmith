@@ -329,7 +329,6 @@ async def generate_uarch_spec(
     Also writes the spec to ``arch/uarch_specs/<block_name>.md``.
     """
     from orchestrator.langchain.agents.uarch_spec_generator import UarchSpecGenerator
-    from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL
 
     python_source_rel = block.get("python_source", "")
     if python_source_rel and python_source_rel.strip():
