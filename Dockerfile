@@ -83,19 +83,25 @@ ENV PATH="/root/.nix-profile/bin:${PATH}"
 #   build error this fixes:
 #     ImportError: libstdc++.so.6: cannot open shared object file: No such file or directory
 RUN set -eux \
- && mkdir -p /usr/lib \
- # NOTE: nix-store ships a `libstdc++.so.6.0.32-gdb.py` next to the
- # real lib; the `.so.6.*` wildcard matches it too, so we explicitly
- # require a numeric .X.Y tail.
- && LIBSTDCPP="$(find /nix/store -regextype posix-extended \
+ && LIBSTDCPP_DIR="$(find /nix/store -regextype posix-extended \
         -regex '.*/libstdc\+\+\.so\.6\.[0-9]+\.[0-9]+$' -type f \
-        2>/dev/null | sort -V | tail -1)" \
- && test -n "${LIBSTDCPP}" \
- && test -s "${LIBSTDCPP}" \
- && echo "libstdc++ source: ${LIBSTDCPP}" \
- && ln -sf "${LIBSTDCPP}" /usr/lib/libstdc++.so.6 \
- && ldconfig 2>/dev/null || true \
- && python3 -c "import ctypes; lib = ctypes.CDLL('libstdc++.so.6'); print('libstdc++ resolves:', lib._name)"
+        2>/dev/null | sort -V | tail -1 | xargs -r dirname)" \
+ && test -n "${LIBSTDCPP_DIR}" \
+ && echo "libstdc++ dir: ${LIBSTDCPP_DIR}" \
+ && mkdir -p /usr/lib /lib /etc/ld.so.conf.d \
+ && ln -sf "${LIBSTDCPP_DIR}/libstdc++.so.6" /usr/lib/libstdc++.so.6 \
+ && ln -sf "${LIBSTDCPP_DIR}/libstdc++.so.6" /lib/libstdc++.so.6 \
+ && echo "${LIBSTDCPP_DIR}" > /etc/ld.so.conf.d/nix-gcc.conf \
+ && (ldconfig -v 2>/dev/null | grep -i stdc || ldconfig 2>/dev/null || true) \
+ && python3 -c "import ctypes; lib = ctypes.CDLL('libstdc++.so.6'); print('libstdc++ resolves at build time:', lib._name)" \
+ # Crucially: verify it ALSO resolves from a subprocess that doesn't
+ # inherit our build-time env (pip's build-isolation venv runs the
+ # wavekit build with a clean env). If this fails, pip will fail too.
+ && env -i PATH=/usr/bin:/bin /usr/bin/env python3 -c "import ctypes; lib = ctypes.CDLL('libstdc++.so.6'); print('libstdc++ resolves in clean-env subprocess:', lib._name)"
+
+# Also export at runtime so a clean-env subprocess that disables
+# /etc/ld.so.cache still finds it.
+ENV LD_LIBRARY_PATH="/usr/lib:/lib:${LD_LIBRARY_PATH}"
 
 # Verify the unstable-channel verilator is on PATH and >= 5.036
 # (cocotb >= 2.0 requires it). Fails the build loud if PATH ordering
