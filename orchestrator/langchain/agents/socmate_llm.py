@@ -28,6 +28,7 @@ import logging
 import os
 import subprocess
 import shutil
+import tempfile
 import threading
 import time as _time_mod
 from pathlib import Path
@@ -157,6 +158,19 @@ _LLM_LOG_RELPATH = ".socmate/llm_calls.jsonl"
 _TRUNCATE_ATTR = 32_000  # OTel attribute max (span attrs); JSONL is untruncated
 
 
+def _default_project_root() -> str:
+    return str(Path(__file__).resolve().parent.parent.parent)
+
+
+def _llm_log_root() -> str:
+    return (
+        os.environ.get("SOCMATE_LLM_LOG_ROOT", "").strip()
+        or os.environ.get("SOCMATE_TELEMETRY_ROOT", "").strip()
+        or os.environ.get("SOCMATE_PROJECT_ROOT", "").strip()
+        or _default_project_root()
+    )
+
+
 def _get_llm_tracer():
     """Lazy import to avoid circular deps at module load time."""
     try:
@@ -207,10 +221,7 @@ def _log_llm_call(
     }
 
     # Write JSONL (full, untruncated)
-    project_root = os.environ.get(
-        "SOCMATE_PROJECT_ROOT",
-        str(Path(__file__).resolve().parent.parent.parent),
-    )
+    project_root = _llm_log_root()
     log_path = Path(project_root) / _LLM_LOG_RELPATH
     log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -569,10 +580,7 @@ class ClaudeLLM:
         _get_breaker(_breaker_context.get("")).check()
 
         # Write llm_start event
-        project_root = os.environ.get(
-            "SOCMATE_PROJECT_ROOT",
-            str(Path(__file__).resolve().parent.parent.parent),
-        )
+        project_root = _llm_log_root()
         self._write_llm_event(project_root, "llm_start", {
             "model": _resolve_model(self.model, self._provider),
             "provider": self._provider,
@@ -688,10 +696,7 @@ class ClaudeLLM:
         )
         logger.info(f"Claude CLI cmd (first 200): {' '.join(cmd)[:200]}")
 
-        project_root = os.environ.get(
-            "SOCMATE_PROJECT_ROOT",
-            str(Path(__file__).resolve().parent.parent.parent),
-        )
+        project_root = _llm_log_root()
 
         t0 = _time_mod.monotonic()
         span_start_ns = _time_mod.time_ns()
@@ -829,10 +834,16 @@ class ClaudeLLM:
         """Call the Codex CLI (``codex exec``) synchronously."""
         resolved_model = _resolve_model(self.model, self._provider)
 
-        project_root = os.environ.get(
-            "SOCMATE_PROJECT_ROOT",
-            str(Path(__file__).resolve().parent.parent.parent),
+        workdir = (
+            os.environ.get("SOCMATE_CODEX_WORKDIR", "").strip()
+            or os.environ.get("SOCMATE_PROJECT_ROOT", "").strip()
+            or _default_project_root()
         )
+        isolate_workdir = os.environ.get("SOCMATE_CODEX_ISOLATE_WORKDIR", "1").strip().lower()
+        if isolate_workdir not in {"0", "false", "no", "off"}:
+            Path(workdir).mkdir(parents=True, exist_ok=True)
+            workdir = tempfile.mkdtemp(prefix="codex-call-", dir=workdir)
+        log_root = _llm_log_root()
         sandbox = os.environ.get("SOCMATE_CODEX_SANDBOX", "workspace-write").strip()
 
         cmd: list[str] = [
@@ -842,7 +853,7 @@ class ClaudeLLM:
             "--dangerously-bypass-approvals-and-sandbox",
             "--sandbox", sandbox,
             "--skip-git-repo-check",
-            "-C", project_root,
+            "-C", workdir,
             "-m", resolved_model,
             "-",
         ]
@@ -861,9 +872,9 @@ class ClaudeLLM:
         span_start_ns = _time_mod.time_ns()
         try:
             output, stderr_text, returncode, elapsed, timed_out, stalled, usage = (
-                self._run_cli_with_watchdog(
-                    cmd, combined_prompt, project_root, resolved_model, t0,
-                )
+                    self._run_cli_with_watchdog(
+                        cmd, combined_prompt, log_root, resolved_model, t0,
+                    )
             )
         except FileNotFoundError:
             elapsed = _time_mod.monotonic() - t0
@@ -907,7 +918,7 @@ class ClaudeLLM:
                 usage=usage,
                 start_ts_ns=span_start_ns,
             )
-            self._write_llm_event(project_root, f"llm_{reason}", {
+            self._write_llm_event(log_root, f"llm_{reason}", {
                 "model": resolved_model,
                 "provider": "codex_cli",
                 "elapsed_s": round(elapsed, 1),
@@ -934,7 +945,7 @@ class ClaudeLLM:
             )
             output = error_msg
             logger.error("LLM empty response: %s", error_msg)
-            self._write_llm_event(project_root, "llm_empty_response", {
+            self._write_llm_event(log_root, "llm_empty_response", {
                 "model": resolved_model,
                 "provider": "codex_cli",
                 "exit_code": returncode,

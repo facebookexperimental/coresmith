@@ -14,6 +14,11 @@ Required codec features:
 - I-frame coding path.
 - Intra prediction directions: DC, vertical, and horizontal.
 - 8x8 macroblocks.
+- Fixed validation geometry for the Mort GIF crop: 640x360 grayscale frames.
+  With 8x8 macroblocks this is exactly 80 macroblock columns (`mb_x=0..79`)
+  and 45 macroblock rows (`mb_y=0..44`), for 3600 macroblocks per frame in
+  raster order. This coordinate contract is a hard invariant; do not transpose
+  it to 45 columns by 80 rows. Metadata widths must represent `mb_x=79`.
 - Per-macroblock selection between one 8x8 transform block and four 4x4
   transform subblocks.
 - Mode decision using a simple rate-distortion proxy consistent with
@@ -71,3 +76,14 @@ Frame-control lifecycle invariant:
 - Block, smoke, integration, and validation DV must include a VCD/FST waveform
   check for this lifecycle: frame start, frame end flush, FIFO drain, idle
   deassertion, and no unintended immediate restart.
+
+Geometry/ordering invariant:
+
+- Pixel input is row-major over each 640x360 frame. The macroblock emitter must
+  buffer one 640x8 stripe and emit all 80 macroblocks from that stripe before
+  accepting/emitting macroblocks from the next stripe. The final macroblock of
+  each frame is `(mb_x=79, mb_y=44)`, and the final frame TLAST/terminal status
+  may only align with that macroblock.
+- Validation DV must check at least the first stripe, a row transition, and the
+  final macroblock against the golden model's `for by in range(0, H, 8)` then
+  `for bx in range(0, W, 8)` traversal.

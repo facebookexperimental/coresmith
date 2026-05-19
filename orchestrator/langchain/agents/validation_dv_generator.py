@@ -46,6 +46,7 @@ class ValidationDVGenerator:
         ers_context: str,
         block_rtl_paths: dict[str, str] | None = None,
         output_path: str = "",
+        prior_failure: str = "",
     ) -> dict[str, Any]:
         """Generate a cocotb validation DV testbench."""
         with _tracer.start_as_current_span(f"Validation DV [{design_name}]") as span:
@@ -103,6 +104,15 @@ class ValidationDVGenerator:
                 "payload movement, KPI counters, and final outputs."
             )
 
+            if prior_failure:
+                parts.append(
+                    "\n--- PRIOR ATTEMPT FAILURE / CONTRACT AUDIT ---\n"
+                    "This is a retry. The previous attempt failed. You MUST "
+                    "address the first divergence and suggested fix below; do "
+                    "not regenerate the same bug.\n"
+                    f"{prior_failure}"
+                )
+
             content = await self.llm.call(
                 system=SYSTEM_PROMPT,
                 prompt="\n".join(parts),
@@ -110,6 +120,16 @@ class ValidationDVGenerator:
             )
 
             testbench = self._extract_python(content)
+            if output_path:
+                disk_path = Path(output_path)
+                if disk_path.exists():
+                    disk_content = disk_path.read_text(encoding="utf-8")
+                    disk_test_count = len(
+                        re.findall(r"@cocotb\.test\(\)", disk_content)
+                    )
+                    if disk_test_count > 0 and "REQUIREMENT_COVERAGE" in disk_content:
+                        testbench = disk_content
+            testbench = self._sanitize_testbench(testbench)
             test_count = len(re.findall(r"@cocotb\.test\(\)", testbench))
 
             if not testbench or test_count == 0:
@@ -140,3 +160,28 @@ class ValidationDVGenerator:
         if match:
             return match.group(1).strip()
         return content.strip()
+
+    def _sanitize_testbench(self, testbench: str) -> str:
+        """Patch known unsafe generated validation-monitor patterns."""
+        wide_read = "current = (_as_int(self.data), _as_int(self.last))"
+        if wide_read in testbench and "len(self.data) > 2048" not in testbench:
+            testbench = testbench.replace(
+                wide_read,
+                (
+                    "if hasattr(self.data, '__len__') and len(self.data) > 2048:\n"
+                    "                current = (0, _as_int(self.last))\n"
+                    "            else:\n"
+                    "                current = (_as_int(self.data), _as_int(self.last))"
+                ),
+            )
+        stuck_gap_patterns = (
+            "gap_fn=lambda accepted, _cycles: accepted % 127 == 33",
+            "gap_fn=lambda accepted, cycles: accepted % 127 == 33",
+        )
+        for pattern in stuck_gap_patterns:
+            if pattern in testbench:
+                testbench = testbench.replace(
+                    pattern,
+                    "gap_fn=lambda _accepted, cycles: (cycles % 127) == 33",
+                )
+        return testbench

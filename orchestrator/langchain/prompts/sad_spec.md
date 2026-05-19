@@ -14,6 +14,17 @@ AVAILABLE PDK TECHNOLOGIES:
 MPW SHUTTLE CONSTRAINTS:
 {shuttle_context}
 
+IMPORTANT SOFT-IP VS SHUTTLE BOUNDARY:
+- If the PRD says the deliverable is reusable soft IP, synthesizable RTL only,
+  or an internal accelerator, do NOT change the functional interface to satisfy
+  MPW pad limits. Keep AXI-Stream/data interfaces at the functional widths
+  required by the user/golden model.
+- Only propose pin-muxing, GPIO serialization, pad-limited physical links, or
+  OpenFrame/Caravel wrapper ports when the user explicitly requests a hardened
+  MPW wrapper/top-level chip integration.
+- For soft-IP runs, shuttle notes are advisory physical context, not a reason
+  to narrow streams or weaken throughput/KPI contracts.
+
 ─────────────────────────────────────────────────────────────────────
 OUTPUT FORMAT
 ─────────────────────────────────────────────────────────────────────

@@ -63,11 +63,12 @@ _PROJECT_ROOT = os.environ.get(
     str(Path(__file__).resolve().parent.parent),
 )
 os.environ["SOCMATE_PROJECT_ROOT"] = _PROJECT_ROOT
+_TELEMETRY_ROOT = os.environ.get("SOCMATE_TELEMETRY_ROOT", _PROJECT_ROOT)
 
 from orchestrator.architecture.state import ARCH_DOC_DIR  # noqa: E402
 from orchestrator.telemetry import init_telemetry  # noqa: E402
 
-init_telemetry(_PROJECT_ROOT)
+init_telemetry(_TELEMETRY_ROOT)
 
 # Register the observability LLM hook (fires after every graph_node_exit)
 from orchestrator.langgraph.event_stream import register_exit_hook  # noqa: E402
@@ -1088,6 +1089,7 @@ async def get_architecture_state() -> str:
         "prd_question_count": len(prd_questions),
         "block_count": len(blocks),
         "block_names": block_names,
+        "constraint_result": cr,
         "violation_count": len(violations),
         "violations": [
             v["violation"] if isinstance(v, dict) else v
@@ -2154,7 +2156,11 @@ def _build_resume_command(state_snapshot, resume_value, action, constraint,
     """
     from langgraph.types import Command
 
-    # Collect completed block names to filter stale interrupts
+    # Collect completed block names (any success status) to filter stale
+    # interrupts.  Once a block lands in completed_blocks the pipeline has
+    # moved past it, so any lingering interrupt from the parallel Send()
+    # checkpoint is stale -- including failed-block interrupts, which the
+    # pipeline already routed around.
     completed_names: set[str] = set()
     if state_snapshot and hasattr(state_snapshot, "values"):
         for b in (state_snapshot.values or {}).get("completed_blocks", []):
@@ -2769,7 +2775,7 @@ async def _merge_block_into_pipeline_checkpoint(block_result: dict) -> bool:
         await _pipeline.graph.aupdate_state(
             config,
             {"completed_blocks": completed},
-            as_node="block_done",
+            as_node="process_block",
         )
         return True
     except Exception:

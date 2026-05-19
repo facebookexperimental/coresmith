@@ -50,9 +50,14 @@ behavioral level.
        latency_cycles = latency_budget_us * target_clock_mhz
        # e.g. 0.32 us * 50 MHz = 16 cycles
 
-   Assert that measured latency <= latency_cycles. If the PRD does not
-   specify a latency budget, use a reasonable upper bound:
-   2x the pipeline depth (number of blocks in the longest path).
+   Assert that measured latency <= latency_cycles only when the PRD/ERS
+   specifies an explicit latency budget or when the architecture provides a
+   concrete transaction-size-derived budget. If the PRD does not specify a
+   latency budget, use a generous liveness watchdog, log the measured latency,
+   and do not invent a hard pass/fail threshold. For batch/stripe/frame
+   designs, any sanity bound must include the required input accumulation
+   before output can legally exist, such as stripe_pixels + pipeline margin,
+   not just 2x the number of blocks.
 
    Implementation pattern:
        start_cycle = None
@@ -65,7 +70,10 @@ behavioral level.
                end_cycle = cycle
                break
        latency = end_cycle - start_cycle
-       assert latency <= budget, f"Latency {latency} exceeds budget {budget}"
+       if explicit_latency_budget_present:
+           assert latency <= budget, f"Latency {latency} exceeds budget {budget}"
+       else:
+           dut._log.info(f"Measured latency: {latency} cycles (no hard PRD/ERS KPI)")
 
 6. **Sustained throughput test**: Drive N consecutive input samples (N >=
    64) back-to-back with m_tready held high. Count the number of output
@@ -75,9 +83,11 @@ behavioral level.
        expected_throughput = 1.0 / pipeline_II            # ideal
        # pipeline_II = initiation interval (usually 1 for streaming designs)
 
-   Assert achieved throughput >= 90% of expected. For streaming pipelines
-   (PRD says "one sample per clock"), expect ~1.0 sample/cycle after the
-   pipeline fills. For batch designs, measure frames or transforms per
+   Assert achieved throughput >= 90% of expected only when the PRD/ERS gives
+   an explicit output-throughput or output-rate budget for that measured
+   stream. For streaming pipelines where the PRD says the same stream accepts
+   "one sample per clock", expect ~1.0 sample/cycle after the pipeline fills
+   for that input stream. For batch designs, measure frames or transforms per
    second against the PRD input_data_rate_mbps:
 
        min_samples_per_sec = input_data_rate_mbps * 1e6 / data_width_bits
@@ -87,14 +97,18 @@ behavioral level.
        cocotb.log.info(f"Throughput: {achieved:.3f} samples/cycle "
                        f"(expected >= {expected:.3f})")
 
-   If throughput is below 90% of expected, the test MUST fail with an
-   assert that includes both numbers.
+   If an explicit throughput budget exists and throughput is below 90% of
+   expected, the test MUST fail with an assert that includes both numbers.
+   If no explicit budget exists for the measured stream, log the measured
+   throughput but do not invent a pass/fail threshold.
 
 PERFORMANCE TEST RULES:
 - Extract target_clock_mhz, latency_budget_us, input_data_rate_mbps,
-  and data_width_bits from the PRD summary provided in context.
-- If a PRD field is missing, use conservative defaults:
-  latency_budget = 100 cycles, throughput = 0.5 samples/cycle.
+  output_data_rate_mbps, and data_width_bits from the PRD/ERS summary
+  provided in context.
+- If a PRD/ERS performance field is missing, do not invent a hard KPI. Use a
+  generous watchdog or architecture-derived sanity bound for liveness, log the
+  measured number, and leave KPI enforcement to Validation DV requirements.
 - Always log performance numbers even when the test passes -- these
   are valuable for the outer agent's trend analysis.
 - Use the @cocotb.test() decorator like all other tests.
@@ -120,12 +134,41 @@ COCOTB RULES (same as per-block):
 - Use cocotb with Python 3.11+ syntax.
 - Use `cocotb.clock.Clock` for clock generation (match PRD target clock).
 - Use active-low reset (`rst_n`): assert low for 5 cycles, then release.
+- Each DUT clock signal must have exactly one live cocotb Clock driver. Reuse a
+  module-level clock task across tests or explicitly stop the previous task;
+  never start a new free-running clock in every test without cleanup.
 - ALWAYS drive `m_tready = 1` BEFORE sending data on any input interface.
 - Use `cocotb.start_soon()` for concurrent sender/receiver coroutines.
   NEVER use `cocotb.start_fork()` (removed in cocotb 2.0).
 - Add cycle-count watchdog to every handshake wait loop (max 10000 cycles).
 - Cast all values to `int()` before assigning to DUT signals.
+- AXI-Stream send helpers MUST be phase-safe: drive `tvalid/tdata/tlast` before
+  the rising edge that can accept the beat, then count a transfer only after a
+  rising edge where the source valid and destination ready were both sampled
+  high. Never increment the software accepted counter on the same edge where
+  the test first asserted `tvalid` from idle; the RTL did not see that valid
+  before the edge. A robust pattern is:
+
+      await FallingEdge(dut.clk)
+      dut.s_axis_tvalid.value = 1
+      dut.s_axis_tdata.value = data
+      await RisingEdge(dut.clk)
+      if int(dut.s_axis_tvalid.value) and int(dut.s_axis_tready.value):
+          accepted += 1
+          dut.s_axis_tvalid.value = 0
+
+  Keep `tvalid` asserted across cycles until a sampled handshake occurs. Do
+  not pre-sample `tready` before an edge and later assume that edge accepted
+  data unless `tvalid` was already stable before the edge.
+- Do not read very wide Verilator VPI signals as one Python integer. For
+  payloads wider than about 2048 bits, `int(dut.<wide_bus>.value)` can be
+  truncated by Verilator's VPI string buffer and produce false mismatches.
+  Compare field-sized debug aliases or chunk wires instead.
 - Use `assert` for pass/fail.
+- Never create a pass/fail assertion from an "architecture sanity budget",
+  "2x path length", "number of blocks", or other locally invented performance
+  threshold. Those are measurement-only unless PRD/ERS/system invariants state
+  a concrete KPI with arithmetic.
 
 TOP-LEVEL PORT NAMING:
 The auto-generated top-level module exposes unconnected block ports at the

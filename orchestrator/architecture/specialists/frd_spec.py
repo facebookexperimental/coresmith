@@ -31,6 +31,7 @@ async def generate_frd(
     prd_spec: dict,
     sad_spec: dict,
     requirements: str,
+    project_root: str = ".",
 ) -> dict[str, Any]:
     """Generate the Functional Requirements Document from PRD + SAD.
 
@@ -38,6 +39,7 @@ async def generate_frd(
         prd_spec: Full PRD document.
         sad_spec: Full SAD document (contains ``sad_text`` markdown key).
         requirements: Original high-level requirements text.
+        project_root: Directory where FRD collateral should be written.
 
     Returns:
         {"frd_text": "<markdown>", "phase": "frd_complete"}
@@ -68,19 +70,20 @@ async def generate_frd(
             shuttle_context=_build_shuttle_context(),
         )
 
+        target_path = Path(project_root) / "arch" / "frd_spec.md"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
         user_message = (
             f"Produce the Functional Requirements Document for this design.\n\n"
             f"Original requirements:\n{requirements}\n\n"
             f"The PRD and SAD have been provided in the system prompt.\n\n"
-            f"IMPORTANT: Write the complete FRD document to: arch/frd_spec.md\n"
+            f"IMPORTANT: Write the complete FRD document to: {target_path}\n"
             f"After writing, respond with only the file path confirmation."
         )
 
         from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
 
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
-
-        target_path = Path.cwd() / "arch" / "frd_spec.md"
 
         try:
             content = await llm.call(

@@ -147,6 +147,13 @@ GUIDELINES:
   decoder/golden reconstruction per macroblock, entropy/adaptive state matching
   the emitted bitstream, packet order preservation, and atomic advancement of
   mode/metadata/payload state.
+- For framed/tiled/matrix/block algorithms, explicitly derive geometry from
+  the golden model and preserve it as a system invariant: frame or matrix
+  dimensions, block dimensions, blocks per row, rows of blocks, coordinate
+  ranges and bit widths, raster/traversal order, terminal coordinate, and total
+  block count. Verify the arithmetic instead of inferring it from names. For
+  example, an image of width W and height H split into BxB blocks has W/B
+  block columns and H/B block rows when divisible; do not swap these axes.
 - Include interface protocols (AXI-Stream, dedicated pins, etc.)
   for each block based on the block diagram connections
 - Reset convention, clock domain assignments from the clock tree

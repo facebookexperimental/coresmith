@@ -44,6 +44,42 @@ RULES:
    and clock-gating cells automatically during top-level integration. Individual
    blocks should simply declare `clk` and `rst_n` ports and assume clean,
    synchronized signals are provided.
+6. Soft-IP interface rule: if the PRD/requirements describe reusable soft IP,
+   synthesizable RTL only, or an internal accelerator, do NOT narrow, serialize,
+   pin-mux, or packetize functional streams solely to fit package/MPW GPIO pad
+   limits. Keep AXI-Stream interfaces at the functional payload widths required
+   by the user and golden model. Add pad serializers/wrappers only when the user
+   explicitly asks for OpenFrame/Caravel/MPW top-level integration.
+7. KPI arithmetic rule: for every measurable throughput, latency, bandwidth,
+   frame-rate, tile-rate, packet-rate, PSNR/error, or compression KPI preserved
+   from PRD/FRD, include a system invariant with the exact arithmetic and units.
+   For cycle budgets, state clock frequency, transactions per frame/window/
+   packet, cycles available, cycles per transaction, and the local block
+   throughput/latency promise. Do not leave stale or contradictory cycle
+   numbers in the diagram.
+8. Payload-width ledger rule: for every nontrivial AXI-Stream payload wider
+   than a scalar sample/byte, include a bit ledger in the relevant
+   `semantic_contracts` and make the ledger sum exactly match both the
+   interface width and every connection `data_width`. Use the form
+   `payload_width = field_a[W] + field_b[W] + ... = TOTAL bits`. Include all
+   metadata bits such as coordinates, mode, index, frame/block flags, masks,
+   and count fields. If the ledger cannot be made exact, either split metadata
+   onto a separate stream, remove unnecessary metadata, or ask a blocking
+   question. Never leave "reserved" or unexplained spare bits in a payload
+   contract unless the field name, width, and value rules are explicit.
+9. Variable-output/burst-bound rule: if any block can emit a variable number
+   of bytes, words, packets, tokens, or events per input transaction, include a
+   conservative maximum-output bound and say how it is justified. The bound
+   must come from one of:
+   - an explicit user/golden-model requirement,
+   - a deterministic parser/golden-model invariant named in the requirements,
+   - a conservative escape/raw-passthrough rule that the architecture defines,
+     or
+   - a named validation-DV proof obligation that must measure and fail if the
+     bound is exceeded.
+   Use that bound to size output FIFOs and prove producer/consumer throughput.
+   Do not invent a numeric byte/packet bound without tying it to a reference or
+   conservative escape rule.
 
 SEMANTIC CONTRACT AND STATEFUL FEEDBACK RULES:
 - The block diagram is not only a wiring diagram. It MUST document the
@@ -68,6 +104,16 @@ SEMANTIC CONTRACT AND STATEFUL FEEDBACK RULES:
 - Every connection may include a `semantic_contract` string describing payload
   layout, ordering, sideband metadata, valid modes, numeric format, and golden
   equivalence obligation. Use it whenever raw `data_width` is insufficient.
+  For wide streams, this connection contract must repeat or reference the exact
+  payload-width ledger so a reviewer can recompute `data_width` from fields.
+- For framed, tiled, matrix, image, video, packet-grid, or block-based designs,
+  derive geometry directly from the golden model/user stimulus and include it
+  in `system_invariants` and relevant `semantic_contracts`: element dimensions,
+  block dimensions, blocks per row, rows of blocks, coordinate ranges, bit
+  widths, traversal order, terminal coordinate, and total transaction count.
+  Be explicit about axis meanings. A width-derived count is columns/x; a
+  height-derived count is rows/y. If the arithmetic is ambiguous, ask a
+  blocking question rather than guessing.
 
 SUBSYSTEM GUIDELINES:
 - Group blocks into logical subsystems to organize the block diagram visually.

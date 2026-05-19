@@ -16,6 +16,8 @@ diagram with AXI-Stream interfaces.
 from __future__ import annotations
 
 import json
+import os
+import re
 from typing import Any
 
 from pathlib import Path
@@ -27,6 +29,7 @@ SYSTEM_PROMPT = _PROMPT_FILE.read_text()
 def _scan_golden_models(
     project_root: str = ".",
     model_dirs: list[dict] | None = None,
+    requirements: str = "",
 ) -> str:
     """Scan Python golden model directories and extract interface signatures.
 
@@ -44,55 +47,99 @@ def _scan_golden_models(
     from pathlib import Path
     import ast
 
-    root = Path(project_root)
+    roots: list[Path] = []
+    for candidate in (
+        Path(project_root),
+        Path(os.environ.get("SOCMATE_SOURCE_ROOT", "") or "."),
+        Path(__file__).resolve().parents[3],
+    ):
+        resolved = candidate.resolve()
+        if resolved.exists() and resolved not in roots:
+            roots.append(resolved)
+    if not roots:
+        roots.append(Path(__file__).resolve().parents[3])
 
     # Resolve configured dirs
     if model_dirs:
         scan_dirs = [(d["path"], d.get("label", d["path"])) for d in model_dirs]
     else:
         # Try loading from config.yaml
-        scan_dirs = _load_golden_model_dirs_from_config(root)
+        scan_dirs = []
+        for root in roots:
+            scan_dirs = _load_golden_model_dirs_from_config(root)
+            if scan_dirs:
+                break
 
     if not scan_dirs:
         # Auto-discover: scan top-level subdirectories (depth <= 2) for
         # Python files that contain class definitions.
-        scan_dirs = _auto_discover_model_dirs(root)
+        scan_dirs = _auto_discover_model_dirs(roots[0])
+
+    referenced_paths = sorted(set(re.findall(r"[\w./-]+\.py", requirements)))
 
     summaries: list[str] = []
+    seen_files: set[Path] = set()
+
+    def summarize_file(py_file: Path, root: Path, subsystem: str) -> None:
+        resolved = py_file.resolve()
+        if resolved in seen_files or py_file.name.startswith("_") or not py_file.exists():
+            return
+        seen_files.add(resolved)
+        try:
+            source = py_file.read_text()
+            tree = ast.parse(source)
+        except Exception:
+            return
+
+        lines: list[str] = []
+        module_doc = ast.get_docstring(tree)
+        if module_doc:
+            first = " ".join(module_doc.strip().split())[:500]
+            lines.append(f"    module_doc: {first}")
+
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                methods = [
+                    n.name for n in node.body
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and not n.name.startswith("_")
+                ]
+                methods_str = ", ".join(methods[:8])
+                if len(methods) > 8:
+                    methods_str += f", ... (+{len(methods) - 8})"
+                lines.append(f"    class {node.name}: [{methods_str}]")
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith("_"):
+                args = [arg.arg for arg in node.args.args]
+                doc = ast.get_docstring(node)
+                doc_part = f" -- {' '.join(doc.split())[:180]}" if doc else ""
+                lines.append(f"    function {node.name}({', '.join(args)}){doc_part}")
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id.isupper():
+                        lines.append(f"    constant {target.id}")
+
+        if not lines:
+            return
+        try:
+            rel_path = py_file.relative_to(root)
+        except ValueError:
+            rel_path = py_file
+        summaries.append(f"  {rel_path} ({subsystem}):\n" + "\n".join(lines[:24]))
+
+    for ref in referenced_paths:
+        for root in roots:
+            candidate = (root / ref).resolve()
+            if candidate.exists() and candidate.is_file():
+                summarize_file(candidate, root, "referenced golden model")
+                break
+
     for rel_dir, subsystem in scan_dirs:
-        src_dir = root / rel_dir
-        if not src_dir.is_dir():
-            continue
-        for py_file in sorted(src_dir.glob("*.py")):
-            if py_file.name.startswith("_"):
+        for root in roots:
+            src_dir = root / rel_dir
+            if not src_dir.is_dir():
                 continue
-            try:
-                source = py_file.read_text()
-                tree = ast.parse(source)
-            except Exception:
-                continue
-
-            classes: list[str] = []
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ClassDef):
-                    methods = [
-                        n.name for n in node.body
-                        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                        and not n.name.startswith("_")
-                    ]
-                    methods_str = ", ".join(methods[:6])
-                    if len(methods) > 6:
-                        methods_str += f", ... (+{len(methods) - 6})"
-                    classes.append(f"    class {node.name}: [{methods_str}]")
-
-            if classes:
-                try:
-                    rel_path = py_file.relative_to(root)
-                except ValueError:
-                    rel_path = py_file
-                summaries.append(
-                    f"  {rel_path} ({subsystem}):\n" + "\n".join(classes)
-                )
+            for py_file in sorted(src_dir.glob("*.py")):
+                summarize_file(py_file, root, subsystem)
 
     if not summaries:
         return ""
@@ -200,7 +247,7 @@ async def analyze_block_diagram(
         span.set_attribute("constraint_count", len(constraint_feedback or []))
 
         # Scan actual golden model sources for grounding
-        golden_model_context = _scan_golden_models(project_root)
+        golden_model_context = _scan_golden_models(project_root, requirements=requirements)
 
         # Read SAD and FRD from disk if available
         sad_context = ""
@@ -232,6 +279,11 @@ async def analyze_block_diagram(
             constraint_context = (
                 "CONSTRAINT VIOLATIONS from previous iteration (you must address these):\n"
                 + "\n".join(f"  - {v}" for v in constraint_feedback)
+                + "\n\nRepair requirements:\n"
+                "- Revise the previous block diagram so every listed violation is either fixed or explicitly converted into a blocking question.\n"
+                "- For throughput, latency, bandwidth, frame-rate, tile-rate, or cycles-per-transaction violations, include explicit arithmetic in system_invariants: clock cycles available, transaction count, cycles per transaction, and claimed latency/throughput.\n"
+                "- Do not keep a stale latency/throughput number that conflicts with the PRD/FRD KPI. Prefer tightening the local pipeline contract over weakening the user KPI.\n"
+                "- In reasoning, list each violation and the concrete before/after repair."
             )
 
         feedback_context = ""
@@ -276,8 +328,11 @@ async def analyze_block_diagram(
                 f"{json.dumps(existing_diagram, indent=2)}"
             )
 
+        target_path = Path(project_root) / ".socmate" / "block_diagram.json"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
         parts.append(
-            "\nIMPORTANT: Write the block diagram JSON to: .socmate/block_diagram.json\n"
+            f"\nIMPORTANT: Write the block diagram JSON to: {target_path}\n"
             "After writing, respond with only the file path confirmation."
         )
 
@@ -294,8 +349,6 @@ async def analyze_block_diagram(
         from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
 
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
-
-        target_path = Path.cwd() / ".socmate" / "block_diagram.json"
 
         try:
             content = await llm.call(

@@ -15,12 +15,13 @@ All invocations are traced via OpenTelemetry for observability and evaluation.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 from opentelemetry import trace
 
-from .socmate_llm import ClaudeLLM
+from .socmate_llm import DEFAULT_MODEL, ClaudeLLM
 
 _tracer = trace.get_tracer(__name__)
 
@@ -82,6 +83,11 @@ When converting Python to Verilog:
 - Map dictionary lookups to ROM/LUT.
 - Map floating-point math to fixed-point (specify Q format in comments).
 - Handle variable-length data with valid/ready handshaking.
+- A ready/valid transfer is exactly `valid && ready` sampled on the clock edge.
+  Do not qualify the handshake with a registered copy of `ready`, a previous
+  cycle's ready, or a requirement that ready stay high for two cycles. If a
+  registered output token is held valid, a one-cycle `ready` pulse must retire
+  exactly one token and advance state once.
 
 If the previous attempt failed, the error will be provided. Fix the specific
 issue while maintaining correctness.
@@ -93,6 +99,29 @@ Output format:
    {{"module_name": "...", "ports": {{"clk": "input", ...}}}}
    ```
 """
+
+
+def _recover_codex_artifact(project_root: str | None, rel_path: str) -> str:
+    """Recover a file written inside a Codex per-call workdir."""
+    if not project_root or not rel_path:
+        return ""
+    root = Path(project_root)
+    try:
+        candidates = sorted(
+            root.glob(f"codex-call-*/{Path(rel_path).as_posix()}"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return ""
+    for candidate in candidates:
+        try:
+            text = candidate.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if re.search(r"^\s*module\s+\w+", text, re.MULTILINE):
+            return text + "\n"
+    return ""
 
 
 class RTLGeneratorAgent:
@@ -111,10 +140,10 @@ class RTLGeneratorAgent:
     _DEFAULT_CONSTRAINTS = "No tri-state buffers, no async resets, no latches (Sky130 limitations)."
 
     def __init__(self, model: str | None = None, temperature: float = 0.1):
-        # Block agents default to Sonnet (cheaper than Opus); override via
-        # SOCMATE_BLOCK_MODEL or the model= kwarg.
-        from orchestrator.langchain.agents.socmate_llm import block_model
-        model = model or block_model()
+        # RTL generation is the load-bearing step, so it defaults to the
+        # project's DEFAULT_MODEL (Opus). Override via SOCMATE_MODEL or the
+        # model= kwarg if a cheaper model is acceptable for a given run.
+        model = model or DEFAULT_MODEL
         # 1800s default; bump via SOCMATE_RTL_TIMEOUT env var for complex blocks
         # like CPUs / multi-stage pipelines that need more agent turns to write.
         self.llm = ClaudeLLM(
@@ -223,6 +252,11 @@ class RTLGeneratorAgent:
 
             rtl_path = Path(project_root) / rtl_target if project_root else Path(rtl_target)
             if rtl_path.exists():
+                return {"rtl_path": str(rtl_path)}
+            recovered = _recover_codex_artifact(project_root, rtl_target)
+            if recovered:
+                rtl_path.parent.mkdir(parents=True, exist_ok=True)
+                rtl_path.write_text(recovered, encoding="utf-8")
                 return {"rtl_path": str(rtl_path)}
             else:
                 return {"error": f"Agent did not write RTL to {rtl_target}"}

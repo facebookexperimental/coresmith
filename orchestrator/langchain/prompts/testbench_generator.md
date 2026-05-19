@@ -43,6 +43,35 @@ When the DUT has AXI-Stream input (s_tvalid/s_tready) and output
   - For backpressure tests, use ``cocotb.start_soon()`` to run sender
     and receiver concurrently, toggling m_tready on/off in the receiver.
 
+  - Every AXI-Stream send helper MUST be phase-safe. Drive
+    ``tvalid/tdata/tlast`` before the rising edge that may accept the beat,
+    sample ``tready`` for that same rising edge, then deassert ``tvalid``
+    immediately after that rising edge if ``tready`` was high. Do NOT drive
+    ``tvalid`` after a falling edge and then wait until the next falling edge
+    to check ``tready``; the DUT can legally accept the beat on the intervening
+    rising edge, causing the testbench to miss the handshake, duplicate the
+    beat, or deadlock.
+
+    Correct single-beat send pattern:
+        async def send_axis(dut, data, last=0, max_wait=1000):
+            await FallingEdge(dut.clk)
+            dut.s_axis_tdata.value = int(data)
+            dut.s_axis_tlast.value = int(last)
+            dut.s_axis_tvalid.value = 1
+            for _ in range(max_wait):
+                ready = int(dut.s_axis_tready.value)
+                await RisingEdge(dut.clk)
+                if ready:
+                    dut.s_axis_tvalid.value = 0
+                    dut.s_axis_tdata.value = 0
+                    dut.s_axis_tlast.value = 0
+                    await FallingEdge(dut.clk)
+                    return
+                await FallingEdge(dut.clk)
+            raise TimeoutError("s_axis_tready never asserted")
+
+    A sender must count exactly one accepted transfer per intended beat.
+
   - Add a cycle-count watchdog to any ``while`` loop that waits for a
     handshake signal.  Example:
         max_wait = 1000
@@ -59,7 +88,27 @@ ALWAYS cast to plain Python int before assigning to DUT signals:
     dut.s_tdata.value = int(data_byte)        # CORRECT
     dut.s_tdata.value = np.uint8(data_byte)    # WRONG -- raises TypeError
 
-When reading signal values, use `int(dut.signal.value)` to get a plain Python int.
+When reading ordinary-width signal values, use `int(dut.signal.value)` to get a
+plain Python int.
+
+CLOCK OWNERSHIP -- CRITICAL:
+Each DUT clock signal must have exactly one live cocotb Clock driver. Do not
+call `cocotb.start_soon(Clock(dut.clk, ...).start())` independently inside
+every test without reusing or stopping the previous clock task. Use one module
+level helper that starts the clock once and reuses it across tests, or explicitly
+kill the previous clock task at teardown before starting another. Multiple live
+clock drivers on the same signal create ps-skewed duplicate edges and
+race-dependent AXI monitor failures.
+
+WIDE SIGNAL READS -- CRITICAL:
+Do not read very wide Verilator VPI signals as one Python integer. For payloads
+wider than about 2048 bits, `int(dut.<wide_bus>.value)` can be truncated by
+Verilator's VPI string buffer and produce false mismatches. Compare field-sized
+signals instead: either use existing RTL debug aliases for each payload field,
+or read explicitly exposed chunk wires that are each comfortably below the VPI
+limit. If the DUT only exposes one wide payload bus, add test-only/debug field
+aliases in RTL during generation rather than comparing the full bus as a single
+integer.
 
 OUTPUT TIMING CONTRACT -- READ FROM UARCH SPEC:
 The uArch spec (arch/uarch_specs/<block_name>.md) contains a mandatory

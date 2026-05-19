@@ -36,6 +36,32 @@ if not _PROMPT_FILE.exists():
 SYSTEM_PROMPT = _PROMPT_FILE.read_text()
 
 
+def _recover_codex_artifact(abs_path: str) -> str:
+    """Recover a testbench written inside a Codex per-call workdir."""
+    path = Path(abs_path)
+    try:
+        root = path.parents[2]
+        rel = path.relative_to(root)
+    except (IndexError, ValueError):
+        return ""
+    try:
+        candidates = sorted(
+            root.glob(f"codex-call-*/{rel.as_posix()}"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return ""
+    for candidate in candidates:
+        try:
+            text = candidate.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if "@cocotb.test()" in text:
+            return text + "\n"
+    return ""
+
+
 class TestbenchGeneratorAgent:
     """Agent for cocotb testbench generation.
 
@@ -121,10 +147,15 @@ class TestbenchGeneratorAgent:
             # max(test_count, 1) pretended the step generated 1 test.
             tb_file = Path(testbench_path) if testbench_path else None
             if not tb_file or not tb_file.exists():
-                raise RuntimeError(
-                    f"Testbench generation failed: claude CLI did not "
-                    f"write {testbench_path}"
-                )
+                recovered = _recover_codex_artifact(testbench_path)
+                if recovered and tb_file:
+                    tb_file.parent.mkdir(parents=True, exist_ok=True)
+                    tb_file.write_text(recovered, encoding="utf-8")
+                else:
+                    raise RuntimeError(
+                        f"Testbench generation failed: claude CLI did not "
+                        f"write {testbench_path}"
+                    )
             tb_text = tb_file.read_text()
             test_count = len(re.findall(r"@cocotb\.test\(\)", tb_text))
             if test_count == 0:

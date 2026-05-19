@@ -542,6 +542,7 @@ class TestPRDAnswerDeliveryContract:
         async def smart_gather_prd(
             *, requirements, pdk_summary, target_clock_mhz,
             user_answers=None, previous_questions=None,
+            project_root=".",
         ):
             captured["user_answers"] = user_answers
             captured["previous_questions"] = previous_questions
@@ -596,6 +597,7 @@ class TestPRDAnswerDeliveryContract:
         async def smart_gather_prd(
             *, requirements, pdk_summary, target_clock_mhz,
             user_answers=None, previous_questions=None,
+            project_root=".",
         ):
             captured["user_answers"] = user_answers
             # Always return questions so we can verify the loop

@@ -113,6 +113,11 @@ When converting Python to {rtl_language}:
 - Map dictionary lookups to ROM/LUT.
 - Map floating-point math to fixed-point (specify Q format in comments).
 - Handle variable-length data with valid/ready handshaking.
+- A ready/valid transfer is exactly `valid && ready` sampled on the clock edge.
+  Do not qualify the handshake with a registered copy of `ready`, a previous
+  cycle's ready, or a requirement that ready stay high for two cycles. If a
+  registered output token is held valid, a one-cycle `ready` pulse must retire
+  exactly one token and advance state once.
 
 If the previous attempt failed, the error will be provided. Fix the specific
 issue while maintaining correctness.

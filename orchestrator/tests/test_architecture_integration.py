@@ -81,7 +81,8 @@ async def _wait_after_resume(runner, target_statuses, timeout=30):
 def _make_smart_gather_prd():
     """PRD mock that returns questions on Phase 1, document on Phase 2."""
     async def _gather_prd(*, requirements, pdk_summary, target_clock_mhz,
-                          user_answers=None, previous_questions=None):
+                          user_answers=None, previous_questions=None,
+                          project_root="."):
         if user_answers and len(user_answers) > 0:
             return FFT16_PRD_DOCUMENT
         return FFT16_PRD_QUESTIONS

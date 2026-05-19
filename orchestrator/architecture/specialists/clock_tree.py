@@ -76,8 +76,11 @@ async def analyze_clock_tree(
                 except OSError:
                     pass
 
+        target_path = _P(project_root) / ".socmate" / "clock_tree.json" if project_root else _P.cwd() / ".socmate" / "clock_tree.json"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
         parts.append(
-            "\nIMPORTANT: Write the clock tree JSON to: .socmate/clock_tree.json\n"
+            f"\nIMPORTANT: Write the clock tree JSON to: {target_path}\n"
             "After writing, respond with only the file path confirmation."
         )
 
@@ -86,8 +89,6 @@ async def analyze_clock_tree(
         from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
 
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
-
-        target_path = _P(project_root) / ".socmate" / "clock_tree.json" if project_root else _P.cwd() / ".socmate" / "clock_tree.json"
 
         try:
             content = await llm.call(

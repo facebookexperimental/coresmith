@@ -130,6 +130,8 @@ def _write_decision_escalation(kind: str, state: dict, allowed_actions: list[str
             "pipeline": {
                 "action": "approve | retry | skip | abort | fix_rtl | fix_tb",
                 "block_actions": "optional object mapping block_name to action",
+                "constraint": "required for add_constraint; optional otherwise",
+                "rtl_fix_description": "optional for fix_rtl/fix_tb",
                 "rationale": "required human/triage-agent rationale",
             },
         },
@@ -197,6 +199,10 @@ async def _wait_for_decision(kind: str, poll_s: float, escalation_path: Path | N
             decision = json.loads(decision_path.read_text())
             if isinstance(decision, dict) and decision.get("action"):
                 print(f"[headless] loaded decision from {decision_path}", flush=True)
+                consumed_path = esc_dir / (
+                    f"{kind}.decision.consumed-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}.json"
+                )
+                decision_path.replace(consumed_path)
                 return decision
             raise RuntimeError(
                 f"Decision at {decision_path} must be a JSON object with an action"
@@ -298,24 +304,91 @@ def _answer_prd_questions(state: dict, requirements: str = "") -> dict:
         ):
             answers[qid] = transformer_kpi_answer
 
+    def _option_text(option: object) -> str:
+        return option.get("label", "") if isinstance(option, dict) else str(option)
+
+    def _choose_option(item: dict) -> str:
+        """Choose a conservative headless answer without inventing budgets.
+
+        The old behavior selected the first option, which often turns a vague
+        requirement into an artificial hard constraint such as "<25k gates" or
+        "<1 mW". That poisons downstream architecture because the human never
+        provided that budget. Prefer explicit "no constraint" / "derive from
+        KPI" options for sizing questions unless the original prompt already
+        gave a numeric limit.
+        """
+        opts = [_option_text(o) for o in (item.get("options") or [])]
+        if not opts:
+            return ""
+
+        qid = str(item.get("id", "")).lower()
+        category = str(item.get("category", "")).lower()
+        text = f"{qid} {category} {item.get('question', '')} {item.get('context', '')}".lower()
+
+        no_constraint_markers = (
+            "no explicit",
+            "no fixed",
+            "no hard",
+            "no latency constraint",
+            "no leakage constraint",
+            "no real-time requirement",
+            "no constraint",
+        )
+        if any(word in text for word in ("area", "gate", "die", "power", "leakage", "latency")):
+            for opt in opts:
+                if any(marker in opt.lower() for marker in no_constraint_markers):
+                    return opt
+
+        if "cycles_per_macroblock" in qid or "cycles per" in text:
+            for opt in opts:
+                if "derive" in opt.lower() or "frame-rate" in opt.lower():
+                    return opt
+
+        if "data_rate" in qid or "input_output" in qid:
+            for opt in opts:
+                if "derive" in opt.lower():
+                    return opt
+
+        if "frame_rate" in qid or "frame rate" in text or "fps" in text:
+            for opt in opts:
+                lowered = opt.lower()
+                if "no real-time" in lowered or "no fixed" in lowered or "no explicit" in lowered:
+                    return opt
+            for opt in opts:
+                if "derive" in opt.lower():
+                    return opt
+
+        if "buffer" in text or "storage" in text or "memory" in text:
+            # Preserve explicit memory constraints from transformer prompts;
+            # codec prompts here only said stream-oriented and did not cap FIFO
+            # bytes, so avoid forcing "registers only" if a no-budget option is
+            # available.
+            if not is_transformer:
+                for opt in opts:
+                    if any(marker in opt.lower() for marker in no_constraint_markers):
+                        return opt
+
+        return opts[0]
+
     for item in ask.get("auto_answerable", []):
         qid = item.get("id")
-        if qid:
-            answers[qid] = item.get("suggested_answer", "")
+        suggested = item.get("suggested_answer", "")
+        if qid and not _needs_default(suggested):
+            answers[qid] = suggested
         _maybe_answer_freeform_kpi(item)
 
     for item in ask.get("remaining_choice_questions", []):
         qid = item.get("id")
         opts = item.get("options") or []
         if qid and opts:
-            answers[qid] = opts[0]
+            answers[qid] = _choose_option(item)
         _maybe_answer_freeform_kpi(item)
 
     for item in ask.get("questions", []):
         qid = item.get("id")
         opts = item.get("options") or []
         if qid and opts:
-            answers[qid] = opts[0].get("label", "") if isinstance(opts[0], dict) else str(opts[0])
+            answers[qid] = _choose_option(item)
         _maybe_answer_freeform_kpi(item)
 
     common_defaults = {
@@ -575,15 +648,6 @@ async def run(args: argparse.Namespace) -> int:
             return 1
         if state.get("status") == "interrupted":
             payload = state.get("interrupt_payload") or {}
-            if (
-                isinstance(payload, dict)
-                and payload.get("type") == "uarch_integration_review"
-                and int(payload.get("issues_found", 0) or 0) == 0
-                and not payload.get("review_failed")
-            ):
-                print("[pipeline] auto-approving clean uarch integration review", flush=True)
-                print(await mcp.resume_pipeline(action="approve"), flush=True)
-                continue
             actions = state.get("interrupt_actions") or []
             interrupted = state.get("interrupted_blocks") or []
             for item in interrupted:
@@ -609,9 +673,13 @@ async def run(args: argparse.Namespace) -> int:
             decision = await _wait_for_decision("pipeline_interrupt", args.poll_s, path)
             action = decision.get("action")
             block_actions = decision.get("block_actions") or {}
+            constraint = decision.get("constraint", "")
+            rtl_fix_description = decision.get("rtl_fix_description", "")
             print("[pipeline] applying decision", action, block_actions, flush=True)
             print(await mcp.resume_pipeline(
                 action=action,
+                constraint=constraint,
+                rtl_fix_description=rtl_fix_description,
                 block_actions=json.dumps(block_actions) if block_actions else "",
             ), flush=True)
 

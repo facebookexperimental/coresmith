@@ -146,6 +146,32 @@ def read_back_json(
                     return merged, True
     except (json.JSONDecodeError, OSError):
         pass
+
+    # Codex runs may be isolated in a per-call worktree under the project
+    # root. In that mode a file-writing specialist can correctly write
+    # ".socmate/<name>.json" inside "codex-call-*", return only a path
+    # confirmation, and leave the canonical project-root file absent or stale.
+    # Recover by looking for the newest matching artifact in those isolated
+    # worktrees before falling back to parsing the response text.
+    try:
+        project_root = path.parent.parent
+        rel = path.relative_to(project_root)
+        candidates = sorted(
+            project_root.glob(f"codex-call-*/{rel.as_posix()}"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for candidate in candidates:
+            text = candidate.read_text(encoding="utf-8").strip()
+            if not text:
+                continue
+            data = json.loads(text)
+            if isinstance(data, dict):
+                atomic_write(path, json.dumps(data, indent=2) + "\n")
+                merged = {**defaults, **data}
+                return merged, True
+    except (ValueError, json.JSONDecodeError, OSError):
+        pass
     return parse_llm_json(llm_response, defaults, context=context)
 
 

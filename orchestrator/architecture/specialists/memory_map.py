@@ -134,8 +134,11 @@ async def analyze_memory_map(
                 except OSError:
                     pass
 
+        target_path = _P(project_root) / ".socmate" / "memory_map.json"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
         parts.append(
-            "\nIMPORTANT: Write the memory map JSON to: .socmate/memory_map.json\n"
+            f"\nIMPORTANT: Write the memory map JSON to: {target_path}\n"
             "After writing, respond with only the file path confirmation."
         )
 
@@ -145,8 +148,6 @@ async def analyze_memory_map(
 
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
         system_prompt = SYSTEM_PROMPT.format(topology_context=topology_context)
-
-        target_path = _P(project_root) / ".socmate" / "memory_map.json"
 
         try:
             content = await llm.call(

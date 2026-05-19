@@ -119,6 +119,15 @@ If the block cannot satisfy a required semantic contract with the interfaces
 provided by the block diagram, do not invent local state to guess it. Record an
 open uArch issue and state the required interface change.
 
+For blocks that consume or emit framed/tiled/matrix coordinates, restate and
+verify the derived geometry before specifying registers or payload fields:
+source dimensions, block dimensions, blocks per row, rows of blocks,
+coordinate ranges and bit widths, raster/traversal order, terminal coordinate,
+and total transaction count. Derive x/column counts from width and y/row counts
+from height. If a payload field is too narrow for the derived range, record a
+blocking uArch issue and widen or repartition the interface instead of wrapping
+or transposing coordinates.
+
 ═══════════════════════════════════════════════════════════════════════
 ARITHMETIC CORRECTNESS
 ═══════════════════════════════════════════════════════════════════════

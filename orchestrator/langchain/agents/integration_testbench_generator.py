@@ -53,6 +53,7 @@ class IntegrationTestbenchGenerator:
         prd_summary: str = "",
         block_rtl_paths: dict[str, str] | None = None,
         output_path: str = "",
+        prior_failure: str = "",
     ) -> dict[str, Any]:
         """Generate a cocotb integration testbench.
 
@@ -125,6 +126,15 @@ class IntegrationTestbenchGenerator:
                 "backpressure, sideband metadata, and final outputs so the "
                 "waveform audit contains meaningful evidence."
             )
+
+            if prior_failure:
+                parts.append(
+                    "\n--- PRIOR ATTEMPT FAILURE / CONTRACT AUDIT ---\n"
+                    "This is a retry. The previous attempt failed. You MUST "
+                    "address the first divergence and suggested fix below; do "
+                    "not regenerate the same bug.\n"
+                    f"{prior_failure}"
+                )
 
             user_message = "\n".join(p for p in parts if p)
 

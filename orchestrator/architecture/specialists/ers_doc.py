@@ -33,6 +33,7 @@ async def generate_ers_doc(
     memory_map: dict | None,
     clock_tree: dict | None,
     register_spec: dict | None,
+    project_root: str = ".",
 ) -> dict[str, Any]:
     """Generate the final ERS by synthesizing all architecture artifacts.
 
@@ -43,6 +44,7 @@ async def generate_ers_doc(
         block_diagram: Block diagram result (blocks, connections).
         memory_map: Memory map result.
         clock_tree: Clock tree result.
+        project_root: Directory where ERS collateral should be written.
         register_spec: Register spec result.
 
     Returns:
@@ -100,19 +102,20 @@ async def generate_ers_doc(
             golden_model_context=golden_model_context,
         )
 
+        target_path = Path(project_root) / ".socmate" / "ers_spec.json"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
         user_message = (
             "Produce the Engineering Requirements Specification (ERS) "
             "by synthesizing all the upstream architecture documents "
             "provided in the system prompt.\n\n"
-            "IMPORTANT: Write the complete ERS JSON to: .socmate/ers_spec.json\n"
+            f"IMPORTANT: Write the complete ERS JSON to: {target_path}\n"
             "After writing, respond with only the file path confirmation."
         )
 
         from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
 
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
-
-        target_path = Path.cwd() / ".socmate" / "ers_spec.json"
 
         try:
             content = await llm.call(

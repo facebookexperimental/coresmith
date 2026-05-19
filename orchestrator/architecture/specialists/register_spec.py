@@ -80,8 +80,11 @@ async def analyze_register_spec(
                 except OSError:
                     pass
 
+        target_path = _P(project_root) / ".socmate" / "register_spec.json" if project_root else _P.cwd() / ".socmate" / "register_spec.json"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
         parts.append(
-            "\nIMPORTANT: Write the register spec JSON to: .socmate/register_spec.json\n"
+            f"\nIMPORTANT: Write the register spec JSON to: {target_path}\n"
             "After writing, respond with only the file path confirmation."
         )
 
@@ -90,8 +93,6 @@ async def analyze_register_spec(
         from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
 
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
-
-        target_path = _P(project_root) / ".socmate" / "register_spec.json" if project_root else _P.cwd() / ".socmate" / "register_spec.json"
 
         try:
             content = await llm.call(

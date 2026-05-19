@@ -70,6 +70,7 @@ async def generate_sad(
     prd_spec: dict,
     requirements: str,
     pdk_summary: str,
+    project_root: str = ".",
 ) -> dict[str, Any]:
     """Generate the System Architecture Document from the PRD.
 
@@ -77,6 +78,7 @@ async def generate_sad(
         prd_spec: Full PRD document (output of gather_prd Phase 2).
         requirements: Original high-level requirements text.
         pdk_summary: Available PDK technologies summary.
+        project_root: Directory where SAD collateral should be written.
 
     Returns:
         {"sad_text": "<markdown>", "phase": "sad_complete"}
@@ -97,19 +99,20 @@ async def generate_sad(
             shuttle_context=_build_shuttle_context(),
         )
 
+        target_path = Path(project_root) / "arch" / "sad_spec.md"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
         user_message = (
             f"Produce the System Architecture Document for this design.\n\n"
             f"Original requirements:\n{requirements}\n\n"
             f"The PRD has been provided in the system prompt.\n\n"
-            f"IMPORTANT: Write the complete SAD document to: arch/sad_spec.md\n"
+            f"IMPORTANT: Write the complete SAD document to: {target_path}\n"
             f"After writing, respond with only the file path confirmation."
         )
 
         from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
 
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
-
-        target_path = Path.cwd() / "arch" / "sad_spec.md"
 
         try:
             content = await llm.call(

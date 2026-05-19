@@ -117,6 +117,12 @@ GUIDELINES:
   predictor, entropy state, reconstruction loop, or history-dependent output,
   the FRD MUST include Semantic Invariants that bind the split hardware blocks
   to the golden model. Do not rely on final output checks alone.
+- For tiled, blocked, framed, packetized, or matrix-shaped algorithms, derive
+  and document the exact geometry from the golden model and user stimulus:
+  element dimensions, block dimensions, counts per row/column, traversal order,
+  coordinate bit widths, terminal coordinate, and total transaction count. Do
+  not transpose row/column meanings. If dimensions do not divide evenly, state
+  the padding/cropping rule and make it a semantic invariant.
 - Use concrete numbers: "latency < 100 us", "throughput >= 1 Gbps",
   "drift < 1 deg/min", NOT vague statements like "low latency"
 - Derive requirements from the PRD's functional_requirements and
