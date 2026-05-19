@@ -1901,8 +1901,8 @@ async def integration_review_node(state: OrchestratorState) -> dict:
         # NOTE: The integration_review agent edits specs on every run, even
         # cosmetically, so this auto-revise creates an infinite loop:
         # revise -> restart_block -> integration_review edits again -> revise...
-        # When the outer agent (human or run_top_headless auto-approve)
-        # explicitly approves, trust that decision; the integration_check
+        # When the outer agent explicitly approves, trust that decision;
+        # the integration_check
         # node at RTL level will catch any real cross-block lint/wiring
         # mismatch and surface it as a normal failure. Setting
         # SOCMATE_STRICT_INTEGRATION_REVIEW=1 restores the old auto-revise.
