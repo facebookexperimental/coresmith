@@ -63,6 +63,15 @@ RUN nix-channel --add https://nixos.org/channels/nixos-24.05 nixpkgs \
  # C++ compiler on PATH for non-yosys subprocesses.
  && nix-env -iA nixos-unstable.verilator
 
+# nixpkgs.gcc's runtime libstdc++ lives under /root/.nix-profile/lib but
+# isn't on the dynamic loader's default search path. PyPI's manylinux
+# wheels for numpy 2.4+ are linked against libstdc++.so.6 at the standard
+# FHS location -- without LD_LIBRARY_PATH, the wavekit sdist build fails
+# its `import numpy as np` with
+#   ImportError: libstdc++.so.6: cannot open shared object file
+# Surface the nix-store libstdc++ at the loader's default search path.
+ENV LD_LIBRARY_PATH="/root/.nix-profile/lib:${LD_LIBRARY_PATH}"
+
 ENV PATH="/root/.nix-profile/bin:${PATH}"
 
 # Verify the unstable-channel verilator is on PATH and >= 5.036
