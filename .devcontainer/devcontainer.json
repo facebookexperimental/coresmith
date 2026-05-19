@@ -12,6 +12,17 @@
     // Codespaces, or temporarily flip this back to a `build` block.
     "image": "ghcr.io/facebookexperimental/socmate:latest",
 
+    // The pre-PR-#11 :latest images don't have /usr/sbin/sshd symlinked
+    // to the nix-store sshd, so `gh codespace ssh` fails with "Please
+    // check if an SSH server is installed in the container". The sshd
+    // feature installs OpenSSH at the FHS path the codespaces agent
+    // expects, sidestepping the issue until a fresh image rebuild lands.
+    "features": {
+        "ghcr.io/devcontainers/features/sshd:1": {
+            "version": "latest"
+        }
+    },
+
     // The openlane2 base image already runs as root with /nix/store on
     // PATH; keep the dev container as root so the entrypoint can write
     // under /socmate/.socmate, /rtl, etc.
