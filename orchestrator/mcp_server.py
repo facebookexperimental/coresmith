@@ -2156,15 +2156,16 @@ def _build_resume_command(state_snapshot, resume_value, action, constraint,
     """
     from langgraph.types import Command
 
-    # Collect successfully completed block names to filter stale interrupts.
-    # A failed block may already appear in completed_blocks during a retry
-    # loop; filtering it here drops its live human-intervention interrupt and
-    # causes resume_pipeline() to re-enter the same interrupt forever.
+    # Collect completed block names (any success status) to filter stale
+    # interrupts.  Once a block lands in completed_blocks the pipeline has
+    # moved past it, so any lingering interrupt from the parallel Send()
+    # checkpoint is stale -- including failed-block interrupts, which the
+    # pipeline already routed around.
     completed_names: set[str] = set()
     if state_snapshot and hasattr(state_snapshot, "values"):
         for b in (state_snapshot.values or {}).get("completed_blocks", []):
             name = b.get("name", "")
-            if name and b.get("success") is True:
+            if name:
                 completed_names.add(name)
 
     # (interrupt_id, block_name, supported_actions)

@@ -568,8 +568,10 @@ class TestRouteAfterIntegrationReview:
     def test_abort_ends_pipeline(self):
         assert route_after_integration_review({"integration_review_action": "abort"}) == "__end__"
 
-    def test_revise_ends_pipeline(self):
-        assert route_after_integration_review({"integration_review_action": "revise"}) == "__end__"
+    def test_revise_inits_tier(self):
+        # 'revise' reruns the current tier from the revised uArch specs;
+        # see route_after_integration_review docstring + __edge_labels__.
+        assert route_after_integration_review({"integration_review_action": "revise"}) == "init_tier"
 
     def test_default_is_approve(self):
         assert route_after_integration_review({}) == "advance_tier"
