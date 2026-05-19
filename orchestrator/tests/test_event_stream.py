@@ -59,7 +59,22 @@ class TestWriteGraphEvent:
         assert "iso" in record
         assert "event" in record
         assert "node" in record
+        assert record["status"] == "ok"
         assert isinstance(record["ts"], float)
+
+    def test_graph_node_exit_derives_uniform_status(self, event_project):
+        write_graph_event(event_project, "Pass Node", "graph_node_exit", {"passed": True})
+        write_graph_event(event_project, "Fail Node", "graph_node_exit", {"passed": False})
+        write_graph_event(event_project, "Skip Node", "graph_node_exit", {"skipped": True})
+        write_graph_event(event_project, "Abort Node", "graph_node_exit", {"pipeline_aborted": True})
+
+        events = read_events(event_project)
+        assert [event["status"] for event in events] == [
+            "ok",
+            "error",
+            "skipped",
+            "interrupted",
+        ]
 
     def test_multiple_events_append(self, event_project):
         write_graph_event(event_project, "A", "graph_node_enter")

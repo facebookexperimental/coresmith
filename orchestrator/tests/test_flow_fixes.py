@@ -28,6 +28,22 @@ from pathlib import Path
 import pytest
 
 
+def test_load_config_falls_back_to_repo_config_when_project_root_is_external(tmp_path, monkeypatch):
+    """Architecture helpers must work when SOCMATE_PROJECT_ROOT is a run dir."""
+    import importlib
+
+    monkeypatch.setenv("SOCMATE_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.delenv("SOCMATE_CONFIG_PATH", raising=False)
+
+    import orchestrator.langgraph.pipeline_helpers as ph
+
+    ph = importlib.reload(ph)
+    cfg = ph.load_config()
+
+    assert isinstance(cfg, dict)
+    assert "blocks" in cfg
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # P0-1: Testbench Regeneration (force_regen_tb flag)
 # ═══════════════════════════════════════════════════════════════════════════

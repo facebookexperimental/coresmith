@@ -45,7 +45,13 @@ PROJECT_ROOT = Path(
         str(Path(__file__).resolve().parent.parent.parent),
     )
 )
-CONFIG_PATH = PROJECT_ROOT / "orchestrator" / "config.yaml"
+CODE_ROOT = Path(__file__).resolve().parent.parent.parent
+CONFIG_PATH = Path(
+    os.environ.get(
+        "SOCMATE_CONFIG_PATH",
+        str(PROJECT_ROOT / "orchestrator" / "config.yaml"),
+    )
+)
 PDK_ROOT = PROJECT_ROOT / ".pdk"
 def _find_liberty_file() -> Path:
     """Locate the Sky130 liberty file, checking both sky130A and sky130B."""
@@ -222,7 +228,13 @@ def load_config() -> dict:
     nightly e2e job to swap in a small reference design without touching
     the canonical config.
     """
-    with open(CONFIG_PATH) as f:
+    config_path = CONFIG_PATH
+    if not config_path.exists():
+        repo_config = CODE_ROOT / "orchestrator" / "config.yaml"
+        if repo_config.exists():
+            config_path = repo_config
+
+    with open(config_path) as f:
         config = yaml.safe_load(f)
 
     blocks_override = os.environ.get("SOCMATE_BLOCKS_FILE")
