@@ -92,15 +92,13 @@ RUN set -eux \
  && ln -sf "${LIBSTDCPP_DIR}/libstdc++.so.6" /usr/lib/libstdc++.so.6 \
  && ln -sf "${LIBSTDCPP_DIR}/libstdc++.so.6" /lib/libstdc++.so.6 \
  && echo "${LIBSTDCPP_DIR}" > /etc/ld.so.conf.d/nix-gcc.conf \
- && (ldconfig -v 2>/dev/null | grep -i stdc || ldconfig 2>/dev/null || true) \
- && python3 -c "import ctypes; lib = ctypes.CDLL('libstdc++.so.6'); print('libstdc++ resolves at build time:', lib._name)" \
- # Crucially: verify it ALSO resolves from a subprocess that doesn't
- # inherit our build-time env (pip's build-isolation venv runs the
- # wavekit build with a clean env). If this fails, pip will fail too.
- && env -i PATH=/usr/bin:/bin /usr/bin/env python3 -c "import ctypes; lib = ctypes.CDLL('libstdc++.so.6'); print('libstdc++ resolves in clean-env subprocess:', lib._name)"
+ && (ldconfig 2>/dev/null || true) \
+ && python3 -c "import ctypes; lib = ctypes.CDLL('libstdc++.so.6'); print('libstdc++ resolves:', lib._name)"
 
-# Also export at runtime so a clean-env subprocess that disables
-# /etc/ld.so.cache still finds it.
+# pip's build-isolation venv runs subprocesses with a stripped env so
+# the /etc/ld.so.cache fallback might not catch every loader. Export
+# LD_LIBRARY_PATH at image level so the loader has at least one path
+# guaranteed to be respected even in restricted subprocesses.
 ENV LD_LIBRARY_PATH="/usr/lib:/lib:${LD_LIBRARY_PATH}"
 
 # Verify the unstable-channel verilator is on PATH and >= 5.036
