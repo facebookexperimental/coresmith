@@ -93,11 +93,73 @@ class IntegrationLeadAgent:
             result = self._parse_response(content, design_name)
 
             verilog = result.pop("verilog", "")
-            if verilog and output_path:
+
+            # The LLM may have used a file-edit tool to write the top RTL
+            # directly to disk and then returned a JSON whose `verilog`
+            # field is a self-`include` or other placeholder (seen with
+            # Codex/gpt-5.5: the response wrote `\`include "<output_path>"\``
+            # which trivially compiles to a recursive include).  Refuse to
+            # overwrite a working on-disk module with a broken one-liner,
+            # and refuse to write a broken one-liner from scratch -- raise
+            # so the integration_check node escalates with a retry-able
+            # error.
+            def _has_real_module(text: str, design_name: str) -> bool:
+                if not text:
+                    return False
+                if "module" not in text:
+                    return False
+                if f"module {design_name}" not in text and "module " not in text:
+                    return False
+                if len(text.strip().splitlines()) < 5:
+                    return False
+                # Reject obvious self-include placeholders.
+                stripped = text.strip()
+                if (
+                    stripped.startswith("`include")
+                    and output_path
+                    and output_path in stripped
+                ):
+                    return False
+                return True
+
+            disk_content = ""
+            if output_path:
+                disk_path = Path(output_path)
+                if disk_path.exists():
+                    try:
+                        disk_content = disk_path.read_text(encoding="utf-8")
+                    except OSError:
+                        disk_content = ""
+
+            chosen_verilog = ""
+            if _has_real_module(verilog, design_name):
+                chosen_verilog = verilog
+            elif _has_real_module(disk_content, design_name):
+                chosen_verilog = disk_content
+                result.setdefault("notes", "")
+                result["notes"] += (
+                    " (used existing on-disk integration top because the LLM "
+                    "response did not contain a valid module declaration)"
+                )
+
+            if chosen_verilog and output_path:
                 out = Path(output_path)
                 out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_text(verilog, encoding="utf-8")
+                out.write_text(chosen_verilog, encoding="utf-8")
                 result["rtl_path"] = output_path
+            elif output_path:
+                # Neither the response nor disk has a valid module.
+                # Raise so the pipeline retries instead of writing junk
+                # that produces a recursive-include lint error.
+                result["rtl_path"] = ""
+                raise RuntimeError(
+                    "Integration Lead returned no valid top-level Verilog "
+                    f"module for '{design_name}'. The response `verilog` "
+                    f"field had {len(verilog)} chars but did not contain a "
+                    f"proper module declaration, and the on-disk file at "
+                    f"{output_path} did not contain a valid module either. "
+                    "Retry."
+                )
             else:
                 result["rtl_path"] = ""
 

@@ -954,7 +954,12 @@ include $(shell cocotb-config --makefiles)/Makefile.sim
 """
     (sim_dir / "Makefile").write_text(makefile_content)
 
-    sim_tb_path = sim_dir / f"test_{design_name}.py"
+    # Copy the TB under its ORIGINAL stem so the cocotb MODULE name (which is
+    # Path(tb_path).stem) resolves on PYTHONPATH=sim_dir.  Validation DV TBs
+    # are named test_<design>_validation.py, so the previous hardcoded
+    # f"test_{design_name}.py" copy renamed them to test_<design>.py and
+    # cocotb failed import at 0 ns with `No module named test_<design>_validation`.
+    sim_tb_path = sim_dir / f"{Path(tb_path).stem}.py"
     shutil.copy2(tb_path, sim_tb_path)
     _normalize_cocotb_timing_keywords(sim_tb_path)
 
