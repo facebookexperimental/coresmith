@@ -54,6 +54,7 @@ RUN nix-channel --add https://nixos.org/channels/nixos-24.05 nixpkgs \
         nixpkgs.openssh \
         nixpkgs.musl \
         nixpkgs.gcc \
+        nixpkgs.zlib \
  # Pull verilator from nixos-unstable so we get >= 5.036; the openlane2
  # base ships 5.018 which cocotb 2.0+ refuses ("cocotb requires
  # Verilator 5.036 or later"). Our PATH (set below) puts
@@ -83,17 +84,27 @@ ENV PATH="/root/.nix-profile/bin:${PATH}"
 #   build error this fixes:
 #     ImportError: libstdc++.so.6: cannot open shared object file: No such file or directory
 RUN set -eux \
- && LIBSTDCPP_DIR="$(find /nix/store -regextype posix-extended \
-        -regex '.*/libstdc\+\+\.so\.6\.[0-9]+\.[0-9]+$' -type f \
-        2>/dev/null | sort -V | tail -1 | xargs -r dirname)" \
- && test -n "${LIBSTDCPP_DIR}" \
- && echo "libstdc++ dir: ${LIBSTDCPP_DIR}" \
  && mkdir -p /usr/lib /lib /etc/ld.so.conf.d \
- && ln -sf "${LIBSTDCPP_DIR}/libstdc++.so.6" /usr/lib/libstdc++.so.6 \
- && ln -sf "${LIBSTDCPP_DIR}/libstdc++.so.6" /lib/libstdc++.so.6 \
- && echo "${LIBSTDCPP_DIR}" > /etc/ld.so.conf.d/nix-gcc.conf \
+ && for spec in \
+        'libstdc++.so.6|libstdc\+\+\.so\.6\.[0-9]+\.[0-9]+' \
+        'libz.so.1|libz\.so\.1\.[0-9]+\.[0-9]+' ; do \
+        LIBNAME="${spec%%|*}"; PATTERN="${spec##*|}"; \
+        LIB="$(find /nix/store -regextype posix-extended \
+                -regex ".*/${PATTERN}$" -type f 2>/dev/null \
+                | sort -V | tail -1)"; \
+        if [ -z "${LIB}" ] || [ ! -s "${LIB}" ]; then \
+            echo "ERROR: could not locate ${LIBNAME} under /nix/store"; \
+            exit 1; \
+        fi; \
+        echo "linking ${LIBNAME} -> ${LIB}"; \
+        ln -sf "${LIB}" "/usr/lib/${LIBNAME}"; \
+        ln -sf "${LIB}" "/lib/${LIBNAME}"; \
+        dirname "${LIB}" >> /etc/ld.so.conf.d/nix-gcc.conf; \
+    done \
+ && sort -u -o /etc/ld.so.conf.d/nix-gcc.conf /etc/ld.so.conf.d/nix-gcc.conf \
  && (ldconfig 2>/dev/null || true) \
- && python3 -c "import ctypes; lib = ctypes.CDLL('libstdc++.so.6'); print('libstdc++ resolves:', lib._name)"
+ && python3 -c "import ctypes; \
+    [print(f'{n} resolves:', ctypes.CDLL(n)._name) for n in ('libstdc++.so.6','libz.so.1')]"
 
 # pip's build-isolation venv runs subprocesses with a stripped env so
 # the /etc/ld.so.cache fallback might not catch every loader. Export
