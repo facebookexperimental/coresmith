@@ -21,7 +21,7 @@ from typing import Any
 
 from opentelemetry import trace
 
-from .socmate_llm import ClaudeLLM
+from .socmate_llm import DEFAULT_MODEL, ClaudeLLM
 
 _tracer = trace.get_tracer(__name__)
 
@@ -140,10 +140,10 @@ class RTLGeneratorAgent:
     _DEFAULT_CONSTRAINTS = "No tri-state buffers, no async resets, no latches (Sky130 limitations)."
 
     def __init__(self, model: str | None = None, temperature: float = 0.1):
-        # Block agents default to Sonnet (cheaper than Opus); override via
-        # SOCMATE_BLOCK_MODEL or the model= kwarg.
-        from orchestrator.langchain.agents.socmate_llm import block_model
-        model = model or block_model()
+        # RTL generation is the load-bearing step, so it defaults to the
+        # project's DEFAULT_MODEL (Opus). Override via SOCMATE_MODEL or the
+        # model= kwarg if a cheaper model is acceptable for a given run.
+        model = model or DEFAULT_MODEL
         # 1800s default; bump via SOCMATE_RTL_TIMEOUT env var for complex blocks
         # like CPUs / multi-stage pipelines that need more agent turns to write.
         self.llm = ClaudeLLM(

@@ -2188,6 +2188,12 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             )
             result = {
                 "aborted": True,
+                "skipped": True,
+                "reason": (
+                    f"Refusing partial integration: "
+                    f"{len(passed_blocks)}/{expected_blocks} blocks passed; "
+                    f"failed={failed_names}, missing={missing_names}"
+                ),
                 "error": "partial_block_set",
                 "error_count": max(1, expected_blocks - len(passed_blocks)),
                 "passed_blocks": len(passed_blocks),
