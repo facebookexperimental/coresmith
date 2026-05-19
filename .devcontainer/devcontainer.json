@@ -10,16 +10,20 @@
     // `:latest` (= last green main). For Dockerfile/toolchain work, build
     // locally with `docker build -t socmate:dev .` and test outside
     // Codespaces, or temporarily flip this back to a `build` block.
-    "image": "ghcr.io/facebookexperimental/socmate:latest",
-
-    // The pre-PR-#11 :latest images don't have /usr/sbin/sshd symlinked
-    // to the nix-store sshd, so `gh codespace ssh` fails with "Please
-    // check if an SSH server is installed in the container". We can't
-    // use the `ghcr.io/devcontainers/features/sshd:1` feature because
-    // its install.sh runs apt-get which isn't on the Nix-only openlane2
-    // base -- doing so kicks the codespace into the alpine recovery
-    // container instead. Do the FHS symlinks ourselves on first attach.
-    "onCreateCommand": "set -e; SSHD=$(command -v sshd); KEYGEN=$(command -v ssh-keygen); mkdir -p /usr/sbin /usr/bin /etc/ssh /var/run/sshd /run/sshd /var/empty; ln -sf \"$SSHD\" /usr/sbin/sshd; ln -sf \"$KEYGEN\" /usr/bin/ssh-keygen; getent passwd sshd >/dev/null 2>&1 || (command -v useradd >/dev/null && useradd -r -M -d /var/empty -s /usr/sbin/nologin sshd) || { echo 'sshd:x:74:74:Privilege-separated SSH:/var/empty:/usr/sbin/nologin' >> /etc/passwd && echo 'sshd:x:74:' >> /etc/group; }; chmod 755 /var/empty; [ -f /etc/ssh/ssh_host_rsa_key ] || ssh-keygen -A",
+    // Use a tiny derived Dockerfile (.devcontainer/Dockerfile) that layers
+    // PR #11's FHS sshd symlinks on top of the published image. We can't
+    // use just the bare published image because pre-PR-#11 :latest images
+    // don't have /usr/sbin/sshd symlinked to the nix-store sshd, so
+    // `gh codespace ssh` fails with "Please check if an SSH server is
+    // installed in the container". onCreateCommand fires too late (after
+    // the codespace agent has already checked sshd at boot); the
+    // ghcr.io/devcontainers/features/sshd:1 feature can't be used because
+    // its install.sh runs apt-get and the Nix-only openlane2 base has
+    // no apt -- the feature install failure dumps us into the alpine
+    // recovery container. Bake the symlinks in at build time instead.
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
 
     // The openlane2 base image already runs as root with /nix/store on
     // PATH; keep the dev container as root so the entrypoint can write
