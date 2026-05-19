@@ -14,14 +14,12 @@
 
     // The pre-PR-#11 :latest images don't have /usr/sbin/sshd symlinked
     // to the nix-store sshd, so `gh codespace ssh` fails with "Please
-    // check if an SSH server is installed in the container". The sshd
-    // feature installs OpenSSH at the FHS path the codespaces agent
-    // expects, sidestepping the issue until a fresh image rebuild lands.
-    "features": {
-        "ghcr.io/devcontainers/features/sshd:1": {
-            "version": "latest"
-        }
-    },
+    // check if an SSH server is installed in the container". We can't
+    // use the `ghcr.io/devcontainers/features/sshd:1` feature because
+    // its install.sh runs apt-get which isn't on the Nix-only openlane2
+    // base -- doing so kicks the codespace into the alpine recovery
+    // container instead. Do the FHS symlinks ourselves on first attach.
+    "onCreateCommand": "set -e; SSHD=$(command -v sshd); KEYGEN=$(command -v ssh-keygen); mkdir -p /usr/sbin /usr/bin /etc/ssh /var/run/sshd /run/sshd /var/empty; ln -sf \"$SSHD\" /usr/sbin/sshd; ln -sf \"$KEYGEN\" /usr/bin/ssh-keygen; getent passwd sshd >/dev/null 2>&1 || (command -v useradd >/dev/null && useradd -r -M -d /var/empty -s /usr/sbin/nologin sshd) || { echo 'sshd:x:74:74:Privilege-separated SSH:/var/empty:/usr/sbin/nologin' >> /etc/passwd && echo 'sshd:x:74:' >> /etc/group; }; chmod 755 /var/empty; [ -f /etc/ssh/ssh_host_rsa_key ] || ssh-keygen -A",
 
     // The openlane2 base image already runs as root with /nix/store on
     // PATH; keep the dev container as root so the entrypoint can write
