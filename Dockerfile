@@ -84,11 +84,18 @@ ENV PATH="/root/.nix-profile/bin:${PATH}"
 #     ImportError: libstdc++.so.6: cannot open shared object file: No such file or directory
 RUN set -eux \
  && mkdir -p /usr/lib \
- && LIBSTDCPP="$(find /nix/store -name 'libstdc++.so.6.*' -type f -not -name '*.debug' 2>/dev/null | sort -V | tail -1)" \
+ # NOTE: nix-store ships a `libstdc++.so.6.0.32-gdb.py` next to the
+ # real lib; the `.so.6.*` wildcard matches it too, so we explicitly
+ # require a numeric .X.Y tail.
+ && LIBSTDCPP="$(find /nix/store -regextype posix-extended \
+        -regex '.*/libstdc\+\+\.so\.6\.[0-9]+\.[0-9]+$' -type f \
+        2>/dev/null | sort -V | tail -1)" \
  && test -n "${LIBSTDCPP}" \
+ && test -s "${LIBSTDCPP}" \
+ && echo "libstdc++ source: ${LIBSTDCPP}" \
  && ln -sf "${LIBSTDCPP}" /usr/lib/libstdc++.so.6 \
  && ldconfig 2>/dev/null || true \
- && python3 -c "import ctypes; ctypes.CDLL('libstdc++.so.6'); print('libstdc++ resolves')"
+ && python3 -c "import ctypes; lib = ctypes.CDLL('libstdc++.so.6'); print('libstdc++ resolves:', lib._name)"
 
 # Verify the unstable-channel verilator is on PATH and >= 5.036
 # (cocotb >= 2.0 requires it). Fails the build loud if PATH ordering
