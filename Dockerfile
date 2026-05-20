@@ -157,6 +157,37 @@ RUN GLIBC_LD="$(find /nix/store -path '*glibc-*/lib/ld-linux-x86-64.so.2' \
  # codespaces agent.
  && /lib64/ld-linux-x86-64.so.2 --help 2>&1 | head -1
 
+# Write a Debian-compatible /etc/os-release so the GitHub Codespaces
+# agent's distro probe succeeds.  The devcontainer CLI runs
+#   (cat /etc/os-release || cat /usr/lib/os-release) 2>/dev/null
+# during boot to pick a matching vscode-remote-server binary (Debian
+# / Ubuntu / Alpine variants are all distinct downloads). On the
+# Nix-only openlane2 base neither file exists, so the probe returns
+# exit code 1 with empty output; the agent then has no distro to
+# target and the workbench dies with the generic
+#   "failed to start vs code remote server"
+# (which is also what `gh codespace ssh` rewrites to "failed to start
+# SSH server"). The image is glibc-ABI compatible with Ubuntu after
+# the loader symlinks above, so identifying as Ubuntu 22.04 is
+# accurate enough for the agent's purposes.
+RUN { \
+        echo 'NAME="Ubuntu"'; \
+        echo 'VERSION="22.04.5 LTS (Jammy Jellyfish)"'; \
+        echo 'ID=ubuntu'; \
+        echo 'ID_LIKE=debian'; \
+        echo 'PRETTY_NAME="Ubuntu 22.04.5 LTS"'; \
+        echo 'VERSION_ID="22.04"'; \
+        echo 'HOME_URL="https://www.ubuntu.com/"'; \
+        echo 'SUPPORT_URL="https://help.ubuntu.com/"'; \
+        echo 'BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"'; \
+        echo 'PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"'; \
+        echo 'VERSION_CODENAME=jammy'; \
+        echo 'UBUNTU_CODENAME=jammy'; \
+    } > /etc/os-release \
+ && mkdir -p /usr/lib && cp /etc/os-release /usr/lib/os-release \
+ # Sanity check: the probe the agent runs must now succeed.
+ && (cat /etc/os-release || cat /usr/lib/os-release) >/dev/null 2>&1
+
 # Nix-built Node sets npm's default prefix into the read-only Nix store,
 # so `npm install -g` "succeeds" but the bin can't symlink anywhere on
 # PATH. Pin the prefix to a writable dir we explicitly put on PATH.
