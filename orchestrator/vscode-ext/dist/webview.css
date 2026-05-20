@@ -1538,6 +1538,43 @@ body {
   overflow: auto;
   color: var(--color-text-primary);
 }
+.result-card {
+  border-left: 3px solid #14b8a6;
+}
+.result-card-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 14px;
+  padding: 10px 12px 12px;
+  font-size: 11px;
+}
+.result-card-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.result-card-key {
+  color: var(--color-text-dimmed);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.result-card-val {
+  font-family: "Menlo", monospace;
+  font-size: 11px;
+  color: var(--color-text-primary);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.result-card-val.ok {
+  color: #16a34a;
+}
+.result-card-val.error {
+  color: #dc2626;
+}
 .llm-dur {
   color: var(--color-text-dimmed);
   font-family:

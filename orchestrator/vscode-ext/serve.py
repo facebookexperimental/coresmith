@@ -500,25 +500,33 @@ def get_node_trajectory(node_name: str, max_log_chars: int = 16000) -> list:
                     )
                     tool_runs.append(log)
 
-        # Some nodes ship rich tool output INSIDE the exit event itself
-        # (tool_stdout, command, return_code, gate_count, etc.) without
-        # writing a step_log file -- e.g. Synthesize embeds an ABC log,
-        # Run PnR embeds OpenROAD metrics. Surface those as a synthetic
-        # tool_run so the trajectory isn't empty for these nodes.
+        # Pull useful state out of the exit event. Two cases:
+        #   1. exit ships actual tool output (command + stdout/stderr) -- emit
+        #      a real tool_run step, like a step_log file would. Synthesize,
+        #      Run PnR, lint nodes often do this.
+        #   2. exit only ships metrics / paths / success flags (Final Report
+        #      writes dashboard_path; Flat Top Synthesis writes gate_count
+        #      and success). The actual work happened inside an LLM call
+        #      already in `calls`, so a separate tool_run card would be
+        #      empty and misleading. Emit a `result_summary` step instead.
         ev = a.get("exit_event") or {}
-        synth_tool_keys = (
-            "command", "tool_stdout", "tool_stderr", "return_code",
-            "gate_count", "chip_area_um2", "wns_ns", "tns_ns",
-            "design_area_um2", "utilization_pct", "total_power_mw",
-            "violations", "sim_passed", "lint_passed",
+        REAL_TOOL_KEYS = {"command", "tool_stdout", "tool_stderr", "return_code"}
+        METRIC_KEYS = (
+            "gate_count", "chip_area_um2", "design_area_um2",
+            "utilization_pct", "wns_ns", "tns_ns", "total_power_mw",
+            "violations", "violation_count", "sim_passed",
+            "lint_passed", "success", "passed", "clean",
+            "dashboard_path", "html_size", "log_path", "path",
+            "node_count", "edge_count", "block_count",
+            "tb_fixes_attempted", "local_fixes_attempted",
+            "tier", "round", "design_name", "category",
+            "max_freq_mhz",
         )
-        if any(k in ev for k in synth_tool_keys):
-            inline_metrics = {
-                k: ev[k] for k in synth_tool_keys
-                if k in ev and k not in {"command", "tool_stdout", "tool_stderr", "return_code"}
-            }
-            # Derive a step label from the node name (lowercased + underscored)
-            step_label = node_name.lower().replace(" ", "_")
+
+        has_real_tool = any(k in ev for k in REAL_TOOL_KEYS)
+        step_label = node_name.lower().replace(" ", "_")
+
+        if has_real_tool:
             stdout = ev.get("tool_stdout") or ""
             stderr = ev.get("tool_stderr") or ""
             content_parts = []
@@ -534,15 +542,32 @@ def get_node_trajectory(node_name: str, max_log_chars: int = 16000) -> list:
                 "command": ev.get("command", ""),
                 "return_code": ev.get("return_code"),
                 "content": "\n\n".join(content_parts) if content_parts else "",
-                "metrics": inline_metrics,
+                "metrics": {
+                    k: ev[k] for k in METRIC_KEYS if k in ev
+                },
                 "size": sum(len(p) for p in content_parts),
             }
-            # Avoid duplicating when a step_log file already covered this
             if not any(t.get("step") == step_label for t in tool_runs):
                 tool_runs.append(inline_tool)
 
+        metrics = {k: ev[k] for k in METRIC_KEYS if k in ev}
+        result_summary = None
+        if metrics and not has_real_tool:
+            # No real tool run -- give the user a compact card showing what
+            # the node actually accomplished (file written, gates produced,
+            # dashboard published, ...).
+            result_summary = {
+                "type": "result_summary",
+                "ts": exit_ts or enter_ts,
+                "step": step_label,
+                "metrics": metrics,
+            }
+
         # Merge + sort all steps chronologically
-        steps = sorted([*calls, *tool_runs], key=lambda s: s.get("ts") or 0)
+        extras = []
+        if result_summary:
+            extras.append(result_summary)
+        steps = sorted([*calls, *tool_runs, *extras], key=lambda s: s.get("ts") or 0)
 
         out.append({
             "attempt": a["attempt"],

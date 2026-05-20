@@ -125491,7 +125491,7 @@ function regroupTraces(traceData) {
   return groups.map((g) => {
     const steps = g.steps || [];
     const toolCount = steps.filter((s) => s.type === "tool_run").length;
-    const llmCount = steps.filter((s) => s.type !== "tool_run").length;
+    const llmCount = steps.filter((s) => s.type === "llm_call" || s.type === "llm_call_streaming" || !s.type).length;
     return {
       key: hasMultipleBlocks ? `${g.blockName || "unknown"}:${g.attempt}` : `a${g.attempt}`,
       label: hasMultipleBlocks ? `${(g.blockName || "unknown").replace(/_/g, " ")} \xB7 Attempt ${g.attempt}` : groups.length === 1 ? "Run" : `Attempt ${g.attempt}`,
@@ -125727,11 +125727,82 @@ function ToolRunCard({ run, index, total }) {
     ] })
   ] });
 }
+function ResultSummaryCard({ metrics, index, total }) {
+  const entries = Object.entries(metrics || {}).filter(([, v]) => v != null);
+  if (!entries.length)
+    return null;
+  function fmt(key, value) {
+    if (typeof value === "boolean")
+      return value ? "\u2713 yes" : "\u2717 no";
+    if (key === "dashboard_path" || key === "path" || key === "log_path") {
+      const s = String(value);
+      return s.length > 60 ? "\u2026" + s.slice(-60) : s;
+    }
+    if (key === "html_size" || key === "size" || key === "stdout_bytes") {
+      const n = Number(value);
+      if (!Number.isFinite(n))
+        return String(value);
+      return n > 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`;
+    }
+    if (typeof value === "number") {
+      if (Math.abs(value) >= 1e3)
+        return value.toLocaleString();
+      if (Number.isInteger(value))
+        return String(value);
+      return value.toFixed(3);
+    }
+    return String(value);
+  }
+  const LABEL = {
+    gate_count: "Gate count",
+    chip_area_um2: "Chip area (\xB5m\xB2)",
+    design_area_um2: "Design area (\xB5m\xB2)",
+    utilization_pct: "Utilization",
+    wns_ns: "WNS (ns)",
+    tns_ns: "TNS (ns)",
+    total_power_mw: "Total power (mW)",
+    max_freq_mhz: "Max freq (MHz)",
+    violations: "Violations",
+    violation_count: "Violations",
+    sim_passed: "Sim passed",
+    lint_passed: "Lint passed",
+    success: "Success",
+    passed: "Passed",
+    clean: "Clean",
+    dashboard_path: "Dashboard",
+    log_path: "Log file",
+    path: "Output path",
+    html_size: "Dashboard size",
+    node_count: "Nodes",
+    edge_count: "Edges",
+    block_count: "Blocks",
+    tb_fixes_attempted: "TB fixes",
+    local_fixes_attempted: "Local fixes",
+    tier: "Tier",
+    round: "Round",
+    design_name: "Design",
+    category: "Category"
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-card result-card", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-card-header", children: [
+      total > 1 && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-call-index", title: `Step ${index + 1} of ${total}`, children: `${index + 1}/${total}` }),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "tool-card-icon", "aria-hidden": "true", children: "\u{1F4CB}" }),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-model-name tool-card-label", children: "Outcome" })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "result-card-grid", children: entries.map(([k, v]) => /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "result-card-row", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "result-card-key", children: LABEL[k] || k.replace(/_/g, " ") }),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `result-card-val ${typeof v === "boolean" ? v ? "ok" : "error" : ""}`, children: fmt(k, v) })
+    ] }, k)) })
+  ] });
+}
 function TrajectorySteps({ steps }) {
   const total = steps.length;
   return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-call-list trajectory-steps", children: steps.map((step, i) => {
     if (step.type === "tool_run") {
       return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(ToolRunCard, { run: step, index: i, total }, `tool-${i}`);
+    }
+    if (step.type === "result_summary") {
+      return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(ResultSummaryCard, { metrics: step.metrics, index: i, total }, `res-${i}`);
     }
     const call = {
       id: step._span?.id || `step-${i}`,

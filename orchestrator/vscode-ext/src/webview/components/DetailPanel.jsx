@@ -346,7 +346,7 @@ function regroupTraces(traceData) {
   return groups.map((g) => {
     const steps = g.steps || [];
     const toolCount = steps.filter((s) => s.type === 'tool_run').length;
-    const llmCount = steps.filter((s) => s.type !== 'tool_run').length;
+    const llmCount = steps.filter((s) => s.type === 'llm_call' || s.type === 'llm_call_streaming' || !s.type).length;
     return {
       key: hasMultipleBlocks
         ? `${g.blockName || 'unknown'}:${g.attempt}`
@@ -670,6 +670,86 @@ function ToolRunCard({ run, index, total }) {
   );
 }
 
+function ResultSummaryCard({ metrics, index, total }) {
+  const entries = Object.entries(metrics || {}).filter(([, v]) => v != null);
+  if (!entries.length) return null;
+
+  function fmt(key, value) {
+    if (typeof value === 'boolean') return value ? '✓ yes' : '✗ no';
+    if (key === 'dashboard_path' || key === 'path' || key === 'log_path') {
+      // Show only the tail of long paths
+      const s = String(value);
+      return s.length > 60 ? '…' + s.slice(-60) : s;
+    }
+    if (key === 'html_size' || key === 'size' || key === 'stdout_bytes') {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return String(value);
+      return n > 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`;
+    }
+    if (typeof value === 'number') {
+      if (Math.abs(value) >= 1000) return value.toLocaleString();
+      if (Number.isInteger(value)) return String(value);
+      return value.toFixed(3);
+    }
+    return String(value);
+  }
+
+  const LABEL = {
+    gate_count: 'Gate count',
+    chip_area_um2: 'Chip area (µm²)',
+    design_area_um2: 'Design area (µm²)',
+    utilization_pct: 'Utilization',
+    wns_ns: 'WNS (ns)',
+    tns_ns: 'TNS (ns)',
+    total_power_mw: 'Total power (mW)',
+    max_freq_mhz: 'Max freq (MHz)',
+    violations: 'Violations',
+    violation_count: 'Violations',
+    sim_passed: 'Sim passed',
+    lint_passed: 'Lint passed',
+    success: 'Success',
+    passed: 'Passed',
+    clean: 'Clean',
+    dashboard_path: 'Dashboard',
+    log_path: 'Log file',
+    path: 'Output path',
+    html_size: 'Dashboard size',
+    node_count: 'Nodes',
+    edge_count: 'Edges',
+    block_count: 'Blocks',
+    tb_fixes_attempted: 'TB fixes',
+    local_fixes_attempted: 'Local fixes',
+    tier: 'Tier',
+    round: 'Round',
+    design_name: 'Design',
+    category: 'Category',
+  };
+
+  return (
+    <div className="llm-card result-card">
+      <div className="llm-card-header">
+        {total > 1 && (
+          <span className="llm-call-index" title={`Step ${index + 1} of ${total}`}>
+            {`${index + 1}/${total}`}
+          </span>
+        )}
+        <span className="tool-card-icon" aria-hidden="true">📋</span>
+        <span className="llm-model-name tool-card-label">Outcome</span>
+      </div>
+      <div className="result-card-grid">
+        {entries.map(([k, v]) => (
+          <div key={k} className="result-card-row">
+            <span className="result-card-key">{LABEL[k] || k.replace(/_/g, ' ')}</span>
+            <span className={`result-card-val ${typeof v === 'boolean' ? (v ? 'ok' : 'error') : ''}`}>
+              {fmt(k, v)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function TrajectorySteps({ steps }) {
   // Count for the N/total badge; combine LLM + tool but show them as a
   // single ordered list.
@@ -679,6 +759,9 @@ function TrajectorySteps({ steps }) {
       {steps.map((step, i) => {
         if (step.type === 'tool_run') {
           return <ToolRunCard key={`tool-${i}`} run={step} index={i} total={total} />;
+        }
+        if (step.type === 'result_summary') {
+          return <ResultSummaryCard key={`res-${i}`} metrics={step.metrics} index={i} total={total} />;
         }
         // llm_call / llm_call_streaming
         const call = {
