@@ -10,7 +10,7 @@
     // `:latest` (= last green main). For Dockerfile/toolchain work, build
     // locally with `docker build -t socmate:dev .` and test outside
     // Codespaces, or temporarily flip this back to a `build` block.
-    "image": "ghcr.io/facebookexperimental/socmate:latest",
+    "image": "ghcr.io/facebookexperimental/coresmith:latest",
 
     // The openlane2 base image already runs as root with /nix/store on
     // PATH; keep the dev container as root so the entrypoint can write
