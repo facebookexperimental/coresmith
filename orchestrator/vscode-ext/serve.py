@@ -1035,16 +1035,60 @@ INDEX_HTML = """<!DOCTYPE html>
 class WebviewHandler(SimpleHTTPRequestHandler):
     """HTTP handler that serves the webview + API endpoints."""
 
+    def do_HEAD(self):
+        # Route HEAD through do_GET, suppressing the body. SimpleHTTPRequestHandler's
+        # default do_HEAD would otherwise hit send_head() and try to serve from the
+        # working directory, which bypasses our routing and leaks a directory listing.
+        real_wfile = self.wfile
+
+        class _NoBody:
+            __slots__ = ("_w", "_suppress")
+            def __init__(self, w):
+                self._w = w
+                self._suppress = False
+            def write(self, data):
+                if self._suppress:
+                    try:
+                        return len(data)
+                    except TypeError:
+                        return 0
+                return self._w.write(data)
+            def flush(self):
+                return self._w.flush()
+
+        wrapper = _NoBody(real_wfile)
+        self.wfile = wrapper
+        real_end_headers = self.end_headers
+
+        def _end_headers():
+            real_end_headers()
+            wrapper._suppress = True
+
+        self.end_headers = _end_headers
+        try:
+            self.do_GET()
+        finally:
+            self.wfile = real_wfile
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
 
         # API: graph introspection
         if path.startswith("/api/graph/"):
-            graph_name = path.split("/api/graph/", 1)[1].strip("/")
+            graph_name = path.split("/api/graph/", 1)[1].strip("/") or "frontend"
             try:
-                data = get_graph_data(graph_name or "frontend")
+                data = get_graph_data(graph_name)
                 self._json_response(data)
+            except KeyError:
+                from orchestrator.mcp_server import _GRAPH_MODULES
+                self._json_response(
+                    {
+                        "error": f"Unknown graph: {graph_name!r}",
+                        "available": sorted(_GRAPH_MODULES.keys()),
+                    },
+                    status=404,
+                )
             except Exception as exc:
                 self._json_response({"error": str(exc)}, status=500)
             return
