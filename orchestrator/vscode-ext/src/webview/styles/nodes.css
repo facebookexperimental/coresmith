@@ -412,6 +412,28 @@
   background: var(--color-bg-elevated);
 }
 
+.trace-tab-counts {
+  display: inline-flex;
+  gap: 4px;
+  font-family: 'Menlo', monospace;
+  font-size: 10px;
+}
+.trace-tab-count-llm,
+.trace-tab-count-tool {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--color-bg-elevated);
+}
+.trace-tab-count-tool {
+  background: rgba(99, 102, 241, 0.18);
+  color: #6366f1;
+}
+.trace-tab-active .trace-tab-count-llm,
+.trace-tab-active .trace-tab-count-tool {
+  background: rgba(255, 255, 255, 0.22);
+  color: var(--color-text-on-accent);
+}
+
 .trace-tab-active .trace-tab-dur {
   background: rgba(255, 255, 255, 0.2);
   color: var(--color-text-on-accent);

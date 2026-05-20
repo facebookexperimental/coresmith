@@ -500,6 +500,47 @@ def get_node_trajectory(node_name: str, max_log_chars: int = 16000) -> list:
                     )
                     tool_runs.append(log)
 
+        # Some nodes ship rich tool output INSIDE the exit event itself
+        # (tool_stdout, command, return_code, gate_count, etc.) without
+        # writing a step_log file -- e.g. Synthesize embeds an ABC log,
+        # Run PnR embeds OpenROAD metrics. Surface those as a synthetic
+        # tool_run so the trajectory isn't empty for these nodes.
+        ev = a.get("exit_event") or {}
+        synth_tool_keys = (
+            "command", "tool_stdout", "tool_stderr", "return_code",
+            "gate_count", "chip_area_um2", "wns_ns", "tns_ns",
+            "design_area_um2", "utilization_pct", "total_power_mw",
+            "violations", "sim_passed", "lint_passed",
+        )
+        if any(k in ev for k in synth_tool_keys):
+            inline_metrics = {
+                k: ev[k] for k in synth_tool_keys
+                if k in ev and k not in {"command", "tool_stdout", "tool_stderr", "return_code"}
+            }
+            # Derive a step label from the node name (lowercased + underscored)
+            step_label = node_name.lower().replace(" ", "_")
+            stdout = ev.get("tool_stdout") or ""
+            stderr = ev.get("tool_stderr") or ""
+            content_parts = []
+            if stdout:
+                content_parts.append("=== STDOUT ===\n" + stdout)
+            if stderr:
+                content_parts.append("=== STDERR ===\n" + stderr)
+            inline_tool = {
+                "type": "tool_run",
+                "ts": exit_ts or enter_ts,
+                "step": step_label,
+                "inline": True,
+                "command": ev.get("command", ""),
+                "return_code": ev.get("return_code"),
+                "content": "\n\n".join(content_parts) if content_parts else "",
+                "metrics": inline_metrics,
+                "size": sum(len(p) for p in content_parts),
+            }
+            # Avoid duplicating when a step_log file already covered this
+            if not any(t.get("step") == step_label for t in tool_runs):
+                tool_runs.append(inline_tool)
+
         # Merge + sort all steps chronologically
         steps = sorted([*calls, *tool_runs], key=lambda s: s.get("ts") or 0)
 

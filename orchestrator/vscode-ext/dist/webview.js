@@ -125488,18 +125488,25 @@ function regroupTraces(traceData) {
       return g.duration_ms;
     return getAttemptDuration(g.spans);
   }
-  return groups.map((g) => ({
-    key: hasMultipleBlocks ? `${g.blockName || "unknown"}:${g.attempt}` : `a${g.attempt}`,
-    label: hasMultipleBlocks ? `${(g.blockName || "unknown").replace(/_/g, " ")} \xB7 Attempt ${g.attempt}` : groups.length === 1 ? "Run" : `Attempt ${g.attempt}`,
-    durMs: attemptDurMs(g),
-    attempt: g.attempt,
-    blockName: g.blockName,
-    status: g.status,
-    exitEvent: g.exit_event,
-    spans: g.spans,
-    steps: g.steps || [],
-    isTrajectory
-  }));
+  return groups.map((g) => {
+    const steps = g.steps || [];
+    const toolCount = steps.filter((s) => s.type === "tool_run").length;
+    const llmCount = steps.filter((s) => s.type !== "tool_run").length;
+    return {
+      key: hasMultipleBlocks ? `${g.blockName || "unknown"}:${g.attempt}` : `a${g.attempt}`,
+      label: hasMultipleBlocks ? `${(g.blockName || "unknown").replace(/_/g, " ")} \xB7 Attempt ${g.attempt}` : groups.length === 1 ? "Run" : `Attempt ${g.attempt}`,
+      durMs: attemptDurMs(g),
+      attempt: g.attempt,
+      blockName: g.blockName,
+      status: g.status,
+      exitEvent: g.exit_event,
+      spans: g.spans,
+      steps,
+      llmCount,
+      toolCount,
+      isTrajectory
+    };
+  });
 }
 function getAttemptDuration(spans) {
   if (!spans || spans.length === 0)
@@ -126188,20 +126195,21 @@ var DetailPanel = import_react15.default.memo(function DetailPanel2({
       return;
     }
     if (node?.attempt) {
-      const match = tabGroups.find((g) => g.attempt === node.attempt);
-      if (match) {
-        setActiveTabKey(match.key);
+      const sameAttempt = tabGroups.filter((g) => g.attempt === node.attempt);
+      const withTools2 = sameAttempt.find((g) => (g.toolCount || 0) > 0);
+      const exact = sameAttempt[0];
+      const pick = withTools2 || exact;
+      if (pick) {
+        setActiveTabKey(pick.key);
         return;
       }
     }
     const nonStreaming = tabGroups.filter(
       (g) => !g.spans?.some((s) => s.children?.some((c) => c.status === "streaming"))
     );
-    if (nonStreaming.length > 0) {
-      setActiveTabKey(nonStreaming[nonStreaming.length - 1].key);
-    } else {
-      setActiveTabKey(tabGroups[tabGroups.length - 1].key);
-    }
+    const candidates = nonStreaming.length ? nonStreaming : tabGroups;
+    const withTools = [...candidates].reverse().find((g) => (g.toolCount || 0) > 0);
+    setActiveTabKey((withTools || candidates[candidates.length - 1]).key);
   }, [tabGroups]);
   const handleRefresh = (0, import_react15.useCallback)(() => {
     if (onRequestTraces && node) {
@@ -126276,7 +126284,17 @@ var DetailPanel = import_react15.default.memo(function DetailPanel2({
                   children: [
                     hasError && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "trace-tab-icon", children: "\u26A0" }),
                     /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "trace-tab-label", children: group.label }),
-                    group.durMs ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "trace-tab-dur", children: formatDuration(group.durMs) }) : null
+                    group.durMs ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "trace-tab-dur", children: formatDuration(group.durMs) }) : null,
+                    (group.llmCount > 0 || group.toolCount > 0) && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "trace-tab-counts", children: [
+                      group.llmCount > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "trace-tab-count-llm", title: `${group.llmCount} LLM call${group.llmCount !== 1 ? "s" : ""}`, children: [
+                        "\u2726",
+                        group.llmCount
+                      ] }),
+                      group.toolCount > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "trace-tab-count-tool", title: `${group.toolCount} tool run${group.toolCount !== 1 ? "s" : ""}`, children: [
+                        "\u{1F527}",
+                        group.toolCount
+                      ] })
+                    ] })
                   ]
                 },
                 group.key

@@ -343,22 +343,29 @@ function regroupTraces(traceData) {
     return getAttemptDuration(g.spans);
   }
 
-  return groups.map((g) => ({
-    key: hasMultipleBlocks
-      ? `${g.blockName || 'unknown'}:${g.attempt}`
-      : `a${g.attempt}`,
-    label: hasMultipleBlocks
-      ? `${(g.blockName || 'unknown').replace(/_/g, ' ')} · Attempt ${g.attempt}`
-      : (groups.length === 1 ? 'Run' : `Attempt ${g.attempt}`),
-    durMs: attemptDurMs(g),
-    attempt: g.attempt,
-    blockName: g.blockName,
-    status: g.status,
-    exitEvent: g.exit_event,
-    spans: g.spans,
-    steps: g.steps || [],
-    isTrajectory: isTrajectory,
-  }));
+  return groups.map((g) => {
+    const steps = g.steps || [];
+    const toolCount = steps.filter((s) => s.type === 'tool_run').length;
+    const llmCount = steps.filter((s) => s.type !== 'tool_run').length;
+    return {
+      key: hasMultipleBlocks
+        ? `${g.blockName || 'unknown'}:${g.attempt}`
+        : `a${g.attempt}`,
+      label: hasMultipleBlocks
+        ? `${(g.blockName || 'unknown').replace(/_/g, ' ')} · Attempt ${g.attempt}`
+        : (groups.length === 1 ? 'Run' : `Attempt ${g.attempt}`),
+      durMs: attemptDurMs(g),
+      attempt: g.attempt,
+      blockName: g.blockName,
+      status: g.status,
+      exitEvent: g.exit_event,
+      spans: g.spans,
+      steps,
+      llmCount,
+      toolCount,
+      isTrajectory: isTrajectory,
+    };
+  });
 }
 
 function getAttemptDuration(spans) {
@@ -1295,24 +1302,28 @@ const DetailPanel = React.memo(function DetailPanel({
     if (activeTabKey && tabGroups.some((g) => g.key === activeTabKey)) {
       return;
     }
-    // Try to match the clicked segment's attempt number
+    // Try to match the clicked segment's attempt number, but prefer a
+    // sibling attempt that actually has tool runs -- otherwise the user
+    // sees only LLM cards and assumes the trajectory is incomplete.
     if (node?.attempt) {
-      const match = tabGroups.find((g) => g.attempt === node.attempt);
-      if (match) {
-        setActiveTabKey(match.key);
+      const sameAttempt = tabGroups.filter((g) => g.attempt === node.attempt);
+      const withTools = sameAttempt.find((g) => (g.toolCount || 0) > 0);
+      const exact = sameAttempt[0];
+      const pick = withTools || exact;
+      if (pick) {
+        setActiveTabKey(pick.key);
         return;
       }
     }
-    // Fall back to the latest non-streaming tab (avoid jumping to
-    // an active call when the user clicked a historical segment).
+
+    // No clicked attempt -- prefer the latest tab that has tool runs so
+    // tool data is visible by default; fall back to latest non-streaming.
     const nonStreaming = tabGroups.filter(
       (g) => !g.spans?.some((s) => s.children?.some((c) => c.status === 'streaming'))
     );
-    if (nonStreaming.length > 0) {
-      setActiveTabKey(nonStreaming[nonStreaming.length - 1].key);
-    } else {
-      setActiveTabKey(tabGroups[tabGroups.length - 1].key);
-    }
+    const candidates = nonStreaming.length ? nonStreaming : tabGroups;
+    const withTools = [...candidates].reverse().find((g) => (g.toolCount || 0) > 0);
+    setActiveTabKey((withTools || candidates[candidates.length - 1]).key);
   }, [tabGroups]);
 
   const handleRefresh = useCallback(() => {
@@ -1435,6 +1446,20 @@ const DetailPanel = React.memo(function DetailPanel({
                         {formatDuration(group.durMs)}
                       </span>
                     ) : null}
+                    {(group.llmCount > 0 || group.toolCount > 0) && (
+                      <span className="trace-tab-counts">
+                        {group.llmCount > 0 && (
+                          <span className="trace-tab-count-llm" title={`${group.llmCount} LLM call${group.llmCount !== 1 ? 's' : ''}`}>
+                            ✦{group.llmCount}
+                          </span>
+                        )}
+                        {group.toolCount > 0 && (
+                          <span className="trace-tab-count-tool" title={`${group.toolCount} tool run${group.toolCount !== 1 ? 's' : ''}`}>
+                            🔧{group.toolCount}
+                          </span>
+                        )}
+                      </span>
+                    )}
                   </button>
                 );
               })}
