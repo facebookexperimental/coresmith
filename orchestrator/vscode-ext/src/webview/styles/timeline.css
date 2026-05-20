@@ -162,6 +162,31 @@
   flex-direction: column;
 }
 
+.gantt-phase-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-gantt-row-border);
+  background: var(--color-gantt-row-even);
+}
+
+.gantt-phase-header:not(:first-child) {
+  margin-top: 4px;
+}
+
+.gantt-phase-count {
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--color-text-dimmed);
+}
+
 .gantt-row {
   display: flex;
   min-height: 44px;

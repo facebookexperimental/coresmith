@@ -125464,7 +125464,8 @@ function regroupTraces(traceData) {
   if (!hasMultipleBlocks) {
     return groups.map((g) => ({
       key: `a${g.attempt}`,
-      label: groups.length === 1 ? "Run" : `#${g.attempt}`,
+      label: groups.length === 1 ? "Run" : `Attempt ${g.attempt}`,
+      durMs: getAttemptDuration(g.spans),
       attempt: g.attempt,
       blockName: g.blockName,
       spans: g.spans
@@ -125474,7 +125475,8 @@ function regroupTraces(traceData) {
     const name = (g.blockName || "unknown").replace(/_/g, " ");
     return {
       key: `${g.blockName || "unknown"}:${g.attempt}`,
-      label: `${name} #${g.attempt}`,
+      label: `${name} \xB7 Attempt ${g.attempt}`,
+      durMs: getAttemptDuration(g.spans),
       attempt: g.attempt,
       blockName: g.blockName,
       spans: g.spans
@@ -125484,7 +125486,18 @@ function regroupTraces(traceData) {
 function getAttemptDuration(spans) {
   if (!spans || spans.length === 0)
     return null;
-  return spans.reduce((sum, s) => sum + (s.duration_ms || 0), 0);
+  let total = 0;
+  for (const s of spans) {
+    if (s.duration_ms) {
+      total += s.duration_ms;
+    } else if (s.children && s.children.length) {
+      for (const c of s.children) {
+        if (c.duration_ms)
+          total += c.duration_ms;
+      }
+    }
+  }
+  return total || null;
 }
 function getAttemptStatus(spans) {
   if (!spans || spans.length === 0)
@@ -125518,7 +125531,17 @@ function markdownToHtml(md) {
       return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
     }
     function inlineFmt(text) {
-      return escapeHtml(text).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>").replace(/_([^_]+)_/g, "<em>$1</em>");
+      const escaped = escapeHtml(text);
+      const parts = escaped.split(/(`[^`\n]+`)/g);
+      return parts.map((part) => {
+        if (part.length >= 2 && part.startsWith("`") && part.endsWith("`")) {
+          return `<code>${part.slice(1, -1)}</code>`;
+        }
+        return part.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*\n]+)\*/g, "<em>$1</em>").replace(
+          /(^|[^A-Za-z0-9_])_([^_\n\s][^_\n]*?)_(?=[^A-Za-z0-9_]|$)/g,
+          "$1<em>$2</em>"
+        );
+      }).join("");
     }
     for (const line of lines) {
       const trimmed = line.trim();
@@ -125603,7 +125626,7 @@ function Collapsible({ label, icon, defaultOpen, children: children2, className 
     open && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-collapsible-body", children: children2 })
   ] });
 }
-function LLMCallCard({ call }) {
+function LLMCallCard({ call, index, total }) {
   const statusSymbol = call.status === "ok" ? "\u2713" : call.status === "error" ? "\u2717" : "\u2014";
   const statusCls = call.status === "ok" ? "ok" : call.status === "error" ? "error" : "unset";
   const tokenLabel = formatTokens(call.totalTokens);
@@ -125613,6 +125636,7 @@ function LLMCallCard({ call }) {
       className: `llm-card ${call.status === "error" ? "llm-card-error" : ""}`,
       children: [
         /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-card-header", children: [
+          total > 1 && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-call-index", title: `Call ${index + 1} of ${total}`, children: `${index + 1}/${total}` }),
           /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-model-name", children: call.model }),
           /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "llm-card-meta", children: [
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-dur", children: formatDuration(call.duration_ms) }),
@@ -126110,7 +126134,8 @@ var DetailPanel = import_react15.default.memo(function DetailPanel2({
                   onClick: () => setActiveTabKey(group.key),
                   children: [
                     hasError && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "trace-tab-icon", children: "\u26A0" }),
-                    group.label
+                    /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "trace-tab-label", children: group.label }),
+                    group.durMs ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "trace-tab-dur", children: formatDuration(group.durMs) }) : null
                   ]
                 },
                 group.key
@@ -126124,7 +126149,15 @@ var DetailPanel = import_react15.default.memo(function DetailPanel2({
                 hasStreamingCalls: llmCalls.some((c) => c.streaming)
               }
             ),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "trace-content", ref: scrollRef, children: llmCalls.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-call-list", children: llmCalls.map((call, i) => call.streaming ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(StreamingLLMCard, { call }, call.id || `stream-${i}`) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(LLMCallCard, { call }, call.id || i)) }) : node.metadata && Object.keys(node.metadata).length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(NodeMetadataSummary, { node }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "trace-empty-tab", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "trace-content", ref: scrollRef, children: llmCalls.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-call-list", children: llmCalls.map((call, i) => call.streaming ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(StreamingLLMCard, { call }, call.id || `stream-${i}`) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+              LLMCallCard,
+              {
+                call,
+                index: i,
+                total: llmCalls.length
+              },
+              call.id || i
+            )) }) : node.metadata && Object.keys(node.metadata).length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(NodeMetadataSummary, { node }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "trace-empty-tab", children: [
               /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "trace-empty-icon", children: "\u{1F4CB}" }),
               "No LLM interactions in this run."
             ] }) })
@@ -127044,17 +127077,51 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
             )
           ] })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "gantt-rows", children: blocks.map((block) => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
-          GanttRow,
-          {
-            block,
-            toPercent,
-            effectiveEnd,
-            onSegmentClick: handleSegmentClick,
-            selectedSegKey
-          },
-          block.name
-        )) })
+        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "gantt-rows", children: (() => {
+          const PHASE_ORDER = ["architecture", "frontend", "backend"];
+          const PHASE_LABEL = {
+            architecture: "Architecture",
+            frontend: "Frontend (RTL pipeline)",
+            backend: "Backend (PnR pipeline)"
+          };
+          const grouped = /* @__PURE__ */ new Map();
+          for (const b of blocks) {
+            const g = b.graph || "other";
+            if (!grouped.has(g))
+              grouped.set(g, []);
+            grouped.get(g).push(b);
+          }
+          const orderedPhases = [
+            ...PHASE_ORDER.filter((p) => grouped.has(p)),
+            ...[...grouped.keys()].filter((p) => !PHASE_ORDER.includes(p))
+          ];
+          const out = [];
+          for (const phase of orderedPhases) {
+            const phaseBlocks = grouped.get(phase);
+            out.push(
+              /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-phase-header", children: [
+                PHASE_LABEL[phase] || phase,
+                /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "gantt-phase-count", children: phaseBlocks.length === 1 ? "1 row" : `${phaseBlocks.length} rows` })
+              ] }, `hdr-${phase}`)
+            );
+            for (const block of phaseBlocks) {
+              out.push(
+                /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+                  GanttRow,
+                  {
+                    block,
+                    toPercent,
+                    effectiveEnd,
+                    onSegmentClick: handleSegmentClick,
+                    selectedSegKey
+                  },
+                  `${phase}-${block.name}`
+                )
+              );
+            }
+          }
+          return out;
+        })() })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(Legend, { graphType: graphName || timelineData.graph || "frontend" })
     ] }),

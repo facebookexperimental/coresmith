@@ -309,7 +309,8 @@ function regroupTraces(traceData) {
     // Single block (or no block names found) -- use original attempt-only tabs
     return groups.map((g) => ({
       key: `a${g.attempt}`,
-      label: groups.length === 1 ? 'Run' : `#${g.attempt}`,
+      label: groups.length === 1 ? 'Run' : `Attempt ${g.attempt}`,
+      durMs: getAttemptDuration(g.spans),
       attempt: g.attempt,
       blockName: g.blockName,
       spans: g.spans,
@@ -321,7 +322,8 @@ function regroupTraces(traceData) {
     const name = (g.blockName || 'unknown').replace(/_/g, ' ');
     return {
       key: `${g.blockName || 'unknown'}:${g.attempt}`,
-      label: `${name} #${g.attempt}`,
+      label: `${name} · Attempt ${g.attempt}`,
+      durMs: getAttemptDuration(g.spans),
       attempt: g.attempt,
       blockName: g.blockName,
       spans: g.spans,
@@ -331,7 +333,21 @@ function regroupTraces(traceData) {
 
 function getAttemptDuration(spans) {
   if (!spans || spans.length === 0) return null;
-  return spans.reduce((sum, s) => sum + (s.duration_ms || 0), 0);
+  // For OTel traces the parent span carries the duration; for live_calls the
+  // synthetic root span has duration_ms=null and the per-call children carry
+  // it. Fall back to summing children when the parent is missing a duration
+  // so tab labels still show a number in either case.
+  let total = 0;
+  for (const s of spans) {
+    if (s.duration_ms) {
+      total += s.duration_ms;
+    } else if (s.children && s.children.length) {
+      for (const c of s.children) {
+        if (c.duration_ms) total += c.duration_ms;
+      }
+    }
+  }
+  return total || null;
 }
 
 function getAttemptStatus(spans) {
@@ -380,11 +396,25 @@ function markdownToHtml(md) {
     }
 
     function inlineFmt(text) {
-      return escapeHtml(text)
-        .replace(/`([^`]+)`/g, '<code>$1</code>')
-        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-        .replace(/_([^_]+)_/g, '<em>$1</em>');
+      const escaped = escapeHtml(text);
+      // Split on inline-code spans first so bold/italic regex never runs
+      // inside `code` -- otherwise `dedicated_pins_` and similar snake_case
+      // identifiers get their underscores eaten by the italic rule and
+      // styling breaks mid-token.
+      const parts = escaped.split(/(`[^`\n]+`)/g);
+      return parts.map((part) => {
+        if (part.length >= 2 && part.startsWith('`') && part.endsWith('`')) {
+          return `<code>${part.slice(1, -1)}</code>`;
+        }
+        return part
+          .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+          .replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
+          // Underscore italic must sit at a word boundary (whitespace or
+          // punctuation) on both sides -- this leaves snake_case tokens
+          // and file paths like arch/uarch_specs/foo_bar.md alone.
+          .replace(/(^|[^A-Za-z0-9_])_([^_\n\s][^_\n]*?)_(?=[^A-Za-z0-9_]|$)/g,
+                   '$1<em>$2</em>');
+      }).join('');
     }
 
     for (const line of lines) {
@@ -497,7 +527,7 @@ function Collapsible({ label, icon, defaultOpen, children, className }) {
 
 /* ── LLM Call Card ───────────────────────────────────────── */
 
-function LLMCallCard({ call }) {
+function LLMCallCard({ call, index, total }) {
   const statusSymbol =
     call.status === 'ok' ? '\u2713' : call.status === 'error' ? '\u2717' : '\u2014';
   const statusCls =
@@ -511,6 +541,11 @@ function LLMCallCard({ call }) {
     >
       {/* Header bar */}
       <div className="llm-card-header">
+        {total > 1 && (
+          <span className="llm-call-index" title={`Call ${index + 1} of ${total}`}>
+            {`${index + 1}/${total}`}
+          </span>
+        )}
         <span className="llm-model-name">{call.model}</span>
         <span className="llm-card-meta">
           <span className="llm-dur">{formatDuration(call.duration_ms)}</span>
@@ -1200,7 +1235,12 @@ const DetailPanel = React.memo(function DetailPanel({
                     {hasError && (
                       <span className="trace-tab-icon">{'\u26A0'}</span>
                     )}
-                    {group.label}
+                    <span className="trace-tab-label">{group.label}</span>
+                    {group.durMs ? (
+                      <span className="trace-tab-dur">
+                        {formatDuration(group.durMs)}
+                      </span>
+                    ) : null}
                   </button>
                 );
               })}
@@ -1220,7 +1260,12 @@ const DetailPanel = React.memo(function DetailPanel({
                   {llmCalls.map((call, i) => (
                     call.streaming
                       ? <StreamingLLMCard key={call.id || `stream-${i}`} call={call} />
-                      : <LLMCallCard key={call.id || i} call={call} />
+                      : <LLMCallCard
+                          key={call.id || i}
+                          call={call}
+                          index={i}
+                          total={llmCalls.length}
+                        />
                   ))}
                 </div>
               ) : node.metadata && Object.keys(node.metadata).length > 0 ? (

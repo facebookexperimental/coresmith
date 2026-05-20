@@ -384,7 +384,10 @@
 }
 
 .trace-tab {
-  padding: 4px 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
   border: 1px solid var(--color-border-primary);
   background: var(--color-bg-input);
   border-radius: 4px;
@@ -394,6 +397,24 @@
   cursor: pointer;
   transition: all 0.15s;
   font-family: 'Roboto', sans-serif;
+}
+
+.trace-tab-label {
+  white-space: nowrap;
+}
+
+.trace-tab-dur {
+  font-family: 'Menlo', 'Monaco', monospace;
+  font-size: 10px;
+  color: var(--color-text-dimmed);
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--color-bg-elevated);
+}
+
+.trace-tab-active .trace-tab-dur {
+  background: rgba(255, 255, 255, 0.2);
+  color: var(--color-text-on-accent);
 }
 
 .trace-tab:hover {
@@ -620,6 +641,28 @@
   background: var(--color-llm-header-bg);
   border-bottom: 1px solid var(--color-border-subtle);
   font-size: 11px;
+  gap: 8px;
+}
+
+.llm-call-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Menlo', 'Monaco', monospace;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--color-bg-input);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-subtle);
+  min-width: 38px;
+  flex-shrink: 0;
+}
+
+.llm-model-name + .llm-card-meta,
+.llm-call-index + .llm-model-name {
+  margin-left: 0;
 }
 
 .llm-card-error .llm-card-header {

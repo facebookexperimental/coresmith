@@ -602,18 +602,55 @@ export default function GanttTimeline({ timelineData, traceData, onRequestTraces
             </div>
           </div>
 
-          {/* Block rows */}
+          {/* Block rows, grouped by phase (graph) with section headers so
+              the timeline structure -- phase orchestrator vs per-block rows
+              -- is obvious to readers who didn't write the pipeline. */}
           <div className="gantt-rows">
-            {blocks.map((block) => (
-              <GanttRow
-                key={block.name}
-                block={block}
-                toPercent={toPercent}
-                effectiveEnd={effectiveEnd}
-                onSegmentClick={handleSegmentClick}
-                selectedSegKey={selectedSegKey}
-              />
-            ))}
+            {(() => {
+              const PHASE_ORDER = ['architecture', 'frontend', 'backend'];
+              const PHASE_LABEL = {
+                architecture: 'Architecture',
+                frontend: 'Frontend (RTL pipeline)',
+                backend: 'Backend (PnR pipeline)',
+              };
+              // Group blocks by graph, preserving start_ts order within each phase
+              const grouped = new Map();
+              for (const b of blocks) {
+                const g = b.graph || 'other';
+                if (!grouped.has(g)) grouped.set(g, []);
+                grouped.get(g).push(b);
+              }
+              // Render in PHASE_ORDER, then any unknown phases at the end
+              const orderedPhases = [
+                ...PHASE_ORDER.filter((p) => grouped.has(p)),
+                ...[...grouped.keys()].filter((p) => !PHASE_ORDER.includes(p)),
+              ];
+              const out = [];
+              for (const phase of orderedPhases) {
+                const phaseBlocks = grouped.get(phase);
+                out.push(
+                  <div key={`hdr-${phase}`} className="gantt-phase-header">
+                    {PHASE_LABEL[phase] || phase}
+                    <span className="gantt-phase-count">
+                      {phaseBlocks.length === 1 ? '1 row' : `${phaseBlocks.length} rows`}
+                    </span>
+                  </div>
+                );
+                for (const block of phaseBlocks) {
+                  out.push(
+                    <GanttRow
+                      key={`${phase}-${block.name}`}
+                      block={block}
+                      toPercent={toPercent}
+                      effectiveEnd={effectiveEnd}
+                      onSegmentClick={handleSegmentClick}
+                      selectedSegKey={selectedSegKey}
+                    />
+                  );
+                }
+              }
+              return out;
+            })()}
           </div>
         </div>
 

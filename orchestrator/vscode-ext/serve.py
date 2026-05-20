@@ -138,6 +138,14 @@ def get_live_calls(node_name: str) -> list[dict]:
             continue
         block_key = block or "__default__"
         if "enter" in event_type:
+            # If a previous enter for this (node, block) never got its exit
+            # event, treat it as stale rather than leaving it open: an
+            # always-open window otherwise matches *every* later LLM call in
+            # llm_calls.jsonl, badly over-attributing calls to this node.
+            prev_key = open_stack.get(block_key)
+            if (prev_key and prev_key in block_windows
+                    and block_windows[prev_key].get("exit_ts") is None):
+                block_windows.pop(prev_key, None)
             window_counter += 1
             key = f"{block_key}_{window_counter}"
             attempt = (e.get("attempt") or e.get("round")
