@@ -1,0 +1,368 @@
+/* ── Theme System ─────────────────────────────────────── */
+/* Light mode (default) + Dark mode via [data-theme="dark"] */
+
+:root {
+  /* ── Surfaces ───────────────────────────────────── */
+  --color-bg-body:       #f0f2f5;
+  --color-bg-primary:    #fff;
+  --color-bg-card:       #f7f4f0;
+  --color-bg-surface:    #f8fafc;
+  --color-bg-subtle:     #fafbfc;
+  --color-bg-hover:      #f0f0f0;
+  --color-bg-input:      #fafafa;
+  --color-bg-overlay:    rgba(255, 255, 255, 0.95);
+  --color-bg-overlay-solid: rgba(255, 255, 255, 0.92);
+  --color-bg-panel:      rgba(255, 255, 255, 0.98);
+
+  /* ── Text ───────────────────────────────────────── */
+  --color-text-primary:    #222;
+  --color-text-secondary:  #333;
+  --color-text-tertiary:   #555;
+  --color-text-muted:      #666;
+  --color-text-dimmed:     #888;
+  --color-text-placeholder:#999;
+  --color-text-faint:      #aaa;
+  --color-text-on-accent:  #fff;
+
+  /* ── Borders ────────────────────────────────────── */
+  --color-border-primary:  #ddd;
+  --color-border-medium:   #e0e0e0;
+  --color-border-light:    #eee;
+  --color-border-subtle:   #f0f0f0;
+  --color-border-card:     #e4e7ec;
+  --color-border-input:    #d9d9d9;
+
+  /* ── Accent ─────────────────────────────────────── */
+  --color-accent:          #1677ff;
+  --color-accent-hover:    #4096ff;
+  --color-accent-bg:       rgba(22, 119, 255, 0.08);
+  --color-accent-shadow:   rgba(22, 119, 255, 0.3);
+
+  /* ── Selector / tab bar ─────────────────────────── */
+  --color-selector-bg:     #f5f5f5;
+  --color-selector-hover:  #e8e8e8;
+  --color-selector-divider:#d1d5db;
+
+  /* ── Shadows ────────────────────────────────────── */
+  --shadow-card:           0 4px 8px rgba(0, 0, 0, 0.2);
+  --shadow-panel:          -2px 0 8px rgba(0, 0, 0, 0.1);
+  --shadow-sidebar:        2px 0 8px rgba(0, 0, 0, 0.06);
+  --shadow-toolbar:        0 2px 8px rgba(0, 0, 0, 0.12);
+  --shadow-modal:          0 6px 16px 0 rgba(0, 0, 0, 0.08),
+                           0 3px 6px -4px rgba(0, 0, 0, 0.12),
+                           0 9px 28px 8px rgba(0, 0, 0, 0.05);
+
+  /* ── Node persona ───────────────────────────────── */
+  --color-persona-bg:      linear-gradient(135deg, #e8edf5 0%, #dce3ef 100%);
+  --color-persona-border:  rgba(0, 0, 0, 0.06);
+  --color-persona-avatar:  #fff;
+  --color-persona-title:   #667;
+
+  /* ── Node body ──────────────────────────────────── */
+  --color-body-gradient:   linear-gradient(90deg, rgba(247, 244, 240, 0) 0%, rgba(247, 244, 240, 1) 8%);
+  --color-body-text:       #555;
+  --color-fn-text:         #888;
+
+  /* ── Code ───────────────────────────────────────── */
+  --color-code-bg:         #f4f4f8;
+  --color-code-border:     #e2e2ea;
+  --color-code-text:       #c7254e;
+  --color-code-block-bg:   #1e293b;
+  --color-code-block-text: #e2e8f0;
+  --color-code-block-border:#334155;
+  --color-code-lang:       #64748b;
+
+  /* ── LLM cards ──────────────────────────────────── */
+  --color-llm-header-bg:   #f8fafc;
+  --color-llm-card-bg:     #fff;
+  --color-llm-card-border: #e5e7eb;
+  --color-llm-model-text:  #475569;
+  --color-llm-sys-body:    #fafbfc;
+  --color-llm-usr-body:    #fafdfb;
+  --color-llm-response-label: #1e40af;
+  --color-llm-tok-bg:      #f5f3ff;
+  --color-llm-tok-text:    #7c3aed;
+  --color-llm-error-bg:    #fef2f2;
+  --color-llm-error-border:#fecaca;
+  --color-llm-error-text:  #dc2626;
+
+  /* ── Summary ────────────────────────────────────── */
+  --color-summary-card-bg:     #fff;
+  --color-summary-card-header: #fafbfc;
+  --color-summary-card-hover:  #f0f2f5;
+  --color-summary-table-header:#fafbfc;
+  --color-summary-table-hover: #f8f9fa;
+
+  /* ── Gantt ──────────────────────────────────────── */
+  --color-gantt-bg:        #f8fafc;
+  --color-gantt-header:    #fff;
+  --color-gantt-row-even:  rgba(248, 250, 252, 0.5);
+  --color-gantt-row-hover: rgba(241, 245, 249, 0.6);
+  --color-gantt-row-border:#f1f5f9;
+  --color-gantt-track-border:#e2e8f0;
+  --color-gantt-tick:      #cbd5e1;
+  --color-gantt-legend-bg: #fff;
+  --color-gantt-tooltip-bg:#fff;
+  --color-gantt-tooltip-border:#e2e8f0;
+  --color-gantt-zoom-bg:   #eef2ff;
+  --color-gantt-zoom-border:#c7d2fe;
+  --color-gantt-stat-text: #334155;
+
+  /* ── Modal / prompt panel ───────────────────────── */
+  --color-modal-bg:        #fff;
+  --color-modal-mask:      rgba(0, 0, 0, 0.45);
+  --color-modal-title:     rgba(0, 0, 0, 0.88);
+  --color-modal-close:     rgba(0, 0, 0, 0.45);
+  --color-modal-close-hover:rgba(0, 0, 0, 0.88);
+  --color-modal-close-bg:  rgba(0, 0, 0, 0.06);
+  --color-modal-desc-bg:   #f8f9fb;
+
+  /* ── Block diagram ──────────────────────────────── */
+  --color-diagram-bg:      #e8e8e8;
+  --color-diagram-overlay: rgba(255, 255, 255, 0.92);
+  --color-diagram-overlay-border: #e0e0e0;
+  --color-diagram-group-bg:rgba(240, 242, 245, 0.5);
+  --color-diagram-group-header:rgba(200, 210, 220, 0.6);
+  --color-diagram-group-text: #555;
+  --color-diagram-body-text:  #555;
+  --color-diagram-body-muted: #777;
+  --color-diagram-node-bg: #f7f4f0;
+  --color-diagram-node-border:#ddd;
+  --color-diagram-selected-bg:rgba(246, 234, 236, 0.86);
+
+  /* ── HITL ───────────────────────────────────────── */
+  --color-hitl-block-header:#f9fafb;
+  --color-hitl-block-border:#e5e7eb;
+  --color-hitl-block-name: #111;
+
+  /* ── Backend stats ──────────────────────────────── */
+  --color-backend-stat-bg: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+  --color-backend-stat-border:#e2e8f0;
+  --color-backend-stat-text:#0f172a;
+  --color-backend-stat-label:#64748b;
+  --color-backend-power-bg:     #fefce8;
+  --color-backend-power-border: #fde68a;
+  --color-backend-power-header: #92400e;
+  --color-backend-power-label:  #a16207;
+  --color-backend-power-value:  #78350f;
+  --color-backend-timing-bg:     #eff6ff;
+  --color-backend-timing-border: #bfdbfe;
+  --color-backend-timing-header: #1e40af;
+  --color-backend-timing-label:  #3b82f6;
+  --color-backend-timing-value:  #1e3a5f;
+  --color-backend-signoff-pass-bg:     #dcfce7;
+  --color-backend-signoff-pass-text:   #166534;
+  --color-backend-signoff-pass-border: #86efac;
+  --color-backend-signoff-fail-bg:     #fee2e2;
+  --color-backend-signoff-fail-text:   #991b1b;
+  --color-backend-signoff-fail-border: #fca5a5;
+
+  /* ── Misc ───────────────────────────────────────── */
+  --color-resize-handle:   #ccc;
+  --color-detail-fn-bg:    #f0f4f8;
+  --color-detail-fn-border:#e2e8f0;
+  --color-detail-fn-text:  #475569;
+  --color-detail-path:     #6366f1;
+  --color-metadata-table-bg:#f8fafc;
+  --color-metadata-value:  #1e293b;
+
+  /* ── ReactFlow overrides ────────────────────────── */
+  --color-rf-handle:       #9c9c9c;
+  --color-rf-controls-bg:  #fff;
+  --color-rf-controls-border:#ccc;
+  --color-rf-controls-hover:#f5f5f5;
+  --color-rf-minimap-bg:   #fff;
+  --color-rf-edge-text:    #333;
+  --color-rf-edge-textbg:  #fff;
+}
+
+
+/* ── Dark Mode ────────────────────────────────────────── */
+
+[data-theme="dark"] {
+  --color-bg-body:       #0f1117;
+  --color-bg-primary:    #181b24;
+  --color-bg-card:       #1c2030;
+  --color-bg-surface:    #1a1e2a;
+  --color-bg-subtle:     #1e2233;
+  --color-bg-hover:      #252a3a;
+  --color-bg-input:      #1e2233;
+  --color-bg-overlay:    rgba(24, 27, 36, 0.96);
+  --color-bg-overlay-solid: rgba(24, 27, 36, 0.94);
+  --color-bg-panel:      rgba(24, 27, 36, 0.98);
+
+  --color-text-primary:    #fff;
+  --color-text-secondary:  #f0f1f4;
+  --color-text-tertiary:   #dcdee6;
+  --color-text-muted:      #cdd0dc;
+  --color-text-dimmed:     #8b8fa3;
+  --color-text-placeholder:#6b7086;
+  --color-text-faint:      #5a5f74;
+  --color-text-on-accent:  #fff;
+
+  --color-border-primary:  #2d3244;
+  --color-border-medium:   #2d3244;
+  --color-border-light:    #252a3a;
+  --color-border-subtle:   #1e2233;
+  --color-border-card:     #2d3244;
+  --color-border-input:    #3a3f54;
+
+  --color-accent:          #4a9eff;
+  --color-accent-hover:    #6db3ff;
+  --color-accent-bg:       rgba(74, 158, 255, 0.12);
+  --color-accent-shadow:   rgba(74, 158, 255, 0.3);
+
+  --color-selector-bg:     #1a1e2a;
+  --color-selector-hover:  #252a3a;
+  --color-selector-divider:#3a3f54;
+
+  --shadow-card:           0 4px 8px rgba(0, 0, 0, 0.4);
+  --shadow-panel:          -2px 0 8px rgba(0, 0, 0, 0.3);
+  --shadow-sidebar:        2px 0 8px rgba(0, 0, 0, 0.2);
+  --shadow-toolbar:        0 2px 8px rgba(0, 0, 0, 0.3);
+  --shadow-modal:          0 6px 16px 0 rgba(0, 0, 0, 0.25),
+                           0 3px 6px -4px rgba(0, 0, 0, 0.3),
+                           0 9px 28px 8px rgba(0, 0, 0, 0.2);
+
+  --color-persona-bg:      linear-gradient(135deg, #1e2233 0%, #252a3a 100%);
+  --color-persona-border:  rgba(255, 255, 255, 0.06);
+  --color-persona-avatar:  #fff;
+  --color-persona-title:   #b0b4c4;
+
+  --color-body-gradient:   linear-gradient(90deg, rgba(28, 32, 48, 0) 0%, rgba(28, 32, 48, 1) 8%);
+  --color-body-text:       #fff;
+  --color-fn-text:         #8b8fa3;
+
+  --color-code-bg:         #1a1e2a;
+  --color-code-border:     #2d3244;
+  --color-code-text:       #f472b6;
+  --color-code-block-bg:   #0d1117;
+  --color-code-block-text: #e2e8f0;
+  --color-code-block-border:#1e2233;
+  --color-code-lang:       #6b7086;
+
+  --color-llm-header-bg:   #1a1e2a;
+  --color-llm-card-bg:     #181b24;
+  --color-llm-card-border: #2d3244;
+  --color-llm-model-text:  #a0a4b4;
+  --color-llm-sys-body:    #1a1e2a;
+  --color-llm-usr-body:    #1a2420;
+  --color-llm-response-label: #60a5fa;
+  --color-llm-tok-bg:      rgba(124, 58, 237, 0.15);
+  --color-llm-tok-text:    #a78bfa;
+  --color-llm-error-bg:    rgba(220, 38, 38, 0.1);
+  --color-llm-error-border:rgba(220, 38, 38, 0.25);
+  --color-llm-error-text:  #f87171;
+
+  --color-summary-card-bg:     #181b24;
+  --color-summary-card-header: #1a1e2a;
+  --color-summary-card-hover:  #252a3a;
+  --color-summary-table-header:#1a1e2a;
+  --color-summary-table-hover: #1e2233;
+
+  --color-gantt-bg:        #14161e;
+  --color-gantt-header:    #181b24;
+  --color-gantt-row-even:  rgba(26, 30, 42, 0.5);
+  --color-gantt-row-hover: rgba(37, 42, 58, 0.6);
+  --color-gantt-row-border:#1e2233;
+  --color-gantt-track-border:#2d3244;
+  --color-gantt-tick:      #3a3f54;
+  --color-gantt-legend-bg: #181b24;
+  --color-gantt-tooltip-bg:#1c2030;
+  --color-gantt-tooltip-border:#2d3244;
+  --color-gantt-zoom-bg:   rgba(67, 56, 202, 0.12);
+  --color-gantt-zoom-border:rgba(99, 102, 241, 0.3);
+  --color-gantt-stat-text: #c8cad3;
+
+  --color-modal-bg:        #181b24;
+  --color-modal-mask:      rgba(0, 0, 0, 0.65);
+  --color-modal-title:     #e2e4ea;
+  --color-modal-close:     #6b7086;
+  --color-modal-close-hover:#e2e4ea;
+  --color-modal-close-bg:  rgba(255, 255, 255, 0.06);
+  --color-modal-desc-bg:   #1a1e2a;
+
+  --color-diagram-bg:      #252a3a;
+  --color-diagram-overlay: rgba(24, 27, 36, 0.94);
+  --color-diagram-overlay-border: #2d3244;
+  --color-diagram-group-bg:rgba(30, 34, 51, 0.5);
+  --color-diagram-group-header:rgba(45, 50, 68, 0.6);
+  --color-diagram-group-text: #a0a4b4;
+  --color-diagram-body-text:  #a0a4b4;
+  --color-diagram-body-muted: #6b7086;
+  --color-diagram-node-bg: #1c2030;
+  --color-diagram-node-border:#2d3244;
+  --color-diagram-selected-bg:rgba(60, 40, 45, 0.86);
+
+  --color-hitl-block-header:#1a1e2a;
+  --color-hitl-block-border:#2d3244;
+  --color-hitl-block-name: #e2e4ea;
+
+  --color-backend-stat-bg: linear-gradient(135deg, #1a1e2a 0%, #1e2233 100%);
+  --color-backend-stat-border:#2d3244;
+  --color-backend-stat-text:#fff;
+  --color-backend-stat-label:#8b8fa3;
+  --color-backend-power-bg:     rgba(120, 53, 15, 0.15);
+  --color-backend-power-border: rgba(253, 230, 138, 0.25);
+  --color-backend-power-header: #fbbf24;
+  --color-backend-power-label:  #fcd34d;
+  --color-backend-power-value:  #fef3c7;
+  --color-backend-timing-bg:     rgba(30, 64, 175, 0.15);
+  --color-backend-timing-border: rgba(96, 165, 250, 0.25);
+  --color-backend-timing-header: #60a5fa;
+  --color-backend-timing-label:  #93c5fd;
+  --color-backend-timing-value:  #dbeafe;
+  --color-backend-signoff-pass-bg:     rgba(22, 163, 74, 0.15);
+  --color-backend-signoff-pass-text:   #4ade80;
+  --color-backend-signoff-pass-border: rgba(134, 239, 172, 0.3);
+  --color-backend-signoff-fail-bg:     rgba(220, 38, 38, 0.15);
+  --color-backend-signoff-fail-text:   #fca5a5;
+  --color-backend-signoff-fail-border: rgba(252, 165, 165, 0.3);
+
+  --color-resize-handle:   #3a3f54;
+  --color-detail-fn-bg:    #1a1e2a;
+  --color-detail-fn-border:#2d3244;
+  --color-detail-fn-text:  #a0a4b4;
+  --color-detail-path:     #818cf8;
+  --color-metadata-table-bg:#1a1e2a;
+  --color-metadata-value:  #e2e4ea;
+
+  --color-rf-handle:       #6b7086;
+  --color-rf-controls-bg:  #181b24;
+  --color-rf-controls-border:#2d3244;
+  --color-rf-controls-hover:#252a3a;
+  --color-rf-minimap-bg:   #181b24;
+  --color-rf-edge-text:    #a0a4b4;
+  --color-rf-edge-textbg:  #1c2030;
+}
+
+/* ── Body baseline ────────────────────────────────────── */
+body {
+  background-color: var(--color-bg-body);
+  color: var(--color-text-primary);
+  transition: background-color 0.2s, color 0.2s;
+}
+
+/* ── Theme Toggle Button ─────────────────────────────── */
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--color-border-primary);
+  border-radius: 6px;
+  background: var(--color-bg-primary);
+  cursor: pointer;
+  font-size: 15px;
+  transition: background 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+  margin-left: 8px;
+  line-height: 1;
+  padding: 0;
+}
+
+.theme-toggle:hover {
+  background: var(--color-bg-hover);
+  border-color: var(--color-accent);
+}
