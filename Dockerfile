@@ -136,6 +136,27 @@ RUN MUSL_LD="$(find /nix/store -maxdepth 4 -name 'ld-musl-x86_64.so.1' \
  && ln -sf "${MUSL_LD}" /lib/ld-musl-x86_64.so.1 \
  && echo "musl_ld=${MUSL_LD}"
 
+# Same surgery for the glibc ELF interpreter. The GitHub Codespaces
+# agent downloads a pre-built `vscode-remote-server` binary and execs
+# it inside the container; the binary is dynamically linked against
+# /lib64/ld-linux-x86-64.so.2 (standard FHS path). On the Nix-only
+# openlane2 base, glibc lives at /nix/store/<hash>-glibc-*/lib/ but
+# nothing at /lib64. Result: the agent's exec returns ENOENT and the
+# caller sees the generic "failed to start vs code remote server" /
+# "failed to start SSH server" -- because both `gh codespace ssh`
+# and the web workbench go through the same agent-spawn path. Symlink
+# the nix-store loader at the FHS path so the agent binary can run.
+RUN GLIBC_LD="$(find /nix/store -path '*glibc-*/lib/ld-linux-x86-64.so.2' \
+        \( -type f -o -type l \) 2>/dev/null | head -1)" \
+ && test -n "${GLIBC_LD}" \
+ && mkdir -p /lib64 \
+ && ln -sf "${GLIBC_LD}" /lib64/ld-linux-x86-64.so.2 \
+ && echo "glibc_ld=${GLIBC_LD}" \
+ # Sanity check: a stock /bin/ls (which is dynamically linked) must
+ # now resolve through this loader. If it doesn't, neither will the
+ # codespaces agent.
+ && /lib64/ld-linux-x86-64.so.2 --help 2>&1 | head -1
+
 # Nix-built Node sets npm's default prefix into the read-only Nix store,
 # so `npm install -g` "succeeds" but the bin can't symlink anywhere on
 # PATH. Pin the prefix to a writable dir we explicitly put on PATH.
