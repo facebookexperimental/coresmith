@@ -292,43 +292,73 @@ function extractBlockName(spans) {
  * share the same graph node. Returns an array of { key, label, attempt,
  * blockName, spans } groups for the tab bar.
  */
+/**
+ * Convert traceData (in either the OTel/live-calls shape with `spans[]`, or
+ * the unified-trajectory shape with `steps[]`) into a flat list of tab
+ * descriptors with a normalized `steps[]` field that always interleaves
+ * LLM calls and tool runs in chronological order.
+ */
 function regroupTraces(traceData) {
   if (!traceData || traceData.length === 0) return [];
+
+  const isTrajectory = traceData[0]?.trajectory === true ||
+                       Array.isArray(traceData[0]?.steps);
 
   // Extract block names from each attempt group
   const groups = traceData.map((group) => ({
     ...group,
-    blockName: extractBlockName(group.spans),
+    blockName: group.block || group.blockName || extractBlockName(group.spans),
   }));
 
-  // Check if there are multiple distinct block names
-  const blockNames = new Set(groups.map((g) => g.blockName).filter(Boolean));
-  const hasMultipleBlocks = blockNames.size > 1;
-
-  if (!hasMultipleBlocks) {
-    // Single block (or no block names found) -- use original attempt-only tabs
-    return groups.map((g) => ({
-      key: `a${g.attempt}`,
-      label: groups.length === 1 ? 'Run' : `Attempt ${g.attempt}`,
-      durMs: getAttemptDuration(g.spans),
-      attempt: g.attempt,
-      blockName: g.blockName,
-      spans: g.spans,
+  // Build a `steps` list per group: trajectory data is already steps;
+  // span data is converted via extractLLMCalls (LLM-only).
+  for (const g of groups) {
+    if (Array.isArray(g.steps) && g.steps.length > 0) {
+      // already normalized
+      continue;
+    }
+    const calls = extractLLMCalls(g.spans);
+    g.steps = calls.map((c) => ({
+      type: c.streaming ? 'llm_call_streaming' : 'llm_call',
+      ts: c.ts || 0,
+      model: c.model,
+      duration_s: c.duration_ms ? c.duration_ms / 1000 : null,
+      duration_ms: c.duration_ms,
+      system_prompt: c.systemPrompt,
+      user_prompt: c.prompt,
+      response: c.response,
+      status: c.status,
+      streaming: c.streaming,
+      _span: c,
     }));
   }
 
-  // Multiple blocks -- create (block, attempt) tabs
-  return groups.map((g) => {
-    const name = (g.blockName || 'unknown').replace(/_/g, ' ');
-    return {
-      key: `${g.blockName || 'unknown'}:${g.attempt}`,
-      label: `${name} · Attempt ${g.attempt}`,
-      durMs: getAttemptDuration(g.spans),
-      attempt: g.attempt,
-      blockName: g.blockName,
-      spans: g.spans,
-    };
-  });
+  const blockNames = new Set(groups.map((g) => g.blockName).filter(Boolean));
+  const hasMultipleBlocks = blockNames.size > 1;
+
+  // Pick a per-attempt duration: prefer trajectory's own duration_s field
+  function attemptDurMs(g) {
+    if (g.duration_s) return g.duration_s * 1000;
+    if (g.duration_ms) return g.duration_ms;
+    return getAttemptDuration(g.spans);
+  }
+
+  return groups.map((g) => ({
+    key: hasMultipleBlocks
+      ? `${g.blockName || 'unknown'}:${g.attempt}`
+      : `a${g.attempt}`,
+    label: hasMultipleBlocks
+      ? `${(g.blockName || 'unknown').replace(/_/g, ' ')} · Attempt ${g.attempt}`
+      : (groups.length === 1 ? 'Run' : `Attempt ${g.attempt}`),
+    durMs: attemptDurMs(g),
+    attempt: g.attempt,
+    blockName: g.blockName,
+    status: g.status,
+    exitEvent: g.exit_event,
+    spans: g.spans,
+    steps: g.steps || [],
+    isTrajectory: isTrajectory,
+  }));
 }
 
 function getAttemptDuration(spans) {
@@ -525,6 +555,146 @@ function Collapsible({ label, icon, defaultOpen, children, className }) {
   );
 }
 
+/* ── Tool Run Card ───────────────────────────────────────── */
+
+function _classifyToolStep(step) {
+  // Step name → display label + icon
+  const map = {
+    lint: { label: 'Lint', icon: '🔍' },
+    simulate: { label: 'Simulate', icon: '▶' },
+    synthesize: { label: 'Synthesize', icon: '⚙' },
+    integration_lint: { label: 'Integration Lint', icon: '🔍' },
+    integration_sim: { label: 'Integration Sim', icon: '▶' },
+    flat_top_synth: { label: 'Flat Top Synth', icon: '⚙' },
+    place: { label: 'Place', icon: '◫' },
+    route: { label: 'Route', icon: '⫸' },
+    cts: { label: 'CTS', icon: '🕒' },
+    drc: { label: 'DRC', icon: '✓' },
+    lvs: { label: 'LVS', icon: '✓' },
+  };
+  return map[step] || { label: step.replace(/_/g, ' '), icon: '🔧' };
+}
+
+function ToolRunCard({ run, index, total }) {
+  const [open, setOpen] = useState(false);
+  const { label, icon } = _classifyToolStep(run.step || 'tool');
+  const rc = run.return_code;
+  const ok = rc === 0;
+  const statusIcon = ok ? '✓' : rc != null ? '✗' : '—';
+  const statusCls = ok ? 'ok' : rc != null ? 'error' : 'unset';
+
+  // Parse useful chunks from the log content -- our pipeline logs have
+  // === STDOUT === / === STDERR === markers we can split on.
+  const content = run.content || '';
+  const stdoutMatch = content.match(/=== STDOUT ===([\s\S]*?)(?:=== STDERR ===|$)/);
+  const stderrMatch = content.match(/=== STDERR ===([\s\S]*?)$/);
+  const stdout = (stdoutMatch?.[1] || '').trim();
+  const stderr = (stderrMatch?.[1] || '').trim();
+  const hasOnlyStdout = stdout && !stderr;
+  const hasOnlyStderr = !stdout && stderr;
+
+  return (
+    <div className={`llm-card tool-card tool-card-${statusCls}`}>
+      <div className="llm-card-header">
+        {total > 1 && (
+          <span className="llm-call-index" title={`Step ${index + 1} of ${total}`}>
+            {`${index + 1}/${total}`}
+          </span>
+        )}
+        <span className="tool-card-icon" aria-hidden="true">{icon}</span>
+        <span className="llm-model-name tool-card-label">{label}</span>
+        <span className="llm-card-meta">
+          {run.command && (
+            <span className="tool-card-cmd" title={run.command}>
+              {(() => {
+                const first = run.command.split(/\s+/)[0] || '';
+                const tool = first.split('/').pop() || first;
+                return tool;
+              })()}
+            </span>
+          )}
+          {rc != null && (
+            <span className={`tool-card-rc tool-card-rc-${statusCls}`}>
+              rc={rc}
+            </span>
+          )}
+          <span className={`llm-stat llm-stat-${statusCls}`}>{statusIcon}</span>
+        </span>
+      </div>
+
+      {run.command && (
+        <div className="tool-card-command">
+          <span className="tool-card-command-label">$</span>
+          <code className="tool-card-command-text">{run.command}</code>
+        </div>
+      )}
+
+      <button
+        className="tool-card-toggle"
+        onClick={() => setOpen((v) => !v)}
+      >
+        {open ? '▼ Hide output' : '▶ Show output'}
+        {run.size != null && (
+          <span className="tool-card-size">
+            {run.size > 1024 ? `${(run.size / 1024).toFixed(1)} KB` : `${run.size} B`}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="tool-card-output">
+          {stdout && (
+            <details open={hasOnlyStdout} className="tool-output-section">
+              <summary>stdout</summary>
+              <pre className="tool-output-pre">{stdout}</pre>
+            </details>
+          )}
+          {stderr && (
+            <details open={hasOnlyStderr || !ok} className="tool-output-section tool-output-stderr">
+              <summary>stderr</summary>
+              <pre className="tool-output-pre">{stderr}</pre>
+            </details>
+          )}
+          {!stdout && !stderr && content && (
+            <pre className="tool-output-pre">{content}</pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TrajectorySteps({ steps }) {
+  // Count for the N/total badge; combine LLM + tool but show them as a
+  // single ordered list.
+  const total = steps.length;
+  return (
+    <div className="llm-call-list trajectory-steps">
+      {steps.map((step, i) => {
+        if (step.type === 'tool_run') {
+          return <ToolRunCard key={`tool-${i}`} run={step} index={i} total={total} />;
+        }
+        // llm_call / llm_call_streaming
+        const call = {
+          id: step._span?.id || `step-${i}`,
+          model: step.model || 'LLM',
+          promptTokens: step.usage?.prompt_tokens || step.usage?.input_tokens,
+          completionTokens: step.usage?.completion_tokens || step.usage?.output_tokens,
+          totalTokens: step.usage?.total_tokens,
+          duration_ms: step.duration_ms || (step.duration_s ? step.duration_s * 1000 : null),
+          status: step.status || (step.error ? 'error' : 'ok'),
+          prompt: step.user_prompt || '',
+          systemPrompt: step.system_prompt || '',
+          response: step.response || '',
+          streaming: step.streaming,
+        };
+        return call.streaming
+          ? <StreamingLLMCard key={`stream-${i}`} call={call} />
+          : <LLMCallCard key={`llm-${i}`} call={call} index={i} total={total} />;
+      })}
+    </div>
+  );
+}
+
 /* ── LLM Call Card ───────────────────────────────────────── */
 
 function LLMCallCard({ call, index, total }) {
@@ -660,10 +830,28 @@ function StreamingLLMCard({ call }) {
 
 /* ── Attempt summary bar ─────────────────────────────────── */
 
-function AttemptSummary({ spans, llmCount, hasStreamingCalls }) {
-  const duration = getAttemptDuration(spans);
+function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
+  // Prefer step-aware tallies when we have trajectory data
+  let llmN = llmCount || 0;
+  let toolN = 0;
+  let toolErr = 0;
+  let stepDurMs = 0;
+  if (Array.isArray(steps) && steps.length) {
+    llmN = 0;
+    for (const s of steps) {
+      if (s.type === 'tool_run') {
+        toolN++;
+        if (s.return_code != null && s.return_code !== 0) toolErr++;
+      } else {
+        llmN++;
+      }
+      const d = s.duration_ms || (s.duration_s ? s.duration_s * 1000 : 0);
+      if (d) stepDurMs += d;
+    }
+  }
+  const duration = stepDurMs || getAttemptDuration(spans);
   const status = getAttemptStatus(spans);
-  const isError = status === 'error';
+  const isError = status === 'error' || toolErr > 0;
   const isStreaming = hasStreamingCalls;
 
   return (
@@ -672,11 +860,17 @@ function AttemptSummary({ spans, llmCount, hasStreamingCalls }) {
         {isStreaming ? '\u25CF Generating' : isError ? '\u2717 Failed' : '\u2713 Completed'}
       </span>
       <span className="llm-summary-detail">
-        {!isStreaming && formatDuration(duration)}
-        {llmCount > 0 && (
+        {!isStreaming && duration ? formatDuration(duration) : null}
+        {llmN > 0 && (
           <span className="llm-summary-count">
-            {llmCount} LLM call{llmCount !== 1 ? 's' : ''}
+            {llmN} LLM call{llmN !== 1 ? 's' : ''}
             {isStreaming ? ' (1 active)' : ''}
+          </span>
+        )}
+        {toolN > 0 && (
+          <span className="llm-summary-count tool-summary-count">
+            {toolN} tool run{toolN !== 1 ? 's' : ''}
+            {toolErr > 0 ? ` (${toolErr} failed)` : ''}
           </span>
         )}
       </span>
@@ -1249,13 +1443,16 @@ const DetailPanel = React.memo(function DetailPanel({
             {/* Summary bar */}
             <AttemptSummary
               spans={activeGroup?.spans}
+              steps={activeGroup?.steps}
               llmCount={llmCalls.length}
               hasStreamingCalls={llmCalls.some((c) => c.streaming)}
             />
 
-            {/* LLM calls */}
+            {/* Steps (LLM calls + tool runs interleaved) */}
             <div className="trace-content" ref={scrollRef}>
-              {llmCalls.length > 0 ? (
+              {activeGroup?.steps && activeGroup.steps.length > 0 ? (
+                <TrajectorySteps steps={activeGroup.steps} />
+              ) : llmCalls.length > 0 ? (
                 <div className="llm-call-list">
                   {llmCalls.map((call, i) => (
                     call.streaming
@@ -1273,7 +1470,7 @@ const DetailPanel = React.memo(function DetailPanel({
               ) : (
                 <div className="trace-empty-tab">
                   <span className="trace-empty-icon">{'\u{1F4CB}'}</span>
-                  No LLM interactions in this run.
+                  No activity recorded in this run.
                 </div>
               )}
             </div>

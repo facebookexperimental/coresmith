@@ -73,8 +73,18 @@
 .gantt-chart {
   flex: 1;
   overflow-y: auto;
-  overflow-x: hidden;
+  overflow-x: auto;
   padding: 0 24px 16px;
+}
+
+/* Auto-fit: when --gantt-fit-width is set, expand the inner tracks so each
+ * segment is rendered at usable pixel width. Without this the percentage-
+ * based positioning collapses small segments into 1-2px slivers and the
+ * user has to drag-zoom just to see anything. */
+.gantt-chart .gantt-time-axis,
+.gantt-chart .gantt-rows .gantt-row,
+.gantt-chart .gantt-phase-header {
+  min-width: var(--gantt-fit-width, auto);
 }
 
 /* ── Time Axis ───────────────────────────────────────── */

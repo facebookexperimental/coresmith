@@ -687,6 +687,127 @@
   flex-shrink: 0;
 }
 
+/* ── Tool run cards (lint/simulate/synthesize step_logs) ── */
+.tool-card {
+  border-left: 3px solid var(--color-tool-accent, #6366f1);
+}
+.tool-card-error {
+  border-left-color: #ef4444;
+}
+.tool-card-icon {
+  font-size: 14px;
+  margin-right: 4px;
+}
+.tool-card-label {
+  font-family: 'Roboto', sans-serif !important;
+  font-size: 12px !important;
+  font-weight: 600;
+  text-transform: none !important;
+  max-width: 220px !important;
+}
+.tool-card-command {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-input);
+  overflow-x: auto;
+}
+.tool-card-command-label {
+  color: var(--color-text-dimmed);
+  font-family: 'Menlo', monospace;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.tool-card-command-text {
+  font-family: 'Menlo', monospace;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  white-space: pre;
+  background: none !important;
+}
+.tool-card-cmd {
+  font-family: 'Menlo', monospace;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--color-bg-input);
+  color: var(--color-text-secondary);
+  font-weight: 600;
+}
+.tool-card-rc {
+  font-family: 'Menlo', monospace;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--color-bg-input);
+  color: var(--color-text-dimmed);
+}
+.tool-card-rc-ok {
+  background: rgba(34, 197, 94, 0.15);
+  color: #16a34a;
+}
+.tool-card-rc-error {
+  background: rgba(239, 68, 68, 0.15);
+  color: #dc2626;
+}
+.tool-card-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 12px;
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--color-border-subtle);
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  font-family: 'Roboto', sans-serif;
+  text-align: left;
+}
+.tool-card-toggle:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-secondary);
+}
+.tool-card-size {
+  font-family: 'Menlo', monospace;
+  font-size: 10px;
+  color: var(--color-text-dimmed);
+}
+.tool-card-output {
+  padding: 8px 12px 12px;
+  border-top: 1px solid var(--color-border-subtle);
+}
+.tool-output-section {
+  margin-top: 8px;
+}
+.tool-output-section summary {
+  cursor: pointer;
+  font-family: 'Menlo', monospace;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  padding: 4px 0;
+}
+.tool-output-section.tool-output-stderr summary {
+  color: #dc2626;
+}
+.tool-output-pre {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  background: var(--color-bg-input);
+  padding: 8px;
+  border-radius: 4px;
+  font-family: 'Menlo', monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  max-height: 360px;
+  overflow: auto;
+  color: var(--color-text-primary);
+}
+
 .llm-dur {
   color: var(--color-text-dimmed);
   font-family: 'Menlo', 'Monaco', monospace;

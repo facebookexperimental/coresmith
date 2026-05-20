@@ -7,6 +7,7 @@ import ReactFlow, {
   BackgroundVariant,
   useNodesState,
   useEdgesState,
+  useReactFlow,
 } from 'reactflow';
 
 import DecideNode from './DecideNode';
@@ -77,6 +78,12 @@ export default function GraphCanvas({ graphData, graphName, executionStatus, onN
 
   // Track whether we've already done initial layout for this graphData
   const layoutGraphRef = useRef(null);
+
+  // Imperative fitView so we can re-fit after switching graphs / after a
+  // re-layout. ReactFlow's `fitView` prop only fires on initial mount; when
+  // the user changes the active graph the new node positions live outside
+  // the prior viewport and the user has to scroll/zoom manually.
+  const reactFlow = useReactFlow();
 
   // Build RF nodes from graphData ONLY (no executionStatus in deps).
   // This prevents layout re-triggering when status polls arrive.
@@ -177,6 +184,19 @@ export default function GraphCanvas({ graphData, graphName, executionStatus, onN
       doLayout(direction);
     }
   }, [graphData, doLayout, direction]);
+
+  // Re-fit after layout finishes so newly-loaded graphs fill the viewport.
+  // Use rAF so ReactFlow's internal node-bounds calc has run by the time
+  // we call fitView.
+  useEffect(() => {
+    if (!layoutDone) return;
+    const id = requestAnimationFrame(() => {
+      try {
+        reactFlow.fitView({ padding: 0.12, duration: 200 });
+      } catch {}
+    });
+    return () => cancelAnimationFrame(id);
+  }, [layoutDone, graphName, reactFlow]);
 
   const onNodeClick = useCallback((_event, node) => {
     setSelectedNode(node.data);

@@ -326,6 +326,201 @@ def get_live_calls(node_name: str) -> list[dict]:
     return result
 
 
+def get_node_trajectory(node_name: str, max_log_chars: int = 16000) -> list:
+    """Return a per-attempt trajectory for a node: enter/exit events,
+    LLM calls within the window, and step_log file content.
+
+    This is what the detail panel actually wants to render -- it interleaves
+    LLM calls (from llm_calls.jsonl) with tool runs (from step_logs/) so the
+    user can see "the steps it took" rather than just a list of identical
+    LLM cards.
+    """
+    events_file = PROJECT_ROOT / ".socmate" / "pipeline_events.jsonl"
+    llm_log = PROJECT_ROOT / ".socmate" / "llm_calls.jsonl"
+    step_logs_root = PROJECT_ROOT / ".socmate" / "step_logs"
+
+    if not events_file.exists():
+        return []
+
+    # Walk pipeline events and build per-(block, attempt-number) windows
+    # using sequential enter/exit pairs. Drop stale "open" windows where a
+    # new enter for the same block arrives before the previous exit -- this
+    # matches the fix applied to get_live_calls.
+    attempts: list[dict] = []
+    open_idx: dict[str, int] = {}     # block_key -> index into attempts
+    counter = 0
+    for line in events_file.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if e.get("node") != node_name:
+            continue
+        ev = e.get("event", "")
+        ts = e.get("ts")
+        block = e.get("block") or e.get("graph", "")
+        block_key = block or "__default__"
+        if ts is None:
+            continue
+        if "enter" in ev:
+            prev = open_idx.get(block_key)
+            if prev is not None and attempts[prev].get("exit_ts") is None:
+                # Stale open window: drop in place by clearing its data
+                attempts[prev]["stale"] = True
+            counter += 1
+            attempts.append({
+                "block": block,
+                "attempt": (e.get("attempt") or e.get("round") or counter),
+                "enter_ts": ts,
+                "enter_iso": e.get("iso"),
+                "exit_ts": None,
+                "exit_iso": None,
+                "exit_event": None,
+                "stale": False,
+            })
+            open_idx[block_key] = len(attempts) - 1
+        elif "exit" in ev and block_key in open_idx:
+            idx = open_idx.pop(block_key)
+            attempts[idx]["exit_ts"] = ts
+            attempts[idx]["exit_iso"] = e.get("iso")
+            attempts[idx]["exit_event"] = {
+                k: v for k, v in e.items()
+                if k not in {"ts", "iso", "event", "node", "block", "graph"}
+            }
+
+    attempts = [a for a in attempts if not a.get("stale")]
+    if not attempts:
+        return []
+
+    # Load LLM calls once, keep just the small subset we need
+    llm_records: list[dict] = []
+    if llm_log.exists():
+        for line in llm_log.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            llm_records.append(r)
+
+    # For each attempt, gather LLM calls + step_log files inside the window
+    def _read_log(path: Path) -> dict:
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return {"path": str(path), "missing": True}
+        truncated = False
+        if len(content) > max_log_chars:
+            head = content[: max_log_chars // 2]
+            tail = content[-max_log_chars // 2 :]
+            content = head + "\n\n... [truncated " + str(len(content) - max_log_chars) + " chars] ...\n\n" + tail
+            truncated = True
+        # Parse the header lines our pipeline writes (Command:, Return code:)
+        meta = {}
+        for line in content.splitlines()[:8]:
+            if line.startswith("Command:"):
+                meta["command"] = line[len("Command:") :].strip()
+            elif line.startswith("Return code:"):
+                try:
+                    meta["return_code"] = int(line[len("Return code:") :].strip())
+                except ValueError:
+                    pass
+            elif line.startswith("Block:"):
+                meta["block"] = line[len("Block:") :].strip()
+        return {
+            "path": str(path),
+            "name": path.name,
+            "mtime": path.stat().st_mtime,
+            "size": path.stat().st_size,
+            "content": content,
+            "truncated": truncated,
+            **meta,
+        }
+
+    out = []
+    for a in attempts:
+        enter_ts = a["enter_ts"]
+        exit_ts = a.get("exit_ts")
+        block = a.get("block") or ""
+
+        # LLM calls in window
+        calls = []
+        for rec in llm_records:
+            t = rec.get("ts")
+            if t is None or t < enter_ts:
+                continue
+            if exit_ts is not None and t > exit_ts:
+                continue
+            calls.append({
+                "type": "llm_call",
+                "ts": t,
+                "iso": rec.get("iso"),
+                "model": rec.get("model", ""),
+                "provider": rec.get("provider", ""),
+                "duration_s": rec.get("duration_s"),
+                "timed_out": rec.get("timed_out", False),
+                "system_prompt": rec.get("system_prompt", ""),
+                "user_prompt": rec.get("user_prompt", ""),
+                "response": rec.get("response", ""),
+                "usage": rec.get("usage"),
+                "error": rec.get("error"),
+                "status": "error" if rec.get("error") else "ok",
+            })
+
+        # Step logs in the window for this block (mtime falls inside window)
+        tool_runs = []
+        if block and step_logs_root.is_dir():
+            block_dir = step_logs_root / block
+            if block_dir.is_dir():
+                for log_path in sorted(block_dir.iterdir()):
+                    if not log_path.is_file():
+                        continue
+                    try:
+                        mt = log_path.stat().st_mtime
+                    except OSError:
+                        continue
+                    if mt < enter_ts:
+                        continue
+                    if exit_ts is not None and mt > exit_ts + 30:
+                        # Allow a small grace window past exit
+                        continue
+                    log = _read_log(log_path)
+                    log["type"] = "tool_run"
+                    log["ts"] = mt
+                    # Derive a step label from the filename
+                    stem = log_path.stem  # e.g. lint_attempt1
+                    log["step"] = stem.rsplit("_attempt", 1)[0]
+                    log["attempt_in_step"] = (
+                        int(stem.rsplit("_attempt", 1)[1])
+                        if "_attempt" in stem
+                        else None
+                    )
+                    tool_runs.append(log)
+
+        # Merge + sort all steps chronologically
+        steps = sorted([*calls, *tool_runs], key=lambda s: s.get("ts") or 0)
+
+        out.append({
+            "attempt": a["attempt"],
+            "block": block,
+            "enter_ts": enter_ts,
+            "exit_ts": exit_ts,
+            "duration_s": (exit_ts - enter_ts) if exit_ts else None,
+            "status": (
+                "failed" if (a.get("exit_event") or {}).get("error") or
+                            (a.get("exit_event") or {}).get("success") is False
+                else ("running" if exit_ts is None else "done")
+            ),
+            "exit_event": a.get("exit_event"),
+            "steps": steps,
+        })
+
+    return out
+
+
 def get_timeline_data(graph_filter: str = "") -> dict:
     """Parse events into Gantt timeline segments for any graph.
 
@@ -1146,6 +1341,18 @@ class WebviewHandler(SimpleHTTPRequestHandler):
         if path.startswith("/api/summary_cards/"):
             stage = path.split("/api/summary_cards/", 1)[1].strip("/")
             self._json_response(get_summary_cards(stage))
+            return
+
+        # API: per-attempt trajectory for a node -- LLM calls + tool runs
+        if path.startswith("/api/node_trajectory/"):
+            node_name = unquote(path.split("/api/node_trajectory/", 1)[1].strip("/"))
+            if not node_name:
+                self._json_response({"error": "node_name required"}, status=400)
+                return
+            try:
+                self._json_response(get_node_trajectory(node_name))
+            except Exception as exc:
+                self._json_response({"error": str(exc)}, status=500)
             return
 
         # API: live LLM calls for a running node (falls back when OTel traces

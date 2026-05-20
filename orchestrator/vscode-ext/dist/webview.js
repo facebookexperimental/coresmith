@@ -125455,33 +125455,51 @@ function extractBlockName(spans) {
 function regroupTraces(traceData) {
   if (!traceData || traceData.length === 0)
     return [];
+  const isTrajectory = traceData[0]?.trajectory === true || Array.isArray(traceData[0]?.steps);
   const groups = traceData.map((group) => ({
     ...group,
-    blockName: extractBlockName(group.spans)
+    blockName: group.block || group.blockName || extractBlockName(group.spans)
   }));
-  const blockNames = new Set(groups.map((g) => g.blockName).filter(Boolean));
-  const hasMultipleBlocks = blockNames.size > 1;
-  if (!hasMultipleBlocks) {
-    return groups.map((g) => ({
-      key: `a${g.attempt}`,
-      label: groups.length === 1 ? "Run" : `Attempt ${g.attempt}`,
-      durMs: getAttemptDuration(g.spans),
-      attempt: g.attempt,
-      blockName: g.blockName,
-      spans: g.spans
+  for (const g of groups) {
+    if (Array.isArray(g.steps) && g.steps.length > 0) {
+      continue;
+    }
+    const calls = extractLLMCalls(g.spans);
+    g.steps = calls.map((c) => ({
+      type: c.streaming ? "llm_call_streaming" : "llm_call",
+      ts: c.ts || 0,
+      model: c.model,
+      duration_s: c.duration_ms ? c.duration_ms / 1e3 : null,
+      duration_ms: c.duration_ms,
+      system_prompt: c.systemPrompt,
+      user_prompt: c.prompt,
+      response: c.response,
+      status: c.status,
+      streaming: c.streaming,
+      _span: c
     }));
   }
-  return groups.map((g) => {
-    const name = (g.blockName || "unknown").replace(/_/g, " ");
-    return {
-      key: `${g.blockName || "unknown"}:${g.attempt}`,
-      label: `${name} \xB7 Attempt ${g.attempt}`,
-      durMs: getAttemptDuration(g.spans),
-      attempt: g.attempt,
-      blockName: g.blockName,
-      spans: g.spans
-    };
-  });
+  const blockNames = new Set(groups.map((g) => g.blockName).filter(Boolean));
+  const hasMultipleBlocks = blockNames.size > 1;
+  function attemptDurMs(g) {
+    if (g.duration_s)
+      return g.duration_s * 1e3;
+    if (g.duration_ms)
+      return g.duration_ms;
+    return getAttemptDuration(g.spans);
+  }
+  return groups.map((g) => ({
+    key: hasMultipleBlocks ? `${g.blockName || "unknown"}:${g.attempt}` : `a${g.attempt}`,
+    label: hasMultipleBlocks ? `${(g.blockName || "unknown").replace(/_/g, " ")} \xB7 Attempt ${g.attempt}` : groups.length === 1 ? "Run" : `Attempt ${g.attempt}`,
+    durMs: attemptDurMs(g),
+    attempt: g.attempt,
+    blockName: g.blockName,
+    status: g.status,
+    exitEvent: g.exit_event,
+    spans: g.spans,
+    steps: g.steps || [],
+    isTrajectory
+  }));
 }
 function getAttemptDuration(spans) {
   if (!spans || spans.length === 0)
@@ -125626,6 +125644,104 @@ function Collapsible({ label, icon, defaultOpen, children: children2, className 
     open && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-collapsible-body", children: children2 })
   ] });
 }
+function _classifyToolStep(step) {
+  const map = {
+    lint: { label: "Lint", icon: "\u{1F50D}" },
+    simulate: { label: "Simulate", icon: "\u25B6" },
+    synthesize: { label: "Synthesize", icon: "\u2699" },
+    integration_lint: { label: "Integration Lint", icon: "\u{1F50D}" },
+    integration_sim: { label: "Integration Sim", icon: "\u25B6" },
+    flat_top_synth: { label: "Flat Top Synth", icon: "\u2699" },
+    place: { label: "Place", icon: "\u25EB" },
+    route: { label: "Route", icon: "\u2AF8" },
+    cts: { label: "CTS", icon: "\u{1F552}" },
+    drc: { label: "DRC", icon: "\u2713" },
+    lvs: { label: "LVS", icon: "\u2713" }
+  };
+  return map[step] || { label: step.replace(/_/g, " "), icon: "\u{1F527}" };
+}
+function ToolRunCard({ run, index, total }) {
+  const [open, setOpen] = (0, import_react15.useState)(false);
+  const { label, icon } = _classifyToolStep(run.step || "tool");
+  const rc = run.return_code;
+  const ok = rc === 0;
+  const statusIcon = ok ? "\u2713" : rc != null ? "\u2717" : "\u2014";
+  const statusCls = ok ? "ok" : rc != null ? "error" : "unset";
+  const content = run.content || "";
+  const stdoutMatch = content.match(/=== STDOUT ===([\s\S]*?)(?:=== STDERR ===|$)/);
+  const stderrMatch = content.match(/=== STDERR ===([\s\S]*?)$/);
+  const stdout = (stdoutMatch?.[1] || "").trim();
+  const stderr = (stderrMatch?.[1] || "").trim();
+  const hasOnlyStdout = stdout && !stderr;
+  const hasOnlyStderr = !stdout && stderr;
+  return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: `llm-card tool-card tool-card-${statusCls}`, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-card-header", children: [
+      total > 1 && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-call-index", title: `Step ${index + 1} of ${total}`, children: `${index + 1}/${total}` }),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "tool-card-icon", "aria-hidden": "true", children: icon }),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-model-name tool-card-label", children: label }),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "llm-card-meta", children: [
+        run.command && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "tool-card-cmd", title: run.command, children: (() => {
+          const first = run.command.split(/\s+/)[0] || "";
+          const tool = first.split("/").pop() || first;
+          return tool;
+        })() }),
+        rc != null && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: `tool-card-rc tool-card-rc-${statusCls}`, children: [
+          "rc=",
+          rc
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `llm-stat llm-stat-${statusCls}`, children: statusIcon })
+      ] })
+    ] }),
+    run.command && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "tool-card-command", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "tool-card-command-label", children: "$" }),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("code", { className: "tool-card-command-text", children: run.command })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
+      "button",
+      {
+        className: "tool-card-toggle",
+        onClick: () => setOpen((v) => !v),
+        children: [
+          open ? "\u25BC Hide output" : "\u25B6 Show output",
+          run.size != null && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "tool-card-size", children: run.size > 1024 ? `${(run.size / 1024).toFixed(1)} KB` : `${run.size} B` })
+        ]
+      }
+    ),
+    open && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "tool-card-output", children: [
+      stdout && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("details", { open: hasOnlyStdout, className: "tool-output-section", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("summary", { children: "stdout" }),
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("pre", { className: "tool-output-pre", children: stdout })
+      ] }),
+      stderr && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("details", { open: hasOnlyStderr || !ok, className: "tool-output-section tool-output-stderr", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("summary", { children: "stderr" }),
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("pre", { className: "tool-output-pre", children: stderr })
+      ] }),
+      !stdout && !stderr && content && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("pre", { className: "tool-output-pre", children: content })
+    ] })
+  ] });
+}
+function TrajectorySteps({ steps }) {
+  const total = steps.length;
+  return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-call-list trajectory-steps", children: steps.map((step, i) => {
+    if (step.type === "tool_run") {
+      return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(ToolRunCard, { run: step, index: i, total }, `tool-${i}`);
+    }
+    const call = {
+      id: step._span?.id || `step-${i}`,
+      model: step.model || "LLM",
+      promptTokens: step.usage?.prompt_tokens || step.usage?.input_tokens,
+      completionTokens: step.usage?.completion_tokens || step.usage?.output_tokens,
+      totalTokens: step.usage?.total_tokens,
+      duration_ms: step.duration_ms || (step.duration_s ? step.duration_s * 1e3 : null),
+      status: step.status || (step.error ? "error" : "ok"),
+      prompt: step.user_prompt || "",
+      systemPrompt: step.system_prompt || "",
+      response: step.response || "",
+      streaming: step.streaming
+    };
+    return call.streaming ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(StreamingLLMCard, { call }, `stream-${i}`) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(LLMCallCard, { call, index: i, total }, `llm-${i}`);
+  }) });
+}
 function LLMCallCard({ call, index, total }) {
   const statusSymbol = call.status === "ok" ? "\u2713" : call.status === "error" ? "\u2717" : "\u2014";
   const statusCls = call.status === "ok" ? "ok" : call.status === "error" ? "error" : "unset";
@@ -125709,20 +125825,45 @@ function StreamingLLMCard({ call }) {
     ] })
   ] });
 }
-function AttemptSummary({ spans, llmCount, hasStreamingCalls }) {
-  const duration = getAttemptDuration(spans);
+function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
+  let llmN = llmCount || 0;
+  let toolN = 0;
+  let toolErr = 0;
+  let stepDurMs = 0;
+  if (Array.isArray(steps) && steps.length) {
+    llmN = 0;
+    for (const s of steps) {
+      if (s.type === "tool_run") {
+        toolN++;
+        if (s.return_code != null && s.return_code !== 0)
+          toolErr++;
+      } else {
+        llmN++;
+      }
+      const d = s.duration_ms || (s.duration_s ? s.duration_s * 1e3 : 0);
+      if (d)
+        stepDurMs += d;
+    }
+  }
+  const duration = stepDurMs || getAttemptDuration(spans);
   const status = getAttemptStatus(spans);
-  const isError = status === "error";
+  const isError = status === "error" || toolErr > 0;
   const isStreaming = hasStreamingCalls;
   return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: `llm-summary-bar ${isStreaming ? "streaming" : isError ? "error" : "ok"}`, children: [
     /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `llm-summary-status ${isStreaming ? "streaming" : isError ? "error" : "ok"}`, children: isStreaming ? "\u25CF Generating" : isError ? "\u2717 Failed" : "\u2713 Completed" }),
     /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "llm-summary-detail", children: [
-      !isStreaming && formatDuration(duration),
-      llmCount > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "llm-summary-count", children: [
-        llmCount,
+      !isStreaming && duration ? formatDuration(duration) : null,
+      llmN > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "llm-summary-count", children: [
+        llmN,
         " LLM call",
-        llmCount !== 1 ? "s" : "",
+        llmN !== 1 ? "s" : "",
         isStreaming ? " (1 active)" : ""
+      ] }),
+      toolN > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "llm-summary-count tool-summary-count", children: [
+        toolN,
+        " tool run",
+        toolN !== 1 ? "s" : "",
+        toolErr > 0 ? ` (${toolErr} failed)` : ""
       ] })
     ] })
   ] });
@@ -126145,11 +126286,12 @@ var DetailPanel = import_react15.default.memo(function DetailPanel2({
               AttemptSummary,
               {
                 spans: activeGroup?.spans,
+                steps: activeGroup?.steps,
                 llmCount: llmCalls.length,
                 hasStreamingCalls: llmCalls.some((c) => c.streaming)
               }
             ),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "trace-content", ref: scrollRef, children: llmCalls.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-call-list", children: llmCalls.map((call, i) => call.streaming ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(StreamingLLMCard, { call }, call.id || `stream-${i}`) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "trace-content", ref: scrollRef, children: activeGroup?.steps && activeGroup.steps.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(TrajectorySteps, { steps: activeGroup.steps }) : llmCalls.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-call-list", children: llmCalls.map((call, i) => call.streaming ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(StreamingLLMCard, { call }, call.id || `stream-${i}`) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
               LLMCallCard,
               {
                 call,
@@ -126159,7 +126301,7 @@ var DetailPanel = import_react15.default.memo(function DetailPanel2({
               call.id || i
             )) }) : node.metadata && Object.keys(node.metadata).length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(NodeMetadataSummary, { node }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "trace-empty-tab", children: [
               /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "trace-empty-icon", children: "\u{1F4CB}" }),
-              "No LLM interactions in this run."
+              "No activity recorded in this run."
             ] }) })
           ] })
         ] })
@@ -126387,6 +126529,7 @@ function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, tr
   const [layoutDone, setLayoutDone] = (0, import_react16.useState)(false);
   const [direction, setDirection] = (0, import_react16.useState)("RIGHT");
   const layoutGraphRef = (0, import_react16.useRef)(null);
+  const reactFlow = useReactFlow();
   const { rfNodes, rfEdges } = (0, import_react16.useMemo)(() => {
     if (!graphData)
       return { rfNodes: [], rfEdges: [] };
@@ -126469,6 +126612,17 @@ function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, tr
       doLayout(direction);
     }
   }, [graphData, doLayout, direction]);
+  (0, import_react16.useEffect)(() => {
+    if (!layoutDone)
+      return;
+    const id2 = requestAnimationFrame(() => {
+      try {
+        reactFlow.fitView({ padding: 0.12, duration: 200 });
+      } catch {
+      }
+    });
+    return () => cancelAnimationFrame(id2);
+  }, [layoutDone, graphName, reactFlow]);
   const onNodeClick = (0, import_react16.useCallback)((_event, node) => {
     setSelectedNode(node.data);
     if (onRequestTraces) {
@@ -126984,6 +127138,27 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
     return latest;
   }, pipeline_start);
   const totalDuration = effectiveEnd - pipeline_start;
+  const fitWidthPx = (() => {
+    const durs = [];
+    for (const b of blocks) {
+      for (const a of b.attempts || []) {
+        for (const s of a.segments || []) {
+          const start2 = s.start_ts;
+          const end = s.end_ts || effectiveEnd;
+          const d = end - start2;
+          if (d > 0.5)
+            durs.push(d);
+        }
+      }
+    }
+    if (!durs.length)
+      return 0;
+    durs.sort((a, b) => a - b);
+    const p10 = durs[Math.floor(durs.length * 0.1)] || durs[0];
+    const pxPerSec = 10 / p10;
+    const widthPx = totalDuration * pxPerSec;
+    return Math.max(0, Math.min(widthPx, 24e3));
+  })();
   const zoomStart = zoomRange ? pipeline_start + zoomRange.start * totalDuration : pipeline_start;
   const zoomEnd = zoomRange ? pipeline_start + zoomRange.end * totalDuration : effectiveEnd;
   const zoomDuration = zoomEnd - zoomStart;
@@ -127042,87 +127217,97 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
           ] })
         ] })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-chart", ref: chartRef, onMouseDown: handleChartMouseDown, onScroll: handleChartScroll, children: [
-        zoomRange && /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-zoom-bar", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("span", { className: "gantt-zoom-label", children: [
-            "Zoomed: ",
-            formatDuration2(zoomStart - pipeline_start),
-            " \u2013 ",
-            formatDuration2(zoomEnd - pipeline_start)
-          ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("button", { className: "gantt-zoom-reset", onClick: handleResetZoom, children: "Reset zoom" })
-        ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-time-axis", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "gantt-label-spacer" }),
-          /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-time-track", children: [
-            ticksAdjusted.map((t) => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
-              "div",
-              {
-                className: "gantt-tick",
-                style: { left: `${toPercent(zoomStart + t)}%` },
-                children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "gantt-tick-label", children: formatDuration2(zoomStart - pipeline_start + t) })
-              },
-              t
-            )),
-            hasRunning && toPercent(now2) >= 0 && toPercent(now2) <= 100 && /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "gantt-now-marker", style: { left: `${toPercent(now2)}%` }, children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "gantt-now-label", children: "now" }) }),
-            dragState && dragState.selLo != null && /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
-              "div",
-              {
-                className: "gantt-drag-selection",
-                style: {
-                  left: `${dragState.selLo * 100}%`,
-                  width: `${(dragState.selHi - dragState.selLo) * 100}%`
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(
+        "div",
+        {
+          className: "gantt-chart",
+          ref: chartRef,
+          onMouseDown: handleChartMouseDown,
+          onScroll: handleChartScroll,
+          style: fitWidthPx && !zoomRange ? { "--gantt-fit-width": `${fitWidthPx}px` } : void 0,
+          children: [
+            zoomRange && /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-zoom-bar", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("span", { className: "gantt-zoom-label", children: [
+                "Zoomed: ",
+                formatDuration2(zoomStart - pipeline_start),
+                " \u2013 ",
+                formatDuration2(zoomEnd - pipeline_start)
+              ] }),
+              /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("button", { className: "gantt-zoom-reset", onClick: handleResetZoom, children: "Reset zoom" })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-time-axis", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "gantt-label-spacer" }),
+              /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-time-track", children: [
+                ticksAdjusted.map((t) => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+                  "div",
+                  {
+                    className: "gantt-tick",
+                    style: { left: `${toPercent(zoomStart + t)}%` },
+                    children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "gantt-tick-label", children: formatDuration2(zoomStart - pipeline_start + t) })
+                  },
+                  t
+                )),
+                hasRunning && toPercent(now2) >= 0 && toPercent(now2) <= 100 && /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "gantt-now-marker", style: { left: `${toPercent(now2)}%` }, children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "gantt-now-label", children: "now" }) }),
+                dragState && dragState.selLo != null && /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+                  "div",
+                  {
+                    className: "gantt-drag-selection",
+                    style: {
+                      left: `${dragState.selLo * 100}%`,
+                      width: `${(dragState.selHi - dragState.selLo) * 100}%`
+                    }
+                  }
+                )
+              ] })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "gantt-rows", children: (() => {
+              const PHASE_ORDER = ["architecture", "frontend", "backend"];
+              const PHASE_LABEL = {
+                architecture: "Architecture",
+                frontend: "Frontend (RTL pipeline)",
+                backend: "Backend (PnR pipeline)"
+              };
+              const grouped = /* @__PURE__ */ new Map();
+              for (const b of blocks) {
+                const g = b.graph || "other";
+                if (!grouped.has(g))
+                  grouped.set(g, []);
+                grouped.get(g).push(b);
+              }
+              const orderedPhases = [
+                ...PHASE_ORDER.filter((p) => grouped.has(p)),
+                ...[...grouped.keys()].filter((p) => !PHASE_ORDER.includes(p))
+              ];
+              const out = [];
+              for (const phase of orderedPhases) {
+                const phaseBlocks = grouped.get(phase);
+                out.push(
+                  /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-phase-header", children: [
+                    PHASE_LABEL[phase] || phase,
+                    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "gantt-phase-count", children: phaseBlocks.length === 1 ? "1 row" : `${phaseBlocks.length} rows` })
+                  ] }, `hdr-${phase}`)
+                );
+                for (const block of phaseBlocks) {
+                  out.push(
+                    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+                      GanttRow,
+                      {
+                        block,
+                        toPercent,
+                        effectiveEnd,
+                        onSegmentClick: handleSegmentClick,
+                        selectedSegKey
+                      },
+                      `${phase}-${block.name}`
+                    )
+                  );
                 }
               }
-            )
-          ] })
-        ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "gantt-rows", children: (() => {
-          const PHASE_ORDER = ["architecture", "frontend", "backend"];
-          const PHASE_LABEL = {
-            architecture: "Architecture",
-            frontend: "Frontend (RTL pipeline)",
-            backend: "Backend (PnR pipeline)"
-          };
-          const grouped = /* @__PURE__ */ new Map();
-          for (const b of blocks) {
-            const g = b.graph || "other";
-            if (!grouped.has(g))
-              grouped.set(g, []);
-            grouped.get(g).push(b);
-          }
-          const orderedPhases = [
-            ...PHASE_ORDER.filter((p) => grouped.has(p)),
-            ...[...grouped.keys()].filter((p) => !PHASE_ORDER.includes(p))
-          ];
-          const out = [];
-          for (const phase of orderedPhases) {
-            const phaseBlocks = grouped.get(phase);
-            out.push(
-              /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-phase-header", children: [
-                PHASE_LABEL[phase] || phase,
-                /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "gantt-phase-count", children: phaseBlocks.length === 1 ? "1 row" : `${phaseBlocks.length} rows` })
-              ] }, `hdr-${phase}`)
-            );
-            for (const block of phaseBlocks) {
-              out.push(
-                /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
-                  GanttRow,
-                  {
-                    block,
-                    toPercent,
-                    effectiveEnd,
-                    onSegmentClick: handleSegmentClick,
-                    selectedSegKey
-                  },
-                  `${phase}-${block.name}`
-                )
-              );
-            }
-          }
-          return out;
-        })() })
-      ] }),
+              return out;
+            })() })
+          ]
+        }
+      ),
       /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(Legend, { graphType: graphName || timelineData.graph || "frontend" })
     ] }),
     selectedSeg && /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(import_jsx_runtime11.Fragment, { children: [
@@ -128378,6 +128563,16 @@ async function fetchLiveCallsHttp(nodeId) {
     return [];
   }
 }
+async function fetchNodeTrajectoryHttp(nodeId) {
+  try {
+    const res = await fetch(`/api/node_trajectory/${encodeURIComponent(nodeId)}`);
+    if (!res.ok)
+      return [];
+    return res.json();
+  } catch {
+    return [];
+  }
+}
 async function fetchSummaryHttp(stage) {
   try {
     const res = await fetch(`/api/summary/${stage}`);
@@ -128589,12 +128784,24 @@ function App() {
     }
     if (isStandalone) {
       Promise.all([
+        fetchNodeTrajectoryHttp(nodeId),
         fetchTracesHttp(nodeId),
         fetchLiveCallsHttp(nodeId)
-      ]).then(([traces, live]) => {
-        const hasTraces = traces && traces.length > 0;
+      ]).then(([trajectory, traces, live]) => {
+        const hasTraj = trajectory && trajectory.length > 0;
         const hasLive = live && live.length > 0;
-        if (hasLive) {
+        const hasTraces = traces && traces.length > 0;
+        if (hasTraj) {
+          setTraceData(trajectory.map((a) => ({
+            attempt: a.attempt,
+            block: a.block,
+            duration_s: a.duration_s,
+            status: a.status,
+            exit_event: a.exit_event,
+            steps: a.steps,
+            trajectory: true
+          })));
+        } else if (hasLive) {
           setTraceData(live.map((g) => ({ ...g, live: true })));
         } else if (hasTraces) {
           setTraceData(traces);
@@ -128611,6 +128818,7 @@ function App() {
     setModalOpen(true);
   }, []);
   const handleTabSwitch = (0, import_react22.useCallback)((tab) => {
+    setModalOpen(false);
     if (tab === "timeline") {
       setViewMode("timeline");
       setGraphName("timeline");

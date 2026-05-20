@@ -149,6 +149,16 @@ async function fetchLiveCallsHttp(nodeId) {
   }
 }
 
+async function fetchNodeTrajectoryHttp(nodeId) {
+  try {
+    const res = await fetch(`/api/node_trajectory/${encodeURIComponent(nodeId)}`);
+    if (!res.ok) return [];
+    return res.json();
+  } catch {
+    return [];
+  }
+}
+
 async function fetchSummaryHttp(stage) {
   try {
     const res = await fetch(`/api/summary/${stage}`);
@@ -378,23 +388,33 @@ function App() {
       setTraceData(null);
     }
     if (isStandalone) {
-      // Fetch both OTel traces and live calls in parallel.  Live calls
-      // cover the gap between LLM completion and OTel batch export, and
-      // include streaming data that OTel never captures.
+      // Prefer the unified trajectory endpoint which interleaves LLM calls
+      // with tool runs (lint/simulate/synthesize step_logs). Fall back to
+      // OTel traces / live_calls if that endpoint returns nothing (older
+      // runs, or nodes with no LLM activity).
       Promise.all([
+        fetchNodeTrajectoryHttp(nodeId),
         fetchTracesHttp(nodeId),
         fetchLiveCallsHttp(nodeId),
-      ]).then(([traces, live]) => {
-        const hasTraces = traces && traces.length > 0;
+      ]).then(([trajectory, traces, live]) => {
+        const hasTraj = trajectory && trajectory.length > 0;
         const hasLive = live && live.length > 0;
+        const hasTraces = traces && traces.length > 0;
 
-        if (hasLive) {
-          // Live calls (from llm_calls.jsonl) are the authoritative
-          // source of LLM interaction data -- they're always written
-          // and never dropped.  OTel traces often have incomplete child
-          // spans due to BatchSpanProcessor drops or context propagation
-          // failures across asyncio.to_thread boundaries.  Always prefer
-          // live calls when available.
+        if (hasTraj) {
+          // Convert trajectory to the same {attempt, spans, steps} shape
+          // DetailPanel already consumes, but tag steps so we can render
+          // LLM calls and tool runs differently.
+          setTraceData(trajectory.map((a) => ({
+            attempt: a.attempt,
+            block: a.block,
+            duration_s: a.duration_s,
+            status: a.status,
+            exit_event: a.exit_event,
+            steps: a.steps,
+            trajectory: true,
+          })));
+        } else if (hasLive) {
           setTraceData(live.map((g) => ({ ...g, live: true })));
         } else if (hasTraces) {
           setTraceData(traces);
@@ -413,6 +433,9 @@ function App() {
   }, []);
 
   const handleTabSwitch = useCallback((tab) => {
+    // Close the per-node modal on tab switch; otherwise it lingers showing
+    // a node from the previous graph, on top of unrelated content.
+    setModalOpen(false);
     if (tab === 'timeline') {
       setViewMode('timeline');
       setGraphName('timeline');
