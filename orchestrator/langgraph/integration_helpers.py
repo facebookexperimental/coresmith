@@ -821,6 +821,7 @@ async def generate_integration_testbench(
     connections: list[dict],
     block_rtl_paths: dict[str, str],
     prd_summary: str = "",
+    prior_failure: str = "",
 ) -> dict:
     """Generate a cocotb integration testbench via the Lead DV agent.
 
@@ -855,6 +856,7 @@ async def generate_integration_testbench(
         prd_summary=prd_summary,
         block_rtl_paths=block_rtl_paths,
         output_path=output_path,
+        prior_failure=prior_failure,
     )
 
     result["testbench_path"] = result.get("tb_path", output_path)
@@ -868,6 +870,7 @@ async def generate_validation_testbench(
     connections: list[dict],
     block_rtl_paths: dict[str, str],
     ers_context: str,
+    prior_failure: str = "",
 ) -> dict:
     """Generate an ERS/KPI validation cocotb testbench via Lead Validation DV.
 
@@ -903,6 +906,7 @@ async def generate_validation_testbench(
         ers_context=ers_context,
         block_rtl_paths=block_rtl_paths,
         output_path=output_path,
+        prior_failure=prior_failure,
     )
 
     result["testbench_path"] = result.get("tb_path", output_path)
