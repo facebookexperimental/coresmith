@@ -531,12 +531,115 @@ function markdownToHtml(md) {
   }).join('');
 }
 
+/* ── JSON detection + syntax highlighting ─────────────────── */
+
+function _tryParseJson(text) {
+  if (!text || typeof text !== 'string') return null;
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  // Cheap shape check before paying parse cost
+  const first = trimmed[0];
+  const last = trimmed[trimmed.length - 1];
+  if (!((first === '{' && last === '}') || (first === '[' && last === ']'))) {
+    return null;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+// Minimal regex-based JSON syntax highlighter -- escapes HTML, then wraps
+// keys/strings/numbers/booleans/nulls in styled spans.
+function _highlightJsonHtml(jsonStr) {
+  const escaped = jsonStr
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return escaped.replace(
+    /("(\\.|[^"\\])*")\s*:|("(\\.|[^"\\])*")|\b(true|false|null)\b|\b(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/g,
+    (match, key, _k2, str, _s2, kw, num) => {
+      if (key) {
+        const k = key.replace(/:$/, '').trim();
+        return `<span class="json-key">${k}</span>:`;
+      }
+      if (str) return `<span class="json-string">${str}</span>`;
+      if (kw) return `<span class="json-${kw}">${kw}</span>`;
+      if (num) return `<span class="json-number">${num}</span>`;
+      return match;
+    },
+  );
+}
+
+const _REASONING_KEYS = [
+  'reasoning', 'thinking', 'diagnosis', 'analysis', 'rationale',
+  'explanation', 'summary',
+];
+const _ACTION_KEYS = ['action', 'decision', 'next_step', 'suggested_fix'];
+
 /* ── Formatted text renderer with markdown ───────────────── */
 
-function FormattedText({ text, maxCollapsed = 2000 }) {
+function FormattedText({ text, maxCollapsed = 2000, autoJson = true }) {
   const [expanded, setExpanded] = useState(false);
 
   if (!text) return <span className="llm-no-content">No content</span>;
+
+  // If the entire response is a JSON object, surface the reasoning/diagnosis
+  // field above the JSON body so the user sees the "thinking" without
+  // hunting through escaped JSON.
+  const parsed = autoJson ? _tryParseJson(text) : null;
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    let reasoningKey = null;
+    let actionKey = null;
+    for (const k of _REASONING_KEYS) {
+      if (typeof parsed[k] === 'string' && parsed[k].trim()) {
+        reasoningKey = k; break;
+      }
+    }
+    for (const k of _ACTION_KEYS) {
+      if (parsed[k] != null && (typeof parsed[k] === 'string' || typeof parsed[k] === 'number')) {
+        actionKey = k; break;
+      }
+    }
+    const pretty = JSON.stringify(parsed, null, 2);
+    const isLong = pretty.length > maxCollapsed;
+    const display = isLong && !expanded ? pretty.slice(0, maxCollapsed) : pretty;
+    return (
+      <div className="llm-formatted llm-json-response">
+        {(reasoningKey || actionKey) && (
+          <div className="llm-thinking">
+            {reasoningKey && (
+              <div className="llm-thinking-section">
+                <div className="llm-thinking-label">{reasoningKey === 'reasoning' ? 'Thinking' : reasoningKey.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase())}</div>
+                <div className="llm-thinking-body">{parsed[reasoningKey]}</div>
+              </div>
+            )}
+            {actionKey && (
+              <div className="llm-thinking-section llm-thinking-action">
+                <div className="llm-thinking-label">{actionKey.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase())}</div>
+                <div className="llm-thinking-body">{String(parsed[actionKey])}</div>
+              </div>
+            )}
+          </div>
+        )}
+        <pre className="llm-code-block json-code-block">
+          <span className="llm-code-lang">json</span>
+          <code dangerouslySetInnerHTML={{ __html: _highlightJsonHtml(display) }} />
+        </pre>
+        {isLong && (
+          <button
+            className="llm-expand-btn"
+            onClick={() => setExpanded(!expanded)}
+          >
+            {expanded
+              ? 'Show less'
+              : `Show more (${(pretty.length / 1000).toFixed(1)}k chars)`}
+          </button>
+        )}
+      </div>
+    );
+  }
 
   const isLong = text.length > maxCollapsed;
   const display = isLong && !expanded ? text.slice(0, maxCollapsed) : text;

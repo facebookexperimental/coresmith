@@ -125626,10 +125626,100 @@ function markdownToHtml(md) {
     return html.join("\n");
   }).join("");
 }
-function FormattedText({ text, maxCollapsed = 2e3 }) {
+function _tryParseJson(text) {
+  if (!text || typeof text !== "string")
+    return null;
+  const trimmed = text.trim();
+  if (!trimmed)
+    return null;
+  const first = trimmed[0];
+  const last = trimmed[trimmed.length - 1];
+  if (!(first === "{" && last === "}" || first === "[" && last === "]")) {
+    return null;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+function _highlightJsonHtml(jsonStr) {
+  const escaped = jsonStr.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return escaped.replace(
+    /("(\\.|[^"\\])*")\s*:|("(\\.|[^"\\])*")|\b(true|false|null)\b|\b(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/g,
+    (match, key, _k2, str, _s2, kw, num) => {
+      if (key) {
+        const k = key.replace(/:$/, "").trim();
+        return `<span class="json-key">${k}</span>:`;
+      }
+      if (str)
+        return `<span class="json-string">${str}</span>`;
+      if (kw)
+        return `<span class="json-${kw}">${kw}</span>`;
+      if (num)
+        return `<span class="json-number">${num}</span>`;
+      return match;
+    }
+  );
+}
+var _REASONING_KEYS = [
+  "reasoning",
+  "thinking",
+  "diagnosis",
+  "analysis",
+  "rationale",
+  "explanation",
+  "summary"
+];
+var _ACTION_KEYS = ["action", "decision", "next_step", "suggested_fix"];
+function FormattedText({ text, maxCollapsed = 2e3, autoJson = true }) {
   const [expanded, setExpanded] = (0, import_react15.useState)(false);
   if (!text)
     return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-no-content", children: "No content" });
+  const parsed = autoJson ? _tryParseJson(text) : null;
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    let reasoningKey = null;
+    let actionKey = null;
+    for (const k of _REASONING_KEYS) {
+      if (typeof parsed[k] === "string" && parsed[k].trim()) {
+        reasoningKey = k;
+        break;
+      }
+    }
+    for (const k of _ACTION_KEYS) {
+      if (parsed[k] != null && (typeof parsed[k] === "string" || typeof parsed[k] === "number")) {
+        actionKey = k;
+        break;
+      }
+    }
+    const pretty = JSON.stringify(parsed, null, 2);
+    const isLong2 = pretty.length > maxCollapsed;
+    const display2 = isLong2 && !expanded ? pretty.slice(0, maxCollapsed) : pretty;
+    return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-formatted llm-json-response", children: [
+      (reasoningKey || actionKey) && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-thinking", children: [
+        reasoningKey && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-thinking-section", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-thinking-label", children: reasoningKey === "reasoning" ? "Thinking" : reasoningKey.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-thinking-body", children: parsed[reasoningKey] })
+        ] }),
+        actionKey && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-thinking-section llm-thinking-action", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-thinking-label", children: actionKey.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-thinking-body", children: String(parsed[actionKey]) })
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("pre", { className: "llm-code-block json-code-block", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-code-lang", children: "json" }),
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("code", { dangerouslySetInnerHTML: { __html: _highlightJsonHtml(display2) } })
+      ] }),
+      isLong2 && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+        "button",
+        {
+          className: "llm-expand-btn",
+          onClick: () => setExpanded(!expanded),
+          children: expanded ? "Show less" : `Show more (${(pretty.length / 1e3).toFixed(1)}k chars)`
+        }
+      )
+    ] });
+  }
   const isLong = text.length > maxCollapsed;
   const display = isLong && !expanded ? text.slice(0, maxCollapsed) : text;
   const html = markdownToHtml(display);
