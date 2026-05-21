@@ -344,30 +344,46 @@ function regroupTraces(traceData) {
   }
 
   // Some pipelines re-enter the same node multiple times within a single
-  // "attempt" (Constraint Check fires once per architecture round). Without
-  // a per-instance counter we end up with duplicate-labelled tabs that look
-  // like a bug. Append (#N) when we see repeats.
+  // "attempt" (Constraint Check fires once per architecture round). When
+  // a result_summary carries a round number, prefer it for the label so
+  // the user sees "Attempt 1 · Round 2" instead of an opaque "(#2)".
   const seenKeys = new Map();
   return groups.map((g) => {
     const steps = g.steps || [];
     const toolCount = steps.filter((s) => s.type === 'tool_run').length;
     const llmCount = steps.filter((s) => s.type === 'llm_call' || s.type === 'llm_call_streaming' || !s.type).length;
+    // Probe step metrics for a useful round / iteration discriminator.
+    let roundNum = null;
+    for (const s of steps) {
+      if (s.type === 'result_summary' && s.metrics) {
+        const r = s.metrics.round ?? s.metrics.new_round;
+        if (r != null) { roundNum = r; break; }
+      }
+    }
     const baseKey = hasMultipleBlocks
       ? `${g.blockName || 'unknown'}:${g.attempt}`
       : `a${g.attempt}`;
     const count = (seenKeys.get(baseKey) || 0) + 1;
     seenKeys.set(baseKey, count);
-    const isRepeat = count > 1 || groups.filter((og) => {
+    const repeatCount = groups.filter((og) => {
       const k = hasMultipleBlocks
         ? `${og.blockName || 'unknown'}:${og.attempt}`
         : `a${og.attempt}`;
       return k === baseKey;
-    }).length > 1;
+    }).length;
+    const isRepeat = repeatCount > 1;
     let label = hasMultipleBlocks
       ? `${(g.blockName || 'unknown').replace(/_/g, ' ')} · Attempt ${g.attempt}`
       : (groups.length === 1 ? 'Run' : `Attempt ${g.attempt}`);
     if (isRepeat) {
-      label += ` (#${count})`;
+      // Build a discriminator that includes round when known and
+      // always appends an iteration counter so two calls in the same
+      // round still get distinct labels (Block Diagram fires multiple
+      // times per architecture round during escalation feedback).
+      const parts = [];
+      if (roundNum != null) parts.push(`Round ${roundNum}`);
+      parts.push(`Iter ${count}`);
+      label += ` · ${parts.join(' · ')}`;
     }
     return {
       key: `${baseKey}#${count}`,
@@ -375,6 +391,8 @@ function regroupTraces(traceData) {
       durMs: attemptDurMs(g),
       attempt: g.attempt,
       blockName: g.blockName,
+      round: roundNum,
+      iteration: count,
       status: g.status,
       exitEvent: g.exit_event,
       spans: g.spans,

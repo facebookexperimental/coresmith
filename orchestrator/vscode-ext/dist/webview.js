@@ -125493,16 +125493,31 @@ function regroupTraces(traceData) {
     const steps = g.steps || [];
     const toolCount = steps.filter((s) => s.type === "tool_run").length;
     const llmCount = steps.filter((s) => s.type === "llm_call" || s.type === "llm_call_streaming" || !s.type).length;
+    let roundNum = null;
+    for (const s of steps) {
+      if (s.type === "result_summary" && s.metrics) {
+        const r = s.metrics.round ?? s.metrics.new_round;
+        if (r != null) {
+          roundNum = r;
+          break;
+        }
+      }
+    }
     const baseKey = hasMultipleBlocks ? `${g.blockName || "unknown"}:${g.attempt}` : `a${g.attempt}`;
     const count = (seenKeys.get(baseKey) || 0) + 1;
     seenKeys.set(baseKey, count);
-    const isRepeat = count > 1 || groups.filter((og) => {
+    const repeatCount = groups.filter((og) => {
       const k = hasMultipleBlocks ? `${og.blockName || "unknown"}:${og.attempt}` : `a${og.attempt}`;
       return k === baseKey;
-    }).length > 1;
+    }).length;
+    const isRepeat = repeatCount > 1;
     let label = hasMultipleBlocks ? `${(g.blockName || "unknown").replace(/_/g, " ")} \xB7 Attempt ${g.attempt}` : groups.length === 1 ? "Run" : `Attempt ${g.attempt}`;
     if (isRepeat) {
-      label += ` (#${count})`;
+      const parts = [];
+      if (roundNum != null)
+        parts.push(`Round ${roundNum}`);
+      parts.push(`Iter ${count}`);
+      label += ` \xB7 ${parts.join(" \xB7 ")}`;
     }
     return {
       key: `${baseKey}#${count}`,
@@ -125510,6 +125525,8 @@ function regroupTraces(traceData) {
       durMs: attemptDurMs(g),
       attempt: g.attempt,
       blockName: g.blockName,
+      round: roundNum,
+      iteration: count,
       status: g.status,
       exitEvent: g.exit_event,
       spans: g.spans,
