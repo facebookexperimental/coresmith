@@ -512,15 +512,33 @@ def get_node_trajectory(node_name: str, max_log_chars: int = 16000) -> list:
         ev = a.get("exit_event") or {}
         REAL_TOOL_KEYS = {"command", "tool_stdout", "tool_stderr", "return_code"}
         METRIC_KEYS = (
+            # Synthesis / PnR metrics
             "gate_count", "chip_area_um2", "design_area_um2",
             "utilization_pct", "wns_ns", "tns_ns", "total_power_mw",
-            "violations", "violation_count", "sim_passed",
-            "lint_passed", "success", "passed", "clean",
-            "dashboard_path", "html_size", "log_path", "path",
-            "node_count", "edge_count", "block_count",
-            "tb_fixes_attempted", "local_fixes_attempted",
-            "tier", "round", "design_name", "category",
             "max_freq_mhz",
+            # Pass/fail flags
+            "success", "passed", "clean", "all_pass",
+            "sim_passed", "lint_passed", "lint_clean", "match",
+            # Counts / violations
+            "violations", "violation_count", "error_count",
+            "has_structural", "issues_found", "device_delta", "net_delta",
+            # Paths / artefacts
+            "dashboard_path", "html_size", "log_path", "path",
+            "layout_2d_png_path", "viewer_path", "ers_generated",
+            "diagnosis_preview", "suggested_fix", "needs_human",
+            # Structural counts
+            "node_count", "edge_count", "block_count", "blocks",
+            "question_count", "tb_fixes_attempted",
+            "local_fixes_attempted", "total", "expected",
+            "completed_so_far", "passed_so_far",
+            "validation_errors",
+            # Round-tracking / identifiers
+            "tier", "round", "new_round", "max_rounds", "total_rounds",
+            "design_name", "integration_top", "category", "confidence",
+            "action", "decision", "phase", "skipped", "last_error",
+            "text_len", "analysis", "has_feedback", "answer_count",
+            "answer_keys", "has_answers", "attempt", "new_tier_index",
+            "feedback",
         )
 
         has_real_tool = any(k in ev for k in REAL_TOOL_KEYS)
