@@ -1,45 +1,112 @@
 {
     "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
-    "name": "socmate",
+    "name": "coresmith-dev",
 
-    // Pull the prebuilt image published by .github/workflows/publish-image.yml
-    // on every push to main. First codespace start drops from ~15-20 min
-    // (full Dockerfile build incl. Sky130 PDK download) to ~1 min (image
-    // pull). The tradeoff: codespaces on a feature branch will NOT pick up
-    // Dockerfile changes from that branch -- they always boot from
-    // `:latest` (= last green main). For Dockerfile/toolchain work, build
-    // locally with `docker build -t socmate:dev .` and test outside
-    // Codespaces, or temporarily flip this back to a `build` block.
-    "image": "ghcr.io/facebookexperimental/coresmith:latest",
+    // Inverted base: stock Ubuntu 22.04 devcontainer image (FHS, glibc,
+    // apt) + Nix layered via the official devcontainer feature. The
+    // production runtime image at ghcr.io/facebookexperimental/coresmith
+    // still uses the openlane2 nix-only base; we don't try to make that
+    // image double as a devcontainer because the agent (sshd / vscode-
+    // remote-server / GitHub Codespaces tunnel) assumes a Debian-style
+    // FHS layout that the nix-only base doesn't provide. This way the
+    // agent is happy out of the box AND we don't have to fork the EDA
+    // toolchain install.
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
 
-    // The openlane2 base image already runs as root with /nix/store on
-    // PATH; keep the dev container as root so the entrypoint can write
-    // under /socmate/.socmate, /rtl, etc.
+    "features": {
+        "ghcr.io/devcontainers/features/common-utils:2": {
+            "installZsh": true,
+            "configureZshAsDefaultShell": false,
+            "upgradePackages": false
+        },
+        // sshd feature -- installs openssh-server via apt-get on this
+        // Ubuntu base, which Just Works (unlike the openlane2 nix base
+        // where apt-get is absent and the feature install crashes).
+        "ghcr.io/devcontainers/features/sshd:1": {
+            "version": "latest"
+        },
+        // Nix via the determinate.systems multi-user installer. Adds
+        // the openlane.cachix.org substituter so the OpenLane2 install
+        // step in onCreateCommand below is a binary-cache pull (~10 min)
+        // instead of a from-source build (hours).
+        "ghcr.io/devcontainers/features/nix:1": {
+            "version": "latest",
+            "multiUser": true,
+            "extraNixConfig": "experimental-features = nix-command flakes\nextra-substituters = https://openlane.cachix.org\nextra-trusted-public-keys = openlane.cachix.org-1:qqdwh+QMNGmZAuyeQJTH9ErW57OWSvdtuwfBKdS254E="
+        },
+        // Node for the Claude Code CLI install.
+        "ghcr.io/devcontainers/features/node:1": {
+            "version": "20"
+        },
+        // Python 3.11 to match the production image and orchestrator
+        // pyproject.toml.
+        "ghcr.io/devcontainers/features/python:1": {
+            "version": "3.11",
+            "installTools": false
+        },
+        "ghcr.io/devcontainers/features/git:1": {}
+    },
+
     "remoteUser": "root",
     "containerUser": "root",
 
-    "workspaceFolder": "/socmate",
-    "workspaceMount": "source=${localWorkspaceFolder},target=/socmate,type=bind,consistency=cached",
+    "workspaceFolder": "/workspaces/coresmith",
 
     "containerEnv": {
-        "SOCMATE_PROJECT_ROOT": "/socmate",
-        "PDK_ROOT": "/socmate/.pdk",
+        "CORESMITH_PROJECT_ROOT": "/workspaces/coresmith",
         "PYTHONUNBUFFERED": "1"
     },
 
-    // Forward the MCP server HTTP port for users running `make mcp` over HTTP.
+    "remoteEnv": {
+        "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
+        "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+        // Set as a user-level codespaces secret scoped to this repo via
+        //   cat ~/.claude/.credentials.json | gh secret set CLAUDE_CREDENTIALS_JSON \
+        //     --user --app codespaces --repos facebookexperimental/coresmith
+        // The Claude Code CLI accepts CLAUDE_CODE_OAUTH_TOKEN in env, but in
+        // headless subprocess invocations (like the pipeline shelling out to
+        // `claude -p ...`) it falls back to ~/.claude/.credentials.json --
+        // env-only auth was reporting "Not logged in" mid-run. Writing the
+        // full credentials bundle to disk in onCreate gives the CLI a
+        // refresh token too, so long sessions don't die when the 8-hour
+        // access token expires.
+        "CLAUDE_CREDENTIALS_JSON": "${localEnv:CLAUDE_CREDENTIALS_JSON}"
+    },
+
+    // onCreate (runs once, shown in the "Setting up your codespace"
+    // log so users see progress during the heavy nix install):
+    //
+    // 1. Install the Claude Code CLI.
+    // 2. Install OpenLane2 from its flake (openroad + opensta + the
+    //    openlane wrapper) + the EDA subtools from nixpkgs that the
+    //    coresmith orchestrator shells out to directly (yosys,
+    //    verilator, magic, klayout, iverilog). The openlane.cachix.org
+    //    substituter configured in the nix feature above turns this
+    //    into a binary-cache pull (~10 min) instead of from-source.
+    //    `netgen` builds from source on nixpkgs and is only needed by
+    //    the backend LVS step, so it's left out -- add by hand if you
+    //    need backend signoff.
+    // 3. Pip-install requirements + the orchestrator in editable mode.
+    // 4. Write a /etc/profile.d hook that sources the codespaces
+    //    secrets file and sets PYTHONPATH for SSH (non-login) shells.
+    //    Codespaces injects secrets into the workbench env but SSH
+    //    sessions don't inherit them unless explicitly sourced.
+    // 5. Materialize the full Claude credentials bundle to
+    //    /root/.claude/.credentials.json from the CLAUDE_CREDENTIALS_JSON
+    //    secret. The Claude Code CLI's headless subprocess path reads
+    //    credentials.json (not the env var) -- the pipeline's
+    //    `claude -p ...` shellouts fail with "Not logged in" without it.
+    "onCreateCommand": "set -eux; npm install -g @anthropic-ai/claude-code 2>&1 | tail -3; nix profile install --accept-flake-config github:efabless/openlane2 2>&1 | tail -10; nix profile install --accept-flake-config github:efabless/openlane2#openroad github:efabless/openlane2#opensta 2>&1 | tail -10; nix profile install --accept-flake-config nixpkgs#yosys nixpkgs#verilator nixpkgs#magic-vlsi nixpkgs#klayout nixpkgs#iverilog 2>&1 | tail -10; apt-get install -y libpython3.11 libpython3.11-dev 2>&1 | tail -3; pip install --upgrade pip; if [ -f /workspaces/coresmith/requirements.txt ]; then pip install -r /workspaces/coresmith/requirements.txt; fi; pip install cocotb cocotb-bus; if [ -d /workspaces/coresmith/orchestrator ]; then pip install -e /workspaces/coresmith/orchestrator; fi; mkdir -p /root/.claude && printf '%s' \"$CLAUDE_CREDENTIALS_JSON\" > /root/.claude/.credentials.json && chmod 600 /root/.claude/.credentials.json; cat > /etc/profile.d/codespaces-setup.sh <<'EOSH'\n# Auto-source codespaces secrets for SSH (non-login) shells.\n[ -r /workspaces/.codespaces/shared/.env-secrets ] && set -a && . /workspaces/.codespaces/shared/.env-secrets && set +a\n# Put the coresmith repo on PYTHONPATH so `import orchestrator` works\n# (the editable install of socmate-asic-orchestrator exposes\n# architecture / langchain / langgraph as TOP-level packages, not\n# under `orchestrator.*`), AND chain in the codespaces python's\n# site-packages so the apt-libpython-embedded interpreter inside the\n# cocotb sim finds cocotb / pygpi.\nexport PYTHONPATH=/workspaces/coresmith:/usr/local/python/3.11.15/lib/python3.11/site-packages${PYTHONPATH:+:$PYTHONPATH}\n# cocotb dlopens libpython3.11.so to embed Python in the sim binary.\n# Codespaces python is static (no .so); apt libpython3.11 from the\n# Ubuntu 22.04 base is ABI-compatible with system glibc/libm (whereas\n# the nix-store libpython requires GLIBC_2.38 that this base doesn't\n# have, so dlopen fails).\nexport LIBPYTHON_LOC=/usr/lib/x86_64-linux-gnu/libpython3.11.so.1.0\nEOSH\nchmod 644 /etc/profile.d/codespaces-setup.sh",
+
+    "postAttachCommand": "bash -lc 'echo coresmith dev container ready. claude --version && openlane --version && yosys --version | head -1'",
+
     "forwardPorts": [8765],
     "portsAttributes": {
         "8765": {
-            "label": "socmate MCP HTTP",
+            "label": "coresmith MCP HTTP",
             "onAutoForward": "silent"
         }
     },
-
-    // Run preflight on attach so users know immediately whether the
-    // toolchain came up correctly. This does NOT call the LLM; it just
-    // checks that the PDK and EDA binaries exist on $PATH.
-    "postAttachCommand": "make preflight || true",
 
     "customizations": {
         "vscode": {
@@ -49,19 +116,7 @@
                 "charliermarsh.ruff",
                 "mshr-h.veriloghdl",
                 "anthropic.claude-code"
-            ],
-            "settings": {
-                "python.defaultInterpreterPath": "/opt/socmate-venv/bin/python",
-                "python.terminal.activateEnvironment": false
-            }
+            ]
         }
-    },
-
-    // Authentication is via env var. In Codespaces, set CLAUDE_CODE_OAUTH_TOKEN
-    // (or ANTHROPIC_API_KEY) as a Codespaces secret on your fork --
-    // see docs/AUTHENTICATION.md.
-    "remoteEnv": {
-        "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
-        "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}"
     }
 }
