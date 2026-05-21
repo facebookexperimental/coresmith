@@ -69,12 +69,26 @@ const EDGE_STROKE = {
 
 const HIDDEN_NODES = new Set(['Abort']);
 
+// Architecture is a DAG (best laid out horizontally to show parallel
+// agent paths); Frontend/Backend pipelines are mostly linear and read
+// better top-down in a landscape viewport.
+function _defaultDirection(name) {
+  if (name === 'frontend' || name === 'backend') return 'DOWN';
+  return 'RIGHT';
+}
+
 export default function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, traceData, onRequestTraces, detailWidth, onDetailResize }) {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [selectedNode, setSelectedNode] = useState(null);
   const [layoutDone, setLayoutDone] = useState(false);
-  const [direction, setDirection] = useState('RIGHT');
+  const [direction, setDirection] = useState(() => _defaultDirection(graphName));
+
+  // Reset direction when the active graph changes so each graph opens in
+  // its natural orientation (Architecture LR; Frontend/Backend TB).
+  useEffect(() => {
+    setDirection(_defaultDirection(graphName));
+  }, [graphName]);
 
   // Track whether we've already done initial layout for this graphData
   const layoutGraphRef = useRef(null);

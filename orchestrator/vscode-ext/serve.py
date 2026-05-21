@@ -805,6 +805,25 @@ def get_timeline_data(graph_filter: str = "") -> dict:
             else:
                 active_blocks += 1
 
+    # If the last event is old, the run is historical -- per-block status
+    # defaults to "running" because explicit completion nodes (Pipeline
+    # Complete, Backend Complete, Architecture Complete) only fire in some
+    # paths. Without this fixup the UI thinks blocks are still active and
+    # ticks the elapsed counter from the start_ts to "now", which for a
+    # week-old run produces nonsense like "9457m 24s elapsed".
+    import time as _time
+    HISTORICAL_CUTOFF_S = 60.0
+    is_historical = (pipeline_end is not None
+                     and _time.time() - pipeline_end > HISTORICAL_CUTOFF_S)
+    if is_historical:
+        for blk in blocks.values():
+            if blk.get("status") == "running":
+                # No explicit failure signal -> assume done; failed blocks
+                # already got their status set inside the exit handler.
+                blk["status"] = "done"
+        waiting_for_human = 0
+        active_blocks = 0
+
     block_list = sorted(blocks.values(), key=lambda b: b["start_ts"])
     return {
         "blocks": block_list,
@@ -813,6 +832,7 @@ def get_timeline_data(graph_filter: str = "") -> dict:
         "graph": graph_filter or "all",
         "waiting_for_human": waiting_for_human,
         "active_blocks": active_blocks,
+        "is_historical": is_historical,
     }
 
 

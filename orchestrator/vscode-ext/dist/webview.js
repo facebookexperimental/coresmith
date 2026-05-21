@@ -126611,12 +126611,20 @@ var EDGE_STROKE = {
   agent: "#1111FF"
 };
 var HIDDEN_NODES = /* @__PURE__ */ new Set(["Abort"]);
+function _defaultDirection(name) {
+  if (name === "frontend" || name === "backend")
+    return "DOWN";
+  return "RIGHT";
+}
 function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, traceData, onRequestTraces, detailWidth, onDetailResize }) {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [selectedNode, setSelectedNode] = (0, import_react16.useState)(null);
   const [layoutDone, setLayoutDone] = (0, import_react16.useState)(false);
-  const [direction, setDirection] = (0, import_react16.useState)("RIGHT");
+  const [direction, setDirection] = (0, import_react16.useState)(() => _defaultDirection(graphName));
+  (0, import_react16.useEffect)(() => {
+    setDirection(_defaultDirection(graphName));
+  }, [graphName]);
   const layoutGraphRef = (0, import_react16.useRef)(null);
   const reactFlow = useReactFlow();
   const { rfNodes, rfEdges } = (0, import_react16.useMemo)(() => {
@@ -126974,7 +126982,14 @@ function GanttRow({ block, toPercent, effectiveEnd, onSegmentClick, selectedSegK
   const handleLeave = (0, import_react17.useCallback)(() => setTooltip(null), []);
   return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-row", ref: rowRef, children: [
     /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "gantt-label", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-block-info", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "gantt-block-name", children: block.name.replace(/_/g, " ") }),
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+        "span",
+        {
+          className: "gantt-block-name",
+          title: block.name.replace(/_/g, " "),
+          children: block.name.replace(/_/g, " ")
+        }
+      ),
       /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-block-meta", children: [
         block.tier && /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("span", { className: "gantt-tier-badge", children: [
           "T",
@@ -127105,14 +127120,17 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
   const [dragState, setDragState] = (0, import_react17.useState)(null);
   const chartRef = (0, import_react17.useRef)(null);
   const chartScrollRef = (0, import_react17.useRef)(0);
-  const hasActiveWork = timelineData?.blocks?.some((b) => {
+  const lastEventTs = timelineData?.pipeline_end || 0;
+  const secondsSinceLastEvent = lastEventTs > 0 ? Date.now() / 1e3 - lastEventTs : Infinity;
+  const isHistoricalRun = secondsSinceLastEvent > 60;
+  const hasActiveWork = !isHistoricalRun && (timelineData?.blocks?.some((b) => {
     if (b.status !== "running")
       return false;
     const segs = b.attempts?.flatMap((a) => a.segments) ?? [];
     const hasOpenWaiting = segs.some((s) => !s.end_ts && s.status === "waiting");
     const hasOpenRunning = segs.some((s) => !s.end_ts && s.status === "running");
     return !hasOpenWaiting || hasOpenRunning;
-  }) ?? false;
+  }) ?? false);
   const handleChartScroll = (0, import_react17.useCallback)(() => {
     if (chartRef.current) {
       chartScrollRef.current = chartRef.current.scrollTop;

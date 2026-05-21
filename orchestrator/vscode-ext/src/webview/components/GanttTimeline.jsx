@@ -191,7 +191,12 @@ function GanttRow({ block, toPercent, effectiveEnd, onSegmentClick, selectedSegK
     <div className="gantt-row" ref={rowRef}>
       <div className="gantt-label">
         <div className="gantt-block-info">
-          <span className="gantt-block-name">{block.name.replace(/_/g, ' ')}</span>
+          <span
+            className="gantt-block-name"
+            title={block.name.replace(/_/g, ' ')}
+          >
+            {block.name.replace(/_/g, ' ')}
+          </span>
           <div className="gantt-block-meta">
             {block.tier && <span className="gantt-tier-badge">T{block.tier}</span>}
             {maxAttempt > 1 && (
@@ -336,14 +341,22 @@ export default function GanttTimeline({ timelineData, traceData, onRequestTraces
   const chartRef = useRef(null);
   const chartScrollRef = useRef(0);
 
-  // Only tick the clock when blocks are actively processing (not just waiting for human)
-  const hasActiveWork = timelineData?.blocks?.some((b) => {
+  // A run is "actively working" only if the latest event is recent. Per-block
+  // status defaults to "running" and stays that way unless very specific
+  // completion nodes fire, so trusting it alone causes the elapsed counter
+  // to tick against a 6-day-old run.
+  const lastEventTs = timelineData?.pipeline_end || 0;
+  const secondsSinceLastEvent = lastEventTs > 0
+    ? (Date.now() / 1000) - lastEventTs
+    : Infinity;
+  const isHistoricalRun = secondsSinceLastEvent > 60;
+  const hasActiveWork = !isHistoricalRun && (timelineData?.blocks?.some((b) => {
     if (b.status !== 'running') return false;
     const segs = b.attempts?.flatMap((a) => a.segments) ?? [];
     const hasOpenWaiting = segs.some((s) => !s.end_ts && s.status === 'waiting');
     const hasOpenRunning = segs.some((s) => !s.end_ts && s.status === 'running');
     return !hasOpenWaiting || hasOpenRunning;
-  }) ?? false;
+  }) ?? false);
 
   // Preserve chart scroll position across re-renders
   const handleChartScroll = useCallback(() => {

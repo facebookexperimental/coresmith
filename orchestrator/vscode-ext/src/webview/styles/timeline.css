@@ -99,11 +99,8 @@
   padding-top: 8px;
 }
 
-.gantt-label-spacer {
-  width: 160px;
-  min-width: 160px;
-  flex-shrink: 0;
-}
+/* Width is defined further down; this rule is intentionally minimal so
+ * the later definition (with sticky positioning) wins via the cascade. */
 
 .gantt-time-track {
   flex: 1;
@@ -220,10 +217,24 @@
 
 /* ── Block Labels ────────────────────────────────────── */
 .gantt-label {
-  width: 160px;
-  min-width: 160px;
+  width: 220px;
+  min-width: 220px;
   flex-shrink: 0;
   padding: 6px 12px 6px 0;
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  background: var(--color-gantt-bg);
+}
+
+.gantt-label-spacer {
+  width: 220px;
+  min-width: 220px;
+  flex-shrink: 0;
+  position: sticky;
+  left: 0;
+  z-index: 4;
+  background: var(--color-gantt-bg);
 }
 
 .gantt-block-info {
@@ -238,9 +249,13 @@
   font-weight: 500;
   color: var(--color-gantt-stat-text);
   text-transform: capitalize;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
   overflow: hidden;
-  text-overflow: ellipsis;
+  line-height: 1.25;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   flex: 1;
 }
 
