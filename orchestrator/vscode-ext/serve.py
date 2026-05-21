@@ -1216,13 +1216,13 @@ def main():
         sys.exit(1)
 
     httpd = HTTPServer((args.host, args.port), WebviewHandler)
-    print(f"╔══════════════════════════════════════════════╗")
-    print(f"║  SoCMate                                     ║")
+    print("╔══════════════════════════════════════════════╗")
+    print("║  SoCMate                                     ║")
     print(f"║  http://{args.host}:{args.port}                   ║")
-    print(f"╚══════════════════════════════════════════════╝")
+    print("╚══════════════════════════════════════════════╝")
     print(f"  Serving webview from {DIST_DIR}")
-    print(f"  Graph API at /api/graph/frontend")
-    print(f"  Press Ctrl+C to stop\n")
+    print("  Graph API at /api/graph/frontend")
+    print("  Press Ctrl+C to stop\n")
 
     try:
         httpd.serve_forever()
