@@ -1015,6 +1015,7 @@ function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
   let toolN = 0;
   let toolErr = 0;
   let resultN = 0;
+  let resultErr = 0;
   let stepDurMs = 0;
   if (Array.isArray(steps) && steps.length) {
     llmN = 0;
@@ -1024,6 +1025,12 @@ function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
         if (s.return_code != null && s.return_code !== 0) toolErr++;
       } else if (s.type === 'result_summary') {
         resultN++;
+        const m = s.metrics || {};
+        if (m.success === false || m.passed === false || m.clean === false
+            || m.lint_passed === false || m.sim_passed === false
+            || m.match === false || m.all_pass === false) {
+          resultErr++;
+        }
       } else {
         // llm_call / llm_call_streaming / undefined (legacy span path)
         llmN++;
@@ -1034,7 +1041,7 @@ function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
   }
   const duration = stepDurMs || getAttemptDuration(spans);
   const status = getAttemptStatus(spans);
-  const isError = status === 'error' || toolErr > 0;
+  const isError = status === 'error' || toolErr > 0 || resultErr > 0;
   const isStreaming = hasStreamingCalls;
   const noActivity = llmN === 0 && toolN === 0 && resultN === 0;
 
@@ -1609,9 +1616,30 @@ const DetailPanel = React.memo(function DetailPanel({
             {/* Tab bar */}
             <div className="trace-tabs">
               {tabGroups.map((group) => {
-                const hasError = group.spans?.some(
+                // Detect failure across both legacy span data and the
+                // unified trajectory steps. Attempts that failed (e.g.
+                // Flat Top Synthesis on success=false) used to render as
+                // a normal tab, hiding the failure from a casual look.
+                const spanError = group.spans?.some(
                   (s) => s.status === 'error'
                 );
+                const stepError = group.steps?.some((s) => {
+                  if (s.type === 'tool_run') {
+                    return s.return_code != null && s.return_code !== 0;
+                  }
+                  if (s.type === 'result_summary') {
+                    const m = s.metrics || {};
+                    return m.success === false
+                        || m.passed === false
+                        || m.clean === false
+                        || m.lint_passed === false
+                        || m.sim_passed === false
+                        || m.match === false;
+                  }
+                  return s.status === 'error';
+                });
+                const groupStatusError = group.status === 'failed';
+                const hasError = spanError || stepError || groupStatusError;
                 return (
                   <button
                     key={group.key}

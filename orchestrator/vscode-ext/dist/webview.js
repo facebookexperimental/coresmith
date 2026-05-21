@@ -125986,6 +125986,7 @@ function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
   let toolN = 0;
   let toolErr = 0;
   let resultN = 0;
+  let resultErr = 0;
   let stepDurMs = 0;
   if (Array.isArray(steps) && steps.length) {
     llmN = 0;
@@ -125996,6 +125997,10 @@ function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
           toolErr++;
       } else if (s.type === "result_summary") {
         resultN++;
+        const m = s.metrics || {};
+        if (m.success === false || m.passed === false || m.clean === false || m.lint_passed === false || m.sim_passed === false || m.match === false || m.all_pass === false) {
+          resultErr++;
+        }
       } else {
         llmN++;
       }
@@ -126006,7 +126011,7 @@ function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
   }
   const duration = stepDurMs || getAttemptDuration(spans);
   const status = getAttemptStatus(spans);
-  const isError = status === "error" || toolErr > 0;
+  const isError = status === "error" || toolErr > 0 || resultErr > 0;
   const isStreaming = hasStreamingCalls;
   const noActivity = llmN === 0 && toolN === 0 && resultN === 0;
   return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: `llm-summary-bar ${isStreaming ? "streaming" : isError ? "error" : "ok"}`, children: [
@@ -126428,9 +126433,21 @@ var DetailPanel = import_react15.default.memo(function DetailPanel2({
           ] })),
           tabGroups.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(import_jsx_runtime9.Fragment, { children: [
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "trace-tabs", children: tabGroups.map((group) => {
-              const hasError = group.spans?.some(
+              const spanError = group.spans?.some(
                 (s) => s.status === "error"
               );
+              const stepError = group.steps?.some((s) => {
+                if (s.type === "tool_run") {
+                  return s.return_code != null && s.return_code !== 0;
+                }
+                if (s.type === "result_summary") {
+                  const m = s.metrics || {};
+                  return m.success === false || m.passed === false || m.clean === false || m.lint_passed === false || m.sim_passed === false || m.match === false;
+                }
+                return s.status === "error";
+              });
+              const groupStatusError = group.status === "failed";
+              const hasError = spanError || stepError || groupStatusError;
               return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
                 "button",
                 {
