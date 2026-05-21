@@ -64,10 +64,24 @@ export async function applyElkLayout(nodes, edges, direction = 'RIGHT') {
     const isGroup = groupNodeIds.has(node.id);
     const parent = childToParent[node.id];
 
+    // Respect explicit width/height ONLY for non-group nodes. Groups must
+    // auto-size from their children's bounding box (width=0/height=0 tells
+    // ELK to compute) -- otherwise a 600x400 group can't contain the
+    // 340x180 children once we add description text and padding.
+    const explicitW = Number(node.style?.width || node.width);
+    const explicitH = Number(node.style?.height || node.style?.minHeight || node.height);
     const elkNode = {
       id: node.id,
-      width: isBus ? BUS_NODE_WIDTH : (isGroup ? 0 : DEFAULT_NODE_WIDTH),
-      height: isBus ? BUS_NODE_HEIGHT : (isGroup ? 0 : DEFAULT_NODE_HEIGHT),
+      width: isGroup
+        ? 0
+        : (explicitW > 0
+            ? explicitW
+            : (isBus ? BUS_NODE_WIDTH : DEFAULT_NODE_WIDTH)),
+      height: isGroup
+        ? 0
+        : (explicitH > 0
+            ? explicitH
+            : (isBus ? BUS_NODE_HEIGHT : DEFAULT_NODE_HEIGHT)),
     };
 
     if (!isGroup) {
@@ -154,18 +168,20 @@ export async function applyElkLayout(nodes, edges, direction = 'RIGHT') {
       'elk.algorithm': 'layered',
       'elk.direction': direction,
       'org.eclipse.elk.direction': direction,
-      'org.eclipse.elk.spacing.nodeNode': '60',
-      'org.eclipse.elk.spacing.edgeNode': '40',
-      'elk.spacing.nodeNode': '60',
-      'elk.layered.spacing.nodeNodeBetweenLayers': '100',
-      'elk.layered.spacing.edgeEdgeBetweenLayers': '30',
-      'elk.layered.spacing.edgeNodeBetweenLayers': '40',
+      // More generous spacing so labels and edge routing don't collide;
+      // a tight layout made the Architecture tab hard to read.
+      'org.eclipse.elk.spacing.nodeNode': '90',
+      'org.eclipse.elk.spacing.edgeNode': '60',
+      'elk.spacing.nodeNode': '90',
+      'elk.layered.spacing.nodeNodeBetweenLayers': '140',
+      'elk.layered.spacing.edgeEdgeBetweenLayers': '40',
+      'elk.layered.spacing.edgeNodeBetweenLayers': '60',
       'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
       'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
       'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES',
       'elk.layered.thoroughness': '15',
       'elk.edgeRouting': 'SPLINES',
-      'elk.spacing.componentComponent': '80',
+      'elk.spacing.componentComponent': '110',
       'elk.hierarchyHandling': 'INCLUDE_CHILDREN',
     },
     children: topLevelElkNodes,
@@ -174,16 +190,35 @@ export async function applyElkLayout(nodes, edges, direction = 'RIGHT') {
 
   const layouted = await elk.layout(graph);
 
-  // Flatten positioned nodes from the ELK result (including children of compounds)
+  // Flatten positioned nodes from the ELK result. ReactFlow expects:
+  //   - top-level nodes: absolute positions
+  //   - child nodes (with parentId): position RELATIVE to parent
+  // ELK returns children's x/y relative to parent already, so we keep them
+  // relative for nodes that will end up with a parentId in ReactFlow.
   const positionMap = {};
   const sizeMap = {};
+  const childIdSet = new Set();
+  for (const id in childToParent) childIdSet.add(id);
 
-  function collectPositions(elkChildren, offsetX = 0, offsetY = 0) {
+  function collectPositions(elkChildren, offsetX = 0, offsetY = 0, depth = 0) {
     for (const child of elkChildren || []) {
-      positionMap[child.id] = { x: child.x + offsetX, y: child.y + offsetY };
+      const isReactFlowChild = childIdSet.has(child.id);
+      if (isReactFlowChild) {
+        // Relative position -- ELK already gives us this when the child
+        // is inside a compound parent.
+        positionMap[child.id] = { x: child.x, y: child.y };
+      } else {
+        // Absolute position for top-level nodes.
+        positionMap[child.id] = { x: child.x + offsetX, y: child.y + offsetY };
+      }
       sizeMap[child.id] = { width: child.width, height: child.height };
       if (child.children) {
-        collectPositions(child.children, child.x + offsetX, child.y + offsetY);
+        // Recurse with the parent's absolute position so any grandchildren
+        // that aren't ReactFlow children still get absolute coords.
+        const childAbsX = (isReactFlowChild ? offsetX : 0) + child.x;
+        const childAbsY = (isReactFlowChild ? offsetY : 0) + child.y;
+        collectPositions(child.children, childAbsX + (isReactFlowChild ? 0 : offsetX),
+                         childAbsY + (isReactFlowChild ? 0 : offsetY), depth + 1);
       }
     }
   }

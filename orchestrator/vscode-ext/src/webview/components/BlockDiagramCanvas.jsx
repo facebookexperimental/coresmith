@@ -305,17 +305,38 @@ export default function BlockDiagramCanvas({ diagramData }) {
     if (!diagramData?.architecture) return;
 
     const arch = diagramData.architecture;
-    const rawNodes = (arch.systemNodes || []).map((n) => ({
-      ...n,
-      type: n.type || 'nodeArchGraph',
-      position: n.position || { x: 0, y: 0 },
-      style: n.data?.is_subsystem
-        ? { width: 600, height: 400 }
-        : { width: 340, minHeight: 160 },
-      ...(n.data?.is_subsystem && n.data?.node_parentId !== 'graph_root'
-        ? { parentId: n.data.node_parentId, extent: 'parent' }
-        : {}),
-    }));
+    // Build the set of valid subsystem IDs so we can attach children that
+    // claim a subsystem parent without orphaning them when the parent
+    // wasn't materialized.
+    const subsystemIds = new Set(
+      (arch.systemNodes || [])
+        .filter((n) => n.data?.is_subsystem)
+        .map((n) => n.id)
+    );
+    const rawNodes = (arch.systemNodes || []).map((n) => {
+      const isSubsystem = !!n.data?.is_subsystem;
+      const parentId = n.data?.node_parentId;
+      const parentValid = parentId && parentId !== 'graph_root'
+                          && subsystemIds.has(parentId);
+      const base = {
+        ...n,
+        type: n.type || 'nodeArchGraph',
+        position: n.position || { x: 0, y: 0 },
+        style: isSubsystem
+          ? { width: 600, height: 400 }
+          : { width: 340, minHeight: 160 },
+      };
+      // Subsystems with a subsystem parent: nest visually.
+      // Regular blocks with a subsystem parent: same, so they render
+      // INSIDE the subsystem container (was the missing case -- previously
+      // only subsystems-of-subsystems got parentId, so leaf blocks
+      // rendered outside their containing subsystem).
+      if (parentValid) {
+        base.parentId = parentId;
+        base.extent = 'parent';
+      }
+      return base;
+    });
 
     const rawEdges = (arch.systemEdges || []).map((e) => ({
       ...e,

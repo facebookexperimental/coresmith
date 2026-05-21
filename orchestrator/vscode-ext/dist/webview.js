@@ -126635,10 +126635,12 @@ async function applyElkLayout(nodes, edges, direction = "RIGHT") {
     const isBus = node.data?.node_type === "bus";
     const isGroup = groupNodeIds.has(node.id);
     const parent = childToParent[node.id];
+    const explicitW = Number(node.style?.width || node.width);
+    const explicitH = Number(node.style?.height || node.style?.minHeight || node.height);
     const elkNode = {
       id: node.id,
-      width: isBus ? BUS_NODE_WIDTH : isGroup ? 0 : DEFAULT_NODE_WIDTH,
-      height: isBus ? BUS_NODE_HEIGHT : isGroup ? 0 : DEFAULT_NODE_HEIGHT
+      width: isGroup ? 0 : explicitW > 0 ? explicitW : isBus ? BUS_NODE_WIDTH : DEFAULT_NODE_WIDTH,
+      height: isGroup ? 0 : explicitH > 0 ? explicitH : isBus ? BUS_NODE_HEIGHT : DEFAULT_NODE_HEIGHT
     };
     if (!isGroup) {
       if (entryNodeIds.has(node.id)) {
@@ -126710,18 +126712,20 @@ async function applyElkLayout(nodes, edges, direction = "RIGHT") {
       "elk.algorithm": "layered",
       "elk.direction": direction,
       "org.eclipse.elk.direction": direction,
-      "org.eclipse.elk.spacing.nodeNode": "60",
-      "org.eclipse.elk.spacing.edgeNode": "40",
-      "elk.spacing.nodeNode": "60",
-      "elk.layered.spacing.nodeNodeBetweenLayers": "100",
-      "elk.layered.spacing.edgeEdgeBetweenLayers": "30",
-      "elk.layered.spacing.edgeNodeBetweenLayers": "40",
+      // More generous spacing so labels and edge routing don't collide;
+      // a tight layout made the Architecture tab hard to read.
+      "org.eclipse.elk.spacing.nodeNode": "90",
+      "org.eclipse.elk.spacing.edgeNode": "60",
+      "elk.spacing.nodeNode": "90",
+      "elk.layered.spacing.nodeNodeBetweenLayers": "140",
+      "elk.layered.spacing.edgeEdgeBetweenLayers": "40",
+      "elk.layered.spacing.edgeNodeBetweenLayers": "60",
       "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
       "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
       "elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES",
       "elk.layered.thoroughness": "15",
       "elk.edgeRouting": "SPLINES",
-      "elk.spacing.componentComponent": "80",
+      "elk.spacing.componentComponent": "110",
       "elk.hierarchyHandling": "INCLUDE_CHILDREN"
     },
     children: topLevelElkNodes,
@@ -126730,12 +126734,27 @@ async function applyElkLayout(nodes, edges, direction = "RIGHT") {
   const layouted = await elk.layout(graph);
   const positionMap = {};
   const sizeMap = {};
-  function collectPositions(elkChildren, offsetX = 0, offsetY = 0) {
+  const childIdSet = /* @__PURE__ */ new Set();
+  for (const id2 in childToParent)
+    childIdSet.add(id2);
+  function collectPositions(elkChildren, offsetX = 0, offsetY = 0, depth = 0) {
     for (const child of elkChildren || []) {
-      positionMap[child.id] = { x: child.x + offsetX, y: child.y + offsetY };
+      const isReactFlowChild = childIdSet.has(child.id);
+      if (isReactFlowChild) {
+        positionMap[child.id] = { x: child.x, y: child.y };
+      } else {
+        positionMap[child.id] = { x: child.x + offsetX, y: child.y + offsetY };
+      }
       sizeMap[child.id] = { width: child.width, height: child.height };
       if (child.children) {
-        collectPositions(child.children, child.x + offsetX, child.y + offsetY);
+        const childAbsX = (isReactFlowChild ? offsetX : 0) + child.x;
+        const childAbsY = (isReactFlowChild ? offsetY : 0) + child.y;
+        collectPositions(
+          child.children,
+          childAbsX + (isReactFlowChild ? 0 : offsetX),
+          childAbsY + (isReactFlowChild ? 0 : offsetY),
+          depth + 1
+        );
       }
     }
   }
@@ -127918,13 +127937,25 @@ function BlockDiagramCanvas({ diagramData }) {
     if (!diagramData?.architecture)
       return;
     const arch = diagramData.architecture;
-    const rawNodes = (arch.systemNodes || []).map((n) => ({
-      ...n,
-      type: n.type || "nodeArchGraph",
-      position: n.position || { x: 0, y: 0 },
-      style: n.data?.is_subsystem ? { width: 600, height: 400 } : { width: 340, minHeight: 160 },
-      ...n.data?.is_subsystem && n.data?.node_parentId !== "graph_root" ? { parentId: n.data.node_parentId, extent: "parent" } : {}
-    }));
+    const subsystemIds = new Set(
+      (arch.systemNodes || []).filter((n) => n.data?.is_subsystem).map((n) => n.id)
+    );
+    const rawNodes = (arch.systemNodes || []).map((n) => {
+      const isSubsystem = !!n.data?.is_subsystem;
+      const parentId = n.data?.node_parentId;
+      const parentValid = parentId && parentId !== "graph_root" && subsystemIds.has(parentId);
+      const base = {
+        ...n,
+        type: n.type || "nodeArchGraph",
+        position: n.position || { x: 0, y: 0 },
+        style: isSubsystem ? { width: 600, height: 400 } : { width: 340, minHeight: 160 }
+      };
+      if (parentValid) {
+        base.parentId = parentId;
+        base.extent = "parent";
+      }
+      return base;
+    });
     const rawEdges = (arch.systemEdges || []).map((e) => ({
       ...e,
       type: e.type || "edgeArchGraph"
