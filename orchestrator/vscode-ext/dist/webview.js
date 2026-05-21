@@ -125789,10 +125789,15 @@ function ResultSummaryCard({ metrics, index, total }) {
       /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "tool-card-icon", "aria-hidden": "true", children: "\u{1F4CB}" }),
       /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-model-name tool-card-label", children: "Outcome" })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "result-card-grid", children: entries.map(([k, v]) => /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "result-card-row", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "result-card-key", children: LABEL[k] || k.replace(/_/g, " ") }),
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `result-card-val ${typeof v === "boolean" ? v ? "ok" : "error" : ""}`, children: fmt(k, v) })
-    ] }, k)) })
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "result-card-grid", children: entries.map(([k, v]) => {
+      const isWide = k === "dashboard_path" || k === "path" || k === "log_path" || k === "design_name" || k === "category" || typeof v === "string" && v.length > 28;
+      const isBool = typeof v === "boolean";
+      const isNumeric2 = typeof v === "number";
+      return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: `result-card-row ${isWide ? "full-width" : ""}`, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "result-card-key", children: LABEL[k] || k.replace(/_/g, " ") }),
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `result-card-val ${isBool ? v ? "ok" : "error" : ""} ${isNumeric2 ? "numeric" : ""}`, children: fmt(k, v) })
+      ] }, k);
+    }) })
   ] });
 }
 function TrajectorySteps({ steps }) {
@@ -125841,7 +125846,7 @@ function LLMCallCard({ call, index, total }) {
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `llm-stat llm-stat-${statusCls}`, children: statusSymbol })
           ] })
         ] }),
-        call.systemPrompt && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(Collapsible, { label: "System Prompt", icon: "\\u2699", className: "llm-sys", children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(FormattedText, { text: call.systemPrompt }) }),
+        call.systemPrompt && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(Collapsible, { label: "System Prompt", icon: "\u2699", className: "llm-sys", children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(FormattedText, { text: call.systemPrompt }) }),
         call.prompt && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(Collapsible, { label: "Prompt", icon: "\u25B6", className: "llm-usr", children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(FormattedText, { text: call.prompt }) }),
         call.response && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-response", children: [
           /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-response-label", children: [
@@ -125907,6 +125912,7 @@ function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
   let llmN = llmCount || 0;
   let toolN = 0;
   let toolErr = 0;
+  let resultN = 0;
   let stepDurMs = 0;
   if (Array.isArray(steps) && steps.length) {
     llmN = 0;
@@ -125915,6 +125921,8 @@ function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
         toolN++;
         if (s.return_code != null && s.return_code !== 0)
           toolErr++;
+      } else if (s.type === "result_summary") {
+        resultN++;
       } else {
         llmN++;
       }
@@ -125927,6 +125935,7 @@ function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
   const status = getAttemptStatus(spans);
   const isError = status === "error" || toolErr > 0;
   const isStreaming = hasStreamingCalls;
+  const noActivity = llmN === 0 && toolN === 0 && resultN === 0;
   return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: `llm-summary-bar ${isStreaming ? "streaming" : isError ? "error" : "ok"}`, children: [
     /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `llm-summary-status ${isStreaming ? "streaming" : isError ? "error" : "ok"}`, children: isStreaming ? "\u25CF Generating" : isError ? "\u2717 Failed" : "\u2713 Completed" }),
     /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "llm-summary-detail", children: [
@@ -125942,7 +125951,9 @@ function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
         " tool run",
         toolN !== 1 ? "s" : "",
         toolErr > 0 ? ` (${toolErr} failed)` : ""
-      ] })
+      ] }),
+      llmN === 0 && toolN === 0 && resultN > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-summary-count", children: "result-only" }),
+      noActivity && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-summary-count", children: "no activity" })
     ] })
   ] });
 }

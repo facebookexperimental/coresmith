@@ -837,7 +837,7 @@
 .result-card-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px 14px;
+  gap: 8px 14px;
   padding: 10px 12px 12px;
   font-size: 11px;
 }
@@ -846,6 +846,10 @@
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+}
+/* Long string values (paths, design names) get their own full-width row */
+.result-card-row.full-width {
+  grid-column: 1 / -1;
 }
 .result-card-key {
   color: var(--color-text-dimmed);
@@ -858,9 +862,11 @@
   font-size: 11px;
   color: var(--color-text-primary);
   font-weight: 600;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+.result-card-val.numeric {
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .result-card-val.ok { color: #16a34a; }
 .result-card-val.error { color: #dc2626; }
@@ -1348,7 +1354,17 @@
   color: #4338ca;
   text-transform: capitalize;
   letter-spacing: 0.2px;
-  white-space: nowrap;
+  /* Allow wrapping for long block names like
+   * "top_32_bit_adder_full_flow_smoke_test_top" — otherwise the badge
+   * gets clipped or pushes the header off-screen. */
+  white-space: normal;
+  word-break: break-word;
+  max-width: 100%;
+}
+
+[data-theme="dark"] .detail-block-badge {
+  background: rgba(74, 158, 255, 0.18);
+  color: #a8c8ff;
 }
 
 .detail-live-badge {

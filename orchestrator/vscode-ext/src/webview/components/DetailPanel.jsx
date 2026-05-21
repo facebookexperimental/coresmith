@@ -737,14 +737,23 @@ function ResultSummaryCard({ metrics, index, total }) {
         <span className="llm-model-name tool-card-label">Outcome</span>
       </div>
       <div className="result-card-grid">
-        {entries.map(([k, v]) => (
-          <div key={k} className="result-card-row">
-            <span className="result-card-key">{LABEL[k] || k.replace(/_/g, ' ')}</span>
-            <span className={`result-card-val ${typeof v === 'boolean' ? (v ? 'ok' : 'error') : ''}`}>
-              {fmt(k, v)}
-            </span>
-          </div>
-        ))}
+        {entries.map(([k, v]) => {
+          // Wide strings (paths, design names, categories) get a full-width
+          // row so they don't truncate to "32 Bit Adder Full Flow Sm...".
+          const isWide = k === 'dashboard_path' || k === 'path'
+                       || k === 'log_path' || k === 'design_name'
+                       || k === 'category' || (typeof v === 'string' && v.length > 28);
+          const isBool = typeof v === 'boolean';
+          const isNumeric = typeof v === 'number';
+          return (
+            <div key={k} className={`result-card-row ${isWide ? 'full-width' : ''}`}>
+              <span className="result-card-key">{LABEL[k] || k.replace(/_/g, ' ')}</span>
+              <span className={`result-card-val ${isBool ? (v ? 'ok' : 'error') : ''} ${isNumeric ? 'numeric' : ''}`}>
+                {fmt(k, v)}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -820,7 +829,7 @@ function LLMCallCard({ call, index, total }) {
 
       {/* System prompt (collapsed) */}
       {call.systemPrompt && (
-        <Collapsible label="System Prompt" icon="\u2699" className="llm-sys">
+        <Collapsible label="System Prompt" icon={'\u2699'} className="llm-sys">
           <FormattedText text={call.systemPrompt} />
         </Collapsible>
       )}
@@ -925,6 +934,7 @@ function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
   let llmN = llmCount || 0;
   let toolN = 0;
   let toolErr = 0;
+  let resultN = 0;
   let stepDurMs = 0;
   if (Array.isArray(steps) && steps.length) {
     llmN = 0;
@@ -932,7 +942,10 @@ function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
       if (s.type === 'tool_run') {
         toolN++;
         if (s.return_code != null && s.return_code !== 0) toolErr++;
+      } else if (s.type === 'result_summary') {
+        resultN++;
       } else {
+        // llm_call / llm_call_streaming / undefined (legacy span path)
         llmN++;
       }
       const d = s.duration_ms || (s.duration_s ? s.duration_s * 1000 : 0);
@@ -943,6 +956,7 @@ function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
   const status = getAttemptStatus(spans);
   const isError = status === 'error' || toolErr > 0;
   const isStreaming = hasStreamingCalls;
+  const noActivity = llmN === 0 && toolN === 0 && resultN === 0;
 
   return (
     <div className={`llm-summary-bar ${isStreaming ? 'streaming' : isError ? 'error' : 'ok'}`}>
@@ -962,6 +976,12 @@ function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
             {toolN} tool run{toolN !== 1 ? 's' : ''}
             {toolErr > 0 ? ` (${toolErr} failed)` : ''}
           </span>
+        )}
+        {llmN === 0 && toolN === 0 && resultN > 0 && (
+          <span className="llm-summary-count">result-only</span>
+        )}
+        {noActivity && (
+          <span className="llm-summary-count">no activity</span>
         )}
       </span>
     </div>

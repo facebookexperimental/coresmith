@@ -1544,7 +1544,7 @@ body {
 .result-card-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px 14px;
+  gap: 8px 14px;
   padding: 10px 12px 12px;
   font-size: 11px;
 }
@@ -1553,6 +1553,9 @@ body {
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+}
+.result-card-row.full-width {
+  grid-column: 1 / -1;
 }
 .result-card-key {
   color: var(--color-text-dimmed);
@@ -1565,9 +1568,11 @@ body {
   font-size: 11px;
   color: var(--color-text-primary);
   font-weight: 600;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+.result-card-val.numeric {
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .result-card-val.ok {
   color: #16a34a;
@@ -2053,7 +2058,13 @@ body {
   color: #4338ca;
   text-transform: capitalize;
   letter-spacing: 0.2px;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
+  max-width: 100%;
+}
+[data-theme=dark] .detail-block-badge {
+  background: rgba(74, 158, 255, 0.18);
+  color: #a8c8ff;
 }
 .detail-live-badge {
   font-size: 9px;
