@@ -127209,7 +127209,7 @@ function Legend({ graphType }) {
     ] })
   ] });
 }
-function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, detailWidth, onDetailResize }) {
+function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, detailWidth, onDetailResize, nodeDescriptions }) {
   const [now2, setNow] = (0, import_react17.useState)(Date.now() / 1e3);
   const [selectedSeg, setSelectedSeg] = (0, import_react17.useState)(null);
   const [selectedSegKey, setSelectedSegKey] = (0, import_react17.useState)(null);
@@ -127525,7 +127525,13 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
       /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
         DetailPanel_default,
         {
-          node: selectedSeg,
+          node: {
+            ...selectedSeg,
+            // selectedSeg is built in handleSegmentClick with id+label
+            // already set to the node name. Look up description via the
+            // label key, not selectedSeg.node (which doesn't exist).
+            description: selectedSeg.description || nodeDescriptions?.[selectedSeg.label] || nodeDescriptions?.[selectedSeg.id]
+          },
           traceData,
           onRequestTraces,
           onClose: handleClosePanel,
@@ -128777,6 +128783,16 @@ async function fetchNodeTrajectoryHttp(nodeId) {
     return [];
   }
 }
+async function fetchNodeDescriptions() {
+  try {
+    const res = await fetch("/api/node_descriptions");
+    if (!res.ok)
+      return {};
+    return res.json();
+  } catch {
+    return {};
+  }
+}
 async function fetchSummaryHttp(stage) {
   try {
     const res = await fetch(`/api/summary/${stage}`);
@@ -128839,6 +128855,12 @@ function App() {
   const [summaryWidth, setSummaryWidth] = (0, import_react22.useState)(360);
   const [detailWidth, setDetailWidth] = (0, import_react22.useState)(420);
   const draggingRef = (0, import_react22.useRef)(null);
+  const [nodeDescriptions, setNodeDescriptions] = (0, import_react22.useState)({});
+  (0, import_react22.useEffect)(() => {
+    if (!isStandalone)
+      return;
+    fetchNodeDescriptions().then(setNodeDescriptions);
+  }, []);
   (0, import_react22.useEffect)(() => {
     viewModeRef.current = viewMode;
   }, [viewMode]);
@@ -129142,7 +129164,8 @@ function App() {
           onRequestTraces: handleRequestTraces,
           graphName,
           detailWidth,
-          onDetailResize: handleDragStart("detail")
+          onDetailResize: handleDragStart("detail"),
+          nodeDescriptions
         }
       ) }) : viewMode === "block_diagram" ? /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ReactFlowProvider, { children: /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(BlockDiagramCanvas, { diagramData: blockDiagramData }) }) }) : /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ReactFlowProvider, { children: graphData ? /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
         GraphCanvas,

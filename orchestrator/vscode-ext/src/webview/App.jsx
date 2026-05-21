@@ -159,6 +159,16 @@ async function fetchNodeTrajectoryHttp(nodeId) {
   }
 }
 
+async function fetchNodeDescriptions() {
+  try {
+    const res = await fetch('/api/node_descriptions');
+    if (!res.ok) return {};
+    return res.json();
+  } catch {
+    return {};
+  }
+}
+
 async function fetchSummaryHttp(stage) {
   try {
     const res = await fetch(`/api/summary/${stage}`);
@@ -225,6 +235,13 @@ function App() {
   const [summaryWidth, setSummaryWidth] = useState(360);
   const [detailWidth, setDetailWidth] = useState(420);
   const draggingRef = useRef(null); // 'summary' | 'detail' | null
+
+  // Node descriptions for the detail panel header (fetched once)
+  const [nodeDescriptions, setNodeDescriptions] = useState({});
+  useEffect(() => {
+    if (!isStandalone) return;
+    fetchNodeDescriptions().then(setNodeDescriptions);
+  }, []);
 
 
   useEffect(() => { viewModeRef.current = viewMode; }, [viewMode]);
@@ -539,6 +556,7 @@ function App() {
               graphName={graphName}
               detailWidth={detailWidth}
               onDetailResize={handleDragStart('detail')}
+              nodeDescriptions={nodeDescriptions}
             />
           </div>
         ) : viewMode === 'block_diagram' ? (

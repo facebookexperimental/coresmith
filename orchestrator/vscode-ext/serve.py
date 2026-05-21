@@ -326,6 +326,88 @@ def get_live_calls(node_name: str) -> list[dict]:
     return result
 
 
+def get_node_descriptions() -> dict:
+    """Build a {display_label: description} lookup from every known graph so
+    the detail panel can show a one-liner about what a node does even when
+    the user clicked it from the timeline (which has no description metadata).
+
+    Architecture meta uses Title Case keys; Pipeline/Backend meta uses
+    snake_case keys -- the pipeline_events stream emits Title Case display
+    labels for everything, so we Title Case the snake_case keys to match
+    what the timeline / detail panel actually receives."""
+    out: dict = {}
+
+    def _title_from_snake(s: str) -> str:
+        # init_block -> "Init Block"; run_pnr -> "Run Pnr" (acceptable, but
+        # also alias special-cases below).
+        return " ".join(p.capitalize() for p in s.split("_"))
+
+    SPECIAL_ALIASES = {
+        "run_pnr": "Run PnR",
+        "drc": "DRC",
+        "lvs": "LVS",
+        "mpw_precheck": "MPW Precheck",
+        "timing_signoff": "Timing Signoff",
+        "validation_dv": "Validation DV",
+        "integration_dv": "Integration DV",
+        "generate_3d_view": "Generate 3D View",
+        "flat_top_synthesis": "Flat Top Synthesis",
+        "generate_uarch_spec": "Generate uArch Spec",
+        "review_uarch_spec": "Review Uarch Spec",
+        "generate_rtl": "Generate RTL",
+        "diagnose": "Diagnose Failure",  # frontend-side; backend alias added below
+    }
+
+    # Backwards-alias common labels emitted at runtime to the canonical
+    # display key so e.g. clicking "Diagnose Backend" on the timeline picks
+    # up the underlying "diagnose" description.
+    EXTRA_ALIASES = {
+        "Diagnose Backend": "diagnose",
+        "Diagnose Failure": "diagnose",
+        "Generate RTL": "generate_rtl",
+        "Generate uArch Spec": "generate_uarch_spec",
+        "Generate Uarch Spec": "generate_uarch_spec",
+        "Review Uarch Spec": "review_uarch_spec",
+        "Initialize Block": "init_block",
+        "Initialize Tier": "init_tier",
+        "Initialize Design": "init_design",
+    }
+
+    try:
+        from orchestrator.mcp_server import (
+            _GRAPH_MODULES, _ARCH_NODE_META, _PIPELINE_NODE_META,
+            _BACKEND_NODE_META,
+        )
+        # Architecture meta: keys are already Title Case display labels.
+        for label, attrs in (_ARCH_NODE_META or {}).items():
+            desc = (attrs or {}).get("description")
+            if desc and label not in out:
+                out[label] = desc
+        # Pipeline + Backend meta: snake_case keys -> Title Case displays.
+        for meta in (_PIPELINE_NODE_META, _BACKEND_NODE_META):
+            for raw_key, attrs in (meta or {}).items():
+                desc = (attrs or {}).get("description")
+                if not desc:
+                    continue
+                display = SPECIAL_ALIASES.get(raw_key, _title_from_snake(raw_key))
+                if display not in out:
+                    out[display] = desc
+                # Also keep the original snake_case key as an alias so graph
+                # API consumers that pass the raw key still resolve.
+                if raw_key not in out:
+                    out[raw_key] = desc
+        # Apply extra aliases so multiple runtime labels resolve to the
+        # same description (e.g. "Diagnose Backend" -> "diagnose").
+        for alias, source_key in EXTRA_ALIASES.items():
+            if alias in out:
+                continue
+            if source_key in out:
+                out[alias] = out[source_key]
+    except Exception:
+        pass
+    return out
+
+
 def get_node_trajectory(node_name: str, max_log_chars: int = 16000) -> list:
     """Return a per-attempt trajectory for a node: enter/exit events,
     LLM calls within the window, and step_log file content.
@@ -1445,6 +1527,14 @@ class WebviewHandler(SimpleHTTPRequestHandler):
         if path.startswith("/api/summary_cards/"):
             stage = path.split("/api/summary_cards/", 1)[1].strip("/")
             self._json_response(get_summary_cards(stage))
+            return
+
+        # API: dictionary of node descriptions across all graphs.
+        if path == "/api/node_descriptions":
+            try:
+                self._json_response(get_node_descriptions())
+            except Exception as exc:
+                self._json_response({"error": str(exc)}, status=500)
             return
 
         # API: per-attempt trajectory for a node -- LLM calls + tool runs

@@ -347,7 +347,7 @@ function Legend({ graphType }) {
   );
 }
 
-export default function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, detailWidth, onDetailResize }) {
+export default function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, detailWidth, onDetailResize, nodeDescriptions }) {
   const [now, setNow] = useState(Date.now() / 1000);
   const [selectedSeg, setSelectedSeg] = useState(null);
   const [selectedSegKey, setSelectedSegKey] = useState(null);
@@ -732,7 +732,15 @@ export default function GanttTimeline({ timelineData, traceData, onRequestTraces
             onMouseDown={onDetailResize}
           />
           <DetailPanel
-            node={selectedSeg}
+            node={{
+              ...selectedSeg,
+              // selectedSeg is built in handleSegmentClick with id+label
+              // already set to the node name. Look up description via the
+              // label key, not selectedSeg.node (which doesn't exist).
+              description: selectedSeg.description
+                          || nodeDescriptions?.[selectedSeg.label]
+                          || nodeDescriptions?.[selectedSeg.id],
+            }}
             traceData={traceData}
             onRequestTraces={onRequestTraces}
             onClose={handleClosePanel}
