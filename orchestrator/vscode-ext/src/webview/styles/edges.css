@@ -1,0 +1,58 @@
+/* ── Edge Label Badges ────────────────────────────────── */
+.edge-label-badge {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: 'Roboto', 'Helvetica', 'Arial', sans-serif;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  z-index: 5;
+}
+
+.edge-label-badge.flow {
+  color: #22DD22;
+  background: #f0fff0;
+  border: 1px solid #22DD22;
+}
+
+.edge-label-badge.fail {
+  color: #FF1111;
+  background: #fff0f0;
+  border: 1px solid #FF1111;
+}
+
+.edge-label-badge.retry {
+  color: #FF6600;
+  background: #fff8f0;
+  border: 1px solid #FF6666;
+}
+
+.edge-label-badge.agent {
+  color: #1111FF;
+  background: #f0f0ff;
+  border: 1px solid #1111FF;
+}
+
+/* ── Animated Edge ────────────────────────────────────── */
+@keyframes edge-dash {
+  to { stroke-dashoffset: -20; }
+}
+
+.animated-edge {
+  animation: edge-dash 0.5s linear infinite;
+}
+
+/* ── Edge text overrides ──────────────────────────────── */
+.react-flow__edge-text {
+  fill: var(--color-rf-edge-text) !important;
+  font-size: 10px !important;
+  font-weight: 500 !important;
+}
+
+.react-flow__edge-textbg {
+  fill: var(--color-rf-edge-textbg) !important;
+  stroke: var(--color-rf-controls-border) !important;
+  stroke-width: 0.5 !important;
+  rx: 4 !important;
+}

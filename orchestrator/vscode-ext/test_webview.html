@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>socmate — Workflow Editor Test</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reactflow@11.11.4/dist/style.css">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body, #root { width: 100%; height: 100%; overflow: hidden; }
+    body { font-family: 'Helvetica', 'Arial', sans-serif; background-color: #f0f2f5; color: #222; }
+
+    /* ── Node Cards ───────────────────────────────────── */
+    .workflow-node { border: 1px solid #ddd; border-radius: 5px; box-shadow: 0 4px 8px rgba(0,0,0,0.2); background-color: #f7f4f0; text-align: left; min-width: 170px; max-width: 260px; font-size: 12px; }
+    .workflow-node.selected { border: 2px solid #ffba00; box-shadow: 0 4px 12px rgba(255,186,0,0.35); }
+    .node-header { border-radius: 5px 5px 0 0; padding: 6px 10px; display: flex; align-items: center; gap: 6px; color: #fff; text-shadow: 1px 1px 2px rgba(0,0,0,0.2); }
+    .node-title { font-size: 13px; font-weight: 700; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .node-icon { font-size: 14px; flex-shrink: 0; }
+    .node-avatar { width: 24px; height: 24px; border-radius: 50%; background: rgba(255,255,255,0.5); border: 1px solid rgba(255,255,255,0.6); flex-shrink: 0; box-shadow: 0 1px 3px rgba(0,0,0,0.15); }
+    .node-body { padding: 6px 10px; font-size: 11px; color: #555; line-height: 1.5; }
+    .node-function { font-family: monospace; font-size: 10px; color: #888; margin-bottom: 4px; }
+    .node-description { font-size: 10px; color: #666; line-height: 1.4; margin-bottom: 4px; font-style: italic; }
+
+    .activity-header { background-color: rgba(50,205,205,0.8); border: 1px solid #28b5b5; }
+    .agent-header { background-color: rgba(128,170,255,0.8); border: 1px solid #4a90d9; }
+    .decide-header { background-color: rgba(255,165,0,0.8); border: 1px solid #d98c00; }
+    .condition-header { background-color: rgba(212,92,67,0.8); border: 1px solid #c4513a; }
+    .human-review-header { background-color: rgba(255,246,66,0.8); border: 1px solid #ccba00; color: #333; text-shadow: none; }
+    .terminal-header { background-color: rgba(180,180,180,0.8); border: 1px solid #999; }
+    .terminal-node { border-radius: 12px; min-width: 140px; }
+    .terminal-node .node-header { border-radius: 12px 12px 0 0; }
+
+    .cogwheel-btn { background: transparent; border: none; cursor: pointer; font-size: 14px; padding: 2px 4px; border-radius: 3px; opacity: 0.7; flex-shrink: 0; line-height: 1; }
+    .cogwheel-btn:hover { opacity: 1; background: rgba(255,255,255,0.3); }
+
+    .outcome-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+    .outcome-chip { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 9px; font-weight: 600; text-transform: uppercase; border: 1px solid #ddd; background: #fafafa; color: #666; }
+    .outcome-chip.retry_rtl, .outcome-chip.retry_tb { background: #fff8f0; color: #d97706; border-color: #f59e0b; }
+    .outcome-chip.ask_human { background: #f0f0ff; color: #1111ff; border-color: #6366f1; }
+    .outcome-chip.escalate { background: #fff0f0; color: #ff1111; border-color: #ef4444; }
+
+    .interrupt-badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 9px; font-family: monospace; background: #fef3c7; color: #92400e; border: 1px solid #f59e0b; }
+
+    /* ── Edge Labels ──────────────────────────────────── */
+    .edge-label-badge { padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 600; white-space: nowrap; z-index: 5; }
+
+    /* ── Graph Selector ───────────────────────────────── */
+    .graph-selector { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 20; display: flex; gap: 4px; background: rgba(255,255,255,0.95); border: 1px solid #ddd; border-radius: 8px; padding: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    .graph-selector button { padding: 6px 14px; border: none; background: transparent; border-radius: 6px; font-size: 12px; font-weight: 500; color: #666; cursor: pointer; }
+    .graph-selector button.active { background: #1677ff; color: #fff; }
+
+    /* ── Right-side Prompt Panel ─────────────────────────── */
+    .prompt-panel-mask { position: fixed; inset: 0; z-index: 1000; background: rgba(0,0,0,0.25); }
+    .prompt-panel { position: fixed; top: 0; right: 0; width: 520px; height: 100vh; background: #fff; box-shadow: -4px 0 16px rgba(0,0,0,0.12); display: flex; flex-direction: column; overflow: hidden; animation: slide-in-right 0.2s ease-out; }
+    @keyframes slide-in-right { from { transform: translateX(100%); } to { transform: translateX(0); } }
+    .prompt-panel-header { padding: 16px 20px; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+    .prompt-panel-body { padding: 20px; overflow-y: auto; flex: 1; min-height: 0; }
+    .modal-mask { position: fixed; inset: 0; z-index: 1000; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; }
+    .modal-wrap { width: 640px; max-height: 80vh; background: #fff; border-radius: 8px; box-shadow: 0 6px 16px rgba(0,0,0,0.08); display: flex; flex-direction: column; overflow: hidden; }
+    .modal-header { padding: 16px 24px; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; justify-content: space-between; }
+    .modal-title { font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+    .modal-avatar { width: 32px; height: 32px; border-radius: 50%; background: #f0f4ff; border: 2px solid #d0d8e8; box-shadow: 0 1px 4px rgba(0,0,0,0.1); flex-shrink: 0; }
+    .modal-title-text { display: flex; flex-direction: column; gap: 2px; }
+    .modal-title-name { font-size: 16px; font-weight: 600; line-height: 1.2; }
+    .modal-type-badge { font-size: 9px; width: fit-content; }
+    .modal-description { padding: 10px 24px; background: #f8f9fb; border-bottom: 1px solid #f0f0f0; font-size: 12px; color: #555; line-height: 1.5; font-style: italic; }
+    .cogwheel-icon { font-size: 18px; }
+    .source-hint { font-size: 11px; color: #999; margin-top: 16px; line-height: 1.5; }
+    .type-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; text-transform: uppercase; }
+    .type-badge.activity { background: rgba(50,205,205,0.2); color: #0d7377; }
+    .type-badge.agent { background: rgba(128,170,255,0.2); color: #2563eb; }
+    .type-badge.decide { background: rgba(255,165,0,0.2); color: #b45309; }
+    .type-badge.terminal { background: rgba(180,180,180,0.2); color: #6b7280; }
+    .type-badge.internal { background: rgba(200,200,200,0.2); color: #6b7280; }
+    .type-badge.human_review { background: rgba(255,246,66,0.2); color: #92400e; }
+    .modal-close { width: 32px; height: 32px; border: none; background: transparent; border-radius: 4px; cursor: pointer; font-size: 18px; color: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; }
+    .modal-tabs { display: flex; border-bottom: 1px solid #f0f0f0; padding: 0 24px; }
+    .modal-tab { padding: 10px 16px; border: none; background: transparent; font-size: 13px; font-weight: 500; color: #666; cursor: pointer; border-bottom: 2px solid transparent; }
+    .modal-tab.active { color: #1677ff; border-bottom-color: #1677ff; }
+    .modal-body { padding: 24px; overflow-y: auto; flex: 1; }
+    .modal-footer { padding: 12px 16px; border-top: 1px solid #f0f0f0; display: flex; justify-content: flex-end; gap: 8px; }
+    .btn { height: 32px; padding: 4px 15px; border-radius: 6px; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+    .btn-default { background: #fff; border: 1px solid #d9d9d9; color: rgba(0,0,0,0.88); }
+    .prompt-file-path code { font-size: 11px; padding: 4px 8px; background: #f5f5f5; border-radius: 4px; color: #666; }
+    .prompt-content { background: #fafafa; border: 1px solid #eee; border-radius: 6px; padding: 16px; max-height: 400px; overflow-y: auto; }
+    .prompt-content pre { font-size: 12px; font-family: monospace; line-height: 1.6; white-space: pre-wrap; margin: 0; color: #333; }
+    .config-row { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
+    .config-label { font-size: 11px; font-weight: 600; color: #999; text-transform: uppercase; min-width: 100px; }
+    .config-value { font-size: 12px; color: #333; }
+    .prompt-empty { color: #999; font-size: 13px; text-align: center; padding: 40px 20px; }
+
+    /* ── Execution Status ─────────────────────────────── */
+    .workflow-node.status-running { border-color: #3b82f6 !important; box-shadow: 0 0 12px rgba(59,130,246,0.5) !important; }
+    .workflow-node.status-done { border-color: #22c55e !important; box-shadow: 0 0 8px rgba(34,197,94,0.4) !important; }
+    .workflow-node.status-failed { border-color: #ef4444 !important; box-shadow: 0 0 12px rgba(239,68,68,0.5) !important; }
+
+    /* ── RF Overrides ─────────────────────────────────── */
+    .react-flow__attribution { display: none !important; }
+    .react-flow__handle { background-color: #9c9c9c !important; border: 1px dashed black !important; border-radius: 5px !important; height: 10px !important; width: 20px !important; z-index: 10 !important; }
+    .react-flow__handle-bottom { bottom: -5px !important; }
+    .loading { display: flex; align-items: center; justify-content: center; height: 100%; color: #999; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18.2.0",
+      "react/jsx-runtime": "https://esm.sh/react@18.2.0/jsx-runtime",
+      "react-dom": "https://esm.sh/react-dom@18.2.0?external=react",
+      "react-dom/client": "https://esm.sh/react-dom@18.2.0/client?external=react",
+      "reactflow": "https://esm.sh/reactflow@11.11.4?external=react,react-dom",
+      "dagre": "https://esm.sh/dagre@0.8.5"
+    }
+  }
+  </script>
+  <script type="module">
+    import React from 'react';
+    import { createRoot } from 'react-dom/client';
+    import ReactFlow, { Background, Controls, MiniMap, MarkerType, BackgroundVariant, Handle, Position, getBezierPath, BaseEdge, EdgeLabelRenderer } from 'reactflow';
+    import dagre from 'dagre';
+
+    const e = React.createElement;
+    const { useState, useEffect, useCallback, useMemo } = React;
+
+    // ── Graph data from MCP introspection (inlined for testing) ──────
+    const GRAPH_DATA = {
+  "nodes": [
+    {
+      "id": "Generate RTL",
+      "type": "activity",
+      "label": "Generate RTL",
+      "function": "generate_rtl_node",
+      "prompt_file": "orchestrator/langchain/prompts/rtl_generator.md",
+      "prompt_preview": "You are an expert digital design engineer specializing in converting Python signal processing models into synthesizable Verilog-2005 RTL for ASIC implementation on the SkyWater Sky130 130nm process.",
+      "prompt_full": "You are an expert digital design engineer specializing in converting Python\nsignal processing models into synthesizable Verilog-2005 RTL for ASIC\nimplementation on the SkyWater Sky130 130nm process.\n\nRULES:\n1. Output ONLY valid Verilog-2005 (no SystemVerilog constructs).\n2. Use AXI-Stream (tdata/tva...",
+      "uses_interrupt": true,
+      "description": "Generates SystemVerilog RTL from the uArch spec",
+      "metadata": {}
+    },
+    {
+      "id": "Lint Check",
+      "type": "activity",
+      "label": "Lint Check",
+      "function": "lint_node",
+      "prompt_file": null,
+      "prompt_preview": "",
+      "prompt_full": "",
+      "uses_interrupt": true,
+      "description": "Runs Verilator lint checks on the generated RTL",
+      "metadata": {}
+    },
+    {
+      "id": "Generate Testbench",
+      "type": "activity",
+      "label": "Generate Testbench",
+      "function": "testbench_node",
+      "prompt_file": "orchestrator/langchain/prompts/testbench_generator.md",
+      "prompt_preview": "You are an expert verification engineer. Generate cocotb testbenches that verify Verilog RTL against a Python golden model.  GOLDEN MODEL IMPORTS: A wrapper module named ``<block_name>_model`` is avai",
+      "prompt_full": "You are an expert verification engineer. Generate cocotb testbenches that\nverify Verilog RTL against a Python golden model.\n\nGOLDEN MODEL IMPORTS:\nA wrapper module named ``<block_name>_model`` is available on PYTHONPATH.\nImport the golden model like this (replace <block_name> with the actual name):\n...",
+      "uses_interrupt": true,
+      "description": "Creates a SystemVerilog testbench for simulation",
+      "metadata": {}
+    },
+    {
+      "id": "Simulate",
+      "type": "activity",
+      "label": "Simulate",
+      "function": "simulate_node",
+      "prompt_file": null,
+      "prompt_preview": "",
+      "prompt_full": "",
+      "uses_interrupt": true,
+      "description": "Runs Verilator simulation with the testbench",
+      "metadata": {}
+    },
+    {
+      "id": "Synthesize",
+      "type": "activity",
+      "label": "Synthesize",
+      "function": "synthesize_node",
+      "prompt_file": null,
+      "prompt_preview": "",
+      "prompt_full": "",
+      "uses_interrupt": true,
+      "description": "Runs logic synthesis targeting the PDK",
+      "metadata": {}
+    },
+    {
+      "id": "Static Timing Analysis",
+      "type": "activity",
+      "label": "Static Timing Analysis",
+      "function": "sta_node",
+      "prompt_file": "orchestrator/langchain/prompts/timing_closure.md",
+      "prompt_preview": "You are an expert ASIC timing closure engineer. You analyze static timing analysis (STA) reports from OpenSTA and modify Verilog RTL to fix violations.  Given: - STA report with critical path details",
+      "prompt_full": "You are an expert ASIC timing closure engineer. You analyze static timing\nanalysis (STA) reports from OpenSTA and modify Verilog RTL to fix violations.\n\nGiven:\n- STA report with critical path details\n- Current Verilog RTL source\n- Target clock frequency\n\nYour strategies (in order of preference):\n1. ...",
+      "uses_interrupt": true,
+      "description": "Performs static timing analysis for signoff",
+      "metadata": {}
+    },
+    {
+      "id": "Ask Human",
+      "type": "human_review",
+      "label": "Ask Human",
+      "function": "ask_human_node",
+      "prompt_file": null,
+      "prompt_preview": "",
+      "prompt_full": "",
+      "uses_interrupt": true,
+      "description": "Escalates to human when automated fixes are exhausted",
+      "metadata": {}
+    },
+    {
+      "id": "Diagnose Failure",
+      "type": "agent",
+      "label": "Diagnose Failure",
+      "function": "diagnose_node",
+      "prompt_file": "orchestrator/langchain/prompts/debug_agent.md",
+      "prompt_preview": "You are an expert digital design debug engineer. You analyze simulation failures in RTL (Verilog) designs and diagnose root causes.  Given: - Block name and description - Simulation error log (cocotb",
+      "prompt_full": "You are an expert digital design debug engineer. You analyze simulation\nfailures in RTL (Verilog) designs and diagnose root causes.\n\nGiven:\n- Block name and description\n- Simulation error log (cocotb output)\n- Previous attempt history (what was tried before)\n\nYour job:\n1. Identify which signal diver...",
+      "uses_interrupt": false,
+      "description": "Debug agent that analyzes failures and proposes fixes",
+      "metadata": {}
+    },
+    {
+      "id": "Route Decision",
+      "type": "decide",
+      "label": "Route Decision",
+      "function": "decide_node",
+      "prompt_file": "orchestrator/langchain/prompts/decide.md",
+      "prompt_preview": "You are a failure-routing classifier for an ASIC RTL generation pipeline. Your ONLY job is to pick the best next action after a block fails a verification step.  You will receive: - Block name and cur",
+      "prompt_full": "You are a failure-routing classifier for an ASIC RTL generation pipeline.\nYour ONLY job is to pick the best next action after a block fails a verification step.\n\nYou will receive:\n- Block name and current attempt number\n- The debug agent's diagnosis (root cause, category, confidence)\n- Accumulated c...",
+      "uses_interrupt": false,
+      "description": "Routes to the next action based on diagnosis results",
+      "metadata": {},
+      "possible_outcomes": [
+        "retry_rtl",
+        "retry_tb",
+        "ask_human",
+        "escalate"
+      ]
+    },
+    {
+      "id": "Pipeline Complete",
+      "type": "terminal",
+      "label": "Pipeline Complete",
+      "function": "mark_success_node",
+      "prompt_file": null,
+      "prompt_preview": "",
+      "prompt_full": "",
+      "uses_interrupt": false,
+      "description": "Terminal state \u2014 all blocks have been processed",
+      "metadata": {}
+    },
+    {
+      "id": "Escalated",
+      "type": "terminal",
+      "label": "Escalated",
+      "function": "mark_escalation_node",
+      "prompt_file": null,
+      "prompt_preview": "",
+      "prompt_full": "",
+      "uses_interrupt": false,
+      "description": "Terminal state \u2014 block was escalated for human decision",
+      "metadata": {}
+    },
+    {
+      "id": "Retry",
+      "type": "internal",
+      "label": "Increment Attempt",
+      "function": "increment_attempt_node",
+      "prompt_file": null,
+      "prompt_preview": "",
+      "prompt_full": "",
+      "uses_interrupt": false,
+      "description": "Bumps the retry counter for the current block",
+      "metadata": {}
+    }
+  ],
+  "edges": [
+    {
+      "source": "Pipeline Complete",
+      "target": "END",
+      "type": "normal",
+      "label": null,
+      "style": "flow"
+    },
+    {
+      "source": "Escalated",
+      "target": "END",
+      "type": "normal",
+      "label": null,
+      "style": "flow"
+    },
+    {
+      "source": "Generate Testbench",
+      "target": "Simulate",
+      "type": "normal",
+      "label": null,
+      "style": "flow"
+    },
+    {
+      "source": "Synthesize",
+      "target": "Static Timing Analysis",
+      "type": "normal",
+      "label": null,
+      "style": "flow"
+    },
+    {
+      "source": "Ask Human",
+      "target": "Route Decision",
+      "type": "normal",
+      "label": null,
+      "style": "flow"
+    },
+    {
+      "source": "START",
+      "target": "Generate RTL",
+      "type": "normal",
+      "label": null,
+      "style": "flow"
+    },
+    {
+      "source": "Generate RTL",
+      "target": "Lint Check",
+      "type": "normal",
+      "label": null,
+      "style": "flow"
+    },
+    {
+      "source": "Diagnose Failure",
+      "target": "Route Decision",
+      "type": "normal",
+      "label": null,
+      "style": "flow"
+    },
+    {
+      "source": "Lint Check",
+      "target": "Generate Testbench",
+      "type": "conditional",
+      "label": "PASS",
+      "style": "flow"
+    },
+    {
+      "source": "Lint Check",
+      "target": "Diagnose Failure",
+      "type": "conditional",
+      "label": "FAIL",
+      "style": "fail"
+    },
+    {
+      "source": "Simulate",
+      "target": "Synthesize",
+      "type": "conditional",
+      "label": "PASS",
+      "style": "flow"
+    },
+    {
+      "source": "Simulate",
+      "target": "Diagnose Failure",
+      "type": "conditional",
+      "label": "FAIL",
+      "style": "fail"
+    },
+    {
+      "source": "Static Timing Analysis",
+      "target": "Pipeline Complete",
+      "type": "conditional",
+      "label": "PASS",
+      "style": "flow"
+    },
+    {
+      "source": "Static Timing Analysis",
+      "target": "Diagnose Failure",
+      "type": "conditional",
+      "label": "FAIL",
+      "style": "fail"
+    },
+    {
+      "source": "Route Decision",
+      "target": "Retry",
+      "type": "conditional",
+      "label": "RETRY RTL",
+      "style": "retry"
+    },
+    {
+      "source": "Route Decision",
+      "target": "Generate Testbench",
+      "type": "conditional",
+      "label": "RETRY TB",
+      "style": "retry"
+    },
+    {
+      "source": "Route Decision",
+      "target": "Ask Human",
+      "type": "conditional",
+      "label": "ASK HUMAN",
+      "style": "agent"
+    },
+    {
+      "source": "Route Decision",
+      "target": "Escalated",
+      "type": "conditional",
+      "label": "ESCALATE",
+      "style": "fail"
+    },
+    {
+      "source": "Retry",
+      "target": "Generate RTL",
+      "type": "conditional",
+      "label": "RETRY",
+      "style": "retry"
+    },
+    {
+      "source": "Retry",
+      "target": "Escalated",
+      "type": "conditional",
+      "label": "EXHAUSTED",
+      "style": "fail"
+    }
+  ]
+};
+
+    // ── Node Components ──────────────────────────────────────────────
+
+    function dicebearUrl(seed) {
+      return `https://api.dicebear.com/9.x/bottts-neutral/svg?seed=${encodeURIComponent(seed)}&size=28&backgroundColor=transparent`;
+    }
+
+    function ActivityNode({ data, selected }) {
+      return e('div', { className: `workflow-node activity-node ${selected ? 'selected' : ''} ${data.status ? 'status-'+data.status : ''}` },
+        e(Handle, { type: 'target', position: Position.Top }),
+        e('div', { className: 'node-header activity-header' },
+          e('span', { className: 'node-icon' }, '\u26A1'),
+          e('span', { className: 'node-title' }, data.label),
+          e('button', { className: 'cogwheel-btn', onClick: (ev) => { ev.stopPropagation(); data.onCogwheel?.(data); } }, '\u2699'),
+        ),
+        e('div', { className: 'node-body' },
+          data.description ? e('div', { className: 'node-description' }, data.description) : null,
+          e('div', { className: 'node-function' }, data.function),
+          data.uses_interrupt ? e('span', { className: 'interrupt-badge' }, 'interrupt()') : null,
+        ),
+        e(Handle, { type: 'source', position: Position.Bottom }),
+      );
+    }
+
+    function AgentNode({ data, selected }) {
+      return e('div', { className: `workflow-node agent-node ${selected ? 'selected' : ''} ${data.status ? 'status-'+data.status : ''}` },
+        e(Handle, { type: 'target', position: Position.Top }),
+        e('div', { className: 'node-header agent-header' },
+          e('img', { className: 'node-avatar', src: dicebearUrl(data.id || data.label), alt: '', width: 24, height: 24 }),
+          e('span', { className: 'node-title' }, data.label),
+          e('button', { className: 'cogwheel-btn', onClick: (ev) => { ev.stopPropagation(); data.onCogwheel?.(data); } }, '\u2699'),
+        ),
+        e('div', { className: 'node-body' },
+          data.description ? e('div', { className: 'node-description' }, data.description) : null,
+          e('div', { className: 'node-function' }, data.function),
+        ),
+        e(Handle, { type: 'source', position: Position.Bottom }),
+      );
+    }
+
+    function DecideNode({ data, selected }) {
+      const outcomes = data.possible_outcomes || [];
+      return e('div', { className: `workflow-node decide-node ${selected ? 'selected' : ''} ${data.status ? 'status-'+data.status : ''}` },
+        e(Handle, { type: 'target', position: Position.Top }),
+        e('div', { className: 'node-header decide-header' },
+          e('img', { className: 'node-avatar', src: dicebearUrl(data.id || data.label), alt: '', width: 24, height: 24 }),
+          e('span', { className: 'node-title' }, data.label),
+          e('button', { className: 'cogwheel-btn', onClick: (ev) => { ev.stopPropagation(); data.onCogwheel?.(data); } }, '\u2699'),
+        ),
+        e('div', { className: 'node-body' },
+          data.description ? e('div', { className: 'node-description' }, data.description) : null,
+          e('div', { className: 'node-function' }, data.function),
+          outcomes.length > 0 ? e('div', { className: 'outcome-chips' },
+            ...outcomes.map(o => e('span', { key: o, className: `outcome-chip ${o}` }, o)),
+          ) : null,
+        ),
+        e(Handle, { type: 'source', position: Position.Bottom }),
+      );
+    }
+
+    function HumanReviewNode({ data, selected }) {
+      return e('div', { className: `workflow-node human-review-node ${selected ? 'selected' : ''} ${data.status ? 'status-'+data.status : ''}` },
+        e(Handle, { type: 'target', position: Position.Top }),
+        e('div', { className: 'node-header human-review-header' },
+          e('span', { className: 'node-icon' }, '\u{1F464}'),
+          e('span', { className: 'node-title' }, data.label),
+          e('button', { className: 'cogwheel-btn', onClick: (ev) => { ev.stopPropagation(); data.onCogwheel?.(data); } }, '\u2699'),
+        ),
+        e('div', { className: 'node-body' },
+          data.description ? e('div', { className: 'node-description' }, data.description) : null,
+          e('div', { className: 'node-function' }, data.function),
+          e('span', { className: 'interrupt-badge' }, 'interrupt()'),
+        ),
+        e(Handle, { type: 'source', position: Position.Bottom }),
+      );
+    }
+
+    function TerminalNode({ data, selected }) {
+      return e('div', { className: `workflow-node terminal-node ${selected ? 'selected' : ''} ${data.status ? 'status-'+data.status : ''}` },
+        e(Handle, { type: 'target', position: Position.Top }),
+        e('div', { className: 'node-header terminal-header' },
+          e('span', { className: 'node-icon' }, '\u23F9'),
+          e('span', { className: 'node-title' }, data.label),
+        ),
+        data.description ? e('div', { className: 'node-body' },
+          e('div', { className: 'node-description' }, data.description),
+        ) : null,
+        e(Handle, { type: 'source', position: Position.Bottom }),
+      );
+    }
+
+    // ── Named Edge ────────────────────────────────────────────────────
+
+    const STYLE_CFG = {
+      flow:  { stroke: '#22DD22', sw: 3, lc: '#22DD22', lb: '#f0fff0' },
+      fail:  { stroke: '#FF1111', sw: 3, lc: '#FF1111', lb: '#fff0f0' },
+      retry: { stroke: '#FF6666', sw: 3, dash: '5 5', lc: '#FF6600', lb: '#fff8f0' },
+      agent: { stroke: '#1111FF', sw: 3, dash: '6 3', lc: '#1111FF', lb: '#f0f0ff' },
+    };
+
+    function NamedEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, markerEnd }) {
+      const cfg = STYLE_CFG[data?.style] || STYLE_CFG.flow;
+      const [path, lx, ly] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition });
+      return e(React.Fragment, null,
+        e(BaseEdge, { id, path, markerEnd, style: { stroke: cfg.stroke, strokeWidth: cfg.sw, strokeDasharray: cfg.dash } }),
+        data?.label ? e(EdgeLabelRenderer, null,
+          e('div', {
+            className: `edge-label-badge`,
+            style: {
+              position: 'absolute',
+              transform: `translate(-50%, -50%) translate(${lx}px, ${ly}px)`,
+              color: cfg.lc, backgroundColor: cfg.lb, border: `1px solid ${cfg.stroke}`,
+              pointerEvents: 'none',
+            },
+          }, data.label),
+        ) : null,
+      );
+    }
+
+    // ── Prompt Modal ──────────────────────────────────────────────────
+
+    const TYPE_LABELS = { agent: 'Agent', activity: 'Activity', decide: 'Decision', terminal: 'Terminal', internal: 'Internal', human_review: 'Human Review' };
+
+    function NodePromptModal({ node, onClose }) {
+      const [tab, setTab] = useState('prompt');
+      if (!node) return null;
+      const isAgentic = node.type === 'agent' || node.type === 'decide';
+      const typeLabel = TYPE_LABELS[node.type] || node.type;
+      const tabs = [{ key: 'prompt', label: 'Prompt' }, { key: 'config', label: 'Config' }, { key: 'source', label: 'Source' }];
+      return e('div', { className: 'prompt-panel-mask', onClick: (ev) => { if (ev.target === ev.currentTarget) onClose(); } },
+        e('div', { className: 'prompt-panel' },
+          e('div', { className: 'prompt-panel-header' },
+            e('span', { className: 'modal-title' },
+              isAgentic
+                ? e('img', { className: 'modal-avatar', src: dicebearUrl(node.id || node.label), alt: '', width: 32, height: 32 })
+                : e('span', { className: 'cogwheel-icon' }, '\u2699'),
+              e('span', { className: 'modal-title-text' },
+                e('span', { className: 'modal-title-name' }, node.label),
+                e('span', { className: `modal-type-badge type-badge ${node.type}` }, typeLabel),
+              ),
+            ),
+            e('button', { className: 'modal-close', onClick: onClose }, '\u00D7'),
+          ),
+          node.description ? e('div', { className: 'modal-description' }, node.description) : null,
+          e('div', { className: 'modal-tabs' },
+            ...tabs.map(t => e('button', { key: t.key, className: `modal-tab ${tab === t.key ? 'active' : ''}`, onClick: () => setTab(t.key) }, t.label)),
+          ),
+          e('div', { className: 'prompt-panel-body' },
+            tab === 'prompt' ? (
+              node.prompt_file
+                ? e('div', null,
+                    e('div', { className: 'prompt-file-path' }, e('code', null, node.prompt_file)),
+                    e('div', { className: 'prompt-content' }, e('pre', null, node.prompt_full || 'No content.')),
+                  )
+                : e('div', { className: 'prompt-empty' },
+                    'This node has no associated prompt file.',
+                    node.type === 'internal' ? ' It is a deterministic internal node.' : '',
+                    node.type === 'terminal' ? ' It is a terminal state node.' : '',
+                    node.type === 'human_review' ? ' It pauses for human input via interrupt().' : '',
+                  )
+            ) : tab === 'config' ? e('div', null,
+                e('div', { className: 'config-row' }, e('span', { className: 'config-label' }, 'Node Type'), e('span', { className: `config-value type-badge ${node.type}` }, typeLabel)),
+                node.id !== node.label ? e('div', { className: 'config-row' }, e('span', { className: 'config-label' }, 'Node ID'), e('code', { className: 'config-value' }, node.id)) : null,
+                e('div', { className: 'config-row' }, e('span', { className: 'config-label' }, 'Function'), e('code', { className: 'config-value' }, node.function)),
+                e('div', { className: 'config-row' }, e('span', { className: 'config-label' }, 'Interrupt'), e('span', { className: 'config-value' }, node.uses_interrupt ? 'Yes (Temporal dispatch)' : 'No (in-process)')),
+                node.possible_outcomes ? e('div', { className: 'config-row' }, e('span', { className: 'config-label' }, 'Outcomes'),
+                  e('div', { className: 'config-value outcome-chips' }, ...node.possible_outcomes.map(o => e('span', { key: o, className: `outcome-chip ${o}` }, o))),
+                ) : null,
+              ) : e('div', null,
+                e('div', { className: 'config-row' }, e('span', { className: 'config-label' }, 'Function'), e('code', { className: 'config-value' }, node.function)),
+                node.prompt_file ? e('div', { className: 'config-row' }, e('span', { className: 'config-label' }, 'Prompt File'), e('code', { className: 'config-value' }, node.prompt_file)) : null,
+                e('p', { className: 'source-hint' }, 'Use Cmd+P in VS Code and search for the function name to jump to source.'),
+              ),
+          ),
+          e('div', { className: 'modal-footer' },
+            e('button', { className: 'btn btn-default', onClick: onClose }, 'Close'),
+          ),
+        ),
+      );
+    }
+
+    // ── Node type mapping ─────────────────────────────────────────────
+
+    const NODE_TYPE_MAP = { activity: 'activityNode', agent: 'agentNode', decide: 'decideNode', terminal: 'terminalNode', internal: 'activityNode', human_review: 'humanReviewNode' };
+    const nodeTypes = { activityNode: ActivityNode, agentNode: AgentNode, decideNode: DecideNode, humanReviewNode: HumanReviewNode, terminalNode: TerminalNode };
+    const edgeTypes = { named: NamedEdge };
+    const NODE_COLORS = { activity: '#32cdcd', agent: '#80aaff', decide: '#ffa500', terminal: '#b4b4b4', internal: '#c8c8c8', human_review: '#fff642' };
+    const EDGE_STROKE = { flow: '#22DD22', fail: '#FF1111', retry: '#FF6666', agent: '#1111FF' };
+    const mkr = (c) => ({ type: MarkerType.ArrowClosed, color: c, strokeWidth: 3, width: 30 });
+
+    // ── Dagre Layout ──────────────────────────────────────────────────
+
+    function dagreLayout(nodes, edges) {
+      const g = new dagre.graphlib.Graph();
+      g.setDefaultEdgeLabel(() => ({}));
+      g.setGraph({ rankdir: 'TB', ranksep: 80, nodesep: 50, edgesep: 15, marginx: 30, marginy: 30 });
+      nodes.forEach(n => g.setNode(n.id, { width: 220, height: n.data.type === 'terminal' ? 40 : 70 }));
+      edges.forEach(ed => g.setEdge(ed.source, ed.target));
+      dagre.layout(g);
+      return nodes.map(n => {
+        const p = g.node(n.id);
+        return { ...n, position: { x: p.x - 110, y: p.y - 35 }, style: { ...n.style, width: 220 } };
+      });
+    }
+
+    // ── App ───────────────────────────────────────────────────────────
+
+    function App() {
+      const [graphData, setGraphData] = useState(GRAPH_DATA);
+      const [graphName, setGraphName] = useState('pipeline');
+      const [selectedNode, setSelectedNode] = useState(null);
+      const [modalOpen, setModalOpen] = useState(false);
+
+      const onCogwheel = useCallback((node) => { setSelectedNode(node); setModalOpen(true); }, []);
+
+      const { nodes, edges } = useMemo(() => {
+        if (!graphData) return { nodes: [], edges: [] };
+
+        const rfNodes = graphData.nodes.map(n => ({
+          id: n.id,
+          type: NODE_TYPE_MAP[n.type] || 'activityNode',
+          data: { ...n, onCogwheel },
+          position: { x: 0, y: 0 },
+        }));
+
+        const rfEdges = graphData.edges.map((ed, i) => {
+          const style = ed.style || 'flow';
+          const sc = EDGE_STROKE[style] || EDGE_STROKE.flow;
+          return {
+            id: `e-${ed.source}-${ed.target}-${i}`,
+            source: ed.source,
+            target: ed.target,
+            type: ed.label ? 'named' : 'smoothstep',
+            markerEnd: mkr(sc),
+            data: { label: ed.label, style },
+            style: { stroke: sc, strokeWidth: 3, ...(style === 'retry' ? { strokeDasharray: '5 5' } : {}), ...(style === 'agent' ? { strokeDasharray: '6 3' } : {}) },
+            animated: style === 'retry',
+          };
+        });
+
+        // Filter edges referencing START/END (not real nodes)
+        const nodeIds = new Set(rfNodes.map(n => n.id));
+        const validEdges = rfEdges.filter(ed => nodeIds.has(ed.source) && nodeIds.has(ed.target));
+
+        const laid = dagreLayout(rfNodes, validEdges);
+        return { nodes: laid, edges: validEdges };
+      }, [graphData, onCogwheel]);
+
+      return e('div', { style: { width: '100vw', height: '100vh', position: 'relative' } },
+        e('div', { className: 'graph-selector' },
+          e('button', { className: graphName === 'pipeline' ? 'active' : '', onClick: () => setGraphName('pipeline') }, 'Pipeline'),
+          e('button', { className: graphName === 'architecture' ? 'active' : '', onClick: () => setGraphName('architecture') }, 'Architecture'),
+        ),
+        e(ReactFlow, {
+          nodes, edges, nodeTypes, edgeTypes,
+          fitView: true, fitViewOptions: { padding: 0.15 },
+          minZoom: 0.1, maxZoom: 2,
+          nodesDraggable: true, nodesConnectable: false,
+          proOptions: { hideAttribution: true },
+        },
+          e(Controls),
+          e(MiniMap, { style: { width: 170, height: 110 }, nodeColor: n => NODE_COLORS[n.data?.type] || '#aaa' }),
+          e(Background, { variant: BackgroundVariant.Dots }),
+        ),
+        modalOpen && selectedNode ? e(NodePromptModal, { node: selectedNode, onClose: () => setModalOpen(false) }) : null,
+      );
+    }
+
+    createRoot(document.getElementById('root')).render(e(App));
+  </script>
+</body>
+</html>
