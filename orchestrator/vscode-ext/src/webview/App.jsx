@@ -4,6 +4,7 @@ import { ReactFlowProvider } from 'reactflow';
 import GraphCanvas from './components/GraphCanvas';
 import GanttTimeline from './components/GanttTimeline';
 import BlockDiagramCanvas from './components/BlockDiagramCanvas';
+import CollateralViewer from './components/CollateralViewer';
 import NodePromptModal from './components/NodePromptModal';
 import SummaryPanel from './components/SummaryPanel';
 import StatusBar from './components/StatusBar';
@@ -461,6 +462,9 @@ function App() {
       } else {
         vscode.postMessage({ type: 'requestTimeline' });
       }
+    } else if (tab === 'collateral') {
+      setViewMode('collateral');
+      setGraphName('collateral');
     } else if (tab === 'block_diagram') {
       setViewMode('block_diagram');
       setGraphName('block_diagram');
@@ -509,6 +513,12 @@ function App() {
             onClick={() => handleTabSwitch('timeline')}
           >
             Timeline
+          </button>
+          <button
+            className={graphName === 'collateral' ? 'active' : ''}
+            onClick={() => handleTabSwitch('collateral')}
+          >
+            Collateral
           </button>
           <span className="selector-divider" />
           <button
@@ -564,6 +574,10 @@ function App() {
             <ReactFlowProvider>
               <BlockDiagramCanvas diagramData={blockDiagramData} />
             </ReactFlowProvider>
+          </div>
+        ) : viewMode === 'collateral' ? (
+          <div className="canvas-container">
+            <CollateralViewer />
           </div>
         ) : (
           <div className="canvas-container">

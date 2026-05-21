@@ -326,6 +326,82 @@ def get_live_calls(node_name: str) -> list[dict]:
     return result
 
 
+def _list_collateral() -> dict:
+    """List generated chip-design artefacts grouped by kind so the
+    Collateral tab can browse RTL, testbenches, synthesis outputs, and
+    waveforms without the user having to dig through the run directory."""
+    out: dict = {"rtl": [], "tb": [], "syn": [], "pnr": [], "waveforms": [], "reports": []}
+    if not PROJECT_ROOT.exists():
+        return out
+
+    def _entry(p: Path, kind: str) -> dict:
+        try:
+            rel = str(p.relative_to(PROJECT_ROOT))
+        except ValueError:
+            rel = str(p)
+        try:
+            st = p.stat()
+            size = st.st_size
+            mtime = st.st_mtime
+        except OSError:
+            size = 0
+            mtime = 0
+        return {
+            "name": p.name,
+            "rel_path": rel,
+            "size": size,
+            "mtime": mtime,
+            "kind": kind,
+        }
+
+    # RTL: rtl/<category>/*.v (and *.sv)
+    rtl_root = PROJECT_ROOT / "rtl"
+    if rtl_root.is_dir():
+        for p in sorted(rtl_root.rglob("*.v")):
+            out["rtl"].append(_entry(p, "rtl"))
+        for p in sorted(rtl_root.rglob("*.sv")):
+            out["rtl"].append(_entry(p, "rtl"))
+
+    # Testbench: tb/*
+    tb_root = PROJECT_ROOT / "tb"
+    if tb_root.is_dir():
+        for p in sorted(tb_root.rglob("*")):
+            if p.is_file() and p.suffix in {".v", ".sv", ".py"}:
+                out["tb"].append(_entry(p, "tb"))
+
+    # Synthesis: syn/output/<block>/*
+    syn_root = PROJECT_ROOT / "syn" / "output"
+    if syn_root.is_dir():
+        for p in sorted(syn_root.rglob("*")):
+            if p.is_file() and p.suffix in {".v", ".sdc", ".ys", ".txt", ".json"}:
+                out["syn"].append(_entry(p, "syn"))
+
+    # PnR: chip_finish/ or syn/output/<block>/pnr/
+    chip_root = PROJECT_ROOT / "chip_finish"
+    if chip_root.is_dir():
+        for p in sorted(chip_root.rglob("*")):
+            if p.is_file() and p.suffix in {".v", ".def", ".sdc", ".rpt", ".gds", ".html", ".json"}:
+                out["pnr"].append(_entry(p, "pnr"))
+
+    # Waveforms: sim_build/<block>/dump.vcd
+    sim_root = PROJECT_ROOT / "sim_build"
+    if sim_root.is_dir():
+        for p in sorted(sim_root.rglob("*.vcd")):
+            out["waveforms"].append(_entry(p, "waveform"))
+        for p in sorted(sim_root.rglob("*.fst")):
+            out["waveforms"].append(_entry(p, "waveform"))
+
+    # Reports: any *.rpt, *.log, *.md inside arch/ or syn/
+    for root_name in ("arch", ".socmate"):
+        root = PROJECT_ROOT / root_name
+        if not root.is_dir():
+            continue
+        for p in sorted(root.rglob("*.md")):
+            out["reports"].append(_entry(p, "report"))
+
+    return out
+
+
 def get_node_descriptions() -> dict:
     """Build a {display_label: description} lookup from every known graph so
     the detail panel can show a one-liner about what a node does even when
@@ -1527,6 +1603,14 @@ class WebviewHandler(SimpleHTTPRequestHandler):
         if path.startswith("/api/summary_cards/"):
             stage = path.split("/api/summary_cards/", 1)[1].strip("/")
             self._json_response(get_summary_cards(stage))
+            return
+
+        # API: collateral listing (RTL / testbench / synthesis / waveforms)
+        if path == "/api/collateral":
+            try:
+                self._json_response(_list_collateral())
+            except Exception as exc:
+                self._json_response({"error": str(exc)}, status=500)
             return
 
         # API: dictionary of node descriptions across all graphs.
