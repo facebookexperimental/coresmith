@@ -59,20 +59,46 @@
 
     "remoteEnv": {
         "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
-        "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}"
+        "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+        // Set as a user-level codespaces secret scoped to this repo via
+        //   cat ~/.claude/.credentials.json | gh secret set CLAUDE_CREDENTIALS_JSON \
+        //     --user --app codespaces --repos facebookexperimental/coresmith
+        // The Claude Code CLI accepts CLAUDE_CODE_OAUTH_TOKEN in env, but in
+        // headless subprocess invocations (like the pipeline shelling out to
+        // `claude -p ...`) it falls back to ~/.claude/.credentials.json --
+        // env-only auth was reporting "Not logged in" mid-run. Writing the
+        // full credentials bundle to disk in onCreate gives the CLI a
+        // refresh token too, so long sessions don't die when the 8-hour
+        // access token expires.
+        "CLAUDE_CREDENTIALS_JSON": "${localEnv:CLAUDE_CREDENTIALS_JSON}"
     },
 
     // onCreate (runs once, shown in the "Setting up your codespace"
-    // log so users see progress during the heavy nix pull):
+    // log so users see progress during the heavy nix install):
     //
     // 1. Install the Claude Code CLI.
-    // 2. Install OpenLane2 via `nix profile install` -- the cachix
-    //    substituter configured above turns this into a binary-cache
-    //    pull so it lands in ~10 min.
-    // 3. Pip-install the orchestrator in editable mode + cocotb.
-    "onCreateCommand": "set -eux; npm install -g @anthropic-ai/claude-code 2>&1 | tail -3; nix profile install --accept-flake-config github:efabless/openlane2 2>&1 | tail -20; pip install --upgrade pip; if [ -f /workspaces/coresmith/requirements.txt ]; then pip install -r /workspaces/coresmith/requirements.txt; fi; pip install cocotb cocotb-bus; if [ -d /workspaces/coresmith/orchestrator ]; then pip install -e /workspaces/coresmith/orchestrator; fi",
+    // 2. Install OpenLane2 from its flake (openroad + opensta + the
+    //    openlane wrapper) + the EDA subtools from nixpkgs that the
+    //    coresmith orchestrator shells out to directly (yosys,
+    //    verilator, magic, klayout, iverilog). The openlane.cachix.org
+    //    substituter configured in the nix feature above turns this
+    //    into a binary-cache pull (~10 min) instead of from-source.
+    //    `netgen` builds from source on nixpkgs and is only needed by
+    //    the backend LVS step, so it's left out -- add by hand if you
+    //    need backend signoff.
+    // 3. Pip-install requirements + the orchestrator in editable mode.
+    // 4. Write a /etc/profile.d hook that sources the codespaces
+    //    secrets file and sets PYTHONPATH for SSH (non-login) shells.
+    //    Codespaces injects secrets into the workbench env but SSH
+    //    sessions don't inherit them unless explicitly sourced.
+    // 5. Materialize the full Claude credentials bundle to
+    //    /root/.claude/.credentials.json from the CLAUDE_CREDENTIALS_JSON
+    //    secret. The Claude Code CLI's headless subprocess path reads
+    //    credentials.json (not the env var) -- the pipeline's
+    //    `claude -p ...` shellouts fail with "Not logged in" without it.
+    "onCreateCommand": "set -eux; npm install -g @anthropic-ai/claude-code 2>&1 | tail -3; nix profile install --accept-flake-config github:efabless/openlane2 2>&1 | tail -10; nix profile install --accept-flake-config github:efabless/openlane2#openroad github:efabless/openlane2#opensta 2>&1 | tail -10; nix profile install --accept-flake-config nixpkgs#yosys nixpkgs#verilator nixpkgs#magic-vlsi nixpkgs#klayout nixpkgs#iverilog 2>&1 | tail -10; pip install --upgrade pip; if [ -f /workspaces/coresmith/requirements.txt ]; then pip install -r /workspaces/coresmith/requirements.txt; fi; pip install cocotb cocotb-bus; if [ -d /workspaces/coresmith/orchestrator ]; then pip install -e /workspaces/coresmith/orchestrator; fi; mkdir -p /root/.claude && printf '%s' \"$CLAUDE_CREDENTIALS_JSON\" > /root/.claude/.credentials.json && chmod 600 /root/.claude/.credentials.json; cat > /etc/profile.d/codespaces-setup.sh <<'EOSH'\n# Auto-source codespaces secrets for SSH (non-login) shells and put the\n# coresmith repo on PYTHONPATH so `import orchestrator` works (the\n# editable install of socmate-asic-orchestrator exposes architecture /\n# langchain / langgraph as TOP-level packages, not under `orchestrator.*`).\n[ -r /workspaces/.codespaces/shared/.env-secrets ] && set -a && . /workspaces/.codespaces/shared/.env-secrets && set +a\nexport PYTHONPATH=/workspaces/coresmith${PYTHONPATH:+:$PYTHONPATH}\nEOSH\nchmod 644 /etc/profile.d/codespaces-setup.sh",
 
-    "postAttachCommand": "echo 'coresmith dev container ready. openlane --version && which yosys'",
+    "postAttachCommand": "bash -lc 'echo coresmith dev container ready. claude --version && openlane --version && yosys --version | head -1'",
 
     "forwardPorts": [8765],
     "portsAttributes": {
