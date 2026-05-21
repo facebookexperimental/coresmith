@@ -693,16 +693,33 @@ function ResultSummaryCard({ metrics, index, total }) {
   if (!entries.length) return null;
 
   function fmt(key, value) {
+    if (value == null) return '—';
     if (typeof value === 'boolean') return value ? '✓ yes' : '✗ no';
-    if (key === 'dashboard_path' || key === 'path' || key === 'log_path') {
-      // Show only the tail of long paths
+    if (Array.isArray(value)) {
+      if (value.length === 0) return '(none)';
+      if (value.length <= 4) return value.join(', ');
+      return `${value.slice(0, 3).join(', ')}, +${value.length - 3} more`;
+    }
+    if (key === 'dashboard_path' || key === 'path' || key === 'log_path'
+        || key === 'layout_2d_png_path' || key === 'viewer_path') {
       const s = String(value);
-      return s.length > 60 ? '…' + s.slice(-60) : s;
+      return s.length > 80 ? '…' + s.slice(-80) : s;
     }
     if (key === 'html_size' || key === 'size' || key === 'stdout_bytes') {
       const n = Number(value);
       if (!Number.isFinite(n)) return String(value);
       return n > 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`;
+    }
+    if (key === 'utilization_pct') {
+      const n = Number(value);
+      if (Number.isFinite(n)) return `${n.toFixed(1)}%`;
+    }
+    if (key === 'confidence') {
+      const n = Number(value);
+      if (Number.isFinite(n)) {
+        const pct = n <= 1 ? n * 100 : n;
+        return `${pct.toFixed(0)}%`;
+      }
     }
     if (typeof value === 'number') {
       if (Math.abs(value) >= 1000) return value.toLocaleString();
@@ -796,11 +813,16 @@ function ResultSummaryCard({ metrics, index, total }) {
       </div>
       <div className="result-card-grid">
         {entries.map(([k, v]) => {
-          // Wide strings (paths, design names, categories) get a full-width
-          // row so they don't truncate to "32 Bit Adder Full Flow Sm...".
+          // Wide strings / arrays / paths get a full-width row so they
+          // don't truncate to "32 Bit Adder Full Flow Sm...".
           const isWide = k === 'dashboard_path' || k === 'path'
                        || k === 'log_path' || k === 'design_name'
-                       || k === 'category' || (typeof v === 'string' && v.length > 28);
+                       || k === 'category' || k === 'analysis'
+                       || k === 'diagnosis_preview' || k === 'suggested_fix'
+                       || k === 'feedback' || k === 'last_error'
+                       || k === 'layout_2d_png_path' || k === 'viewer_path'
+                       || Array.isArray(v)
+                       || (typeof v === 'string' && v.length > 28);
           const isBool = typeof v === 'boolean';
           const isNumeric = typeof v === 'number';
           return (
