@@ -125488,13 +125488,25 @@ function regroupTraces(traceData) {
       return g.duration_ms;
     return getAttemptDuration(g.spans);
   }
+  const seenKeys = /* @__PURE__ */ new Map();
   return groups.map((g) => {
     const steps = g.steps || [];
     const toolCount = steps.filter((s) => s.type === "tool_run").length;
     const llmCount = steps.filter((s) => s.type === "llm_call" || s.type === "llm_call_streaming" || !s.type).length;
+    const baseKey = hasMultipleBlocks ? `${g.blockName || "unknown"}:${g.attempt}` : `a${g.attempt}`;
+    const count = (seenKeys.get(baseKey) || 0) + 1;
+    seenKeys.set(baseKey, count);
+    const isRepeat = count > 1 || groups.filter((og) => {
+      const k = hasMultipleBlocks ? `${og.blockName || "unknown"}:${og.attempt}` : `a${og.attempt}`;
+      return k === baseKey;
+    }).length > 1;
+    let label = hasMultipleBlocks ? `${(g.blockName || "unknown").replace(/_/g, " ")} \xB7 Attempt ${g.attempt}` : groups.length === 1 ? "Run" : `Attempt ${g.attempt}`;
+    if (isRepeat) {
+      label += ` (#${count})`;
+    }
     return {
-      key: hasMultipleBlocks ? `${g.blockName || "unknown"}:${g.attempt}` : `a${g.attempt}`,
-      label: hasMultipleBlocks ? `${(g.blockName || "unknown").replace(/_/g, " ")} \xB7 Attempt ${g.attempt}` : groups.length === 1 ? "Run" : `Attempt ${g.attempt}`,
+      key: `${baseKey}#${count}`,
+      label,
       durMs: attemptDurMs(g),
       attempt: g.attempt,
       blockName: g.blockName,
@@ -127101,6 +127113,19 @@ var LEGEND_ITEMS = {
     { label: "Timing", color: "#fbbf24" }
   ]
 };
+LEGEND_ITEMS.all = [
+  { label: "Architecture", color: SEGMENT_COLORS["Block Diagram"].bg },
+  { label: "Generate RTL", color: SEGMENT_COLORS["Generate RTL"].bg },
+  { label: "Lint / Sim", color: SEGMENT_COLORS["Lint Check"].bg },
+  { label: "Testbench", color: SEGMENT_COLORS["Generate Testbench"].bg },
+  { label: "Synthesize", color: SEGMENT_COLORS["Synthesize"].bg },
+  { label: "Diagnose", color: SEGMENT_COLORS["Diagnose Failure"].bg },
+  { label: "Constraints", color: SEGMENT_COLORS["Constraint Check"].bg },
+  { label: "Init/Advance", color: SEGMENT_COLORS["Init Block"].bg },
+  { label: "Human Review", color: SEGMENT_COLORS["Review Uarch Spec"].bg },
+  { label: "PnR (DRC/LVS/Timing)", color: "#a78bfa" }
+];
+LEGEND_ITEMS.timeline = LEGEND_ITEMS.all;
 function Legend({ graphType }) {
   const items = LEGEND_ITEMS[graphType] || LEGEND_ITEMS.frontend;
   return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-legend", children: [

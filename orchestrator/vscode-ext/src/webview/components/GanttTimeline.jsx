@@ -295,6 +295,23 @@ const LEGEND_ITEMS = {
   ],
 };
 
+// On the Timeline tab the user sees ALL phases at once, so the frontend-only
+// legend confused the architecture row's color choices. Combine the most
+// common items across phases so every color in view has a label.
+LEGEND_ITEMS.all = [
+  { label: 'Architecture', color: SEGMENT_COLORS['Block Diagram'].bg },
+  { label: 'Generate RTL', color: SEGMENT_COLORS['Generate RTL'].bg },
+  { label: 'Lint / Sim', color: SEGMENT_COLORS['Lint Check'].bg },
+  { label: 'Testbench', color: SEGMENT_COLORS['Generate Testbench'].bg },
+  { label: 'Synthesize', color: SEGMENT_COLORS['Synthesize'].bg },
+  { label: 'Diagnose', color: SEGMENT_COLORS['Diagnose Failure'].bg },
+  { label: 'Constraints', color: SEGMENT_COLORS['Constraint Check'].bg },
+  { label: 'Init/Advance', color: SEGMENT_COLORS['Init Block'].bg },
+  { label: 'Human Review', color: SEGMENT_COLORS['Review Uarch Spec'].bg },
+  { label: 'PnR (DRC/LVS/Timing)', color: '#a78bfa' },
+];
+LEGEND_ITEMS.timeline = LEGEND_ITEMS.all;
+
 const GRAPH_TITLES = {
   frontend: 'Pipeline Execution Timeline',
   architecture: 'Architecture Execution Timeline',

@@ -343,17 +343,35 @@ function regroupTraces(traceData) {
     return getAttemptDuration(g.spans);
   }
 
+  // Some pipelines re-enter the same node multiple times within a single
+  // "attempt" (Constraint Check fires once per architecture round). Without
+  // a per-instance counter we end up with duplicate-labelled tabs that look
+  // like a bug. Append (#N) when we see repeats.
+  const seenKeys = new Map();
   return groups.map((g) => {
     const steps = g.steps || [];
     const toolCount = steps.filter((s) => s.type === 'tool_run').length;
     const llmCount = steps.filter((s) => s.type === 'llm_call' || s.type === 'llm_call_streaming' || !s.type).length;
+    const baseKey = hasMultipleBlocks
+      ? `${g.blockName || 'unknown'}:${g.attempt}`
+      : `a${g.attempt}`;
+    const count = (seenKeys.get(baseKey) || 0) + 1;
+    seenKeys.set(baseKey, count);
+    const isRepeat = count > 1 || groups.filter((og) => {
+      const k = hasMultipleBlocks
+        ? `${og.blockName || 'unknown'}:${og.attempt}`
+        : `a${og.attempt}`;
+      return k === baseKey;
+    }).length > 1;
+    let label = hasMultipleBlocks
+      ? `${(g.blockName || 'unknown').replace(/_/g, ' ')} · Attempt ${g.attempt}`
+      : (groups.length === 1 ? 'Run' : `Attempt ${g.attempt}`);
+    if (isRepeat) {
+      label += ` (#${count})`;
+    }
     return {
-      key: hasMultipleBlocks
-        ? `${g.blockName || 'unknown'}:${g.attempt}`
-        : `a${g.attempt}`,
-      label: hasMultipleBlocks
-        ? `${(g.blockName || 'unknown').replace(/_/g, ' ')} · Attempt ${g.attempt}`
-        : (groups.length === 1 ? 'Run' : `Attempt ${g.attempt}`),
+      key: `${baseKey}#${count}`,
+      label,
       durMs: attemptDurMs(g),
       attempt: g.attempt,
       blockName: g.blockName,
