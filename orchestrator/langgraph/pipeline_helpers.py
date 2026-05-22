@@ -465,10 +465,59 @@ async def generate_rtl(
             project_root=str(PROJECT_ROOT),
             callbacks=callbacks,
         )
-        return result
     except (ValueError, Exception) as e:
         log(f"  [RTL-GEN] Error: {e}", RED)
         return {"error": str(e)}
+
+    # Postcondition: the agent must have materialized RTL at the canonical
+    # path with a real Verilog module. Codex in particular has a strong
+    # bias to write into its isolated codex-call-*/ scratch workdir and
+    # then return a JSON status that points at that scratch path rather
+    # than copying to rtl/. Failing fast here -- with a specific error
+    # the retry prompt can act on -- is cheaper than letting lint discover
+    # an empty or stub file.
+    postcond = _assert_rtl_materialized(rtl_path, block["name"])
+    if postcond is not None:
+        log(f"  [RTL-GEN] postcondition failed: {postcond}", RED)
+        return {"error": postcond, "postcondition_failed": True}
+
+    return result
+
+
+def _assert_rtl_materialized(rtl_path: Path, block_name: str) -> str | None:
+    """Return None if rtl_path contains a real `module <block_name>` Verilog
+    file; otherwise return a one-line diagnostic explaining what's wrong.
+
+    Three checks: file exists; file is non-trivially-sized (manylinux empty
+    file is 0 bytes, an `include "<path>"` redirect stub is typically
+    < 200 bytes); file contains `module <block_name>` literal so we know
+    the LLM didn't write the wrong module or a placeholder.
+    """
+    if not rtl_path.exists():
+        return (
+            f"agent did not write {rtl_path}. The RTL likely lives in a "
+            f"codex-call-*/ scratch workdir. Materialize it at "
+            f"{rtl_path} via your file-write tool before returning."
+        )
+    size = rtl_path.stat().st_size
+    if size < 200:
+        return (
+            f"{rtl_path} exists but is only {size} bytes -- likely a stub "
+            f"or `include` redirect, not real RTL. Write the full module "
+            f"body inline."
+        )
+    try:
+        text = rtl_path.read_text(encoding="utf-8")
+    except OSError as e:
+        return f"{rtl_path}: read failed ({e})"
+    if f"module {block_name}" not in text:
+        return (
+            f"{rtl_path} ({size} bytes) does not contain `module "
+            f"{block_name}`. The agent likely wrote the wrong module name "
+            f"or a different block's RTL. The module declaration must use "
+            f"exactly the block name."
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -519,19 +568,51 @@ async def generate_testbench(
     from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL
 
     rtl_path = str(PROJECT_ROOT / block["rtl_target"])
-    tb_path = str(PROJECT_ROOT / block["testbench"])
-    Path(tb_path).parent.mkdir(parents=True, exist_ok=True)
+    tb_path_str = str(PROJECT_ROOT / block["testbench"])
+    Path(tb_path_str).parent.mkdir(parents=True, exist_ok=True)
 
     agent = TestbenchGeneratorAgent(model=DEFAULT_MODEL, temperature=0.1)
     result = await agent.generate(
         block_name=block["name"],
         rtl_path=rtl_path,
         python_source_path=block.get("python_source", ""),
-        testbench_path=tb_path,
+        testbench_path=tb_path_str,
         project_root=str(PROJECT_ROOT),
         callbacks=callbacks,
     )
+
+    # Postcondition: cocotb TB must exist with at least one @cocotb.test().
+    # Same Codex-writes-to-scratch failure mode as generate_rtl; surface it
+    # early instead of waiting for simulate to discover an empty TB.
+    postcond = _assert_testbench_materialized(Path(tb_path_str), block["name"])
+    if postcond is not None:
+        log(f"  [TB-GEN] postcondition failed: {postcond}", RED)
+        return {"error": postcond, "postcondition_failed": True}
+
     return result
+
+
+def _assert_testbench_materialized(tb_path: Path, block_name: str) -> str | None:
+    """Return None if tb_path is a usable cocotb file; else a one-line reason."""
+    if not tb_path.exists():
+        return (
+            f"agent did not write {tb_path}. Likely written to a codex-call-*/ "
+            f"scratch dir. Materialize at {tb_path}."
+        )
+    size = tb_path.stat().st_size
+    if size < 200:
+        return f"{tb_path} exists but is only {size} bytes -- likely a stub."
+    try:
+        text = tb_path.read_text(encoding="utf-8")
+    except OSError as e:
+        return f"{tb_path}: read failed ({e})"
+    if "@cocotb.test" not in text:
+        return (
+            f"{tb_path} ({size} bytes) has no @cocotb.test() decorator. "
+            f"The cocotb runner will report zero testcases. Write at least "
+            f"one @cocotb.test() async function."
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
