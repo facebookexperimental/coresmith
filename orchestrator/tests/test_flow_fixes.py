@@ -1082,3 +1082,106 @@ class TestAutoApplyHighConfidenceFix:
             phase="sim",
         )
         assert result == "ask_human"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Post-mortem fix: soft write-lock on uArch specs
+#
+# The integration-review agent rewrote canonical uArch specs AFTER RTL had
+# been committed against them.  Codec run had specs balloon from 414-755
+# chars (RTL-gen time) to 27-40 KB (post-review).  RTL was built from the
+# stub specs; the rich versions now on disk describe interfaces the RTL
+# doesn't match.
+#
+# Fix: by default clone specs to arch/uarch_specs_review/ before the LLM
+# can touch them.  Originals are untouched; the review dir holds the
+# LLM's proposed edits.  An env var lets callers opt into the legacy
+# in-place behaviour for back-compat.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestIntegrationReviewSoftLock:
+    @pytest.mark.asyncio
+    async def test_review_writes_to_review_dir_not_canonical(
+        self, tmp_path, monkeypatch,
+    ):
+        from orchestrator.langchain.agents import integration_review_agent
+
+        # Plant canonical specs
+        specs_dir = tmp_path / "arch" / "uarch_specs"
+        specs_dir.mkdir(parents=True)
+        canonical_text = "# canonical spec for block_a\noriginal content"
+        (specs_dir / "block_a.md").write_text(canonical_text)
+
+        # Stub the LLM out: it would normally Edit the file at the path
+        # we hand it.  We just verify the path we hand it is the COPY.
+        seen_paths = []
+
+        async def fake_call(self, system=None, prompt=None, run_name=None, **kw):
+            for line in prompt.splitlines():
+                if "uarch_specs" in line and ".md" in line:
+                    seen_paths.append(line.strip())
+            return "Reviewed. Issues: 0\nFixes: 0"
+
+        monkeypatch.setattr(
+            integration_review_agent.ClaudeLLM, "call", fake_call
+        )
+
+        agent = integration_review_agent.IntegrationReviewAgent()
+        result = await agent.review(
+            block_names=["block_a"], project_root=str(tmp_path),
+        )
+
+        # Canonical untouched
+        assert (specs_dir / "block_a.md").read_text() == canonical_text
+
+        # Review copy was created and surfaced in the prompt
+        review_path = tmp_path / "arch" / "uarch_specs_review" / "block_a.md"
+        assert review_path.exists(), "review copy should be created"
+        assert review_path.read_text() == canonical_text  # starts identical
+
+        assert any("uarch_specs_review" in line for line in seen_paths), (
+            "review-dir copy path should appear in the LLM prompt"
+        )
+        assert not any(
+            "uarch_specs/block_a.md" in line and "uarch_specs_review" not in line
+            for line in seen_paths
+        ), "canonical path should NOT appear in the LLM prompt"
+
+        # review_dir surfaced in return value so caller can compare
+        assert result["review_dir"] is not None
+        assert "uarch_specs_review" in result["review_dir"]
+
+    @pytest.mark.asyncio
+    async def test_inplace_env_var_uses_canonical_path(
+        self, tmp_path, monkeypatch,
+    ):
+        from orchestrator.langchain.agents import integration_review_agent
+
+        specs_dir = tmp_path / "arch" / "uarch_specs"
+        specs_dir.mkdir(parents=True)
+        (specs_dir / "block_a.md").write_text("# spec")
+
+        seen_paths = []
+
+        async def fake_call(self, system=None, prompt=None, run_name=None, **kw):
+            for line in prompt.splitlines():
+                if ".md" in line:
+                    seen_paths.append(line.strip())
+            return "Reviewed. Issues: 0\nFixes: 0"
+
+        monkeypatch.setattr(
+            integration_review_agent.ClaudeLLM, "call", fake_call
+        )
+        monkeypatch.setenv("SOCMATE_INTEGRATION_REVIEW_INPLACE", "1")
+
+        agent = integration_review_agent.IntegrationReviewAgent()
+        result = await agent.review(
+            block_names=["block_a"], project_root=str(tmp_path),
+        )
+
+        # In-place mode: canonical spec path IS in the prompt
+        assert any(
+            "uarch_specs/block_a.md" in line and "uarch_specs_review" not in line
+            for line in seen_paths
+        ), "in-place mode should point LLM at canonical spec"
+        assert result["review_dir"] is None

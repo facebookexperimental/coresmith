@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -130,11 +131,34 @@ class IntegrationReviewAgent:
             span.set_attribute("block_count", len(block_names))
 
             root = Path(project_root)
+
+            # Soft write-lock on the canonical uArch specs: clone each into
+            # arch/uarch_specs_review/ and let the LLM Edit/Write against
+            # the copies.  Without this, the integration-review agent
+            # rewrites the originals AFTER RTL has been committed against
+            # them -- bytes that the block-level cocotb tests already
+            # validated get replaced by 30-40 KB the RTL was never built
+            # for.  Discovered live during the H.264 codec run.
+            #
+            # Behaviour: callers can opt out by setting
+            # SOCMATE_INTEGRATION_REVIEW_INPLACE=1 (e.g. for legacy flows).
+            inplace = os.environ.get(
+                "SOCMATE_INTEGRATION_REVIEW_INPLACE", ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
+
+            review_dir = root / "arch" / "uarch_specs_review"
             spec_paths = []
             for name in block_names:
-                p = root / "arch" / "uarch_specs" / f"{name}.md"
-                if p.exists():
-                    spec_paths.append(str(p))
+                src = root / "arch" / "uarch_specs" / f"{name}.md"
+                if not src.exists():
+                    continue
+                if inplace:
+                    spec_paths.append(str(src))
+                    continue
+                review_dir.mkdir(parents=True, exist_ok=True)
+                dst = review_dir / f"{name}.md"
+                shutil.copy2(src, dst)
+                spec_paths.append(str(dst))
 
             bd_path = root / ".socmate" / "block_diagram.json"
             review_bd_path = bd_path
@@ -207,8 +231,14 @@ class IntegrationReviewAgent:
 
             issues_found, issues_fixed = _parse_issue_counts(summary)
 
+            # Surface the review-dir so the caller (or the next iteration's
+            # uArch generator) can compare canonical specs vs review copies
+            # and decide whether to restart blocks.
             return {
                 "summary": summary,
                 "issues_found": issues_found,
                 "issues_fixed": issues_fixed,
+                "review_dir": (
+                    str(review_dir) if not inplace and review_dir.exists() else None
+                ),
             }
