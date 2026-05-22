@@ -976,3 +976,109 @@ class TestIntegrationLeadOutputPath:
         )
         sig = inspect.signature(IntegrationTestbenchGenerator.generate)
         assert "output_path" in sig.parameters
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Post-mortem fix: auto-apply high-confidence contract-audit fixes
+#
+# In the codec run, transform_select's fp16-static-function bug came back
+# from the debug agent at confidence=0.92 with a precise code_snippet fix,
+# but `needs_human=True` triggered an ask_human escalation that resolved to
+# instant retry with no new context.  _route_decision now overrides
+# needs_human when there's a high-confidence specific fix.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestAutoApplyHighConfidenceFix:
+    def _diag(self, **overrides):
+        d = {
+            "category": "ARITHMETIC_ERROR",
+            "confidence": 0.92,
+            "needs_human": True,
+            "escalate": False,
+            "local_fix_possible": True,
+            "suggested_fix": (
+                "Add `automatic` keyword to fp16_add, fp16_mul, and "
+                "fp16_round_pack so they don't share local temps across "
+                "calls in the dot-product tree at op_idx=4."
+            ),
+        }
+        d.update(overrides)
+        return d
+
+    def test_high_confidence_specific_fix_skips_ask_human(self):
+        from orchestrator.langgraph.pipeline_graph import _route_decision
+
+        result = _route_decision(
+            debug_result=self._diag(),
+            attempt_history=[],
+            attempt=1,
+            max_attempts=5,
+            phase="sim",
+        )
+        assert result == "retry_rtl"  # NOT ask_human
+
+    def test_high_confidence_testbench_bug_routes_to_retry_tb(self):
+        from orchestrator.langgraph.pipeline_graph import _route_decision
+
+        result = _route_decision(
+            debug_result=self._diag(is_testbench_bug=True, category="TESTBENCH_BUG"),
+            attempt_history=[],
+            attempt=1,
+            max_attempts=5,
+            phase="sim",
+        )
+        # needs_human override still honors testbench routing via the
+        # generic post-route logic; the key thing is it didn't escalate.
+        assert result in {"retry_tb", "retry_rtl"}
+        assert result != "ask_human"
+
+    def test_low_confidence_still_asks_human(self):
+        from orchestrator.langgraph.pipeline_graph import _route_decision
+
+        result = _route_decision(
+            debug_result=self._diag(confidence=0.6),
+            attempt_history=[],
+            attempt=1,
+            max_attempts=5,
+            phase="sim",
+        )
+        assert result == "ask_human"
+
+    def test_vague_suggested_fix_still_asks_human(self):
+        from orchestrator.langgraph.pipeline_graph import _route_decision
+
+        # Short / vague suggested_fix below 50 chars -> not actionable
+        result = _route_decision(
+            debug_result=self._diag(suggested_fix="Retry it."),
+            attempt_history=[],
+            attempt=1,
+            max_attempts=5,
+            phase="sim",
+        )
+        assert result == "ask_human"
+
+    def test_local_fix_impossible_still_asks_human(self):
+        from orchestrator.langgraph.pipeline_graph import _route_decision
+
+        result = _route_decision(
+            debug_result=self._diag(local_fix_possible=False),
+            attempt_history=[],
+            attempt=1,
+            max_attempts=5,
+            phase="sim",
+        )
+        assert result == "ask_human"
+
+    def test_env_var_can_raise_threshold(self, monkeypatch):
+        from orchestrator.langgraph.pipeline_graph import _route_decision
+
+        # 0.92 < 0.95 threshold -> stays as ask_human
+        monkeypatch.setenv("SOCMATE_AUTO_FIX_CONFIDENCE", "0.95")
+        result = _route_decision(
+            debug_result=self._diag(),  # confidence=0.92
+            attempt_history=[],
+            attempt=1,
+            max_attempts=5,
+            phase="sim",
+        )
+        assert result == "ask_human"

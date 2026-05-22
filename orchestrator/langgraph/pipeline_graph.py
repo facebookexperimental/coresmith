@@ -1206,6 +1206,29 @@ def _route_decision(debug_result: dict, attempt_history: list[dict],
     needs_human = debug_result.get("needs_human", False)
     escalate = debug_result.get("escalate", False)
 
+    # High-confidence machine-applicable fix -> auto-retry instead of asking
+    # a human.  The LLM debug agent often hedges with needs_human=True even
+    # when it has a concrete suggested_fix (e.g. the codec run's
+    # transform_select fp16-static-function bug came back at confidence=0.92
+    # with a precise `code_snippet`, but `needs_human=True` triggered an
+    # ask_human escalation that resolved to instant retry with no new
+    # context).  Skip the round-trip: the diagnosis.json is already on disk
+    # and the next retry's prompt reads it.
+    #   Tunable via SOCMATE_AUTO_FIX_CONFIDENCE (default 0.85).
+    suggested_fix = str(debug_result.get("suggested_fix") or "").strip()
+    local_fix_possible = debug_result.get("local_fix_possible", True)
+    try:
+        auto_fix_threshold = float(os.environ.get("SOCMATE_AUTO_FIX_CONFIDENCE", "0.85"))
+    except ValueError:
+        auto_fix_threshold = 0.85
+    if (
+        needs_human
+        and confidence >= auto_fix_threshold
+        and local_fix_possible
+        and len(suggested_fix) >= 50
+    ):
+        needs_human = False  # overridden -- the retry path injects the fix
+
     # Count how many times each category has occurred
     category_counts: dict[str, int] = {}
     for entry in attempt_history:
