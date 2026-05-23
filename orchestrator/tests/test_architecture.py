@@ -368,6 +368,73 @@ class TestConstraintChecker:
 
         assert _shuttle_constraints_enabled() is False
 
+    def test_inter_block_payload_protocol_coherence_registered(self):
+        """The bit-ledger + handshake-protocol + flow-control subagent must
+        be present, must always apply when connections exist, and must
+        prompt for all three dimensions."""
+        from orchestrator.architecture.constraints import _CONSTRAINT_CATALOG
+
+        match = [c for c in _CONSTRAINT_CATALOG if c["id"] == "inter_block_payload_protocol_coherence"]
+        assert len(match) == 1
+        c = match[0]
+        assert c["category"] == "structural"
+        assert c["severity"] == "error"
+        # The applies() predicate triggers whenever there's at least one connection.
+        assert c["applies"]({"block_diagram": {"connections": [{"from": "a", "to": "b"}]}}) is True
+        assert c["applies"]({"block_diagram": {"connections": []}}) is False
+        # The description must explicitly cover all three dimensions the
+        # user asked about (bit ledger, protocol family, flow control).
+        desc = c["description"].lower()
+        assert "bit" in desc and "ledger" in desc, "must mention bit ledger"
+        assert "axi-stream" in desc, "must mention AXI-Stream as a protocol family"
+        assert "ocp" in desc or "avalon" in desc or "wishbone" in desc, "must enumerate non-AXI families"
+        assert "bubble" in desc or "fifo" in desc, "must cover flow-control bubbles/buffering"
+        assert "backpressure" in desc, "must call out backpressure"
+        assert "rate" in desc or "burst" in desc, "must mention rate/burst matching"
+
+    @pytest.mark.asyncio
+    async def test_inter_block_coherence_detects_bit_ledger_disagreement(self, sample_block_diagram):
+        """When the subagent reports a bit-ledger disagreement between
+        producer and consumer of a connection, the violation flows through
+        with the right check id."""
+        from unittest.mock import patch
+        from orchestrator.architecture.constraints import check_constraints
+
+        mock_call = self._make_subagent_mock(per_check_response={
+            "inter_block_payload_protocol_coherence": {
+                "pass": False,
+                "violation_text": (
+                    "raster_block_assembler.m_axis_mb_lookup_tdata packs "
+                    "[6:0]=mb_x but recon_neighbor_store.s_axis_mb_lookup_tdata "
+                    "decodes [20:14]=mb_x; same 21-bit width, reversed bit order."
+                ),
+                "evidence": (
+                    "arch/uarch_specs/raster_block_assembler.md ledger differs "
+                    "from arch/uarch_specs/recon_neighbor_store.md ledger"
+                ),
+                "suggested_fix": (
+                    "Define a single mb_meta21 type in the SAD; regenerate "
+                    "recon_neighbor_store to consume it."
+                ),
+            },
+        })
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
+            MockLLM.return_value.call = mock_call
+            violations = await check_constraints(
+                block_diagram=sample_block_diagram,
+                memory_map={},
+                clock_tree={},
+                register_spec={},
+            )
+
+        match = [v for v in violations if v["check"] == "inter_block_payload_protocol_coherence"]
+        assert len(match) == 1
+        v = match[0]
+        assert v["severity"] == "error"
+        assert v["category"] == "structural"
+        assert "mb_x" in v["violation"]
+        assert "mb_meta21" in v["suggested_fix"]
+
     def test_anti_pattern_warnings_no_longer_in_corpus(self):
         """Smoke test: the regex extractor was removed, so requirements-doc
         anti-pattern phrases no longer feed a claim-extraction stage at all.

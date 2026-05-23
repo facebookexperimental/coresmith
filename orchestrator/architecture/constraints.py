@@ -399,6 +399,68 @@ _CONSTRAINT_CATALOG: list[dict] = [
         ),
         "applies": lambda ctx: bool(ctx["block_diagram"].get("connections")),
     },
+    {
+        "id": "inter_block_payload_protocol_coherence",
+        "category": "structural",
+        "severity": "error",
+        "description": (
+            "For EACH edge in `block_diagram.connections`, the producer block "
+            "and the consumer block must agree on three things. Width-matched "
+            "wires alone are not enough. Read each end's uArch spec carefully "
+            "(SAD/FRD if present too) and check every connection.\n\n"
+            "1. **Payload bit ledger (field-by-field).** The producer's "
+            "output payload bit layout and the consumer's input payload bit "
+            "layout must define the SAME fields at the SAME bit positions. "
+            "Widths matching is not enough; bit order matters. Example "
+            "failure: a 21-bit metadata word where producer packs "
+            "[6:0]=mb_x, [12:7]=mb_y, ... but consumer decodes "
+            "[20:14]=mb_x, [13:8]=mb_y, ... — both sides claim 21 bits and "
+            "the AXI wire connects, but the receiver gets bit-reversed "
+            "garbage. Flag every connection where producer/consumer bit "
+            "ledgers disagree on field name, position, width, or endianness. "
+            "Cite the producer-side and consumer-side ledger lines.\n\n"
+            "2. **Handshake protocol family + signal naming.** Both ends "
+            "must declare the same protocol family (AXI-Stream, AXI-Lite, "
+            "AXI4 full, OCP, Avalon-ST, Wishbone, sRDY/DRDY, ready/valid "
+            "with optional last, request/grant, …) AND use compatible "
+            "signal names. AXI-Stream requires {tvalid, tready, tdata, "
+            "optional tlast/tuser/tkeep}. AXI-Lite requires {awvalid, "
+            "awaddr, wvalid, wdata, bvalid, arvalid, araddr, rvalid, rdata}. "
+            "Avalon-ST requires {valid, ready, data, optional sop/eop}. A "
+            "producer emitting `tvalid/tready/tdata` cannot connect to a "
+            "consumer expecting `valid/grant/payload` — even if the data "
+            "widths match. Flag any mismatch in protocol family OR signal "
+            "naming. If one side leaves the protocol implicit, flag it as "
+            "ambiguous.\n\n"
+            "3. **Flow control: pipeline bubbles, rate matching, buffering.** "
+            "For streaming connections, determine whether the producer's "
+            "burst behavior and the consumer's consumption rate are "
+            "compatible:\n"
+            "   - If producer emits 1 word per N cycles and consumer "
+            "consumes 1 word per M cycles with M > N, a buffer of depth "
+            "≥ (M-N) * burst_length is needed between them; otherwise the "
+            "producer will deadlock on backpressure during a burst. Flag "
+            "the missing buffer (or undersized FIFO).\n"
+            "   - If the consumer asserts ready intermittently (bubbles), "
+            "verify the producer keeps `tvalid+tdata` stable across the "
+            "bubble (AXI-Stream protocol rule). If the producer's spec "
+            "says it deasserts valid mid-transaction, that's an AXI-Stream "
+            "compliance violation — flag it.\n"
+            "   - If the consumer's spec says it requires N back-to-back "
+            "input words with no bubbles (e.g., a transform engine that "
+            "blocks on incomplete 8x8 blocks), but the producer can stall, "
+            "an elastic FIFO must be declared at that boundary. Flag if "
+            "the connection lacks it.\n"
+            "   - For sized FIFOs, verify the declared depth is at least "
+            "the burst-length × any expected stall window. If the producer "
+            "spec says \"emits 64 words per macroblock\" but the inter-"
+            "block FIFO is 8 entries deep, flag it.\n\n"
+            "Cite the producer-side and consumer-side spec evidence for "
+            "each violation. Pass if every connection has consistent ledger "
+            "+ matching protocol family + adequate flow control evidence."
+        ),
+        "applies": lambda ctx: bool(ctx["block_diagram"].get("connections")),
+    },
 ]
 
 
