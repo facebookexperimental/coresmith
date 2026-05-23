@@ -8,6 +8,7 @@ import ReactFlow, {
   useNodesState,
   useEdgesState,
   useReactFlow,
+  getRectOfNodes,
 } from 'reactflow';
 
 import DecideNode from './DecideNode';
@@ -198,17 +199,48 @@ export default function GraphCanvas({ graphData, graphName, executionStatus, onN
     }
   }, [graphData, doLayout, direction]);
 
-  // Re-fit after layout finishes so newly-loaded graphs fill the viewport.
-  // Use rAF so ReactFlow's internal node-bounds calc has run by the time
-  // we call fitView.
+  // After layout finishes, manually compute a zoom that keeps nodes legible.
+  // ReactFlow's built-in fitView ignores its `minZoom` option for shrinking
+  // (it only clamps growth), so a Frontend pipeline with an 8:1 aspect ratio
+  // ends up at scale 0.35 with 70px-wide nodes you can't read. We compute
+  // the fit zoom, floor it at MIN_ZOOM, center the graph, and call
+  // setViewport directly. If the graph then overflows, the user pans.
+  // Use a real timeout (not rAF) so ReactFlow's own auto-fit-on-mount has
+  // already settled before we override -- otherwise our viewport gets
+  // clobbered by the prop-level fitView a tick later.
   useEffect(() => {
     if (!layoutDone) return;
-    const id = requestAnimationFrame(() => {
+    const tid = setTimeout(() => {
       try {
-        reactFlow.fitView({ padding: 0.12, duration: 200 });
-      } catch {}
-    });
-    return () => cancelAnimationFrame(id);
+        const wrapper = document.querySelector('.graph-canvas-wrapper');
+        if (!wrapper) return;
+        const W = wrapper.clientWidth;
+        const H = wrapper.clientHeight;
+        const rfNodesNow = reactFlow.getNodes();
+        if (!rfNodesNow || rfNodesNow.length === 0) return;
+        const bounds = getRectOfNodes(rfNodesNow);
+        if (!bounds.width || !bounds.height) return;
+        const PADDING = 40;
+        const fitX = (W - PADDING * 2) / bounds.width;
+        const fitY = (H - PADDING * 2) / bounds.height;
+        const fit = Math.min(fitX, fitY);
+        // Clamp so nodes never render below ~120px wide. With our ~200px
+        // node width, that's a 0.6 zoom floor. The user can still zoom out
+        // manually via the Controls if they need a bird's-eye view.
+        const MIN_ZOOM = 0.6;
+        const MAX_ZOOM = 1.0;
+        const zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, fit));
+        const cx = bounds.x + bounds.width / 2;
+        const cy = bounds.y + bounds.height / 2;
+        reactFlow.setViewport(
+          { x: W / 2 - cx * zoom, y: H / 2 - cy * zoom, zoom },
+          { duration: 250 },
+        );
+      } catch (e) {
+        console.warn('graph fit error', e);
+      }
+    }, 80);
+    return () => clearTimeout(tid);
   }, [layoutDone, graphName, reactFlow]);
 
   const onNodeClick = useCallback((_event, node) => {
@@ -248,9 +280,7 @@ export default function GraphCanvas({ graphData, graphName, executionStatus, onN
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         onNodeClick={onNodeClick}
-        fitView
-        fitViewOptions={{ padding: 0.15 }}
-        minZoom={0.02}
+        minZoom={0.05}
         maxZoom={1.5}
         nodesDraggable={true}
         nodesConnectable={false}

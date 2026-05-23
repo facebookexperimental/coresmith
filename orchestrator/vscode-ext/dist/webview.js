@@ -121150,6 +121150,10 @@ var getNodesBounds = (nodes, nodeOrigin = [0, 0]) => {
   }, { x: Infinity, y: Infinity, x2: -Infinity, y2: -Infinity });
   return boxToRect(box);
 };
+var getRectOfNodes = (nodes, nodeOrigin = [0, 0]) => {
+  console.warn("[DEPRECATED] `getRectOfNodes` is deprecated. Instead use `getNodesBounds` https://reactflow.dev/api-reference/utils/get-nodes-bounds.");
+  return getNodesBounds(nodes, nodeOrigin);
+};
 var getNodesInside = (nodeInternals, rect, [tx, ty, tScale] = [0, 0, 1], partially = false, excludeNonSelectableNodes = false, nodeOrigin = [0, 0]) => {
   const paneRect = {
     x: (rect.x - tx) / tScale,
@@ -126962,13 +126966,37 @@ function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, tr
   (0, import_react16.useEffect)(() => {
     if (!layoutDone)
       return;
-    const id2 = requestAnimationFrame(() => {
+    const tid = setTimeout(() => {
       try {
-        reactFlow.fitView({ padding: 0.12, duration: 200 });
-      } catch {
+        const wrapper = document.querySelector(".graph-canvas-wrapper");
+        if (!wrapper)
+          return;
+        const W = wrapper.clientWidth;
+        const H = wrapper.clientHeight;
+        const rfNodesNow = reactFlow.getNodes();
+        if (!rfNodesNow || rfNodesNow.length === 0)
+          return;
+        const bounds = getRectOfNodes(rfNodesNow);
+        if (!bounds.width || !bounds.height)
+          return;
+        const PADDING = 40;
+        const fitX = (W - PADDING * 2) / bounds.width;
+        const fitY = (H - PADDING * 2) / bounds.height;
+        const fit = Math.min(fitX, fitY);
+        const MIN_ZOOM = 0.6;
+        const MAX_ZOOM = 1;
+        const zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, fit));
+        const cx = bounds.x + bounds.width / 2;
+        const cy = bounds.y + bounds.height / 2;
+        reactFlow.setViewport(
+          { x: W / 2 - cx * zoom, y: H / 2 - cy * zoom, zoom },
+          { duration: 250 }
+        );
+      } catch (e) {
+        console.warn("graph fit error", e);
       }
-    });
-    return () => cancelAnimationFrame(id2);
+    }, 80);
+    return () => clearTimeout(tid);
   }, [layoutDone, graphName, reactFlow]);
   const onNodeClick = (0, import_react16.useCallback)((_event, node) => {
     setSelectedNode(node.data);
@@ -127002,9 +127030,7 @@ function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, tr
         nodeTypes,
         edgeTypes,
         onNodeClick,
-        fitView: true,
-        fitViewOptions: { padding: 0.15 },
-        minZoom: 0.02,
+        minZoom: 0.05,
         maxZoom: 1.5,
         nodesDraggable: true,
         nodesConnectable: false,
