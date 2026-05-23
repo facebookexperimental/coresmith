@@ -125998,6 +125998,7 @@ function TrajectorySteps({ steps }) {
       model: step.model || "LLM",
       runName: step.run_name || "",
       heartbeats: step.heartbeats || [],
+      codexTurns: step.codex_turns || [],
       promptTokens: step.usage?.prompt_tokens || step.usage?.input_tokens,
       completionTokens: step.usage?.completion_tokens || step.usage?.output_tokens,
       totalTokens: step.usage?.total_tokens,
@@ -126010,6 +126011,43 @@ function TrajectorySteps({ steps }) {
     };
     return call.streaming ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(StreamingLLMCard, { call }, `stream-${i}`) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(LLMCallCard, { call, index: i, total }, `llm-${i}`);
   }) });
+}
+var _TURN_META = {
+  reasoning: { label: "Reasoning", icon: "\u{1F9E0}", cls: "turn-reasoning" },
+  agent_message: { label: "Message", icon: "\u{1F4AC}", cls: "turn-message" },
+  local_shell_call: { label: "Shell", icon: "$", cls: "turn-shell" },
+  local_shell_output: { label: "Shell output", icon: "\u21E5", cls: "turn-shell-out" },
+  tool_call: { label: "Tool", icon: "\u{1F527}", cls: "turn-tool" },
+  tool_result: { label: "Tool result", icon: "\u21E5", cls: "turn-tool-out" },
+  turn_complete: { label: "Turn end", icon: "\xB7", cls: "turn-end" }
+};
+function CodexTurn({ turn, index }) {
+  const [open, setOpen] = (0, import_react15.useState)(false);
+  const meta = _TURN_META[turn.kind] || { label: turn.kind || "Turn", icon: "\xB7", cls: "turn-other" };
+  const fullJson = (() => {
+    try {
+      return JSON.stringify(turn.full, null, 2);
+    } catch {
+      return String(turn.full);
+    }
+  })();
+  return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: `codex-turn ${meta.cls}`, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
+      "button",
+      {
+        className: "codex-turn-header",
+        onClick: () => setOpen((v) => !v),
+        children: [
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "codex-turn-index", children: index + 1 }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "codex-turn-icon", "aria-hidden": "true", children: meta.icon }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "codex-turn-label", children: meta.label }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "codex-turn-summary", children: turn.summary || "(no preview)" }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "codex-turn-chev", children: open ? "\u25BE" : "\u25B8" })
+        ]
+      }
+    ),
+    open && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("pre", { className: "codex-turn-full", children: fullJson })
+  ] });
 }
 function LLMCallCard({ call, index, total }) {
   const statusSymbol = call.status === "ok" ? "\u2713" : call.status === "error" ? "\u2717" : "\u2014";
@@ -126037,9 +126075,9 @@ function LLMCallCard({ call, index, total }) {
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-step-chain", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step llm-step-sys", title: "System prompt set", children: "\u2699" }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step llm-step-sys", title: "System prompt set", children: "sys" }),
           /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step-line" }),
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step llm-step-usr", title: "User prompt", children: "\u25B6" }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step llm-step-usr", title: "User prompt", children: "in" }),
           hbCount > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(import_jsx_runtime9.Fragment, { children: [
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step-line" }),
             call.heartbeats.map((h, i) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
@@ -126047,13 +126085,21 @@ function LLMCallCard({ call, index, total }) {
               {
                 className: "llm-step llm-step-hb",
                 title: `Heartbeat @${(h.elapsed_s || 0).toFixed(0)}s \xB7 stdout ${h.stdout_bytes || 0}B`,
-                children: "\u25CF"
+                children: "\xB7"
               },
               `hb-${i}`
             ))
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step-line" }),
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `llm-step llm-step-resp llm-step-${statusCls}`, title: "Response", children: "\u25C0" })
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `llm-step llm-step-resp llm-step-${statusCls}`, title: "Response", children: "out" })
+        ] }),
+        Array.isArray(call.codexTurns) && call.codexTurns.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-codex-turns", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-codex-turns-label", children: [
+            call.codexTurns.length,
+            " agent turn",
+            call.codexTurns.length !== 1 ? "s" : ""
+          ] }),
+          call.codexTurns.map((turn, i) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(CodexTurn, { turn, index: i }, `turn-${i}`))
         ] }),
         call.systemPrompt && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(Collapsible, { label: "System Prompt", icon: "\u2699", className: "llm-sys", children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(FormattedText, { text: call.systemPrompt }) }),
         call.prompt && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(Collapsible, { label: "Prompt", icon: "\u25B6", className: "llm-usr", children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(FormattedText, { text: call.prompt }) }),

@@ -721,11 +721,15 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
+  min-width: 18px;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-family: 'Menlo', 'Monaco', monospace;
   font-size: 9px;
   font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
   flex-shrink: 0;
 }
 .llm-step-sys {
@@ -779,6 +783,105 @@
   gap: 8px;
   flex-shrink: 0;
 }
+
+/* ── Codex turn cards (engine-captured reasoning + tool calls) ── */
+.llm-codex-turns {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-subtle);
+}
+.llm-codex-turns-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+  padding: 2px 0 4px;
+}
+.codex-turn {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 5px;
+  background: var(--color-bg-primary);
+  overflow: hidden;
+}
+.codex-turn-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+  font-size: 11px;
+  font-family: inherit;
+  color: var(--color-text-primary);
+}
+.codex-turn-header:hover { background: var(--color-bg-hover); }
+.codex-turn-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 16px;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--color-text-dimmed);
+  font-family: 'Menlo', monospace;
+}
+.codex-turn-icon {
+  width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.codex-turn-label {
+  font-weight: 600;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  min-width: 78px;
+  flex-shrink: 0;
+}
+.codex-turn-summary {
+  flex: 1;
+  font-family: 'Menlo', monospace;
+  font-size: 10.5px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.codex-turn-chev {
+  font-size: 10px;
+  color: var(--color-text-dimmed);
+  flex-shrink: 0;
+}
+.codex-turn-full {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--color-bg-input);
+  font-family: 'Menlo', monospace;
+  font-size: 10.5px;
+  line-height: 1.5;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  border-top: 1px solid var(--color-border-subtle);
+}
+/* Per-kind accent on the left border */
+.turn-reasoning   { border-left: 3px solid #8b5cf6; }
+.turn-message     { border-left: 3px solid #16a34a; }
+.turn-shell       { border-left: 3px solid #f59e0b; }
+.turn-shell-out   { border-left: 3px solid #f59e0b; opacity: 0.85; }
+.turn-tool        { border-left: 3px solid #2563eb; }
+.turn-tool-out    { border-left: 3px solid #2563eb; opacity: 0.85; }
+.turn-end         { border-left: 3px solid var(--color-border-primary); opacity: 0.7; }
+.turn-other       { border-left: 3px solid var(--color-border-primary); }
 
 /* ── Tool run cards (lint/simulate/synthesize step_logs) ── */
 .tool-card {

@@ -649,6 +649,80 @@ def get_node_trajectory(node_name: str, max_log_chars: int = 16000) -> list:
             out_hb.append(h)
         return out_hb
 
+    # Engine-side codex turn log: each codex_cli invocation appends every
+    # turn (reasoning, tool_call, tool_result, agent_message) to
+    # .coresmith/codex_turns.jsonl with its pid + ts. We correlate to each
+    # LLM call by [start, end] time window so the trajectory can show what
+    # the agent actually did, not just the final answer. Historical runs
+    # (pre-engine-change) won't have this file; we degrade gracefully.
+    codex_turns_log = PROJECT_ROOT / ".coresmith" / "codex_turns.jsonl"
+    if not codex_turns_log.exists():
+        # Fall back to the legacy .socmate/ path used by pre-rebrand runs.
+        codex_turns_log = PROJECT_ROOT / ".socmate" / "codex_turns.jsonl"
+    codex_records: list[dict] = []
+    if codex_turns_log.exists():
+        try:
+            for line in codex_turns_log.read_text().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    codex_records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        except OSError:
+            pass
+
+    def _codex_turns_in(call_ts: float, end_ts: float | None):
+        """Return concise turn summaries inside the call's window.
+
+        We project each codex event down to a compact card-friendly shape:
+        {kind, summary, full} where `kind` is one of reasoning / tool_call
+        / tool_result / agent_message / other, `summary` is a one-line
+        preview, and `full` is the original payload for the on-demand
+        expander.
+        """
+        out_turns = []
+        for rec in codex_records:
+            t = rec.get("ts")
+            if t is None or t < call_ts:
+                continue
+            if end_ts is not None and t > end_ts + 1.0:
+                continue
+            ev = rec.get("event") or {}
+            ev_type = ev.get("type", "")
+            if ev_type != "item.completed" and ev_type != "turn.completed":
+                continue
+            item = (ev.get("item") or {}) if ev_type == "item.completed" else {}
+            kind = item.get("type") or ev_type
+            summary = ""
+            if kind == "reasoning":
+                summary = (item.get("text") or item.get("summary") or "")[:240]
+            elif kind == "agent_message":
+                summary = (item.get("text") or "")[:240]
+            elif kind in ("local_shell_call", "tool_call"):
+                cmd = (item.get("input") or {}).get("command") or item.get("name") or ""
+                if isinstance(cmd, list):
+                    cmd = " ".join(map(str, cmd))
+                summary = str(cmd)[:240]
+            elif kind in ("local_shell_output", "tool_result"):
+                summary = (item.get("output") or item.get("text") or "")[:240]
+            elif ev_type == "turn.completed":
+                kind = "turn_complete"
+                u = ev.get("usage") or {}
+                summary = (
+                    f"in={u.get('input_tokens','?')} out={u.get('output_tokens','?')}"
+                )
+            else:
+                summary = json.dumps(item, default=str)[:240]
+            out_turns.append({
+                "type": "codex_turn",
+                "ts": t,
+                "kind": kind,
+                "summary": summary,
+                "full": item or ev,
+            })
+        return out_turns
+
     # Load LLM calls once, keep just the small subset we need
     llm_records: list[dict] = []
     if llm_log.exists():
@@ -714,6 +788,7 @@ def get_node_trajectory(node_name: str, max_log_chars: int = 16000) -> list:
             start_match = _match_start(t, dur)
             run_name = (start_match or {}).get("run_name", "")
             heartbeats = _heartbeats_in(t, end_t)
+            codex_turns = _codex_turns_in(t, end_t)
             calls.append({
                 "type": "llm_call",
                 "ts": t,
@@ -729,6 +804,10 @@ def get_node_trajectory(node_name: str, max_log_chars: int = 16000) -> list:
                 # rough indicator the codex_cli was producing output during
                 # the call.
                 "heartbeats": heartbeats,
+                # Codex CLI's per-turn record: reasoning blocks, tool
+                # calls + outputs, agent messages. Empty for runs that
+                # predate the engine-side logging change.
+                "codex_turns": codex_turns,
                 "system_prompt": rec.get("system_prompt", ""),
                 "user_prompt": rec.get("user_prompt", ""),
                 "response": rec.get("response", ""),

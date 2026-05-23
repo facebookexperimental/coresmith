@@ -979,6 +979,7 @@ function TrajectorySteps({ steps }) {
           model: step.model || 'LLM',
           runName: step.run_name || '',
           heartbeats: step.heartbeats || [],
+          codexTurns: step.codex_turns || [],
           promptTokens: step.usage?.prompt_tokens || step.usage?.input_tokens,
           completionTokens: step.usage?.completion_tokens || step.usage?.output_tokens,
           totalTokens: step.usage?.total_tokens,
@@ -993,6 +994,42 @@ function TrajectorySteps({ steps }) {
           ? <StreamingLLMCard key={`stream-${i}`} call={call} />
           : <LLMCallCard key={`llm-${i}`} call={call} index={i} total={total} />;
       })}
+    </div>
+  );
+}
+
+/* ── Codex turn (reasoning / tool call / tool result / agent message) ── */
+const _TURN_META = {
+  reasoning:           { label: 'Reasoning',     icon: '🧠', cls: 'turn-reasoning' },
+  agent_message:       { label: 'Message',       icon: '💬', cls: 'turn-message' },
+  local_shell_call:    { label: 'Shell',         icon: '$',  cls: 'turn-shell' },
+  local_shell_output:  { label: 'Shell output',  icon: '⇥',  cls: 'turn-shell-out' },
+  tool_call:           { label: 'Tool',          icon: '🔧', cls: 'turn-tool' },
+  tool_result:         { label: 'Tool result',   icon: '⇥',  cls: 'turn-tool-out' },
+  turn_complete:       { label: 'Turn end',      icon: '·',  cls: 'turn-end' },
+};
+
+function CodexTurn({ turn, index }) {
+  const [open, setOpen] = useState(false);
+  const meta = _TURN_META[turn.kind] || { label: turn.kind || 'Turn', icon: '·', cls: 'turn-other' };
+  const fullJson = (() => {
+    try { return JSON.stringify(turn.full, null, 2); } catch { return String(turn.full); }
+  })();
+  return (
+    <div className={`codex-turn ${meta.cls}`}>
+      <button
+        className="codex-turn-header"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="codex-turn-index">{index + 1}</span>
+        <span className="codex-turn-icon" aria-hidden="true">{meta.icon}</span>
+        <span className="codex-turn-label">{meta.label}</span>
+        <span className="codex-turn-summary">{turn.summary || '(no preview)'}</span>
+        <span className="codex-turn-chev">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <pre className="codex-turn-full">{fullJson}</pre>
+      )}
     </div>
   );
 }
@@ -1043,9 +1080,9 @@ function LLMCallCard({ call, index, total }) {
           codex_cli's internal tool calls aren't instrumented, we can at
           least show the pulses we DO have. */}
       <div className="llm-step-chain">
-        <span className="llm-step llm-step-sys" title="System prompt set">{'\u2699'}</span>
+        <span className="llm-step llm-step-sys" title="System prompt set">sys</span>
         <span className="llm-step-line" />
-        <span className="llm-step llm-step-usr" title="User prompt">{'\u25b6'}</span>
+        <span className="llm-step llm-step-usr" title="User prompt">in</span>
         {hbCount > 0 && (
           <>
             <span className="llm-step-line" />
@@ -1054,13 +1091,27 @@ function LLMCallCard({ call, index, total }) {
                 key={`hb-${i}`}
                 className="llm-step llm-step-hb"
                 title={`Heartbeat @${(h.elapsed_s || 0).toFixed(0)}s \u00b7 stdout ${h.stdout_bytes || 0}B`}
-              >{'\u25cf'}</span>
+              >&middot;</span>
             ))}
           </>
         )}
         <span className="llm-step-line" />
-        <span className={`llm-step llm-step-resp llm-step-${statusCls}`} title="Response">{'\u25c0'}</span>
+        <span className={`llm-step llm-step-resp llm-step-${statusCls}`} title="Response">out</span>
       </div>
+
+      {/* Codex turns (reasoning + tool calls + tool results) when the
+          engine captured them. For historical runs this is empty and we
+          fall back to the prompt \u2192 response collapsibles below. */}
+      {Array.isArray(call.codexTurns) && call.codexTurns.length > 0 && (
+        <div className="llm-codex-turns">
+          <div className="llm-codex-turns-label">
+            {call.codexTurns.length} agent turn{call.codexTurns.length !== 1 ? 's' : ''}
+          </div>
+          {call.codexTurns.map((turn, i) => (
+            <CodexTurn key={`turn-${i}`} turn={turn} index={i} />
+          ))}
+        </div>
+      )}
 
       {/* System prompt (collapsed) */}
       {call.systemPrompt && (
