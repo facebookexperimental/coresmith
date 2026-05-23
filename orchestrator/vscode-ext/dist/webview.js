@@ -2440,7 +2440,7 @@ var require_react_dom_development = __commonJS({
         var HostPortal = 4;
         var HostComponent = 5;
         var HostText = 6;
-        var Fragment9 = 7;
+        var Fragment10 = 7;
         var Mode = 8;
         var ContextConsumer = 9;
         var ContextProvider = 10;
@@ -3596,7 +3596,7 @@ var require_react_dom_development = __commonJS({
               return "DehydratedFragment";
             case ForwardRef:
               return getWrappedName$1(type, type.render, "ForwardRef");
-            case Fragment9:
+            case Fragment10:
               return "Fragment";
             case HostComponent:
               return type;
@@ -11997,7 +11997,7 @@ var require_react_dom_development = __commonJS({
             }
           }
           function updateFragment2(returnFiber, current2, fragment, lanes, key) {
-            if (current2 === null || current2.tag !== Fragment9) {
+            if (current2 === null || current2.tag !== Fragment10) {
               var created = createFiberFromFragment(fragment, returnFiber.mode, lanes, key);
               created.return = returnFiber;
               return created;
@@ -12400,7 +12400,7 @@ var require_react_dom_development = __commonJS({
               if (child.key === key) {
                 var elementType = element.type;
                 if (elementType === REACT_FRAGMENT_TYPE) {
-                  if (child.tag === Fragment9) {
+                  if (child.tag === Fragment10) {
                     deleteRemainingChildren(returnFiber, child.sibling);
                     var existing = useFiber(child, element.props.children);
                     existing.return = returnFiber;
@@ -17877,7 +17877,7 @@ var require_react_dom_development = __commonJS({
               var _resolvedProps2 = workInProgress2.elementType === type ? _unresolvedProps2 : resolveDefaultProps(type, _unresolvedProps2);
               return updateForwardRef(current2, workInProgress2, type, _resolvedProps2, renderLanes2);
             }
-            case Fragment9:
+            case Fragment10:
               return updateFragment(current2, workInProgress2, renderLanes2);
             case Mode:
               return updateMode(current2, workInProgress2, renderLanes2);
@@ -18150,7 +18150,7 @@ var require_react_dom_development = __commonJS({
             case SimpleMemoComponent:
             case FunctionComponent:
             case ForwardRef:
-            case Fragment9:
+            case Fragment10:
             case Mode:
             case Profiler:
             case ContextConsumer:
@@ -22409,7 +22409,7 @@ var require_react_dom_development = __commonJS({
           return fiber;
         }
         function createFiberFromFragment(elements, mode, lanes, key) {
-          var fiber = createFiber(Fragment9, elements, key, mode);
+          var fiber = createFiber(Fragment10, elements, key, mode);
           fiber.lanes = lanes;
           return fiber;
         }
@@ -126037,9 +126037,9 @@ function LLMCallCard({ call, index, total }) {
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-step-chain", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step llm-step-sys", title: "System prompt set", children: "\\u2699" }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step llm-step-sys", title: "System prompt set", children: "\u2699" }),
           /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step-line" }),
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step llm-step-usr", title: "User prompt", children: "\\u25b6" }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step llm-step-usr", title: "User prompt", children: "\u25B6" }),
           hbCount > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(import_jsx_runtime9.Fragment, { children: [
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step-line" }),
             call.heartbeats.map((h, i) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
@@ -126047,13 +126047,13 @@ function LLMCallCard({ call, index, total }) {
               {
                 className: "llm-step llm-step-hb",
                 title: `Heartbeat @${(h.elapsed_s || 0).toFixed(0)}s \xB7 stdout ${h.stdout_bytes || 0}B`,
-                children: "\\u25cf"
+                children: "\u25CF"
               },
               `hb-${i}`
             ))
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step-line" }),
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `llm-step llm-step-resp llm-step-${statusCls}`, title: "Response", children: "\\u25c0" })
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `llm-step llm-step-resp llm-step-${statusCls}`, title: "Response", children: "\u25C0" })
         ] }),
         call.systemPrompt && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(Collapsible, { label: "System Prompt", icon: "\u2699", className: "llm-sys", children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(FormattedText, { text: call.systemPrompt }) }),
         call.prompt && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(Collapsible, { label: "Prompt", icon: "\u25B6", className: "llm-usr", children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(FormattedText, { text: call.prompt }) }),
@@ -128138,14 +128138,6 @@ function BlockDiagramCanvas({ diagramData }) {
 // src/webview/components/CollateralViewer.jsx
 var import_react19 = __toESM(require_react());
 var import_jsx_runtime13 = __toESM(require_jsx_runtime());
-var KIND_META = {
-  rtl: { label: "RTL (Verilog)", icon: "\u26A1" },
-  tb: { label: "Testbench", icon: "\u232D" },
-  syn: { label: "Synthesis", icon: "\u2699" },
-  pnr: { label: "PnR", icon: "\u25EB" },
-  waveforms: { label: "Waveforms", icon: "\u3030" },
-  reports: { label: "Reports / Docs", icon: "\u{1F4CB}" }
-};
 var TEXT_EXTS = /* @__PURE__ */ new Set([
   ".v",
   ".sv",
@@ -128160,7 +128152,9 @@ var TEXT_EXTS = /* @__PURE__ */ new Set([
   ".log",
   ".def",
   ".html",
-  ".csv"
+  ".htm",
+  ".csv",
+  ".map"
 ]);
 function _extOf(name) {
   const i = name.lastIndexOf(".");
@@ -128330,6 +128324,280 @@ function highlightVerilog(text) {
   }
   return out.join("");
 }
+var TCL_KEYWORDS = /* @__PURE__ */ new Set([
+  // Core Tcl
+  "set",
+  "unset",
+  "if",
+  "else",
+  "elseif",
+  "for",
+  "foreach",
+  "while",
+  "switch",
+  "proc",
+  "return",
+  "break",
+  "continue",
+  "expr",
+  "puts",
+  "gets",
+  "string",
+  "lindex",
+  "llength",
+  "lappend",
+  "list",
+  "array",
+  "dict",
+  "global",
+  "upvar",
+  "variable",
+  "namespace",
+  "source",
+  "package",
+  "catch",
+  "error",
+  "eval",
+  "exec",
+  "open",
+  "close",
+  "read",
+  "regexp",
+  "regsub",
+  "format",
+  "scan",
+  "incr",
+  "append",
+  "concat",
+  // SDC commands
+  "create_clock",
+  "create_generated_clock",
+  "set_input_delay",
+  "set_output_delay",
+  "set_clock_uncertainty",
+  "set_clock_latency",
+  "set_clock_groups",
+  "set_false_path",
+  "set_multicycle_path",
+  "set_max_delay",
+  "set_min_delay",
+  "set_disable_timing",
+  "set_load",
+  "set_drive",
+  "set_driving_cell",
+  "set_max_fanout",
+  "set_max_transition",
+  "set_max_capacitance",
+  "set_min_capacitance",
+  "set_case_analysis",
+  "set_propagated_clock",
+  "group_path",
+  "all_inputs",
+  "all_outputs",
+  "all_clocks",
+  "all_registers",
+  "get_ports",
+  "get_pins",
+  "get_nets",
+  "get_cells",
+  "get_clocks",
+  "current_design",
+  "read_sdc",
+  "write_sdc",
+  "check_timing",
+  // Yosys-ish
+  "design",
+  "read_verilog",
+  "synth",
+  "flatten",
+  "opt",
+  "abc",
+  "write_verilog",
+  "hierarchy",
+  "proc",
+  "memory",
+  "opt_clean",
+  "stat",
+  "check"
+]);
+function highlightTcl(text) {
+  if (!text)
+    return "";
+  const out = [];
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (c === "#" && (i === 0 || /\s/.test(text[i - 1]))) {
+      let j = text.indexOf("\n", i);
+      if (j < 0)
+        j = n;
+      out.push(`<span class="syntax-comment">${_escHtml(text.slice(i, j))}</span>`);
+      i = j;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < n && text[j] !== '"') {
+        if (text[j] === "\\")
+          j += 2;
+        else
+          j++;
+      }
+      j = Math.min(j + 1, n);
+      out.push(`<span class="syntax-string">${_escHtml(text.slice(i, j))}</span>`);
+      i = j;
+      continue;
+    }
+    if (c === "$" && /[A-Za-z_]/.test(text[i + 1] || "")) {
+      const m = text.slice(i).match(/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/);
+      if (m) {
+        out.push(`<span class="syntax-attr">${_escHtml(m[0])}</span>`);
+        i += m[0].length;
+        continue;
+      }
+    }
+    if (/[0-9]/.test(c)) {
+      const m = text.slice(i).match(/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+      if (m) {
+        out.push(`<span class="syntax-number">${_escHtml(m[0])}</span>`);
+        i += m[0].length;
+        continue;
+      }
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      const m = text.slice(i).match(/^[A-Za-z_][A-Za-z0-9_]*/);
+      if (m) {
+        const ident = m[0];
+        if (TCL_KEYWORDS.has(ident)) {
+          out.push(`<span class="syntax-keyword">${ident}</span>`);
+        } else {
+          out.push(_escHtml(ident));
+        }
+        i += ident.length;
+        continue;
+      }
+    }
+    out.push(_escHtml(c));
+    i++;
+  }
+  return out.join("");
+}
+function highlightMarkdown(text) {
+  if (!text)
+    return "";
+  const lines = text.split("\n");
+  const out = [];
+  let inFence = false;
+  let fenceLang = "";
+  let fenceBuf = [];
+  function flushFence() {
+    const inner = _escHtml(fenceBuf.join("\n"));
+    const langTag = fenceLang ? ` <span class="syntax-attr">${_escHtml(fenceLang)}</span>` : "";
+    out.push(`<span class="syntax-md-code-block"><span class="syntax-md-fence">\`\`\`${langTag}</span>
+${inner}
+<span class="syntax-md-fence">\`\`\`</span></span>`);
+    fenceBuf = [];
+    fenceLang = "";
+  }
+  for (const line of lines) {
+    if (inFence) {
+      const m = line.match(/^```\s*$/);
+      if (m) {
+        flushFence();
+        inFence = false;
+      } else {
+        fenceBuf.push(line);
+      }
+      continue;
+    }
+    const fenceStart = line.match(/^```(\w*)/);
+    if (fenceStart) {
+      inFence = true;
+      fenceLang = fenceStart[1];
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      out.push(`<span class="syntax-md-heading">${_escHtml(line)}</span>`);
+      continue;
+    }
+    const list = line.match(/^(\s*)([-*+]|\d+\.)\s/);
+    if (list) {
+      const lead = line.slice(0, list[0].length);
+      const rest = line.slice(list[0].length);
+      out.push(`<span class="syntax-md-list">${_escHtml(lead)}</span>${_inlineMd(rest)}`);
+      continue;
+    }
+    out.push(_inlineMd(line));
+  }
+  if (inFence)
+    flushFence();
+  return out.join("\n");
+}
+function _inlineMd(line) {
+  const out = [];
+  let i = 0;
+  const n = line.length;
+  while (i < n) {
+    const c = line[i];
+    if (c === "`") {
+      const end = line.indexOf("`", i + 1);
+      if (end > i) {
+        out.push(`<span class="syntax-md-code">${_escHtml(line.slice(i, end + 1))}</span>`);
+        i = end + 1;
+        continue;
+      }
+    }
+    if (c === "*" && line[i + 1] === "*") {
+      const end = line.indexOf("**", i + 2);
+      if (end > i + 2) {
+        const inner = _escHtml(line.slice(i + 2, end));
+        out.push(`<span class="syntax-md-bold">**${inner}**</span>`);
+        i = end + 2;
+        continue;
+      }
+    }
+    if (c === "*") {
+      const end = line.indexOf("*", i + 1);
+      if (end > i + 1 && !/^\s/.test(line[i + 1])) {
+        out.push(`<span class="syntax-md-em">${_escHtml(line.slice(i, end + 1))}</span>`);
+        i = end + 1;
+        continue;
+      }
+    }
+    if (c === "[") {
+      const closeBr = line.indexOf("](", i + 1);
+      const endParen = closeBr > i ? line.indexOf(")", closeBr + 2) : -1;
+      if (closeBr > i && endParen > closeBr) {
+        out.push(`<span class="syntax-md-link">${_escHtml(line.slice(i, endParen + 1))}</span>`);
+        i = endParen + 1;
+        continue;
+      }
+    }
+    out.push(_escHtml(c));
+    i++;
+  }
+  return out.join("");
+}
+function highlightHtml(text) {
+  if (!text)
+    return "";
+  let escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  escaped = escaped.replace(
+    /(&lt;\/?)([a-zA-Z][a-zA-Z0-9-]*)/g,
+    (m, lead, tag) => `${lead}<span class="syntax-tag">${tag}</span>`
+  );
+  escaped = escaped.replace(
+    /([a-zA-Z-]+)=&quot;([^&]*?)&quot;/g,
+    (m, attr, val) => `<span class="syntax-attr">${attr}</span>=<span class="syntax-string">"${val}"</span>`
+  );
+  escaped = escaped.replace(
+    /&lt;!--([\s\S]*?)--&gt;/g,
+    (m) => `<span class="syntax-comment">${m}</span>`
+  );
+  return escaped;
+}
 function highlightJson(text) {
   if (!text)
     return "";
@@ -128396,6 +128664,12 @@ function FileViewer({ file }) {
     if (!file)
       return;
     const ext2 = _extOf(file.name);
+    if (ext2 === ".html" || ext2 === ".htm" || ext2 === ".vcd" || ext2 === ".fst" || ext2 === ".ghw" || ext2 === ".png" || ext2 === ".jpg" || ext2 === ".jpeg" || ext2 === ".gif" || ext2 === ".svg" || ext2 === ".webp") {
+      setContent(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     if (!TEXT_EXTS.has(ext2)) {
       setContent(null);
       setError(null);
@@ -128429,12 +128703,20 @@ function FileViewer({ file }) {
   const ext = _extOf(file.name);
   const isText = TEXT_EXTS.has(ext);
   const isWaveform = ext === ".vcd" || ext === ".fst" || ext === ".ghw";
+  const isHtmlPreview = ext === ".html" || ext === ".htm";
+  const isImage = ext === ".png" || ext === ".jpg" || ext === ".jpeg" || ext === ".gif" || ext === ".svg" || ext === ".webp";
   let highlighted = null;
-  if (content) {
+  if (content && !isHtmlPreview) {
     if (ext === ".v" || ext === ".sv")
       highlighted = highlightVerilog(content);
-    else if (ext === ".json")
+    else if (ext === ".json" || ext === ".map")
       highlighted = highlightJson(content);
+    else if (ext === ".sdc" || ext === ".tcl" || ext === ".ys")
+      highlighted = highlightTcl(content);
+    else if (ext === ".md")
+      highlighted = highlightMarkdown(content);
+    else if (ext === ".html" || ext === ".htm")
+      highlighted = highlightHtml(content);
     else
       highlighted = content.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
@@ -128458,7 +128740,18 @@ function FileViewer({ file }) {
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-content-body", children: [
       isWaveform && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(SurferWaveformViewer, { relPath: file.rel_path }, file.rel_path),
-      !isWaveform && !isText && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-empty", children: [
+      isHtmlPreview && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+        "iframe",
+        {
+          className: "collateral-html-frame",
+          src: `/api/artifacts/${file.rel_path}`,
+          title: file.name,
+          sandbox: "allow-same-origin allow-popups allow-scripts"
+        },
+        file.rel_path
+      ),
+      isImage && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-image", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("img", { src: `/api/artifacts/${file.rel_path}`, alt: file.name }) }),
+      !isWaveform && !isHtmlPreview && !isImage && !isText && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-empty", children: [
         /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-empty-icon", children: "\u{1F4E6}" }),
         /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { children: [
           "Binary file (",
@@ -128466,14 +128759,151 @@ function FileViewer({ file }) {
           ") \u2014 open via the link above."
         ] })
       ] }),
-      !isWaveform && loading && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-loading", children: "Loading\u2026" }),
-      !isWaveform && error && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-error", children: [
+      !isWaveform && !isHtmlPreview && !isImage && loading && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-loading", children: "Loading\u2026" }),
+      !isWaveform && !isHtmlPreview && !isImage && error && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-error", children: [
         "Failed to load: ",
         error
       ] }),
-      !isWaveform && isText && content != null && !error && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("pre", { className: "collateral-code", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("code", { dangerouslySetInnerHTML: { __html: highlighted } }) })
+      !isWaveform && !isHtmlPreview && !isImage && isText && content != null && !error && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("pre", { className: "collateral-code", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("code", { dangerouslySetInnerHTML: { __html: highlighted } }) })
     ] })
   ] });
+}
+function _buildTree(files) {
+  const root3 = { name: "", children: /* @__PURE__ */ new Map(), files: [], isDir: true };
+  for (const f of files) {
+    const parts = f.rel_path.split("/").filter(Boolean);
+    let node = root3;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      if (!node.children.has(part)) {
+        node.children.set(part, {
+          name: part,
+          path: parts.slice(0, i + 1).join("/"),
+          children: /* @__PURE__ */ new Map(),
+          files: [],
+          isDir: true
+        });
+      }
+      node = node.children.get(part);
+    }
+    node.files.push({ ...f, displayName: parts[parts.length - 1] });
+  }
+  const sortNode = (n) => {
+    n.children = new Map([...n.children.entries()].sort((a, b) => a[0].localeCompare(b[0])));
+    n.files.sort((a, b) => a.displayName.localeCompare(b.displayName));
+    for (const child of n.children.values())
+      sortNode(child);
+  };
+  sortNode(root3);
+  return root3;
+}
+function TreeNode({ node, depth, selected, onSelect, defaultOpen, filterTokens }) {
+  const [open, setOpen] = (0, import_react19.useState)(defaultOpen);
+  if (!node)
+    return null;
+  const indent = { paddingLeft: 6 + depth * 12 };
+  const matchesFilter = (text) => {
+    if (!filterTokens || filterTokens.length === 0)
+      return true;
+    const t = text.toLowerCase();
+    return filterTokens.every((q) => t.includes(q));
+  };
+  const visibleFiles = node.files.filter((f) => matchesFilter(f.rel_path));
+  const visibleChildren = [...node.children.values()].filter((c) => _treeHasMatches(c, filterTokens));
+  if (filterTokens && filterTokens.length > 0 && visibleFiles.length === 0 && visibleChildren.length === 0) {
+    return null;
+  }
+  return /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-tree-node", children: [
+    node.path != null && node.name && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)(
+      "div",
+      {
+        className: "collateral-tree-folder",
+        style: indent,
+        onClick: () => setOpen((v) => !v),
+        children: [
+          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-tree-chev", children: open ? "\u25BE" : "\u25B8" }),
+          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-tree-folder-icon", children: "\u{1F4C1}" }),
+          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-tree-folder-name", children: node.name }),
+          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-tree-folder-count", children: visibleFiles.length + visibleChildren.reduce((s, c) => s + _treeFileCount(c, filterTokens), 0) })
+        ]
+      }
+    ),
+    (open || node.path == null) && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)(import_jsx_runtime13.Fragment, { children: [
+      visibleChildren.map((child) => /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+        TreeNode,
+        {
+          node: child,
+          depth: node.path != null ? depth + 1 : depth,
+          selected,
+          onSelect,
+          defaultOpen: depth < 1,
+          filterTokens
+        },
+        child.path
+      )),
+      visibleFiles.map((f) => /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)(
+        "div",
+        {
+          className: `collateral-tree-file ${selected?.rel_path === f.rel_path ? "collateral-tree-file-selected" : ""}`,
+          style: { paddingLeft: indent.paddingLeft + 14 },
+          onClick: () => onSelect(f),
+          title: f.rel_path,
+          children: [
+            /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-tree-file-icon", children: _fileIcon(f.displayName) }),
+            /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-tree-file-name", children: f.displayName }),
+            /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-tree-file-size", children: _formatBytes(f.size) })
+          ]
+        },
+        f.rel_path
+      ))
+    ] })
+  ] });
+}
+function _treeHasMatches(node, filterTokens) {
+  if (!filterTokens || filterTokens.length === 0)
+    return true;
+  for (const f of node.files) {
+    const t = f.rel_path.toLowerCase();
+    if (filterTokens.every((q) => t.includes(q)))
+      return true;
+  }
+  for (const child of node.children.values()) {
+    if (_treeHasMatches(child, filterTokens))
+      return true;
+  }
+  return false;
+}
+function _treeFileCount(node, filterTokens) {
+  let n = node.files.filter((f) => {
+    if (!filterTokens || filterTokens.length === 0)
+      return true;
+    const t = f.rel_path.toLowerCase();
+    return filterTokens.every((q) => t.includes(q));
+  }).length;
+  for (const child of node.children.values()) {
+    n += _treeFileCount(child, filterTokens);
+  }
+  return n;
+}
+function _fileIcon(name) {
+  const ext = _extOf(name);
+  if (ext === ".v" || ext === ".sv")
+    return "\u26A1";
+  if (ext === ".vcd" || ext === ".fst" || ext === ".ghw")
+    return "\u3030";
+  if (ext === ".html" || ext === ".htm")
+    return "\u{1F310}";
+  if (ext === ".json")
+    return "{ }";
+  if (ext === ".md")
+    return "\u{1F4C4}";
+  if (ext === ".rpt" || ext === ".log" || ext === ".txt")
+    return "\u{1F4CB}";
+  if (ext === ".sdc" || ext === ".tcl" || ext === ".ys")
+    return "\u2699";
+  if (ext === ".png" || ext === ".jpg" || ext === ".jpeg" || ext === ".svg" || ext === ".gif")
+    return "\u{1F5BC}";
+  return "\xB7";
 }
 function CollateralViewer() {
   const [data, setData] = (0, import_react19.useState)(null);
@@ -128483,24 +128913,24 @@ function CollateralViewer() {
   (0, import_react19.useEffect)(() => {
     fetch("/api/collateral").then((r) => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`)).then(setData).catch((e) => setError(String(e)));
   }, []);
-  const sections = (0, import_react19.useMemo)(() => {
+  const { tree, totalFiles } = (0, import_react19.useMemo)(() => {
     if (!data)
-      return [];
-    const out = [];
-    const kinds = ["rtl", "tb", "syn", "pnr", "waveforms", "reports"];
-    for (const k of kinds) {
-      const items = (data[k] || []).filter((f) => {
-        if (!filter2)
-          return true;
-        const q = filter2.toLowerCase();
-        return f.name.toLowerCase().includes(q) || f.rel_path.toLowerCase().includes(q);
-      });
-      if (items.length === 0)
-        continue;
-      out.push({ kind: k, meta: KIND_META[k], items });
+      return { tree: null, totalFiles: 0 };
+    const all = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const k of ["rtl", "tb", "syn", "pnr", "waveforms", "reports"]) {
+      for (const f of data[k] || []) {
+        if (seen.has(f.rel_path))
+          continue;
+        seen.add(f.rel_path);
+        all.push({ ...f, kind: k });
+      }
     }
-    return out;
-  }, [data, filter2]);
+    return { tree: _buildTree(all), totalFiles: all.length };
+  }, [data]);
+  const filterTokens = (0, import_react19.useMemo)(() => {
+    return filter2 ? filter2.toLowerCase().split(/\s+/).filter(Boolean) : [];
+  }, [filter2]);
   if (error) {
     return /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-shell", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-empty", children: [
       "Failed to load collateral: ",
@@ -128510,7 +128940,6 @@ function CollateralViewer() {
   if (!data) {
     return /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-shell", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-empty", children: "Loading collateral\u2026" }) });
   }
-  const totalFiles = sections.reduce((s, sec) => s + sec.items.length, 0);
   return /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-shell", children: [
     /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-sidebar", children: [
       /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-toolbar", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
@@ -128523,27 +128952,18 @@ function CollateralViewer() {
         }
       ) }),
       /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-tree", children: [
-        sections.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-empty-mini", children: "No matching files." }),
-        sections.map(({ kind, meta, items }) => /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-section", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-section-header", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-section-icon", children: meta.icon }),
-            /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { children: meta.label }),
-            /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-section-count", children: items.length })
-          ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("ul", { className: "collateral-file-list", children: items.map((f) => /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)(
-            "li",
-            {
-              className: `collateral-file ${selected?.rel_path === f.rel_path ? "collateral-file-selected" : ""}`,
-              onClick: () => setSelected(f),
-              title: f.rel_path,
-              children: [
-                /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-file-iname", children: f.name }),
-                /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-file-isize", children: _formatBytes(f.size) })
-              ]
-            },
-            f.rel_path
-          )) })
-        ] }, kind))
+        tree && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+          TreeNode,
+          {
+            node: tree,
+            depth: 0,
+            selected,
+            onSelect: setSelected,
+            defaultOpen: true,
+            filterTokens
+          }
+        ),
+        totalFiles === 0 && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-empty-mini", children: "No collateral yet." })
       ] })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-viewer", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(FileViewer, { file: selected }) })

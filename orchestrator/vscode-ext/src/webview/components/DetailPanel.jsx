@@ -1043,9 +1043,9 @@ function LLMCallCard({ call, index, total }) {
           codex_cli's internal tool calls aren't instrumented, we can at
           least show the pulses we DO have. */}
       <div className="llm-step-chain">
-        <span className="llm-step llm-step-sys" title="System prompt set">\u2699</span>
+        <span className="llm-step llm-step-sys" title="System prompt set">{'\u2699'}</span>
         <span className="llm-step-line" />
-        <span className="llm-step llm-step-usr" title="User prompt">\u25b6</span>
+        <span className="llm-step llm-step-usr" title="User prompt">{'\u25b6'}</span>
         {hbCount > 0 && (
           <>
             <span className="llm-step-line" />
@@ -1054,12 +1054,12 @@ function LLMCallCard({ call, index, total }) {
                 key={`hb-${i}`}
                 className="llm-step llm-step-hb"
                 title={`Heartbeat @${(h.elapsed_s || 0).toFixed(0)}s \u00b7 stdout ${h.stdout_bytes || 0}B`}
-              >\u25cf</span>
+              >{'\u25cf'}</span>
             ))}
           </>
         )}
         <span className="llm-step-line" />
-        <span className={`llm-step llm-step-resp llm-step-${statusCls}`} title="Response">\u25c0</span>
+        <span className={`llm-step llm-step-resp llm-step-${statusCls}`} title="Response">{'\u25c0'}</span>
       </div>
 
       {/* System prompt (collapsed) */}
