@@ -1219,20 +1219,25 @@ body {
   flex-shrink: 0;
 }
 .llm-summary-bar {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 6px 16px;
-  margin: 0 0 4px;
+  gap: 10px;
+  align-self: flex-start;
+  padding: 4px 10px;
+  margin: 4px 12px 6px;
   font-size: 11px;
   flex-shrink: 0;
-  border-bottom: 1px solid var(--color-border-subtle);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 12px;
+  background: var(--color-bg-subtle);
 }
 .llm-summary-bar.ok {
-  background: #f0fdf4;
+  background: rgba(34, 197, 94, 0.10);
+  border-color: rgba(34, 197, 94, 0.30);
 }
 .llm-summary-bar.error {
-  background: #fef2f2;
+  background: rgba(239, 68, 68, 0.10);
+  border-color: rgba(239, 68, 68, 0.30);
 }
 .llm-summary-status {
   font-weight: 600;
@@ -1245,18 +1250,18 @@ body {
   color: #dc2626;
 }
 .llm-summary-detail {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 8px;
-  color: #888;
+  color: var(--color-text-dimmed);
   font-family:
     "Menlo",
     "Monaco",
     monospace;
-  font-size: 11px;
+  font-size: 10.5px;
 }
 .llm-summary-count {
-  color: #999;
+  color: var(--color-text-muted);
   font-family: "Roboto", sans-serif;
 }
 .llm-call-list {
@@ -1396,6 +1401,66 @@ body {
 .llm-model-name + .llm-card-meta,
 .llm-call-index + .llm-model-name {
   margin-left: 0;
+}
+.llm-model-sub {
+  font-family:
+    "Menlo",
+    "Monaco",
+    monospace;
+  font-size: 9.5px;
+  color: var(--color-text-dimmed);
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--color-bg-input);
+}
+.llm-step-chain {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px 4px;
+  border-bottom: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-subtle);
+  font-size: 10px;
+}
+.llm-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 9px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.llm-step-sys {
+  background: rgba(99, 102, 241, 0.18);
+  color: #6366f1;
+}
+.llm-step-usr {
+  background: rgba(59, 130, 246, 0.18);
+  color: #2563eb;
+}
+.llm-step-hb {
+  background: rgba(245, 158, 11, 0.18);
+  color: #d97706;
+  width: 10px;
+  height: 10px;
+  font-size: 6px;
+}
+.llm-step-resp.llm-step-ok {
+  background: rgba(34, 197, 94, 0.18);
+  color: #16a34a;
+}
+.llm-step-resp.llm-step-error {
+  background: rgba(239, 68, 68, 0.18);
+  color: #dc2626;
+}
+.llm-step-line {
+  flex: 1;
+  height: 1.5px;
+  background: var(--color-border-primary);
+  min-width: 6px;
 }
 .llm-card-error .llm-card-header {
   background: var(--color-llm-error-bg);
@@ -1680,6 +1745,45 @@ body {
   flex: 1;
   overflow: auto;
   padding: 12px 16px;
+}
+.collateral-content-body:has(> .collateral-waveform) {
+  padding: 0;
+  overflow: hidden;
+}
+.collateral-waveform {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+}
+.collateral-waveform-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-elevated);
+  font-size: 10px;
+}
+.collateral-waveform-engine {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+}
+.collateral-waveform-status {
+  font-family:
+    "Menlo",
+    "Monaco",
+    monospace;
+  font-size: 10px;
+  color: var(--color-text-dimmed);
+}
+.collateral-waveform-frame {
+  flex: 1;
+  width: 100%;
+  border: 0;
+  background: var(--color-bg-primary);
 }
 .collateral-code {
   font-family:

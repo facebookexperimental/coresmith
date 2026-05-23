@@ -1098,7 +1098,7 @@ var require_react_development = __commonJS({
           var dispatcher = resolveDispatcher();
           return dispatcher.useReducer(reducer, initialArg, init2);
         }
-        function useRef9(initialValue) {
+        function useRef10(initialValue) {
           var dispatcher = resolveDispatcher();
           return dispatcher.useRef(initialValue);
         }
@@ -1409,7 +1409,7 @@ var require_react_development = __commonJS({
             }
           }
         }
-        function checkPropTypes(typeSpecs, values, location, componentName, element) {
+        function checkPropTypes(typeSpecs, values, location2, componentName, element) {
           {
             var has = Function.call.bind(hasOwnProperty);
             for (var typeSpecName in typeSpecs) {
@@ -1417,23 +1417,23 @@ var require_react_development = __commonJS({
                 var error$1 = void 0;
                 try {
                   if (typeof typeSpecs[typeSpecName] !== "function") {
-                    var err = Error((componentName || "React class") + ": " + location + " type `" + typeSpecName + "` is invalid; it must be a function, usually from the `prop-types` package, but received `" + typeof typeSpecs[typeSpecName] + "`.This often happens because of typos such as `PropTypes.function` instead of `PropTypes.func`.");
+                    var err = Error((componentName || "React class") + ": " + location2 + " type `" + typeSpecName + "` is invalid; it must be a function, usually from the `prop-types` package, but received `" + typeof typeSpecs[typeSpecName] + "`.This often happens because of typos such as `PropTypes.function` instead of `PropTypes.func`.");
                     err.name = "Invariant Violation";
                     throw err;
                   }
-                  error$1 = typeSpecs[typeSpecName](values, typeSpecName, componentName, location, null, "SECRET_DO_NOT_PASS_THIS_OR_YOU_WILL_BE_FIRED");
+                  error$1 = typeSpecs[typeSpecName](values, typeSpecName, componentName, location2, null, "SECRET_DO_NOT_PASS_THIS_OR_YOU_WILL_BE_FIRED");
                 } catch (ex) {
                   error$1 = ex;
                 }
                 if (error$1 && !(error$1 instanceof Error)) {
                   setCurrentlyValidatingElement(element);
-                  error("%s: type specification of %s `%s` is invalid; the type checker function must return `null` or an `Error` but returned a %s. You may have forgotten to pass an argument to the type checker creator (arrayOf, instanceOf, objectOf, oneOf, oneOfType, and shape all require an argument).", componentName || "React class", location, typeSpecName, typeof error$1);
+                  error("%s: type specification of %s `%s` is invalid; the type checker function must return `null` or an `Error` but returned a %s. You may have forgotten to pass an argument to the type checker creator (arrayOf, instanceOf, objectOf, oneOf, oneOfType, and shape all require an argument).", componentName || "React class", location2, typeSpecName, typeof error$1);
                   setCurrentlyValidatingElement(null);
                 }
                 if (error$1 instanceof Error && !(error$1.message in loggedTypeFailures)) {
                   loggedTypeFailures[error$1.message] = true;
                   setCurrentlyValidatingElement(element);
-                  error("Failed %s type: %s", location, error$1.message);
+                  error("Failed %s type: %s", location2, error$1.message);
                   setCurrentlyValidatingElement(null);
                 }
               }
@@ -1892,7 +1892,7 @@ var require_react_development = __commonJS({
         exports.useLayoutEffect = useLayoutEffect4;
         exports.useMemo = useMemo7;
         exports.useReducer = useReducer;
-        exports.useRef = useRef9;
+        exports.useRef = useRef10;
         exports.useState = useState11;
         exports.useSyncExternalStore = useSyncExternalStore;
         exports.useTransition = useTransition;
@@ -10780,7 +10780,7 @@ var require_react_dom_development = __commonJS({
             }
           }
         }
-        function checkPropTypes(typeSpecs, values, location, componentName, element) {
+        function checkPropTypes(typeSpecs, values, location2, componentName, element) {
           {
             var has2 = Function.call.bind(hasOwnProperty);
             for (var typeSpecName in typeSpecs) {
@@ -10788,23 +10788,23 @@ var require_react_dom_development = __commonJS({
                 var error$1 = void 0;
                 try {
                   if (typeof typeSpecs[typeSpecName] !== "function") {
-                    var err = Error((componentName || "React class") + ": " + location + " type `" + typeSpecName + "` is invalid; it must be a function, usually from the `prop-types` package, but received `" + typeof typeSpecs[typeSpecName] + "`.This often happens because of typos such as `PropTypes.function` instead of `PropTypes.func`.");
+                    var err = Error((componentName || "React class") + ": " + location2 + " type `" + typeSpecName + "` is invalid; it must be a function, usually from the `prop-types` package, but received `" + typeof typeSpecs[typeSpecName] + "`.This often happens because of typos such as `PropTypes.function` instead of `PropTypes.func`.");
                     err.name = "Invariant Violation";
                     throw err;
                   }
-                  error$1 = typeSpecs[typeSpecName](values, typeSpecName, componentName, location, null, "SECRET_DO_NOT_PASS_THIS_OR_YOU_WILL_BE_FIRED");
+                  error$1 = typeSpecs[typeSpecName](values, typeSpecName, componentName, location2, null, "SECRET_DO_NOT_PASS_THIS_OR_YOU_WILL_BE_FIRED");
                 } catch (ex) {
                   error$1 = ex;
                 }
                 if (error$1 && !(error$1 instanceof Error)) {
                   setCurrentlyValidatingElement(element);
-                  error("%s: type specification of %s `%s` is invalid; the type checker function must return `null` or an `Error` but returned a %s. You may have forgotten to pass an argument to the type checker creator (arrayOf, instanceOf, objectOf, oneOf, oneOfType, and shape all require an argument).", componentName || "React class", location, typeSpecName, typeof error$1);
+                  error("%s: type specification of %s `%s` is invalid; the type checker function must return `null` or an `Error` but returned a %s. You may have forgotten to pass an argument to the type checker creator (arrayOf, instanceOf, objectOf, oneOf, oneOfType, and shape all require an argument).", componentName || "React class", location2, typeSpecName, typeof error$1);
                   setCurrentlyValidatingElement(null);
                 }
                 if (error$1 instanceof Error && !(error$1.message in loggedTypeFailures)) {
                   loggedTypeFailures[error$1.message] = true;
                   setCurrentlyValidatingElement(element);
-                  error("Failed %s type: %s", location, error$1.message);
+                  error("Failed %s type: %s", location2, error$1.message);
                   setCurrentlyValidatingElement(null);
                 }
               }
@@ -23643,9 +23643,9 @@ var require_with_selector_development = __commonJS({
         return x === y && (0 !== x || 1 / x === 1 / y) || x !== x && y !== y;
       }
       "undefined" !== typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ && "function" === typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart && __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart(Error());
-      var React23 = require_react(), shim = require_shim(), objectIs = "function" === typeof Object.is ? Object.is : is, useSyncExternalStore = shim.useSyncExternalStore, useRef9 = React23.useRef, useEffect10 = React23.useEffect, useMemo7 = React23.useMemo, useDebugValue2 = React23.useDebugValue;
+      var React23 = require_react(), shim = require_shim(), objectIs = "function" === typeof Object.is ? Object.is : is, useSyncExternalStore = shim.useSyncExternalStore, useRef10 = React23.useRef, useEffect10 = React23.useEffect, useMemo7 = React23.useMemo, useDebugValue2 = React23.useDebugValue;
       exports.useSyncExternalStoreWithSelector = function(subscribe, getSnapshot, getServerSnapshot, selector4, isEqual) {
-        var instRef = useRef9(null);
+        var instRef = useRef10(null);
         if (null === instRef.current) {
           var inst = { hasValue: false, value: null };
           instRef.current = inst;
@@ -24133,7 +24133,7 @@ var require_react_jsx_runtime_development = __commonJS({
             }
           }
         }
-        function checkPropTypes(typeSpecs, values, location, componentName, element) {
+        function checkPropTypes(typeSpecs, values, location2, componentName, element) {
           {
             var has = Function.call.bind(hasOwnProperty);
             for (var typeSpecName in typeSpecs) {
@@ -24141,23 +24141,23 @@ var require_react_jsx_runtime_development = __commonJS({
                 var error$1 = void 0;
                 try {
                   if (typeof typeSpecs[typeSpecName] !== "function") {
-                    var err = Error((componentName || "React class") + ": " + location + " type `" + typeSpecName + "` is invalid; it must be a function, usually from the `prop-types` package, but received `" + typeof typeSpecs[typeSpecName] + "`.This often happens because of typos such as `PropTypes.function` instead of `PropTypes.func`.");
+                    var err = Error((componentName || "React class") + ": " + location2 + " type `" + typeSpecName + "` is invalid; it must be a function, usually from the `prop-types` package, but received `" + typeof typeSpecs[typeSpecName] + "`.This often happens because of typos such as `PropTypes.function` instead of `PropTypes.func`.");
                     err.name = "Invariant Violation";
                     throw err;
                   }
-                  error$1 = typeSpecs[typeSpecName](values, typeSpecName, componentName, location, null, "SECRET_DO_NOT_PASS_THIS_OR_YOU_WILL_BE_FIRED");
+                  error$1 = typeSpecs[typeSpecName](values, typeSpecName, componentName, location2, null, "SECRET_DO_NOT_PASS_THIS_OR_YOU_WILL_BE_FIRED");
                 } catch (ex) {
                   error$1 = ex;
                 }
                 if (error$1 && !(error$1 instanceof Error)) {
                   setCurrentlyValidatingElement(element);
-                  error("%s: type specification of %s `%s` is invalid; the type checker function must return `null` or an `Error` but returned a %s. You may have forgotten to pass an argument to the type checker creator (arrayOf, instanceOf, objectOf, oneOf, oneOfType, and shape all require an argument).", componentName || "React class", location, typeSpecName, typeof error$1);
+                  error("%s: type specification of %s `%s` is invalid; the type checker function must return `null` or an `Error` but returned a %s. You may have forgotten to pass an argument to the type checker creator (arrayOf, instanceOf, objectOf, oneOf, oneOfType, and shape all require an argument).", componentName || "React class", location2, typeSpecName, typeof error$1);
                   setCurrentlyValidatingElement(null);
                 }
                 if (error$1 instanceof Error && !(error$1.message in loggedTypeFailures)) {
                   loggedTypeFailures[error$1.message] = true;
                   setCurrentlyValidatingElement(element);
-                  error("Failed %s type: %s", location, error$1.message);
+                  error("Failed %s type: %s", location2, error$1.message);
                   setCurrentlyValidatingElement(null);
                 }
               }
@@ -120158,8 +120158,8 @@ Transform.prototype = {
   applyY: function(y) {
     return y * this.k + this.y;
   },
-  invert: function(location) {
-    return [(location[0] - this.x) / this.k, (location[1] - this.y) / this.k];
+  invert: function(location2) {
+    return [(location2[0] - this.x) / this.k, (location2[1] - this.y) / this.k];
   },
   invertX: function(x) {
     return (x - this.x) / this.k;
@@ -125992,6 +125992,8 @@ function TrajectorySteps({ steps }) {
     const call = {
       id: step._span?.id || `step-${i}`,
       model: step.model || "LLM",
+      runName: step.run_name || "",
+      heartbeats: step.heartbeats || [],
       promptTokens: step.usage?.prompt_tokens || step.usage?.input_tokens,
       completionTokens: step.usage?.completion_tokens || step.usage?.output_tokens,
       totalTokens: step.usage?.total_tokens,
@@ -126009,6 +126011,9 @@ function LLMCallCard({ call, index, total }) {
   const statusSymbol = call.status === "ok" ? "\u2713" : call.status === "error" ? "\u2717" : "\u2014";
   const statusCls = call.status === "ok" ? "ok" : call.status === "error" ? "error" : "unset";
   const tokenLabel = formatTokens(call.totalTokens);
+  const heading = call.runName || call.model;
+  const sub = call.runName ? call.model : null;
+  const hbCount = (call.heartbeats || []).length;
   return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
     "div",
     {
@@ -126016,7 +126021,8 @@ function LLMCallCard({ call, index, total }) {
       children: [
         /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-card-header", children: [
           total > 1 && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-call-index", title: `Call ${index + 1} of ${total}`, children: `${index + 1}/${total}` }),
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-model-name", children: call.model }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-model-name", title: call.runName || "", children: heading }),
+          sub && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-model-sub", children: sub }),
           /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "llm-card-meta", children: [
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-dur", children: formatDuration(call.duration_ms) }),
             tokenLabel && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "llm-tok", children: [
@@ -126025,6 +126031,25 @@ function LLMCallCard({ call, index, total }) {
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `llm-stat llm-stat-${statusCls}`, children: statusSymbol })
           ] })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-step-chain", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step llm-step-sys", title: "System prompt set", children: "\\u2699" }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step-line" }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step llm-step-usr", title: "User prompt", children: "\\u25b6" }),
+          hbCount > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(import_jsx_runtime9.Fragment, { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step-line" }),
+            call.heartbeats.map((h, i) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+              "span",
+              {
+                className: "llm-step llm-step-hb",
+                title: `Heartbeat @${(h.elapsed_s || 0).toFixed(0)}s \xB7 stdout ${h.stdout_bytes || 0}B`,
+                children: "\\u25cf"
+              },
+              `hb-${i}`
+            ))
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step-line" }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `llm-step llm-step-resp llm-step-${statusCls}`, title: "Response", children: "\\u25c0" })
         ] }),
         call.systemPrompt && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(Collapsible, { label: "System Prompt", icon: "\u2699", className: "llm-sys", children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(FormattedText, { text: call.systemPrompt }) }),
         call.prompt && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(Collapsible, { label: "Prompt", icon: "\u25B6", className: "llm-usr", children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(FormattedText, { text: call.prompt }) }),
@@ -126838,9 +126863,7 @@ var EDGE_STROKE = {
   agent: "#1111FF"
 };
 var HIDDEN_NODES = /* @__PURE__ */ new Set(["Abort"]);
-function _defaultDirection(name) {
-  if (name === "frontend" || name === "backend")
-    return "DOWN";
+function _defaultDirection(_name) {
   return "RIGHT";
 }
 function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, traceData, onRequestTraces, detailWidth, onDetailResize }) {
@@ -127485,27 +127508,7 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
     return latest;
   }, pipeline_start);
   const totalDuration = effectiveEnd - pipeline_start;
-  const fitWidthPx = (() => {
-    const durs = [];
-    for (const b of blocks) {
-      for (const a of b.attempts || []) {
-        for (const s of a.segments || []) {
-          const start2 = s.start_ts;
-          const end = s.end_ts || effectiveEnd;
-          const d = end - start2;
-          if (d > 0.5)
-            durs.push(d);
-        }
-      }
-    }
-    if (!durs.length)
-      return 0;
-    durs.sort((a, b) => a - b);
-    const p10 = durs[Math.floor(durs.length * 0.1)] || durs[0];
-    const pxPerSec = 10 / p10;
-    const widthPx = totalDuration * pxPerSec;
-    return Math.max(0, Math.min(widthPx, 24e3));
-  })();
+  const fitWidthPx = 0;
   const zoomStart = zoomRange ? pipeline_start + zoomRange.start * totalDuration : pipeline_start;
   const zoomEnd = zoomRange ? pipeline_start + zoomRange.end * totalDuration : effectiveEnd;
   const zoomDuration = zoomEnd - zoomStart;
@@ -128322,6 +128325,43 @@ function highlightJson(text) {
     }
   );
 }
+function SurferWaveformViewer({ relPath }) {
+  const iframeRef = (0, import_react19.useRef)(null);
+  const [status, setStatus] = (0, import_react19.useState)("loading");
+  const vcdUrl = `${location.origin}/api/artifacts/${relPath}`;
+  (0, import_react19.useEffect)(() => {
+    const iframe = iframeRef.current;
+    if (!iframe)
+      return;
+    const handleLoad = () => {
+      setTimeout(() => {
+        try {
+          iframe.contentWindow.postMessage({ command: "LoadUrl", url: vcdUrl }, "*");
+          setStatus("loaded");
+        } catch (e) {
+          setStatus("error: " + e.message);
+        }
+      }, 1500);
+    };
+    iframe.addEventListener("load", handleLoad);
+    return () => iframe.removeEventListener("load", handleLoad);
+  }, [vcdUrl]);
+  return /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-waveform", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-waveform-bar", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-waveform-engine", children: "Surfer" }),
+      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-waveform-status", children: status })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+      "iframe",
+      {
+        ref: iframeRef,
+        className: "collateral-waveform-frame",
+        src: "/waveform-demos/surfer-local/index.html",
+        title: "Surfer waveform viewer"
+      }
+    )
+  ] });
+}
 function FileViewer({ file }) {
   const [content, setContent] = (0, import_react19.useState)(null);
   const [error, setError] = (0, import_react19.useState)(null);
@@ -128362,6 +128402,7 @@ function FileViewer({ file }) {
   }
   const ext = _extOf(file.name);
   const isText = TEXT_EXTS.has(ext);
+  const isWaveform = ext === ".vcd" || ext === ".fst" || ext === ".ghw";
   let highlighted = null;
   if (content) {
     if (ext === ".v" || ext === ".sv")
@@ -128390,7 +128431,8 @@ function FileViewer({ file }) {
       ] })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-content-body", children: [
-      !isText && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-empty", children: [
+      isWaveform && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(SurferWaveformViewer, { relPath: file.rel_path }, file.rel_path),
+      !isWaveform && !isText && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-empty", children: [
         /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-empty-icon", children: "\u{1F4E6}" }),
         /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { children: [
           "Binary file (",
@@ -128398,12 +128440,12 @@ function FileViewer({ file }) {
           ") \u2014 open via the link above."
         ] })
       ] }),
-      loading && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-loading", children: "Loading\u2026" }),
-      error && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-error", children: [
+      !isWaveform && loading && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-loading", children: "Loading\u2026" }),
+      !isWaveform && error && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-error", children: [
         "Failed to load: ",
         error
       ] }),
-      isText && content != null && !error && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("pre", { className: "collateral-code", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("code", { dangerouslySetInnerHTML: { __html: highlighted } }) })
+      !isWaveform && isText && content != null && !error && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("pre", { className: "collateral-code", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("code", { dangerouslySetInnerHTML: { __html: highlighted } }) })
     ] })
   ] });
 }
@@ -129679,7 +129721,7 @@ function App() {
       )
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "app-body", children: [
-      showSummary && /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(import_jsx_runtime17.Fragment, { children: [
+      showSummary && viewMode !== "collateral" && /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(import_jsx_runtime17.Fragment, { children: [
         /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
           SummaryPanel_default,
           {

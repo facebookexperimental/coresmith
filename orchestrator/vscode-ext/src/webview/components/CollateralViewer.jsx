@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 
 const KIND_META = {
   rtl: { label: 'RTL (Verilog)', icon: '⚡' },
@@ -150,6 +150,46 @@ function highlightJson(text) {
   );
 }
 
+// Embed the self-hosted Surfer (Rust→WASM) waveform viewer for .vcd / .fst
+// files. The bundle lives under /waveform-demos/surfer-local/ and Surfer's
+// integration.js listens for {command: "LoadUrl", url} via postMessage.
+function SurferWaveformViewer({ relPath }) {
+  const iframeRef = useRef(null);
+  const [status, setStatus] = useState('loading');
+  const vcdUrl = `${location.origin}/api/artifacts/${relPath}`;
+  useEffect(() => {
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+    const handleLoad = () => {
+      // Give Surfer's WASM a beat to register its message listener.
+      setTimeout(() => {
+        try {
+          iframe.contentWindow.postMessage({ command: 'LoadUrl', url: vcdUrl }, '*');
+          setStatus('loaded');
+        } catch (e) {
+          setStatus('error: ' + e.message);
+        }
+      }, 1500);
+    };
+    iframe.addEventListener('load', handleLoad);
+    return () => iframe.removeEventListener('load', handleLoad);
+  }, [vcdUrl]);
+  return (
+    <div className="collateral-waveform">
+      <div className="collateral-waveform-bar">
+        <span className="collateral-waveform-engine">Surfer</span>
+        <span className="collateral-waveform-status">{status}</span>
+      </div>
+      <iframe
+        ref={iframeRef}
+        className="collateral-waveform-frame"
+        src="/waveform-demos/surfer-local/index.html"
+        title="Surfer waveform viewer"
+      />
+    </div>
+  );
+}
+
 function FileViewer({ file }) {
   const [content, setContent] = useState(null);
   const [error, setError] = useState(null);
@@ -196,6 +236,7 @@ function FileViewer({ file }) {
 
   const ext = _extOf(file.name);
   const isText = TEXT_EXTS.has(ext);
+  const isWaveform = ext === '.vcd' || ext === '.fst' || ext === '.ghw';
 
   let highlighted = null;
   if (content) {
@@ -223,15 +264,18 @@ function FileViewer({ file }) {
         </div>
       </div>
       <div className="collateral-content-body">
-        {!isText && (
+        {isWaveform && (
+          <SurferWaveformViewer relPath={file.rel_path} key={file.rel_path} />
+        )}
+        {!isWaveform && !isText && (
           <div className="collateral-empty">
             <div className="collateral-empty-icon">📦</div>
             <div>Binary file ({ext || 'unknown'}) — open via the link above.</div>
           </div>
         )}
-        {loading && <div className="collateral-loading">Loading…</div>}
-        {error && <div className="collateral-error">Failed to load: {error}</div>}
-        {isText && content != null && !error && (
+        {!isWaveform && loading && <div className="collateral-loading">Loading…</div>}
+        {!isWaveform && error && <div className="collateral-error">Failed to load: {error}</div>}
+        {!isWaveform && isText && content != null && !error && (
           <pre className="collateral-code">
             <code dangerouslySetInnerHTML={{ __html: highlighted }} />
           </pre>

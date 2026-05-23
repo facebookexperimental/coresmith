@@ -514,36 +514,12 @@ export default function GanttTimeline({ timelineData, traceData, onRequestTraces
       }, pipeline_start);
   const totalDuration = effectiveEnd - pipeline_start;
 
-  // Auto-scale the chart's pixel width based on segment durations so the
-  // shortest interesting segment is at least ~10px wide. Without this, a
-  // 5s lint step in a 30-minute run is half a pixel and the user is forced
-  // to drag-zoom just to see anything.
-  const fitWidthPx = (() => {
-    const durs = [];
-    for (const b of blocks) {
-      for (const a of b.attempts || []) {
-        for (const s of a.segments || []) {
-          const start = s.start_ts;
-          const end = s.end_ts || effectiveEnd;
-          const d = end - start;
-          if (d > 0.5) durs.push(d);  // ignore sub-second blips
-        }
-      }
-    }
-    if (!durs.length) return 0;  // fall back to viewport
-    durs.sort((a, b) => a - b);
-    // Target the 10th-percentile segment to be ~10px wide so the long
-    // tail (PnR steps that take minutes) doesn't make everything else
-    // shrink. The 10th percentile is robust against a few really-short
-    // outliers like "Init Block" (microseconds).
-    const p10 = durs[Math.floor(durs.length * 0.10)] || durs[0];
-    const pxPerSec = 10 / p10;
-    const widthPx = totalDuration * pxPerSec;
-    // Clamp: never narrower than the current viewport, never wider than
-    // 24000px (browsers struggle past that and the user can drag-zoom
-    // for finer detail).
-    return Math.max(0, Math.min(widthPx, 24000));
-  })();
+  // Fit the entire pipeline horizontally to the viewport on load so all
+  // phases (Architecture / Frontend / Backend) are visible at first glance.
+  // Aggressive auto-fit-to-content used to push the chart past 20k px wide,
+  // leaving the user staring at the Architecture row at t=0 with everything
+  // else scrolled off-screen. They can drag-select to zoom into any region.
+  const fitWidthPx = 0;
 
   // Compute visible time window based on zoom
   const zoomStart = zoomRange ? pipeline_start + zoomRange.start * totalDuration : pipeline_start;

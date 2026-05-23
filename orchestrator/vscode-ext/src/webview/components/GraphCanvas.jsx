@@ -69,11 +69,10 @@ const EDGE_STROKE = {
 
 const HIDDEN_NODES = new Set(['Abort']);
 
-// Architecture is a DAG (best laid out horizontally to show parallel
-// agent paths); Frontend/Backend pipelines are mostly linear and read
-// better top-down in a landscape viewport.
-function _defaultDirection(name) {
-  if (name === 'frontend' || name === 'backend') return 'DOWN';
+// User asked for the same layout rules across all graphs -- use RIGHT
+// (landscape) everywhere. The DOWN default for Frontend/Backend made the
+// pipelines tall + narrow in a landscape viewport.
+function _defaultDirection(_name) {
   return 'RIGHT';
 }
 

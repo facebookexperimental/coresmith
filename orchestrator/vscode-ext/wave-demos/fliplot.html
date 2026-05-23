@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fliplot · waveform eval</title>
+<link rel="stylesheet" href="./_demo_common.css">
+</head>
+<body>
+  <div class="demo-header">
+    <a href="./">← back</a>
+    <span class="demo-title">fliplot</span>
+    <span class="demo-tag">3rd-party</span>
+    <span>raczben.github.io/fliplot · HTML/JS · GTKWave-style</span>
+    <span id="status" class="demo-status"></span>
+  </div>
+  <iframe
+    id="fliplot"
+    class="demo-frame"
+    src="https://raczben.github.io/fliplot/"
+  ></iframe>
+  <script>
+    // fliplot's demo is drag/drop; no documented URL API. Give the user
+    // a quick download link to drop into the iframe.
+    const VCD = "/api/artifacts/sim_build/adder32/dump.vcd";
+    const status = document.getElementById("status");
+    status.innerHTML = `Drag <a href="${VCD}" download="adder32_dump.vcd">adder32_dump.vcd</a> into the iframe`;
+    status.classList.add("ok");
+  </script>
+</body>
+</html>

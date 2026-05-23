@@ -552,6 +552,103 @@ def get_node_trajectory(node_name: str, max_log_chars: int = 16000) -> list:
     if not attempts:
         return []
 
+    # Walk events again to collect llm_start / llm_end / llm_call_heartbeat
+    # so we can attach the codex_cli `run_name` (e.g. "Generate Verilog
+    # [Adder32]") and heartbeat progress to each LLM call. Without this the
+    # detail panel just shows "gpt-5.5" N times and the user can't tell what
+    # each call was for.
+    llm_starts: list[dict] = []  # {ts, end_ts, run_name, prompt_chars, ...}
+    llm_heartbeats: list[dict] = []
+    OBSERVER_NAMES = {"Observer [frontend]", "Observer [backend]",
+                      "Observer [architecture]"}
+    try:
+        open_starts: list[dict] = []
+        for line in events_file.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ev = e.get("event", "")
+            t = e.get("ts")
+            if t is None:
+                continue
+            if ev == "llm_start":
+                rn = e.get("run_name", "")
+                # Skip observer/summarizer calls -- they overlap user-node
+                # windows but aren't part of the agent's "thinking" steps.
+                if rn in OBSERVER_NAMES:
+                    continue
+                open_starts.append({
+                    "ts": t,
+                    "end_ts": None,
+                    "run_name": rn,
+                    "prompt_chars": e.get("prompt_chars"),
+                    "system_chars": e.get("system_chars"),
+                    "model": e.get("model", ""),
+                    "provider": e.get("provider", ""),
+                    "heartbeats": [],
+                })
+            elif ev == "llm_end":
+                rn = e.get("run_name", "")
+                if rn in OBSERVER_NAMES:
+                    continue
+                # Pair to the earliest still-open llm_start with the same run_name.
+                for s in open_starts:
+                    if s["end_ts"] is None and s["run_name"] == rn:
+                        s["end_ts"] = t
+                        s["output_chars"] = e.get("output_chars")
+                        llm_starts.append(s)
+                        break
+            elif ev == "llm_call_heartbeat":
+                llm_heartbeats.append({
+                    "ts": t,
+                    "elapsed_s": e.get("elapsed_s"),
+                    "stdout_bytes": e.get("stdout_bytes"),
+                    "stderr_bytes": e.get("stderr_bytes"),
+                    "pid": e.get("pid"),
+                })
+        # Anything still open at file end goes in with end_ts=None
+        for s in open_starts:
+            if s["end_ts"] is None:
+                llm_starts.append(s)
+    except OSError:
+        pass
+
+    # For each llm_calls.jsonl record, find the llm_start whose
+    # [ts, end_ts] interval contains the call's timestamp. One engine-level
+    # llm_start (e.g. "Generate Verilog [Adder32]") wraps many inner
+    # llm_calls because codex_cli takes multiple turns per invocation; we
+    # want them all to share the outer run_name.
+    def _match_start(call_ts: float, _dur_s: float | None):
+        if not llm_starts:
+            return None
+        # First try: call_ts strictly inside [start, end]. Fall back to
+        # nearest start within 5s on either side for open / un-paired calls.
+        for s in llm_starts:
+            end = s.get("end_ts")
+            if call_ts >= s["ts"] - 1.0 and (end is None or call_ts <= end + 1.0):
+                return s
+        best = None
+        best_d = 5.0
+        for s in llm_starts:
+            d = abs(s["ts"] - call_ts)
+            if d <= best_d:
+                best_d = d
+                best = s
+        return best
+
+    def _heartbeats_in(call_ts: float, end_ts: float | None):
+        out_hb = []
+        for h in llm_heartbeats:
+            if h["ts"] < call_ts:
+                continue
+            if end_ts is not None and h["ts"] > end_ts:
+                continue
+            out_hb.append(h)
+        return out_hb
+
     # Load LLM calls once, keep just the small subset we need
     llm_records: list[dict] = []
     if llm_log.exists():
@@ -612,14 +709,26 @@ def get_node_trajectory(node_name: str, max_log_chars: int = 16000) -> list:
                 continue
             if exit_ts is not None and t > exit_ts:
                 continue
+            dur = rec.get("duration_s")
+            end_t = (t + dur) if dur else None
+            start_match = _match_start(t, dur)
+            run_name = (start_match or {}).get("run_name", "")
+            heartbeats = _heartbeats_in(t, end_t)
             calls.append({
                 "type": "llm_call",
                 "ts": t,
                 "iso": rec.get("iso"),
                 "model": rec.get("model", ""),
                 "provider": rec.get("provider", ""),
-                "duration_s": rec.get("duration_s"),
+                "duration_s": dur,
                 "timed_out": rec.get("timed_out", False),
+                # The agent's own label for this call (e.g. "Generate Verilog
+                # [Adder32]"), much more useful than just the model name.
+                "run_name": run_name,
+                # 30s heartbeat pulses with stdout/stderr byte counts -- a
+                # rough indicator the codex_cli was producing output during
+                # the call.
+                "heartbeats": heartbeats,
                 "system_prompt": rec.get("system_prompt", ""),
                 "user_prompt": rec.get("user_prompt", ""),
                 "response": rec.get("response", ""),
@@ -1678,6 +1787,25 @@ class WebviewHandler(SimpleHTTPRequestHandler):
             self.send_error(404)
             return
 
+        # Serve waveform-viewer eval demos from wave-demos/. Includes the
+        # mirrored Surfer / vcdrom static bundles so they can be served
+        # same-origin (avoids CORS headaches when the viewer fetches VCDs
+        # from /api/artifacts/).
+        if path == "/waveform-demos" or path.startswith("/waveform-demos/"):
+            rel = path[len("/waveform-demos/"):].lstrip("/") if path != "/waveform-demos" else ""
+            base = Path(__file__).resolve().parent / "wave-demos"
+            file_path = (base / (rel or "index.html")).resolve()
+            if not file_path.is_relative_to(base.resolve()):
+                self.send_error(403)
+                return
+            if file_path.is_dir():
+                file_path = file_path / "index.html"
+            if file_path.exists() and file_path.is_file():
+                self._serve_file(file_path)
+                return
+            self.send_error(404)
+            return
+
         # Serve built JS/CSS from dist/
         if path.startswith("/dist/"):
             rel = path[len("/dist/"):]
@@ -1724,12 +1852,24 @@ class WebviewHandler(SimpleHTTPRequestHandler):
             ".svg": "image/svg+xml",
             ".gif": "image/gif",
             ".webp": "image/webp",
+            ".wasm": "application/wasm",
+            ".woff2": "font/woff2",
+            ".woff": "font/woff",
+            ".ico": "image/x-icon",
+            ".vcd": "text/plain; charset=utf-8",
+            ".v": "text/plain; charset=utf-8",
+            ".sv": "text/plain; charset=utf-8",
+            ".txt": "text/plain; charset=utf-8",
+            ".md": "text/markdown; charset=utf-8",
         }.get(ext, "application/octet-stream")
 
         data = file_path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
+        # Allow cross-origin fetches (Surfer / fliplot iframes need this to
+        # pull VCDs from /api/artifacts/).
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(data)
 

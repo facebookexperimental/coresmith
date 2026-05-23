@@ -541,7 +541,7 @@ function App() {
 
       {/* ── Main content area with optional summary sidebar ── */}
       <div className="app-body">
-        {showSummary && (
+        {showSummary && viewMode !== 'collateral' && (
           <>
             <SummaryPanel
               stage={summaryStage}

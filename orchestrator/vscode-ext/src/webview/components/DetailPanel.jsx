@@ -977,6 +977,8 @@ function TrajectorySteps({ steps }) {
         const call = {
           id: step._span?.id || `step-${i}`,
           model: step.model || 'LLM',
+          runName: step.run_name || '',
+          heartbeats: step.heartbeats || [],
           promptTokens: step.usage?.prompt_tokens || step.usage?.input_tokens,
           completionTokens: step.usage?.completion_tokens || step.usage?.output_tokens,
           totalTokens: step.usage?.total_tokens,
@@ -1004,6 +1006,12 @@ function LLMCallCard({ call, index, total }) {
     call.status === 'ok' ? 'ok' : call.status === 'error' ? 'error' : 'unset';
 
   const tokenLabel = formatTokens(call.totalTokens);
+  // Prefer the agent's own task label ("Generate Verilog [Adder32]") over
+  // the bare model name -- the model name is identical across all calls so
+  // it's useless as a card heading.
+  const heading = call.runName || call.model;
+  const sub = call.runName ? call.model : null;
+  const hbCount = (call.heartbeats || []).length;
 
   return (
     <div
@@ -1016,7 +1024,8 @@ function LLMCallCard({ call, index, total }) {
             {`${index + 1}/${total}`}
           </span>
         )}
-        <span className="llm-model-name">{call.model}</span>
+        <span className="llm-model-name" title={call.runName || ''}>{heading}</span>
+        {sub && <span className="llm-model-sub">{sub}</span>}
         <span className="llm-card-meta">
           <span className="llm-dur">{formatDuration(call.duration_ms)}</span>
           {tokenLabel && (
@@ -1026,6 +1035,31 @@ function LLMCallCard({ call, index, total }) {
             {statusSymbol}
           </span>
         </span>
+      </div>
+
+      {/* Inline timeline of intra-call steps: system_prompt \u2192 user_prompt
+          \u2192 [heartbeats] \u2192 response. Gives the user "more spans between
+          prompt and response" the way they asked for -- even though the
+          codex_cli's internal tool calls aren't instrumented, we can at
+          least show the pulses we DO have. */}
+      <div className="llm-step-chain">
+        <span className="llm-step llm-step-sys" title="System prompt set">\u2699</span>
+        <span className="llm-step-line" />
+        <span className="llm-step llm-step-usr" title="User prompt">\u25b6</span>
+        {hbCount > 0 && (
+          <>
+            <span className="llm-step-line" />
+            {call.heartbeats.map((h, i) => (
+              <span
+                key={`hb-${i}`}
+                className="llm-step llm-step-hb"
+                title={`Heartbeat @${(h.elapsed_s || 0).toFixed(0)}s \u00b7 stdout ${h.stdout_bytes || 0}B`}
+              >\u25cf</span>
+            ))}
+          </>
+        )}
+        <span className="llm-step-line" />
+        <span className={`llm-step llm-step-resp llm-step-${statusCls}`} title="Response">\u25c0</span>
       </div>
 
       {/* System prompt (collapsed) */}

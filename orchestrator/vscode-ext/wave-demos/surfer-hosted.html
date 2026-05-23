@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Surfer (hosted) · waveform eval</title>
+<link rel="stylesheet" href="./_demo_common.css">
+</head>
+<body>
+  <div class="demo-header">
+    <a href="./">← back</a>
+    <span class="demo-title">Surfer</span>
+    <span class="demo-tag">3rd-party</span>
+    <span>app.surfer-project.org · Rust→WASM · postMessage LoadUrl</span>
+    <span id="status" class="demo-status">loading…</span>
+  </div>
+  <iframe
+    id="surfer"
+    class="demo-frame"
+    src="https://app.surfer-project.org/"
+    allow="cross-origin-isolated; clipboard-write"
+  ></iframe>
+  <script>
+    const VCD = location.origin + "/api/artifacts/sim_build/adder32/dump.vcd";
+    const iframe = document.getElementById("surfer");
+    const status = document.getElementById("status");
+    iframe.addEventListener("load", () => {
+      status.textContent = "LoadUrl posted → " + VCD;
+      status.classList.add("ok");
+      // Surfer's integration.js listens for {command: "LoadUrl", url: ...}
+      // Give the WASM a moment to register its message listener, then nudge it.
+      setTimeout(() => {
+        try {
+          iframe.contentWindow.postMessage({ command: "LoadUrl", url: VCD }, "*");
+        } catch (e) {
+          status.textContent = "postMessage failed: " + e.message;
+          status.classList.remove("ok");
+          status.classList.add("err");
+        }
+      }, 1500);
+    });
+    iframe.addEventListener("error", () => {
+      status.textContent = "iframe failed";
+      status.classList.add("err");
+    });
+  </script>
+</body>
+</html>
