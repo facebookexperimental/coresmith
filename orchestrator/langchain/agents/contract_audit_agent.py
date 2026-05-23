@@ -9,7 +9,7 @@ from typing import Any
 
 from opentelemetry import trace
 
-from .socmate_llm import ClaudeLLM
+from .coresmith_llm import ClaudeLLM
 
 _tracer = trace.get_tracer(__name__)
 
@@ -21,7 +21,7 @@ class ContractAuditAgent:
     """Audits integration/validation failures for cross-block contract issues."""
 
     def __init__(self, model: str | None = None, temperature: float = 0.1):
-        from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
 
         model = model or DEFAULT_MODEL
         self.llm = ClaudeLLM(model=model, timeout=900)

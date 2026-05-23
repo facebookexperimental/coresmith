@@ -4,19 +4,19 @@
 
 """Local-only live architecture stress tests for derived contracts.
 
-These tests intentionally exercise only the SocMate architecture stage. They
+These tests intentionally exercise only the CoreSmith architecture stage. They
 start the architecture graph, answer sizing questions, allow architecture
 constraint iteration, accept final review, and then assert that the
 deterministic derived-constraint audit is clean.
 
 They call the configured LLM provider and are skipped unless explicitly enabled:
 
-    SOCMATE_RUN_LOCAL_ARCH_STRESS=1 pytest \
+    CORESMITH_RUN_LOCAL_ARCH_STRESS=1 pytest \
       orchestrator/tests/test_local_architecture_contract_stress.py -v --tb=short
 
 To run one or a subset:
 
-    SOCMATE_RUN_LOCAL_ARCH_STRESS=1 SOCMATE_ARCH_STRESS_CASES=codec_640x360,gemm_tiles pytest ...
+    CORESMITH_RUN_LOCAL_ARCH_STRESS=1 CORESMITH_ARCH_STRESS_CASES=codec_640x360,gemm_tiles pytest ...
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from orchestrator.tests.conftest import wait_for_status
 from orchestrator.tests.test_live_architecture import _auto_answer_ers
 
 
-RUN_STRESS = os.environ.get("SOCMATE_RUN_LOCAL_ARCH_STRESS", "").lower() in {
+RUN_STRESS = os.environ.get("CORESMITH_RUN_LOCAL_ARCH_STRESS", "").lower() in {
     "1",
     "true",
     "yes",
@@ -135,14 +135,14 @@ count, alignment, underrun reporting, and transaction completion.
 
 
 def _case_selected(case_id: str) -> bool:
-    selected = os.environ.get("SOCMATE_ARCH_STRESS_CASES", "").strip()
+    selected = os.environ.get("CORESMITH_ARCH_STRESS_CASES", "").strip()
     if not selected:
         return True
     return case_id in {item.strip() for item in selected.split(",") if item.strip()}
 
 
 def _export_case_artifacts(case_id: str, project_root: Path, state: dict) -> None:
-    artifact_root = os.environ.get("SOCMATE_STRESS_ARTIFACT_ROOT", "").strip()
+    artifact_root = os.environ.get("CORESMITH_STRESS_ARTIFACT_ROOT", "").strip()
     if not artifact_root:
         return
 
@@ -151,13 +151,13 @@ def _export_case_artifacts(case_id: str, project_root: Path, state: dict) -> Non
     (dest / "final_architecture_state.json").write_text(json.dumps(state, indent=2, default=str))
 
     for relpath in [
-        ".socmate/derived_constraints_audit.json",
-        ".socmate/block_specs.json",
-        ".socmate/block_diagram.json",
-        ".socmate/prd_spec.json",
-        ".socmate/ers_spec.json",
-        ".socmate/architecture_events.jsonl",
-        ".socmate/pipeline_events.jsonl",
+        ".coresmith/derived_constraints_audit.json",
+        ".coresmith/block_specs.json",
+        ".coresmith/block_diagram.json",
+        ".coresmith/prd_spec.json",
+        ".coresmith/ers_spec.json",
+        ".coresmith/architecture_events.jsonl",
+        ".coresmith/pipeline_events.jsonl",
         "arch/sad_spec.md",
         "arch/frd_spec.md",
     ]:
@@ -258,12 +258,12 @@ def _repair_feedback(violations: list[dict]) -> str:
 
 @pytest.mark.local_arch_stress
 @pytest.mark.slow
-@pytest.mark.skipif(not RUN_STRESS, reason="set SOCMATE_RUN_LOCAL_ARCH_STRESS=1")
+@pytest.mark.skipif(not RUN_STRESS, reason="set CORESMITH_RUN_LOCAL_ARCH_STRESS=1")
 @pytest.mark.parametrize("case_id,requirements", ARCH_STRESS_CASES)
 @pytest.mark.asyncio
 async def test_architecture_stage_preserves_derived_contracts(case_id, requirements, live_arch):
     if not _case_selected(case_id):
-        pytest.skip(f"{case_id} not selected by SOCMATE_ARCH_STRESS_CASES")
+        pytest.skip(f"{case_id} not selected by CORESMITH_ARCH_STRESS_CASES")
 
     state = await _run_architecture_only(live_arch, requirements)
     project_root = Path(state.get("project_root") or ".")
@@ -273,13 +273,13 @@ async def test_architecture_stage_preserves_derived_contracts(case_id, requireme
         indent=2,
     )
 
-    audit_path = project_root / ".socmate" / "derived_constraints_audit.json"
+    audit_path = project_root / ".coresmith" / "derived_constraints_audit.json"
     assert audit_path.exists(), "derived constraint audit was not written"
 
     audit = json.loads(audit_path.read_text())
     assert audit["violations"] == [], json.dumps(audit["violations"], indent=2)
 
-    block_specs = project_root / ".socmate" / "block_specs.json"
+    block_specs = project_root / ".coresmith" / "block_specs.json"
     assert block_specs.exists(), "architecture did not finalize block_specs.json"
 
     _export_case_artifacts(case_id, project_root, state)

@@ -29,11 +29,11 @@ import pytest
 
 
 def test_load_config_falls_back_to_repo_config_when_project_root_is_external(tmp_path, monkeypatch):
-    """Architecture helpers must work when SOCMATE_PROJECT_ROOT is a run dir."""
+    """Architecture helpers must work when CORESMITH_PROJECT_ROOT is a run dir."""
     import importlib
 
-    monkeypatch.setenv("SOCMATE_PROJECT_ROOT", str(tmp_path))
-    monkeypatch.delenv("SOCMATE_CONFIG_PATH", raising=False)
+    monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.delenv("CORESMITH_CONFIG_PATH", raising=False)
 
     import orchestrator.langgraph.pipeline_helpers as ph
 
@@ -289,7 +289,7 @@ class TestDiscoverBlockPorts:
             endmodule
         """))
 
-        (tmp_path / ".socmate").mkdir(exist_ok=True)
+        (tmp_path / ".coresmith").mkdir(exist_ok=True)
 
         blocks = [{"name": "my_block"}]
         enriched = _discover_block_ports(blocks)
@@ -317,7 +317,7 @@ class TestDiscoverBlockPorts:
             "module my_block (input wire clk_in, input wire rst_n_in, "
             "output wire data); endmodule\n"
         )
-        (tmp_path / ".socmate").mkdir(exist_ok=True)
+        (tmp_path / ".coresmith").mkdir(exist_ok=True)
 
         blocks = [{"name": "my_block"}]
         enriched = _discover_block_ports(blocks)
@@ -334,7 +334,7 @@ class TestFastPathDiagnosis:
     """Verify fast-path diagnosis catches known testbench bugs.
 
     The current ``diagnose_node`` reads its error context from
-    ``.socmate/blocks/<block>/previous_error.txt`` (written by the
+    ``.coresmith/blocks/<block>/previous_error.txt`` (written by the
     upstream sim/lint nodes) and persists the diag dict to
     ``diagnosis.json`` in the same directory.  It returns only
     ``{"debug_action": ...}`` -- the diag dict is fetched from disk.
@@ -342,7 +342,7 @@ class TestFastPathDiagnosis:
 
     @staticmethod
     def _setup_block(tmp_path, block_name, error_text):
-        block_dir = tmp_path / ".socmate" / "blocks" / block_name
+        block_dir = tmp_path / ".coresmith" / "blocks" / block_name
         block_dir.mkdir(parents=True, exist_ok=True)
         (block_dir / "previous_error.txt").write_text(error_text)
         return block_dir
@@ -485,12 +485,12 @@ class TestBackendGate:
         import orchestrator.mcp_server as mcp
         from unittest.mock import AsyncMock, patch
 
-        (tmp_path / ".socmate").mkdir()
+        (tmp_path / ".coresmith").mkdir()
         block_specs = [
             {"name": "good_block", "rtl_target": "rtl/good_block/good_block.v"},
             {"name": "bad_block", "rtl_target": "rtl/bad_block/bad_block.v"},
         ]
-        (tmp_path / ".socmate" / "block_specs.json").write_text(json.dumps(block_specs))
+        (tmp_path / ".coresmith" / "block_specs.json").write_text(json.dumps(block_specs))
 
         # Create RTL + netlist for good_block only
         rtl_dir = tmp_path / "rtl" / "good_block"
@@ -519,11 +519,11 @@ class TestBackendGate:
         import orchestrator.mcp_server as mcp
         from unittest.mock import AsyncMock, patch
 
-        (tmp_path / ".socmate").mkdir()
+        (tmp_path / ".coresmith").mkdir()
         block_specs = [
             {"name": "block_a", "rtl_target": "rtl/block_a/block_a.v"},
         ]
-        (tmp_path / ".socmate" / "block_specs.json").write_text(json.dumps(block_specs))
+        (tmp_path / ".coresmith" / "block_specs.json").write_text(json.dumps(block_specs))
 
         # Create all artifacts
         rtl_dir = tmp_path / "rtl" / "block_a"
@@ -644,7 +644,7 @@ class TestRegressionGuard:
         rtl_dir.mkdir(parents=True)
         (rtl_dir / f"{block_name}.v").write_text("module test_block(); endmodule\n")
 
-        best_dir = tmp_path / ".socmate" / "blocks" / block_name
+        best_dir = tmp_path / ".coresmith" / "blocks" / block_name
         best_dir.mkdir(parents=True)
         (best_dir / "best_result.json").write_text(json.dumps({
             "sim_passed": True,
@@ -681,7 +681,7 @@ class TestRegressionGuard:
         rtl_dir.mkdir(parents=True)
         (rtl_dir / f"{block_name}.v").write_text("module test_block(); endmodule\n")
 
-        best_dir = tmp_path / ".socmate" / "blocks" / block_name
+        best_dir = tmp_path / ".coresmith" / "blocks" / block_name
         best_dir.mkdir(parents=True)
         (best_dir / "best_result.json").write_text(json.dumps({
             "sim_passed": False,
@@ -720,7 +720,7 @@ class TestRegressionGuard:
         rtl_dir.mkdir(parents=True)
         (rtl_dir / f"{block_name}.v").write_text("module test_block(); endmodule\n")
 
-        best_dir = tmp_path / ".socmate" / "blocks" / block_name
+        best_dir = tmp_path / ".coresmith" / "blocks" / block_name
         best_dir.mkdir(parents=True)
         (best_dir / "best_result.json").write_text(json.dumps({
             "sim_passed": True,
@@ -756,7 +756,7 @@ class TestBestResultPersistence:
         block_name = "my_alu"
         block = {"name": block_name, "testbench": f"tb/cocotb/test_{block_name}.py"}
 
-        (tmp_path / ".socmate" / "blocks" / block_name).mkdir(parents=True)
+        (tmp_path / ".coresmith" / "blocks" / block_name).mkdir(parents=True)
 
         rtl_file = tmp_path / "rtl" / block_name / f"{block_name}.v"
         rtl_file.parent.mkdir(parents=True)
@@ -786,7 +786,7 @@ class TestBestResultPersistence:
         ):
             await generate_testbench_node(state)
 
-        best_path = tmp_path / ".socmate" / "blocks" / block_name / "best_result.json"
+        best_path = tmp_path / ".coresmith" / "blocks" / block_name / "best_result.json"
         assert best_path.exists()
         best = json.loads(best_path.read_text())
         assert best["sim_passed"] is True
@@ -801,7 +801,7 @@ class TestBestResultPersistence:
         block_name = "buggy"
         block = {"name": block_name, "testbench": f"tb/cocotb/test_{block_name}.py"}
 
-        (tmp_path / ".socmate" / "blocks" / block_name).mkdir(parents=True)
+        (tmp_path / ".coresmith" / "blocks" / block_name).mkdir(parents=True)
 
         rtl_file = tmp_path / "rtl" / block_name / f"{block_name}.v"
         rtl_file.parent.mkdir(parents=True)
@@ -828,7 +828,7 @@ class TestBestResultPersistence:
         ):
             await generate_testbench_node(state)
 
-        best_path = tmp_path / ".socmate" / "blocks" / block_name / "best_result.json"
+        best_path = tmp_path / ".coresmith" / "blocks" / block_name / "best_result.json"
         assert not best_path.exists()
 
 
@@ -872,7 +872,7 @@ class TestUarchAutoApprove:
             "current_block": {"name": "enc_control"},
             "project_root": str(tmp_path),
         }
-        (tmp_path / ".socmate").mkdir(exist_ok=True)
+        (tmp_path / ".coresmith").mkdir(exist_ok=True)
 
         result = await review_uarch_spec_node(state)
         assert result["uarch_approved"] is True
@@ -1073,7 +1073,7 @@ class TestAutoApplyHighConfidenceFix:
         from orchestrator.langgraph.pipeline_graph import _route_decision
 
         # 0.92 < 0.95 threshold -> stays as ask_human
-        monkeypatch.setenv("SOCMATE_AUTO_FIX_CONFIDENCE", "0.95")
+        monkeypatch.setenv("CORESMITH_AUTO_FIX_CONFIDENCE", "0.95")
         result = _route_decision(
             debug_result=self._diag(),  # confidence=0.92
             attempt_history=[],
@@ -1172,7 +1172,7 @@ class TestIntegrationReviewSoftLock:
         monkeypatch.setattr(
             integration_review_agent.ClaudeLLM, "call", fake_call
         )
-        monkeypatch.setenv("SOCMATE_INTEGRATION_REVIEW_INPLACE", "1")
+        monkeypatch.setenv("CORESMITH_INTEGRATION_REVIEW_INPLACE", "1")
 
         agent = integration_review_agent.IntegrationReviewAgent()
         result = await agent.review(

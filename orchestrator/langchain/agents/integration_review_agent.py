@@ -22,7 +22,7 @@ from typing import Any
 
 from opentelemetry import trace
 
-from .socmate_llm import DEFAULT_MODEL, ClaudeLLM
+from .coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
 _tracer = trace.get_tracer(__name__)
 
@@ -110,7 +110,7 @@ class IntegrationReviewAgent:
     def __init__(self, model: str = DEFAULT_MODEL, temperature: float = 0.1):
         self.llm = ClaudeLLM(
             model=model,
-            timeout=int(os.environ.get("SOCMATE_INTEGRATION_REVIEW_TIMEOUT", "2700")),
+            timeout=int(os.environ.get("CORESMITH_INTEGRATION_REVIEW_TIMEOUT", "2700")),
         )
 
     async def review(
@@ -141,9 +141,9 @@ class IntegrationReviewAgent:
             # for.  Discovered live during the H.264 codec run.
             #
             # Behaviour: callers can opt out by setting
-            # SOCMATE_INTEGRATION_REVIEW_INPLACE=1 (e.g. for legacy flows).
+            # CORESMITH_INTEGRATION_REVIEW_INPLACE=1 (e.g. for legacy flows).
             inplace = os.environ.get(
-                "SOCMATE_INTEGRATION_REVIEW_INPLACE", ""
+                "CORESMITH_INTEGRATION_REVIEW_INPLACE", ""
             ).strip().lower() in {"1", "true", "yes", "on"}
 
             review_dir = root / "arch" / "uarch_specs_review"
@@ -160,7 +160,7 @@ class IntegrationReviewAgent:
                 shutil.copy2(src, dst)
                 spec_paths.append(str(dst))
 
-            bd_path = root / ".socmate" / "block_diagram.json"
+            bd_path = root / ".coresmith" / "block_diagram.json"
             review_bd_path = bd_path
             deferred_connection_count = 0
             if bd_path.exists():
@@ -169,7 +169,7 @@ class IntegrationReviewAgent:
                     filtered, deferred_connection_count = _filter_connections_for_blocks(
                         block_diagram, block_names
                     )
-                    review_bd_path = root / ".socmate" / "integration_review_block_diagram.json"
+                    review_bd_path = root / ".coresmith" / "integration_review_block_diagram.json"
                     review_bd_path.write_text(json.dumps(filtered, indent=2))
                 except (json.JSONDecodeError, OSError, TypeError):
                     review_bd_path = bd_path
@@ -197,7 +197,7 @@ class IntegrationReviewAgent:
             if ers_path.exists():
                 parts.append(f"- ERS: {ers_path}")
 
-            prd_path = root / ".socmate" / "prd_spec.json"
+            prd_path = root / ".coresmith" / "prd_spec.json"
             if prd_path.exists():
                 try:
                     prd = json.loads(prd_path.read_text())

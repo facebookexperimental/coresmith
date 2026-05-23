@@ -1,6 +1,6 @@
-# Contributing to socmate
+# Contributing to coresmith
 
-We welcome contributions to socmate. By participating, you agree to abide by the [Code of Conduct](CODE_OF_CONDUCT.md).
+We welcome contributions to coresmith. By participating, you agree to abide by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Getting Started
 

@@ -53,7 +53,7 @@ class TestPersistPrd:
             FFT16_PRD_ANSWERS,
         )
 
-        json_path = Path(isolated_project) / ".socmate" / "prd_spec.json"
+        json_path = Path(isolated_project) / ".coresmith" / "prd_spec.json"
         assert json_path.exists()
         data = json.loads(json_path.read_text())
         assert isinstance(data, dict)
@@ -87,8 +87,8 @@ class TestPersistPrd:
             FFT16_PRD_ANSWERS,
         )
 
-        socmate = Path(isolated_project) / ".socmate"
-        tmp_files = list(socmate.glob("*.tmp"))
+        coresmith = Path(isolated_project) / ".coresmith"
+        tmp_files = list(coresmith.glob("*.tmp"))
         assert len(tmp_files) == 0, f"Leftover .tmp files: {tmp_files}"
 
 
@@ -107,8 +107,8 @@ class TestPersistSad:
 
         arch = Path(isolated_project) / "arch"
         assert (arch / "sad_spec.md").exists()
-        socmate = Path(isolated_project) / ".socmate"
-        assert not (socmate / "sad_spec.json").exists()
+        coresmith = Path(isolated_project) / ".coresmith"
+        assert not (coresmith / "sad_spec.json").exists()
 
     def test_markdown_has_expected_sections(self, isolated_project):
         from orchestrator.langgraph.architecture_graph import _persist_sad
@@ -147,8 +147,8 @@ class TestPersistFrd:
 
         arch = Path(isolated_project) / "arch"
         assert (arch / "frd_spec.md").exists()
-        socmate = Path(isolated_project) / ".socmate"
-        assert not (socmate / "frd_spec.json").exists()
+        coresmith = Path(isolated_project) / ".coresmith"
+        assert not (coresmith / "frd_spec.json").exists()
 
     def test_markdown_has_expected_sections(self, isolated_project):
         from orchestrator.langgraph.architecture_graph import _persist_frd
@@ -185,7 +185,7 @@ class TestPersistBlockDiagram:
 
         _persist_block_diagram(isolated_project, FFT16_BLOCK_DIAGRAM)
 
-        json_path = Path(isolated_project) / ".socmate" / "block_diagram.json"
+        json_path = Path(isolated_project) / ".coresmith" / "block_diagram.json"
         assert json_path.exists()
         data = json.loads(json_path.read_text())
         assert len(data["blocks"]) == 3
@@ -228,7 +228,7 @@ class TestPersistMemoryMap:
 
         _persist_memory_map(isolated_project, FFT16_MEMORY_MAP)
 
-        json_path = Path(isolated_project) / ".socmate" / "memory_map.json"
+        json_path = Path(isolated_project) / ".coresmith" / "memory_map.json"
         assert json_path.exists()
         data = json.loads(json_path.read_text())
         assert len(data["result"]["peripherals"]) == 3
@@ -260,7 +260,7 @@ class TestPersistClockTree:
 
         _persist_clock_tree(isolated_project, FFT16_CLOCK_TREE)
 
-        json_path = Path(isolated_project) / ".socmate" / "clock_tree.json"
+        json_path = Path(isolated_project) / ".coresmith" / "clock_tree.json"
         assert json_path.exists()
         data = json.loads(json_path.read_text())
         assert data["result"]["num_domains"] == 1
@@ -292,7 +292,7 @@ class TestPersistRegisterSpec:
 
         _persist_register_spec(isolated_project, FFT16_REGISTER_SPEC)
 
-        json_path = Path(isolated_project) / ".socmate" / "register_spec.json"
+        json_path = Path(isolated_project) / ".coresmith" / "register_spec.json"
         assert json_path.exists()
         data = json.loads(json_path.read_text())
         assert data["result"]["total_blocks"] == 4

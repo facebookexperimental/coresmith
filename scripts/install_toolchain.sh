@@ -25,7 +25,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-echo "=== socmate ASIC Toolchain Installer ==="
+echo "=== coresmith ASIC Toolchain Installer ==="
 echo "Project root: $PROJECT_ROOT"
 
 OS="$(uname -s)"

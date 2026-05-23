@@ -46,7 +46,7 @@ async def generate_frd(
     """
     from opentelemetry import trace as _trace
 
-    tracer = _trace.get_tracer("socmate.architecture.frd_spec")
+    tracer = _trace.get_tracer("coresmith.architecture.frd_spec")
 
     with tracer.start_as_current_span("generate_frd") as span:
         prd_doc = prd_spec.get("prd", {}) if prd_spec else {}
@@ -81,7 +81,7 @@ async def generate_frd(
             f"After writing, respond with only the file path confirmation."
         )
 
-        from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
 

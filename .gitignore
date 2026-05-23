@@ -43,7 +43,7 @@ verification/
 arch/
 
 # Runtime / pipeline data
-.socmate/
+.coresmith/
 .txrx/
 
 # Images and binary assets

@@ -70,7 +70,7 @@ async def generate_chip_finish_dashboard(
 
     from opentelemetry import trace as _trace
 
-    tracer = _trace.get_tracer("socmate.backend.chip_finish_dashboard")
+    tracer = _trace.get_tracer("coresmith.backend.chip_finish_dashboard")
 
     with tracer.start_as_current_span("generate_chip_finish_dashboard") as span:
         root = Path(project_root)
@@ -85,9 +85,9 @@ async def generate_chip_finish_dashboard(
         top_design = _find_top_design(root, block_name, completed_blocks)
 
         # -- Structured architecture data ----------------------------------
-        prd_data = _read_json_safe(root / ".socmate" / "prd_spec.json") or {}
+        prd_data = _read_json_safe(root / ".coresmith" / "prd_spec.json") or {}
         prd_content = prd_data.get("prd", prd_data) if prd_data else {}
-        block_diagram = _read_json_safe(root / ".socmate" / "block_diagram.json") or {}
+        block_diagram = _read_json_safe(root / ".coresmith" / "block_diagram.json") or {}
         mermaid_diagram = _blocks_to_mermaid(block_diagram)
 
         # -- Backend reports -----------------------------------------------
@@ -110,7 +110,7 @@ async def generate_chip_finish_dashboard(
         span.set_attribute("tb_file_count", len(tb_files))
 
         # -- Pipeline timeline ---------------------------------------------
-        timeline = _build_timeline_bars(root / ".socmate" / "pipeline_events.jsonl")
+        timeline = _build_timeline_bars(root / ".coresmith" / "pipeline_events.jsonl")
 
         # -- Test results --------------------------------------------------
         test_results = _read_test_results(root, block_name)
@@ -287,7 +287,7 @@ def _read_json_safe(path: Path) -> dict | None:
 
 def _read_uarch_spec(root: Path, block_name: str) -> str:
     """Read the uArch spec markdown for *block_name*."""
-    for parent in ("arch", ".socmate"):
+    for parent in ("arch", ".coresmith"):
         spec = root / parent / "uarch_specs" / f"{block_name}.md"
         if spec.exists():
             try:
@@ -1504,7 +1504,7 @@ def inject_vcd_waveforms(html: str, vcd_waveforms: list[dict]) -> str:
 """
 
     section_html = f"""
-<!-- SIMULATION WAVEFORMS (VCD) — injected by socmate pipeline -->
+<!-- SIMULATION WAVEFORMS (VCD) — injected by coresmith pipeline -->
 <section id="waveform">
 <h2>Simulation Waveforms</h2>
 <p style="color:var(--dim,#8892b0);font-size:.85rem;margin-bottom:1rem">

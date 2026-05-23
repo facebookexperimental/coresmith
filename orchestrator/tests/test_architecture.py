@@ -26,9 +26,9 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 
 @pytest.fixture
 def tmp_project(tmp_path):
-    """Create a temporary project directory with .socmate/ state dir."""
-    socmate_dir = tmp_path / ".socmate"
-    socmate_dir.mkdir()
+    """Create a temporary project directory with .coresmith/ state dir."""
+    coresmith_dir = tmp_path / ".coresmith"
+    coresmith_dir.mkdir()
     return str(tmp_path)
 
 
@@ -247,7 +247,7 @@ class TestConstraintChecker:
         from orchestrator.architecture.constraints import check_constraints
 
         llm_response = json.dumps({"violations": [], "reasoning": "All checks pass."})
-        with patch("orchestrator.langchain.agents.socmate_llm.ClaudeLLM") as MockLLM:
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
             MockLLM.return_value.call = AsyncMock(return_value=llm_response)
             violations = await check_constraints(
                 block_diagram=sample_block_diagram,
@@ -278,7 +278,7 @@ class TestConstraintChecker:
             }
         }
 
-        with patch("orchestrator.langchain.agents.socmate_llm.ClaudeLLM") as MockLLM:
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
             MockLLM.return_value.call = AsyncMock(return_value=llm_response)
             violations = await check_constraints(
                 block_diagram={"blocks": [], "connections": []},
@@ -304,7 +304,7 @@ class TestConstraintChecker:
         ]
         diagram = {"blocks": blocks, "connections": []}
 
-        with patch("orchestrator.langchain.agents.socmate_llm.ClaudeLLM") as MockLLM:
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
             MockLLM.return_value.call = AsyncMock(return_value=llm_response)
             violations = await check_constraints(
                 block_diagram=diagram,
@@ -331,7 +331,7 @@ class TestConstraintChecker:
             "connections": [],
         }
 
-        with patch("orchestrator.langchain.agents.socmate_llm.ClaudeLLM") as MockLLM:
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
             MockLLM.return_value.call = AsyncMock(return_value=llm_response)
             violations = await check_constraints(
                 block_diagram=diagram,
@@ -356,7 +356,7 @@ class TestConstraintChecker:
             {"name": "orphan_block", "description": "No connections", "tier": 1}
         ]
 
-        with patch("orchestrator.langchain.agents.socmate_llm.ClaudeLLM") as MockLLM:
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
             MockLLM.return_value.call = AsyncMock(return_value=llm_response)
             violations = await check_constraints(
                 block_diagram=diagram,
@@ -401,7 +401,7 @@ class TestStubSpecialists:
         })
 
         with patch(
-            "orchestrator.langchain.agents.socmate_llm.ClaudeLLM"
+            "orchestrator.langchain.agents.coresmith_llm.ClaudeLLM"
         ) as MockLLM:
             MockLLM.return_value.call = AsyncMock(return_value=llm_response)
             from orchestrator.architecture.specialists.clock_tree import analyze_clock_tree
@@ -432,7 +432,7 @@ class TestStubSpecialists:
         })
 
         with patch(
-            "orchestrator.langchain.agents.socmate_llm.ClaudeLLM"
+            "orchestrator.langchain.agents.coresmith_llm.ClaudeLLM"
         ) as MockLLM:
             MockLLM.return_value.call = AsyncMock(return_value=llm_response)
             from orchestrator.architecture.specialists.register_spec import (
@@ -459,7 +459,7 @@ class TestBenchmarkCache:
     def test_store_and_retrieve(self, tmp_project):
         from orchestrator.architecture.benchmarks.cache import BenchmarkCache
 
-        db_path = os.path.join(tmp_project, ".socmate", "benchmark_cache.db")
+        db_path = os.path.join(tmp_project, ".coresmith", "benchmark_cache.db")
         cache = BenchmarkCache(db_path)
 
         result = {"gate_count": 847, "area_um2": 12340}
@@ -475,7 +475,7 @@ class TestBenchmarkCache:
     def test_cache_miss(self, tmp_project):
         from orchestrator.architecture.benchmarks.cache import BenchmarkCache
 
-        db_path = os.path.join(tmp_project, ".socmate", "benchmark_cache.db")
+        db_path = os.path.join(tmp_project, ".coresmith", "benchmark_cache.db")
         cache = BenchmarkCache(db_path)
 
         cached = cache.get("multiplier", {"width": 16}, "sky130", 50.0)
@@ -486,7 +486,7 @@ class TestBenchmarkCache:
     def test_different_params_different_keys(self, tmp_project):
         from orchestrator.architecture.benchmarks.cache import BenchmarkCache
 
-        db_path = os.path.join(tmp_project, ".socmate", "benchmark_cache.db")
+        db_path = os.path.join(tmp_project, ".coresmith", "benchmark_cache.db")
         cache = BenchmarkCache(db_path)
 
         cache.store("multiplier", {"width": 16}, "sky130", 50.0, {"gate_count": 847})
@@ -502,7 +502,7 @@ class TestBenchmarkCache:
     def test_clear(self, tmp_project):
         from orchestrator.architecture.benchmarks.cache import BenchmarkCache
 
-        db_path = os.path.join(tmp_project, ".socmate", "benchmark_cache.db")
+        db_path = os.path.join(tmp_project, ".coresmith", "benchmark_cache.db")
         cache = BenchmarkCache(db_path)
 
         cache.store("multiplier", {"width": 16}, "sky130", 50.0, {"gate_count": 847})
@@ -582,7 +582,7 @@ class TestBlockSpecsRoundtrip:
             }
             block_specs.append(spec)
 
-        specs_path = Path(tmp_project) / ".socmate" / "block_specs.json"
+        specs_path = Path(tmp_project) / ".coresmith" / "block_specs.json"
         specs_path.write_text(json.dumps(block_specs, indent=2))
 
         # Verify JSON roundtrip
@@ -640,19 +640,19 @@ class TestEndToEndStateFlow:
         state.memory_map = mm
         save_state(state, tmp_project)
 
-        with patch("orchestrator.langchain.agents.socmate_llm.ClaudeLLM") as MockLLM:
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
             MockLLM.return_value.call = AsyncMock(return_value=ct_response)
             ct = await analyze_clock_tree(sample_block_diagram, 50.0)
         state.clock_tree = ct
         save_state(state, tmp_project)
 
-        with patch("orchestrator.langchain.agents.socmate_llm.ClaudeLLM") as MockLLM:
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
             MockLLM.return_value.call = AsyncMock(return_value=rs_response)
             rs = await analyze_register_spec(sample_block_diagram)
         state.register_spec = rs
         save_state(state, tmp_project)
 
-        with patch("orchestrator.langchain.agents.socmate_llm.ClaudeLLM") as MockLLM:
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
             MockLLM.return_value.call = AsyncMock(return_value=cc_response)
             violations = await check_constraints(
                 block_diagram=sample_block_diagram,

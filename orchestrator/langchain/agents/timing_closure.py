@@ -25,7 +25,7 @@ from typing import Any
 
 from opentelemetry import trace
 
-from .socmate_llm import DEFAULT_MODEL, ClaudeLLM
+from .coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
 _tracer = trace.get_tracer(__name__)
 
@@ -79,7 +79,7 @@ class TimingClosureAgent:
     def __init__(self, model: str = DEFAULT_MODEL, temperature: float = 0.1):
         self.llm = ClaudeLLM(
             model=model,
-            timeout=scaled(2700, env="SOCMATE_TIMING_CLOSURE_TIMEOUT"),
+            timeout=scaled(2700, env="CORESMITH_TIMING_CLOSURE_TIMEOUT"),
         )
 
     async def fix_timing(

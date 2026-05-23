@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""coresmith -- CLI client for the coresmithd daemon.
+
+Replaces the old ``run_pipeline.py`` headless driver. Cron-fired agents
+(and humans) use this to start the daemon, inspect run state, and resume
+the pipeline after each interrupt.
+
+The CLI auto-discovers the daemon for a given project_root by reading
+``<project_root>/.coresmith/daemon.json``. Specify the project root via
+``--project-root`` or ``CORESMITH_PROJECT_ROOT`` env var.
+
+Usage examples::
+
+    coresmith daemon start --project-root /tmp/myrun
+    coresmith run start --blocks-file blocks.yaml
+    coresmith state
+    coresmith resume --action approve
+    coresmith daemon stop
+
+Common decision actions for ``resume``:
+    approve     -- accept a uarch_spec_review / uarch_integration_review
+    retry       -- retry a block that failed (debug_classifier interrupts)
+    skip        -- skip a block whose attempts are exhausted
+    abort       -- stop the run
+    feedback    -- send feedback text back to the agent (architecture)
+    fix_rtl     -- you edited RTL on disk; re-run the failed stage
+    fix_tb      -- you edited TB on disk; re-run the failed stage
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any, Optional
+
+# Re-exec into the repo venv if we are not already running under it, so
+# httpx + the orchestrator deps resolve without forcing every caller to
+# `source venv/bin/activate` first. We detect "already in venv" by sys.prefix.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_VENV_DIR = _REPO_ROOT / "venv"
+_VENV_PY = _VENV_DIR / "bin" / "python"
+if (
+    _VENV_PY.exists()
+    and not Path(sys.prefix).resolve().samefile(_VENV_DIR.resolve())
+):
+    os.execv(str(_VENV_PY), [str(_VENV_PY), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+import httpx
+
+
+# ---------------------------------------------------------------------------
+# Daemon discovery
+# ---------------------------------------------------------------------------
+
+def _project_root(arg: Optional[str]) -> Path:
+    pr = arg or os.environ.get("CORESMITH_PROJECT_ROOT")
+    if not pr:
+        sys.exit(
+            "error: pass --project-root or set CORESMITH_PROJECT_ROOT.\n"
+            "       the daemon is per-run (per project_root)."
+        )
+    return Path(pr).resolve()
+
+
+def _daemon_file(project_root: Path) -> Path:
+    return project_root / ".coresmith" / "daemon.json"
+
+
+def _daemon_info(project_root: Path) -> dict:
+    df = _daemon_file(project_root)
+    if not df.exists():
+        sys.exit(
+            f"error: no daemon for {project_root}\n"
+            f"       run: coresmith daemon start --project-root {project_root}"
+        )
+    return json.loads(df.read_text())
+
+
+def _daemon_url(project_root: Path) -> str:
+    info = _daemon_info(project_root)
+    return f"http://127.0.0.1:{info['port']}"
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# HTTP helpers
+# ---------------------------------------------------------------------------
+
+def _get(project_root: Path, path: str) -> dict:
+    url = _daemon_url(project_root) + path
+    try:
+        r = httpx.get(url, timeout=30)
+    except httpx.HTTPError as e:
+        sys.exit(f"error: GET {url} -- {e}")
+    if r.status_code >= 400:
+        sys.exit(f"error: GET {url} -> {r.status_code}\n{r.text}")
+    return r.json()
+
+
+def _post(project_root: Path, path: str, body: dict) -> dict:
+    url = _daemon_url(project_root) + path
+    try:
+        r = httpx.post(url, json=body, timeout=60)
+    except httpx.HTTPError as e:
+        sys.exit(f"error: POST {url} -- {e}")
+    if r.status_code >= 400:
+        sys.exit(f"error: POST {url} -> {r.status_code}\n{r.text}")
+    return r.json()
+
+
+# ---------------------------------------------------------------------------
+# Subcommands: daemon
+# ---------------------------------------------------------------------------
+
+def _daemon_start(args):
+    project_root = _project_root(args.project_root)
+    project_root.mkdir(parents=True, exist_ok=True)
+    (project_root / ".coresmith").mkdir(exist_ok=True)
+
+    df = _daemon_file(project_root)
+    if df.exists():
+        try:
+            info = json.loads(df.read_text())
+            if _alive(info.get("pid", 0)):
+                print(f"daemon already running pid={info['pid']} port={info['port']}")
+                return
+        except Exception:
+            pass
+        df.unlink(missing_ok=True)
+
+    env = os.environ.copy()
+    env["CORESMITH_PROJECT_ROOT"] = str(project_root)
+
+    # Load any sticky env vars the operator persisted at run-start time.
+    # Lets a daemon restart pick up CORESMITH_LLM_PROVIDER, model overrides,
+    # CORESMITH_SKIP_SYNTH, etc. without re-sourcing launch.sh each time.
+    # Format: one "KEY=VALUE" per line, lines starting with # ignored.
+    env_file = project_root / ".coresmith" / "env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            env.setdefault(k.strip(), v.strip())
+
+    log_path = project_root / ".coresmith" / "daemon.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Spawn detached. The daemon writes daemon.json on startup; poll for it.
+    repo_root = Path(__file__).resolve().parent.parent
+    python = repo_root / "venv" / "bin" / "python"
+    if not python.exists():
+        python = Path(sys.executable)
+
+    # Inject the repo venv onto PATH so subprocesses spawned by the daemon
+    # (cocotb-config, verilator wrappers, etc.) resolve to the same toolchain
+    # the venv was provisioned with, regardless of the caller's PATH.
+    venv_bin = repo_root / "venv" / "bin"
+    if venv_bin.is_dir():
+        env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
+        env["VIRTUAL_ENV"] = str(repo_root / "venv")
+
+    with open(log_path, "ab") as logf:
+        proc = subprocess.Popen(
+            [str(python), "-m", "orchestrator.daemon.server", "--port", str(args.port or 0)],
+            cwd=str(repo_root),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=logf,
+            stderr=logf,
+            start_new_session=True,
+        )
+
+    for _ in range(50):
+        if df.exists():
+            info = json.loads(df.read_text())
+            print(f"daemon started pid={info['pid']} port={info['port']}")
+            print(f"log: {log_path}")
+            return
+        if proc.poll() is not None:
+            sys.exit(
+                f"error: daemon exited with code {proc.returncode}\n"
+                f"see {log_path}"
+            )
+        time.sleep(0.2)
+
+    sys.exit(
+        f"error: daemon did not write {df} within 10s -- check {log_path}"
+    )
+
+
+def _daemon_stop(args):
+    project_root = _project_root(args.project_root)
+    df = _daemon_file(project_root)
+    if not df.exists():
+        print(f"no daemon for {project_root}")
+        return
+    info = json.loads(df.read_text())
+    pid = info.get("pid", 0)
+    if pid and _alive(pid):
+        try:
+            os.kill(pid, 15)  # SIGTERM
+            print(f"sent SIGTERM to pid={pid}")
+        except OSError as e:
+            print(f"warning: could not signal pid={pid}: {e}")
+    else:
+        df.unlink(missing_ok=True)
+        print("stale daemon file removed")
+
+
+def _daemon_status(args):
+    project_root = _project_root(args.project_root)
+    df = _daemon_file(project_root)
+    if not df.exists():
+        print(f"no daemon for {project_root}")
+        return
+    info = json.loads(df.read_text())
+    alive = _alive(info.get("pid", 0))
+    print(json.dumps({**info, "alive": alive}, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Subcommands: run
+# ---------------------------------------------------------------------------
+
+def _run_start(args):
+    project_root = _project_root(args.project_root)
+    body = {
+        "max_attempts": args.max_attempts,
+        "target_clock_mhz": args.target_clock_mhz,
+        "blocks_file": args.blocks_file or "",
+    }
+    print(json.dumps(_post(project_root, "/run/start", body), indent=2))
+
+
+def _run_pause(args):
+    project_root = _project_root(args.project_root)
+    print(json.dumps(_post(project_root, "/run/pause", {}), indent=2))
+
+
+def _run_state(args):
+    project_root = _project_root(args.project_root)
+    print(json.dumps(_get(project_root, "/run/state"), indent=2))
+
+
+def _run_resume(args):
+    project_root = _project_root(args.project_root)
+    body = {
+        "action": args.action,
+        "feedback": args.feedback or "",
+        "rtl_fix_description": args.rtl_fix_description or "",
+        "rationale": args.rationale or "",
+        "block_actions": json.loads(args.block_actions) if args.block_actions else None,
+    }
+    print(json.dumps(_post(project_root, "/run/resume", body), indent=2))
+
+
+def _run_logs(args):
+    project_root = _project_root(args.project_root)
+    path = project_root / ".coresmith" / "pipeline_events.jsonl"
+    if not path.exists():
+        sys.exit(f"no events at {path}")
+    n = args.tail
+    lines = path.read_text().splitlines()[-n:]
+    for line in lines:
+        print(line)
+
+
+# ---------------------------------------------------------------------------
+# Subcommands: architecture (PRD -> SAD -> FRD -> ERS -> block_diagram ->
+# constraint check). Produces the ers_spec.json + block_specs.json that the
+# pipeline phase consumes.
+# ---------------------------------------------------------------------------
+
+def _arch_start(args):
+    project_root = _project_root(args.project_root)
+    body = {
+        "requirements_file": args.requirements_file or "",
+        "requirements": args.requirements or "",
+        "target_clock_mhz": args.target_clock_mhz,
+        "pdk_config_path": args.pdk_config_path or "",
+        "max_rounds": args.max_rounds,
+    }
+    print(json.dumps(_post(project_root, "/architecture/start", body), indent=2))
+
+
+def _arch_state(args):
+    project_root = _project_root(args.project_root)
+    print(json.dumps(_get(project_root, "/architecture/state"), indent=2))
+
+
+def _arch_resume(args):
+    project_root = _project_root(args.project_root)
+    body = {
+        "action": args.action,
+        "feedback": args.feedback or "",
+        "rationale": args.rationale or "",
+    }
+    print(json.dumps(_post(project_root, "/architecture/resume", body), indent=2))
+
+
+def _arch_pause(args):
+    project_root = _project_root(args.project_root)
+    print(json.dumps(_post(project_root, "/architecture/pause", {}), indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Main parser
+# ---------------------------------------------------------------------------
+
+def _add_project_root(p: argparse.ArgumentParser):
+    p.add_argument("--project-root", help="overrides $CORESMITH_PROJECT_ROOT")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="coresmith")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    # daemon ...
+    pd = sub.add_parser("daemon", help="manage the coresmithd daemon")
+    psub = pd.add_subparsers(dest="daemon_cmd", required=True)
+    p1 = psub.add_parser("start", help="start the daemon")
+    _add_project_root(p1)
+    p1.add_argument("--port", type=int, default=0, help="bind port (0 = pick free)")
+    p1.set_defaults(func=_daemon_start)
+    p2 = psub.add_parser("stop", help="stop the daemon (SIGTERM)")
+    _add_project_root(p2)
+    p2.set_defaults(func=_daemon_stop)
+    p3 = psub.add_parser("status", help="print daemon.json + liveness")
+    _add_project_root(p3)
+    p3.set_defaults(func=_daemon_status)
+
+    # run start
+    pr1 = sub.add_parser("run", help="run lifecycle")
+    rsub = pr1.add_subparsers(dest="run_cmd", required=True)
+    r1 = rsub.add_parser("start", help="start a fresh pipeline run")
+    _add_project_root(r1)
+    r1.add_argument("--blocks-file", default="")
+    r1.add_argument("--max-attempts", type=int, default=5)
+    r1.add_argument("--target-clock-mhz", type=float, default=50.0)
+    r1.set_defaults(func=_run_start)
+    r2 = rsub.add_parser("pause", help="cancel the current task")
+    _add_project_root(r2)
+    r2.set_defaults(func=_run_pause)
+
+    # architecture (PRD/SAD/FRD/ERS/block_diagram). Use BEFORE `run start`
+    # when validation_dv needs an ERS to verify against.
+    pa = sub.add_parser("architecture", help="architecture phase lifecycle")
+    asub = pa.add_subparsers(dest="arch_cmd", required=True)
+    a1 = asub.add_parser("start", help="start the architecture graph")
+    _add_project_root(a1)
+    a1.add_argument("--requirements-file", help="path to requirements.md")
+    a1.add_argument("--requirements", help="inline requirements text")
+    a1.add_argument("--target-clock-mhz", type=float, default=50.0)
+    a1.add_argument("--pdk-config-path", default="")
+    a1.add_argument("--max-rounds", type=int, default=3)
+    a1.set_defaults(func=_arch_start)
+    a2 = asub.add_parser("state", help="architecture state snapshot")
+    _add_project_root(a2)
+    a2.set_defaults(func=_arch_state)
+    a3 = asub.add_parser("resume", help="resume from architecture interrupt")
+    _add_project_root(a3)
+    a3.add_argument(
+        "--action", required=True,
+        help="continue | retry | accept | feedback | abort",
+    )
+    a3.add_argument("--feedback", help="feedback text or JSON answers")
+    a3.add_argument("--rationale", help="rationale logged to the run record")
+    a3.set_defaults(func=_arch_resume)
+    a4 = asub.add_parser("pause", help="cancel the architecture task")
+    _add_project_root(a4)
+    a4.set_defaults(func=_arch_pause)
+
+    # state
+    s = sub.add_parser("state", help="print the current pipeline state")
+    _add_project_root(s)
+    s.set_defaults(func=_run_state)
+
+    # resume
+    rs = sub.add_parser("resume", help="resume from the current interrupt")
+    _add_project_root(rs)
+    rs.add_argument(
+        "--action", required=True,
+        help="approve | retry | skip | abort | feedback | fix_rtl | fix_tb | revise",
+    )
+    rs.add_argument("--feedback", help="text feedback for the agent")
+    rs.add_argument("--rtl-fix-description", help="describe the on-disk RTL/TB edit")
+    rs.add_argument("--rationale", help="rationale logged to the run record")
+    rs.add_argument(
+        "--block-actions",
+        help="JSON dict of {block_name: action} for per-block resume",
+    )
+    rs.set_defaults(func=_run_resume)
+
+    # logs
+    lg = sub.add_parser("logs", help="tail pipeline_events.jsonl")
+    _add_project_root(lg)
+    lg.add_argument("-n", "--tail", type=int, default=50)
+    lg.set_defaults(func=_run_logs)
+
+    args = ap.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

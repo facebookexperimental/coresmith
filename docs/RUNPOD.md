@@ -1,6 +1,6 @@
-# Running socmate on RunPod
+# Running coresmith on RunPod
 
-socmate ships a single Docker image (`Dockerfile` at the repo root) that
+coresmith ships a single Docker image (`Dockerfile` at the repo root) that
 bundles the entire EDA toolchain (Yosys, OpenROAD, Magic, netgen, KLayout,
 Sky130 PDK, Verilator + cocotb) with the Python orchestrator and the
 Claude Code CLI. RunPod is the lowest-friction way to run the pipeline
@@ -10,8 +10,8 @@ end-to-end on a fresh machine -- no Nix install required.
 
 1. Build and push the image:
    ```bash
-   docker build -t <your-registry>/socmate:latest .
-   docker push <your-registry>/socmate:latest
+   docker build -t <your-registry>/coresmith:latest .
+   docker push <your-registry>/coresmith:latest
    ```
 2. Create a RunPod template (see template JSON below).
 3. Deploy a pod, set `ANTHROPIC_API_KEY`, then either SSH in or watch the
@@ -26,9 +26,9 @@ and the heavy local work is Yosys/OpenROAD/Magic. A GPU pod is wasted money.
 |----------|-------------|
 | CPU      | 8 vCPU      |
 | RAM      | 32 GB (16 GB minimum; OpenROAD on a chip-finish run can spike) |
-| Disk     | 60 GB persistent volume mounted at `/socmate/.socmate` |
+| Disk     | 60 GB persistent volume mounted at `/coresmith/.coresmith` |
 | GPU      | None        |
-| Image    | `<your-registry>/socmate:latest` (or build inline; see below) |
+| Image    | `<your-registry>/coresmith:latest` (or build inline; see below) |
 
 Pick any RunPod CPU pod template. "Community Cloud" is fine; "Secure Cloud"
 is fine. There's no GPU dependency.
@@ -39,8 +39,8 @@ is fine. There's no GPU dependency.
 |----------|---------|----------|
 | `ANTHROPIC_API_KEY` | API key from console.anthropic.com | one of API key / OAuth required for non-shell modes |
 | `CLAUDE_CODE_OAUTH_TOKEN` | OAuth token from `claude setup-token` | alternate to API key |
-| `SOCMATE_MODE` | `shell` (default), `pipeline`, `mcp`, `mcp-http`, `test` | optional |
-| `SOCMATE_MODEL` | Override default model (e.g. `opus-4.7`, `sonnet-4.6`, `haiku-4.5`) | optional |
+| `CORESMITH_MODE` | `shell` (default), `pipeline`, `mcp`, `mcp-http`, `test` | optional |
+| `CORESMITH_MODEL` | Override default model (e.g. `opus-4.7`, `sonnet-4.6`, `haiku-4.5`) | optional |
 | `MCP_PORT` | Port for `mcp-http` mode (default `8765`) | optional |
 
 ## RunPod template (JSON)
@@ -50,15 +50,15 @@ the RunPod GraphQL API:
 
 ```json
 {
-  "name": "socmate",
-  "imageName": "your-registry/socmate:latest",
+  "name": "coresmith",
+  "imageName": "your-registry/coresmith:latest",
   "containerDiskInGb": 60,
   "volumeInGb": 50,
-  "volumeMountPath": "/socmate/.socmate",
+  "volumeMountPath": "/coresmith/.coresmith",
   "ports": "8765/http",
   "env": [
-    { "key": "SOCMATE_MODE",    "value": "shell" },
-    { "key": "SOCMATE_MODEL",   "value": "" },
+    { "key": "CORESMITH_MODE",    "value": "shell" },
+    { "key": "CORESMITH_MODEL",   "value": "" },
     { "key": "ANTHROPIC_API_KEY","value": "" },
     { "key": "PYTHONUNBUFFERED","value": "1" }
   ],
@@ -68,11 +68,11 @@ the RunPod GraphQL API:
 
 Notes:
 
-- `volumeMountPath` is `/socmate/.socmate` so SQLite checkpoints,
+- `volumeMountPath` is `/coresmith/.coresmith` so SQLite checkpoints,
   generated RTL/testbenches, and the event log all survive pod restarts.
   If you want generated RTL/syn/pnr to persist as well, mount additional
-  volumes at `/socmate/rtl`, `/socmate/syn`, `/socmate/pnr`.
-- `8765/http` is only needed if you plan to use `SOCMATE_MODE=mcp-http`
+  volumes at `/coresmith/rtl`, `/coresmith/syn`, `/coresmith/pnr`.
+- `8765/http` is only needed if you plan to use `CORESMITH_MODE=mcp-http`
   (so an external Claude CLI / Cursor instance can talk to the in-pod MCP
   server). Drop it for headless `pipeline` mode.
 - Leave `ANTHROPIC_API_KEY` blank in the template and fill it in when
@@ -83,23 +83,23 @@ Notes:
 ### Headless: full pipeline run, no interaction
 
 ```
-SOCMATE_MODE=pipeline
+CORESMITH_MODE=pipeline
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 The entrypoint runs `make pipeline` which auto-resumes interrupts (uArch
 specs are auto-approved, failed blocks retry up to `MAX_ATTEMPTS=5` then
 skip). Watch the pod's stdout for progress; results are written to
-`.socmate/pipeline_results.json`.
+`.coresmith/pipeline_results.json`.
 
 ### Interactive: MCP over HTTP, drive from your laptop
 
-In the pod, set `SOCMATE_MODE=mcp-http`. RunPod will expose port 8765 as
+In the pod, set `CORESMITH_MODE=mcp-http`. RunPod will expose port 8765 as
 a public HTTPS endpoint -- e.g. `https://abc123-8765.proxy.runpod.net/`.
 Point your local Claude CLI at it:
 
 ```bash
-claude --mcp-server socmate=https://abc123-8765.proxy.runpod.net/sse
+claude --mcp-server coresmith=https://abc123-8765.proxy.runpod.net/sse
 > /mcp
 > use the start_architecture tool with my requirements...
 ```
@@ -109,7 +109,7 @@ in the pod, your laptop just sees Claude conversations.
 
 ### Debug shell
 
-The default mode is `SOCMATE_MODE=shell`. SSH or web-terminal in, then:
+The default mode is `CORESMITH_MODE=shell`. SSH or web-terminal in, then:
 
 ```bash
 make help
@@ -133,12 +133,12 @@ on the same pod takes 2-4 hours, dominated by OpenROAD PnR and DRC.
 If you just want to test locally before pushing to a registry:
 
 ```bash
-docker build -t socmate:latest .
+docker build -t coresmith:latest .
 docker run --rm -it \
     -e ANTHROPIC_API_KEY=sk-ant-... \
-    -e SOCMATE_MODE=shell \
-    -v "$(pwd)/.socmate:/socmate/.socmate" \
-    socmate:latest
+    -e CORESMITH_MODE=shell \
+    -v "$(pwd)/.coresmith:/coresmith/.coresmith" \
+    coresmith:latest
 
 # inside the container:
 make preflight

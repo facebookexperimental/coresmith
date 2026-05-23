@@ -2,8 +2,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 #
-# Smoke-test the published socmate image against a 3-stage MCU spec.
-# Pulls ghcr.io/facebookexperimental/socmate:latest, runs preflight,
+# Smoke-test the published coresmith image against a 3-stage MCU spec.
+# Pulls ghcr.io/facebookexperimental/coresmith:latest, runs preflight,
 # then drives the LangGraph pipeline against examples/mcu3/blocks.yaml
 # to verify the image can produce RTL + simulate + synthesise an actual
 # pipelined design (not just the trivial adder8 demo).
@@ -27,7 +27,7 @@ jobs:
   test-mcu3:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    if: ${{ github.repository == 'facebookexperimental/socmate' }}
+    if: ${{ github.repository == 'facebookexperimental/coresmith' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -55,12 +55,12 @@ jobs:
       # Build the in-PR Dockerfile rather than pulling the published
       # `:latest` -- so we test what's on the branch (entrypoint fixes,
       # requirements changes, etc.) instead of whatever's stuck on main.
-      - name: Build socmate image from PR branch
+      - name: Build coresmith image from PR branch
         uses: docker/build-push-action@v5
         with:
           context: .
           file: Dockerfile
-          tags: socmate:pr-test
+          tags: coresmith:pr-test
           load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -68,7 +68,7 @@ jobs:
       - name: Preflight (toolchain sanity)
         run: |
           docker run --rm \
-            socmate:pr-test \
+            coresmith:pr-test \
             make preflight
 
       - name: Check Claude credentials presence
@@ -87,12 +87,12 @@ jobs:
         run: |
           mkdir -p _artifacts
           docker run --rm \
-            -e SOCMATE_MODE=pipeline \
-            -e SOCMATE_BLOCKS_FILE=/socmate/examples/mcu3/blocks.yaml \
+            -e CORESMITH_MODE=pipeline \
+            -e CORESMITH_BLOCKS_FILE=/coresmith/examples/mcu3/blocks.yaml \
             -e CLAUDE_CODE_OAUTH_TOKEN \
-            -v "${{ github.workspace }}/examples/mcu3:/socmate/examples/mcu3:ro" \
-            -v "${{ github.workspace }}/_artifacts:/socmate/_artifacts:rw" \
-            socmate:pr-test \
+            -v "${{ github.workspace }}/examples/mcu3:/coresmith/examples/mcu3:ro" \
+            -v "${{ github.workspace }}/_artifacts:/coresmith/_artifacts:rw" \
+            coresmith:pr-test \
             2>&1 | tee _artifacts/pipeline.log
 
       - name: Show what was generated

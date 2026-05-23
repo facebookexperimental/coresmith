@@ -3,7 +3,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Evaluation metrics for the socmate ASIC pipeline.
+Evaluation metrics for the coresmith ASIC pipeline.
 
 Logs ASIC-specific evaluation metrics as OpenTelemetry span attributes
 for analysis and filtering.

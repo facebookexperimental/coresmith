@@ -24,7 +24,7 @@ Usage::
 
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-    async with AsyncSqliteSaver.from_conn_string(".socmate/tapeout_checkpoint.db") as cp:
+    async with AsyncSqliteSaver.from_conn_string(".coresmith/tapeout_checkpoint.db") as cp:
         graph = build_tapeout_graph(checkpointer=cp)
         result = await graph.ainvoke(initial_state, config)
 """
@@ -50,7 +50,7 @@ from orchestrator.langgraph.pipeline_helpers import (
     YELLOW,
 )
 
-_tracer = trace.get_tracer("socmate.langgraph.tapeout_graph")
+_tracer = trace.get_tracer("coresmith.langgraph.tapeout_graph")
 
 
 def _last(a, b):
@@ -119,7 +119,7 @@ def _output_dir(state: TapeoutState) -> str:
     return str(Path(state["project_root"]) / "openframe_submission" / "pnr")
 
 
-_PNR_OVERRIDES_NAME = ".socmate/pnr_overrides.json"
+_PNR_OVERRIDES_NAME = ".coresmith/pnr_overrides.json"
 
 
 def _read_pnr_overrides(project_root: str) -> dict:
@@ -148,8 +148,8 @@ _PROMPT_DIR = Path(__file__).resolve().parent.parent / "langchain" / "prompts"
 def _spec_paths(project_root: str) -> dict[str, str]:
     """Return paths to PRD/ERS/FRD spec files."""
     root = Path(project_root)
-    prd = root / ".socmate" / "prd_spec.json"
-    ers = root / ".socmate" / "ers_spec.json"
+    prd = root / ".coresmith" / "prd_spec.json"
+    ers = root / ".coresmith" / "ers_spec.json"
     frd = root / "arch" / "frd_spec.md"
     return {
         "prd_path": str(prd if prd.exists() else ers),
@@ -165,7 +165,7 @@ async def _run_tapeout_llm_step(
     timeout: int = 900,
 ) -> dict:
     """Run an LLM-driven EDA step for the tapeout pipeline."""
-    from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
+    from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
     prompt_path = _PROMPT_DIR / prompt_file
     system_prompt = prompt_path.read_text().format(**context)

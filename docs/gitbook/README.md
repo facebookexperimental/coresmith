@@ -1,6 +1,6 @@
-# Socmate Pipeline
+# Coresmith Pipeline
 
-Socmate is the ASIC generation pipeline inside this repository. The codebase is
+Coresmith is the ASIC generation pipeline inside this repository. The codebase is
 currently named `coresmith`, and new service endpoints are being added under
 `coresmithd`, but the core pipeline described here is the same disk-first
 LangGraph flow.

@@ -23,7 +23,7 @@ from typing import Any
 
 from opentelemetry import trace
 
-from .socmate_llm import ClaudeLLM
+from .coresmith_llm import ClaudeLLM
 
 _tracer = trace.get_tracer(__name__)
 
@@ -71,13 +71,13 @@ class TestbenchGeneratorAgent:
     """
 
     def __init__(self, model: str | None = None, temperature: float = 0.1):
-        from orchestrator.langchain.agents.socmate_llm import block_model
+        from orchestrator.langchain.agents.coresmith_llm import block_model
         model = model or block_model()
-        # 1800s default; bump via SOCMATE_TB_TIMEOUT env var for complex blocks
+        # 1800s default; bump via CORESMITH_TB_TIMEOUT env var for complex blocks
         # whose testbenches need many turns of tool use.
         self.llm = ClaudeLLM(
             model=model,
-            timeout=scaled(1800, env="SOCMATE_TB_TIMEOUT"),
+            timeout=scaled(1800, env="CORESMITH_TB_TIMEOUT"),
         )
 
     async def generate(
@@ -114,7 +114,7 @@ class TestbenchGeneratorAgent:
                 f"- RTL Verilog: {rtl_path} (use EXACT port names from this!)\n"
                 f"- Python Golden Model: {python_source_path}\n"
                 f"- uArch Spec: arch/uarch_specs/{block_name}.md\n"
-                f"- Constraints: .socmate/blocks/{block_name}/constraints.json\n"
+                f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n"
                 f"- DV Rules: arch/DV_RULES.md (if it exists, read and follow ALL rules)\n\n"
                 f"## Output\n"
                 f"Write the complete cocotb testbench to: {testbench_path}\n\n"

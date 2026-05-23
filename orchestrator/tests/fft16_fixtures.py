@@ -3,7 +3,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-FFT16 Reference Design constants for the socmate orchestrator test suite.
+FFT16 Reference Design constants for the coresmith orchestrator test suite.
 
 A tiny, concrete 16-point FFT design that all tests share. Keeps test
 data in one place so mock outputs are consistent across test files.

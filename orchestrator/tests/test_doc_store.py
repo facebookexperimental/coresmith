@@ -36,9 +36,9 @@ from orchestrator.tests.fft16_fixtures import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _socmate(tmp_path: Path) -> Path:
-    """Create and return the .socmate/ directory inside tmp_path."""
-    d = tmp_path / ".socmate"
+def _coresmith(tmp_path: Path) -> Path:
+    """Create and return the .coresmith/ directory inside tmp_path."""
+    d = tmp_path / ".coresmith"
     d.mkdir(exist_ok=True)
     return d
 
@@ -50,9 +50,9 @@ def _arch(tmp_path: Path) -> Path:
     return d
 
 
-def _write_doc(socmate_dir: Path, filename: str, data: dict) -> None:
-    """Write a JSON document to the .socmate/ directory."""
-    (socmate_dir / filename).write_text(json.dumps(data, indent=2))
+def _write_doc(coresmith_dir: Path, filename: str, data: dict) -> None:
+    """Write a JSON document to the .coresmith/ directory."""
+    (coresmith_dir / filename).write_text(json.dumps(data, indent=2))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -66,7 +66,7 @@ class TestReadFunctions:
     @pytest.fixture(autouse=True)
     def _setup(self, tmp_path):
         self.root = str(tmp_path)
-        self.socmate = _socmate(tmp_path)
+        self.coresmith = _coresmith(tmp_path)
         self.arch = _arch(tmp_path)
 
     def test_read_prd_returns_none_when_missing(self):
@@ -75,7 +75,7 @@ class TestReadFunctions:
 
     def test_read_prd_returns_data_when_present(self):
         from orchestrator.architecture.doc_store import read_prd
-        _write_doc(self.socmate, "prd_spec.json", FFT16_PRD_DOCUMENT)
+        _write_doc(self.coresmith, "prd_spec.json", FFT16_PRD_DOCUMENT)
         result = read_prd(self.root)
         assert result is not None
         assert result["phase"] == "prd_complete"
@@ -108,7 +108,7 @@ class TestReadFunctions:
 
     def test_read_block_diagram_returns_data_when_present(self):
         from orchestrator.architecture.doc_store import read_block_diagram
-        _write_doc(self.socmate, "block_diagram.json", FFT16_BLOCK_DIAGRAM)
+        _write_doc(self.coresmith, "block_diagram.json", FFT16_BLOCK_DIAGRAM)
         result = read_block_diagram(self.root)
         assert result is not None
         assert len(result["blocks"]) == 3
@@ -119,7 +119,7 @@ class TestReadFunctions:
 
     def test_read_memory_map_returns_data_when_present(self):
         from orchestrator.architecture.doc_store import read_memory_map
-        _write_doc(self.socmate, "memory_map.json", FFT16_MEMORY_MAP)
+        _write_doc(self.coresmith, "memory_map.json", FFT16_MEMORY_MAP)
         result = read_memory_map(self.root)
         assert result is not None
         assert len(result["result"]["peripherals"]) == 3
@@ -130,7 +130,7 @@ class TestReadFunctions:
 
     def test_read_clock_tree_returns_data_when_present(self):
         from orchestrator.architecture.doc_store import read_clock_tree
-        _write_doc(self.socmate, "clock_tree.json", FFT16_CLOCK_TREE)
+        _write_doc(self.coresmith, "clock_tree.json", FFT16_CLOCK_TREE)
         result = read_clock_tree(self.root)
         assert result is not None
         assert result["result"]["num_domains"] == 1
@@ -141,7 +141,7 @@ class TestReadFunctions:
 
     def test_read_register_spec_returns_data_when_present(self):
         from orchestrator.architecture.doc_store import read_register_spec
-        _write_doc(self.socmate, "register_spec.json", FFT16_REGISTER_SPEC)
+        _write_doc(self.coresmith, "register_spec.json", FFT16_REGISTER_SPEC)
         result = read_register_spec(self.root)
         assert result is not None
         assert result["result"]["total_blocks"] == 4
@@ -153,7 +153,7 @@ class TestReadFunctions:
     def test_read_ers_returns_data_when_present(self):
         from orchestrator.architecture.doc_store import read_ers
         ers_data = {"ers": {"title": "Final ERS"}, "phase": "ers_complete"}
-        _write_doc(self.socmate, "ers_spec.json", ers_data)
+        _write_doc(self.coresmith, "ers_spec.json", ers_data)
         result = read_ers(self.root)
         assert result is not None
         assert result["ers"]["title"] == "Final ERS"
@@ -165,7 +165,7 @@ class TestReadFunctions:
     def test_read_block_specs_returns_data_when_present(self):
         from orchestrator.architecture.doc_store import read_block_specs
         specs = [{"name": "fft_butterfly", "tier": 1}]
-        (self.socmate / "block_specs.json").write_text(json.dumps(specs))
+        (self.coresmith / "block_specs.json").write_text(json.dumps(specs))
         result = read_block_specs(self.root)
         assert result is not None
         assert len(result) == 1
@@ -183,8 +183,8 @@ class TestMalformedJson:
     def test_malformed_json_returns_none(self, tmp_path):
         from orchestrator.architecture.doc_store import read_prd
 
-        socmate = _socmate(tmp_path)
-        (socmate / "prd_spec.json").write_text("{invalid json")
+        coresmith = _coresmith(tmp_path)
+        (coresmith / "prd_spec.json").write_text("{invalid json")
         assert read_prd(str(tmp_path)) is None
 
     def test_empty_sad_file_returns_none(self, tmp_path):
@@ -210,20 +210,20 @@ class TestMalformedJson:
 class TestListDocuments:
     """Test list_documents() accuracy."""
 
-    def test_all_false_on_empty_socmate(self, tmp_path):
+    def test_all_false_on_empty_coresmith(self, tmp_path):
         from orchestrator.architecture.doc_store import list_documents
 
-        _socmate(tmp_path)
+        _coresmith(tmp_path)
         result = list_documents(str(tmp_path))
         assert all(v is False for v in result.values())
 
     def test_reflects_present_documents(self, tmp_path):
         from orchestrator.architecture.doc_store import list_documents
 
-        socmate = _socmate(tmp_path)
+        coresmith = _coresmith(tmp_path)
         arch = _arch(tmp_path)
-        _write_doc(socmate, "prd_spec.json", FFT16_PRD_DOCUMENT)
-        _write_doc(socmate, "block_diagram.json", FFT16_BLOCK_DIAGRAM)
+        _write_doc(coresmith, "prd_spec.json", FFT16_PRD_DOCUMENT)
+        _write_doc(coresmith, "block_diagram.json", FFT16_BLOCK_DIAGRAM)
         (arch / "sad_spec.md").write_text(FFT16_SAD_MARKDOWN["sad_text"])
 
         result = list_documents(str(tmp_path))
@@ -235,9 +235,9 @@ class TestListDocuments:
     def test_ignores_non_document_files(self, tmp_path):
         from orchestrator.architecture.doc_store import list_documents
 
-        socmate = _socmate(tmp_path)
-        (socmate / "pipeline_events.jsonl").write_text("")
-        (socmate / "pipeline_checkpoint.db").write_text("")
+        coresmith = _coresmith(tmp_path)
+        (coresmith / "pipeline_events.jsonl").write_text("")
+        (coresmith / "pipeline_checkpoint.db").write_text("")
 
         result = list_documents(str(tmp_path))
         assert all(v is False for v in result.values())
@@ -245,14 +245,14 @@ class TestListDocuments:
     def test_all_documents_present(self, tmp_path):
         from orchestrator.architecture.doc_store import list_documents
 
-        socmate = _socmate(tmp_path)
+        coresmith = _coresmith(tmp_path)
         arch = _arch(tmp_path)
         json_docs = [
             "prd_spec", "block_diagram",
             "memory_map", "clock_tree", "register_spec", "ers_spec",
         ]
         for doc in json_docs:
-            _write_doc(socmate, f"{doc}.json", {"test": True})
+            _write_doc(coresmith, f"{doc}.json", {"test": True})
         # SAD and FRD are now markdown-only (in arch/ directory)
         (arch / "sad_spec.md").write_text("# SAD")
         (arch / "frd_spec.md").write_text("# FRD")
@@ -282,8 +282,8 @@ class TestRoundTrip:
     def test_round_trip_json(self, tmp_path, filename, fixture_data, reader_name):
         import orchestrator.architecture.doc_store as ds
 
-        socmate = _socmate(tmp_path)
-        _write_doc(socmate, filename, fixture_data)
+        coresmith = _coresmith(tmp_path)
+        _write_doc(coresmith, filename, fixture_data)
 
         reader = getattr(ds, reader_name)
         result = reader(str(tmp_path))

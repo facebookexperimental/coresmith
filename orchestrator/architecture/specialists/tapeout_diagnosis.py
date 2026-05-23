@@ -46,7 +46,7 @@ async def diagnose_tapeout_failure(
     """
     from opentelemetry import trace as _trace
 
-    tracer = _trace.get_tracer("socmate.tapeout.diagnosis")
+    tracer = _trace.get_tracer("coresmith.tapeout.diagnosis")
 
     with tracer.start_as_current_span("diagnose_tapeout_failure") as span:
         span.set_attribute("phase", phase)
@@ -78,7 +78,7 @@ async def diagnose_tapeout_failure(
             "Return ONLY the JSON object."
         )
 
-        from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=120)
 

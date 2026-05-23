@@ -1,6 +1,6 @@
 # State, Artifacts, And Observability
 
-Socmate is designed so a controller can stop, inspect, edit, and resume without
+Coresmith is designed so a controller can stop, inspect, edit, and resume without
 losing context.
 
 ## Checkpoints

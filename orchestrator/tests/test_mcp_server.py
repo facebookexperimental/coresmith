@@ -37,7 +37,7 @@ class TestToolRegistration:
         from orchestrator.mcp_server import server
 
         assert server is not None
-        assert server.name == "socmate-architecture"
+        assert server.name == "coresmith-architecture"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1174,25 +1174,25 @@ class TestResetProjectPerDocFiles:
     async def test_reset_architecture_deletes_all_doc_files(self, reset_mcp_state, tmp_path):
         import orchestrator.mcp_server as mcp
 
-        socmate = tmp_path / ".socmate"
+        coresmith = tmp_path / ".coresmith"
 
         all_docs = [
             "prd_spec", "sad_spec", "frd_spec", "block_diagram",
             "memory_map", "clock_tree", "register_spec", "ers_spec",
         ]
         for doc in all_docs:
-            (socmate / f"{doc}.json").write_text("{}")
-            (socmate / f"{doc}.md").write_text("# test")
+            (coresmith / f"{doc}.json").write_text("{}")
+            (coresmith / f"{doc}.md").write_text("# test")
 
-        (socmate / "block_specs.json").write_text("[]")
-        (socmate / "summary_architecture.md").write_text("# summary")
+        (coresmith / "block_specs.json").write_text("[]")
+        (coresmith / "summary_architecture.md").write_text("# summary")
 
         result_json = await mcp.reset_project(scope="architecture")
         json.loads(result_json)
 
         for doc in all_docs:
-            json_path = socmate / f"{doc}.json"
-            md_path = socmate / f"{doc}.md"
+            json_path = coresmith / f"{doc}.json"
+            md_path = coresmith / f"{doc}.md"
             if json_path.exists() or md_path.exists():
                 pytest.xfail(
                     f"{doc} files not cleaned by reset_project "
@@ -1204,15 +1204,15 @@ class TestResetProjectPerDocFiles:
         """reset_project(scope='architecture') should not touch pipeline files."""
         import orchestrator.mcp_server as mcp
 
-        socmate = tmp_path / ".socmate"
+        coresmith = tmp_path / ".coresmith"
 
-        (socmate / "pipeline_events.jsonl").write_text("")
-        (socmate / "summary_frontend.md").write_text("# pipeline summary")
+        (coresmith / "pipeline_events.jsonl").write_text("")
+        (coresmith / "summary_frontend.md").write_text("# pipeline summary")
 
         await mcp.reset_project(scope="architecture")
 
-        assert (socmate / "pipeline_events.jsonl").exists()
-        assert (socmate / "summary_frontend.md").exists()
+        assert (coresmith / "pipeline_events.jsonl").exists()
+        assert (coresmith / "summary_frontend.md").exists()
 
 
 # ═══════════════════════════════════════════════════════════════════════════

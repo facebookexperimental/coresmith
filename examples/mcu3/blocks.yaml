@@ -4,11 +4,11 @@
 #
 # 3-stage pipelined microcontroller smoke test. One block end-to-end
 # through RTL gen -> lint -> testbench -> simulation -> synthesis. Used
-# to validate the published ghcr.io/facebookexperimental/socmate image
+# to validate the published ghcr.io/facebookexperimental/coresmith image
 # beyond the trivial adder8 demo.
 #
 # Loaded into orchestrator/config.yaml's blocks: section via
-# SOCMATE_BLOCKS_FILE=examples/mcu3/blocks.yaml.
+# CORESMITH_BLOCKS_FILE=examples/mcu3/blocks.yaml.
 
 blocks:
   mcu3:

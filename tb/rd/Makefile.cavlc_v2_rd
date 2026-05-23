@@ -21,6 +21,6 @@ VERILOG_SOURCES = \
   $(PWD)/rtl/multiframe_codec_v2/transform_select.v \
   $(PWD)/rtl/multiframe_codec_v2/zigzag_rle_select.v
 
-export PYTHONPATH := $(PWD)/tb/rd:$(PWD):$(PWD)/examples/multiframe_codec_v2:/home/ubuntu/socmate-codec/venv/lib/python3.12/site-packages:$(PYTHONPATH)
+export PYTHONPATH := $(PWD)/tb/rd:$(PWD):$(PWD)/examples/multiframe_codec_v2:/home/ubuntu/coresmith-codec/venv/lib/python3.12/site-packages:$(PYTHONPATH)
 
 include $(shell cocotb-config --makefiles)/Makefile.sim

@@ -163,7 +163,7 @@ class TestRtlRegressionGuard:
         rtl_file = rtl_dir / f"{block_name}.v"
         rtl_file.write_text("module test_block(); endmodule\n")
 
-        block_dir = tmp_path / ".socmate" / "blocks" / block_name
+        block_dir = tmp_path / ".coresmith" / "blocks" / block_name
         block_dir.mkdir(parents=True)
         (block_dir / "best_result.json").write_text(json.dumps({
             "sim_passed": True,
@@ -217,7 +217,7 @@ class TestRtlRegressionGuard:
         from unittest.mock import patch
 
         block_name = "test_block"
-        block_dir = tmp_path / ".socmate" / "blocks" / block_name
+        block_dir = tmp_path / ".coresmith" / "blocks" / block_name
         block_dir.mkdir(parents=True)
 
         rtl_file = tmp_path / "test.v"
@@ -288,9 +288,9 @@ class TestRtlGeneratorModel:
     def test_uses_default_model(self):
         """RTL generation should construct the agent with the project default
         model. We assert via the symbolic constant rather than a string literal,
-        so model bumps in socmate_llm don't require touching this test.
+        so model bumps in coresmith_llm don't require touching this test.
         """
-        from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
         from orchestrator.langchain.agents.rtl_generator import RTLGeneratorAgent
         agent = RTLGeneratorAgent()
         assert agent.llm.model == DEFAULT_MODEL
@@ -434,23 +434,23 @@ class TestChipFinishDashboard:
         uarch_dir.mkdir()
         (uarch_dir / "test_block.md").write_text("# uArch\nTest uArch")
 
-        socmate_dir = tmp_path / ".socmate"
-        socmate_dir.mkdir()
-        (socmate_dir / "prd_spec.json").write_text(json.dumps({
+        coresmith_dir = tmp_path / ".coresmith"
+        coresmith_dir.mkdir()
+        (coresmith_dir / "prd_spec.json").write_text(json.dumps({
             "prd": {
                 "title": "Test Design",
                 "target_technology": {"pdk": "sky130", "process_nm": 130},
                 "area_budget": {"max_gate_count": 5000},
             }
         }))
-        (socmate_dir / "block_diagram.json").write_text(json.dumps({
+        (coresmith_dir / "block_diagram.json").write_text(json.dumps({
             "blocks": [
                 {"name": "test_block", "tier": 1, "estimated_gates": 100,
                  "description": "A test block"},
             ],
             "connections": [],
         }))
-        (socmate_dir / "pipeline_events.jsonl").write_text("")
+        (coresmith_dir / "pipeline_events.jsonl").write_text("")
 
         rtl_dir = tmp_path / "rtl" / "test_block"
         rtl_dir.mkdir(parents=True)
@@ -517,16 +517,16 @@ class TestChipFinishDashboard:
     def _setup_minimal_project(self, tmp_path):
         (tmp_path / "arch").mkdir(exist_ok=True)
         (tmp_path / "arch" / "uarch_specs").mkdir(exist_ok=True)
-        socmate = tmp_path / ".socmate"
-        socmate.mkdir(exist_ok=True)
-        (socmate / "prd_spec.json").write_text(json.dumps({"prd": {
+        coresmith = tmp_path / ".coresmith"
+        coresmith.mkdir(exist_ok=True)
+        (coresmith / "prd_spec.json").write_text(json.dumps({"prd": {
             "title": "T", "target_technology": {"pdk": "sky130", "process_nm": 130},
             "area_budget": {"max_gate_count": 1000},
         }}))
-        (socmate / "block_diagram.json").write_text(json.dumps({
+        (coresmith / "block_diagram.json").write_text(json.dumps({
             "blocks": [{"name": "test_block", "tier": 1}], "connections": [],
         }))
-        (socmate / "pipeline_events.jsonl").write_text("")
+        (coresmith / "pipeline_events.jsonl").write_text("")
         (tmp_path / "rtl" / "test_block").mkdir(parents=True, exist_ok=True)
         (tmp_path / "rtl" / "test_block" / "test_block.v").write_text(
             "module test_block(); endmodule\n"

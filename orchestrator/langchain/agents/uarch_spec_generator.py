@@ -24,7 +24,7 @@ from typing import Any
 
 from opentelemetry import trace
 
-from .socmate_llm import ClaudeLLM
+from .coresmith_llm import ClaudeLLM
 
 _tracer = trace.get_tracer(__name__)
 
@@ -44,11 +44,11 @@ class UarchSpecGenerator:
     """Agent for generating microarchitecture specifications."""
 
     def __init__(self, model: str | None = None, temperature: float = 0.2):
-        from orchestrator.langchain.agents.socmate_llm import block_model
+        from orchestrator.langchain.agents.coresmith_llm import block_model
         model = model or block_model()
         self.llm = ClaudeLLM(
             model=model,
-            timeout=scaled(2700, env="SOCMATE_UARCH_TIMEOUT"),
+            timeout=scaled(2700, env="CORESMITH_UARCH_TIMEOUT"),
         )
 
     async def generate(
@@ -136,7 +136,7 @@ class UarchSpecGenerator:
                         pass
 
                 # Block diagram connections for this block
-                bd_path = _root / ".socmate" / "block_diagram.json"
+                bd_path = _root / ".coresmith" / "block_diagram.json"
                 if bd_path.exists():
                     try:
                         bd = _json.loads(bd_path.read_text())

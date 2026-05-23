@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LLM-backed triage agent for SocMate headless escalation packets."""
+"""LLM-backed triage agent for CoreSmith headless escalation packets."""
 
 from __future__ import annotations
 
@@ -17,11 +17,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
+from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 from orchestrator.utils import atomic_write, parse_llm_json
 
 
-SYSTEM = """You are the SocMate headless triage/debug agent.
+SYSTEM = """You are the CoreSmith headless triage/debug agent.
 
 You are not the generator and you are not the human. Your job is to read the
 escalation packet and relevant on-disk OTEL/log/design artifacts, then choose
@@ -107,8 +107,8 @@ Read any referenced artifacts from disk. Then return this JSON shape:
         return _fallback_decision(packet, "dry-run: no LLM triage executed")
 
     llm = ClaudeLLM(
-        model=os.environ.get("SOCMATE_TRIAGE_MODEL", DEFAULT_MODEL),
-        timeout=int(os.environ.get("SOCMATE_TRIAGE_TIMEOUT_S", "1200")),
+        model=os.environ.get("CORESMITH_TRIAGE_MODEL", DEFAULT_MODEL),
+        timeout=int(os.environ.get("CORESMITH_TRIAGE_TIMEOUT_S", "1200")),
     )
     text = await llm.call(system=SYSTEM, prompt=prompt, run_name="headless_triage")
     defaults = {
@@ -133,7 +133,7 @@ Read any referenced artifacts from disk. Then return this JSON shape:
         )
     decision["triage_agent"] = {
         "packet": str(path),
-        "model": os.environ.get("SOCMATE_TRIAGE_MODEL", DEFAULT_MODEL),
+        "model": os.environ.get("CORESMITH_TRIAGE_MODEL", DEFAULT_MODEL),
         "parse_ok": parse_ok,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }

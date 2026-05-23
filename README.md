@@ -1,14 +1,14 @@
-# socmate
+# coresmith
 
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/facebookexperimental/socmate)
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/facebookexperimental/coresmith)
 
-An AI-orchestrated ASIC design pipeline. socmate uses LangGraph to drive the full RTL-to-GDSII flow: architecture specification, RTL generation, verification, synthesis, and physical design -- all orchestrated by Claude as the LLM backbone.
+An AI-orchestrated ASIC design pipeline. coresmith uses LangGraph to drive the full RTL-to-GDSII flow: architecture specification, RTL generation, verification, synthesis, and physical design -- all orchestrated by Claude as the LLM backbone.
 
 > **Try it instantly:** click the Codespaces badge above for a pre-built sandbox with the full EDA toolchain (Yosys, OpenROAD, Magic, Sky130 PDK) and Claude CLI ready to go. No local install, no PDK download. Set `CLAUDE_CODE_OAUTH_TOKEN` as a Codespaces secret first — see [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md).
 
 ## What It Does
 
-Given a set of requirements, socmate:
+Given a set of requirements, coresmith:
 
 1. **Architecture** -- Generates a Product Requirements Document (PRD), block diagram, memory map, clock tree, and register specification via a multi-step LangGraph state machine
 2. **RTL Generation** -- An LLM agent converts specifications into synthesizable Verilog-2005
@@ -78,17 +78,18 @@ cocotb) plus the orchestrator and the Claude CLI. No Nix or local
 EDA install needed.
 
 ```bash
-git clone https://github.com/facebookexperimental/socmate.git
-cd socmate
-docker build -t socmate:latest .
+git clone https://github.com/facebookexperimental/coresmith.git
+cd coresmith
+docker build -t coresmith:latest .
 
 docker run --rm -it \
     -e ANTHROPIC_API_KEY=sk-ant-... \
-    -e SOCMATE_MODE=shell \
-    -v "$(pwd)/.socmate:/socmate/.socmate" \
-    socmate:latest
+    -e CORESMITH_MODE=shell \
+    -v "$(pwd)/.coresmith:/coresmith/.coresmith" \
+    coresmith:latest
 # inside the container:
-make pipeline
+bin/coresmith daemon start --project-root /coresmith
+bin/coresmith run start --project-root /coresmith
 ```
 
 For a hosted run, see [docs/RUNPOD.md](docs/RUNPOD.md) for a
@@ -97,8 +98,8 @@ ready-to-paste pod template.
 ### Option B -- Local install (Nix-based backend)
 
 ```bash
-git clone https://github.com/facebookexperimental/socmate.git
-cd socmate
+git clone https://github.com/facebookexperimental/coresmith.git
+cd coresmith
 
 python3 -m venv venv
 source venv/bin/activate
@@ -108,13 +109,16 @@ pip install -e orchestrator/
 cp .env.example .env  # then edit and add ANTHROPIC_API_KEY
 
 # Optional: pin a non-default model without code edits
-# export SOCMATE_MODEL=sonnet-4.6   # (cheaper than opus-4.7 default)
+# export CORESMITH_MODEL=sonnet-4.6   # (cheaper than opus-4.7 default)
 
 # Start the MCP server (for interactive use with Claude Code)
 make mcp
 
-# Or run the pipeline headlessly
-make pipeline
+# Or drive the pipeline via the coresmithd daemon + bin/coresmith CLI
+bin/coresmith daemon start --project-root $(pwd)
+bin/coresmith run start --project-root $(pwd)
+# Then `bin/coresmith state` / `bin/coresmith resume --action approve`,
+# or wire up the cron-Claude autochecker described in CLAUDE.md.
 ```
 
 The local path uses `nix shell "nixpkgs#openroad"` etc. for the backend
@@ -126,14 +130,15 @@ If you have Nix with flakes already enabled, the cleanest local setup
 is `nix develop` -- the repo's `flake.nix` pins every EDA tool plus
 Verilator and Node/Claude CLI to a single nixpkgs commit, drops them
 on `$PATH`, and bypasses the per-call `nix shell` re-entry through the
-`SOCMATE_BACKEND_*` env vars:
+`CORESMITH_BACKEND_*` env vars:
 
 ```bash
 nix develop
 # then, inside the dev shell:
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt && pip install -e orchestrator/
-make pipeline
+bin/coresmith daemon start --project-root $(pwd)
+bin/coresmith run start --project-root $(pwd)
 ```
 
 ### Option C -- Linux without Nix or Docker (OSS-CAD-Suite)
@@ -147,8 +152,8 @@ Ubuntu 22.04 are *below* this README's stated minimums and will silently
 break the pipeline.
 
 ```bash
-git clone https://github.com/facebookexperimental/socmate.git
-cd socmate
+git clone https://github.com/facebookexperimental/coresmith.git
+cd coresmith
 
 # 1. Frontend EDA toolchain (~2 GB extracted)
 curl -L -o /tmp/oss-cad.tgz \
@@ -180,7 +185,8 @@ volare enable --pdk sky130 --pdk-root .pdk "$SKY130_PDK_COMMIT"
 
 # 5. Verify before burning a real run
 make preflight   # should print {"ok": true}
-make pipeline
+bin/coresmith daemon start --project-root $(pwd)
+bin/coresmith run start --project-root $(pwd)
 ```
 
 > The orchestrator drives the Claude CLI in headless mode via
@@ -212,20 +218,22 @@ pip install -r requirements-lock.txt   # exact wheels used during validation
 pip install -e orchestrator/
 
 # Optional knobs (defaults are sane; bump for very large blocks):
-export SOCMATE_RTL_TIMEOUT=1800        # RTL agent LLM timeout (s)
-export SOCMATE_TB_TIMEOUT=1800         # Testbench agent LLM timeout (s)
-export SOCMATE_TB_FIX_TIMEOUT=600      # Local TB-fix loop timeout (s)
-export SOCMATE_LINT_FIX_TIMEOUT=600    # Local lint-fix loop timeout (s)
-export SOCMATE_SYNTH_FIX_TIMEOUT=600   # Local synth-fix loop timeout (s)
-export SOCMATE_MODEL=opus-4.7          # default; sonnet-4.6 is cheaper
+export CORESMITH_RTL_TIMEOUT=1800        # RTL agent LLM timeout (s)
+export CORESMITH_TB_TIMEOUT=1800         # Testbench agent LLM timeout (s)
+export CORESMITH_TB_FIX_TIMEOUT=600      # Local TB-fix loop timeout (s)
+export CORESMITH_LINT_FIX_TIMEOUT=600    # Local lint-fix loop timeout (s)
+export CORESMITH_SYNTH_FIX_TIMEOUT=600   # Local synth-fix loop timeout (s)
+export CORESMITH_MODEL=opus-4.7          # default; sonnet-4.6 is cheaper
 
-make preflight && make pipeline
-make traces      # inspect OTel spans in .socmate/traces.db
+make preflight
+bin/coresmith daemon start --project-root $(pwd)
+bin/coresmith run start --project-root $(pwd)
+make traces      # inspect OTel spans in .coresmith/traces.db
 ```
 
-The CLI runner (`run_pipeline.py`) initialises OpenTelemetry at startup,
-so a SQLite span database is written to `.socmate/traces.db` for every
-run. `make traces` prints span counts and the slowest 10 spans.
+The daemon initialises OpenTelemetry at startup, so a SQLite span database
+is written to `.coresmith/traces.db` for every run. `make traces` prints
+span counts and the slowest 10 spans.
 
 ## Architecture
 
@@ -249,7 +257,7 @@ Memory Map -> Clock Tree -> Register Spec -> Constraint Check -> OK2DEV Gate
 ## Project Structure
 
 ```
-socmate/
+coresmith/
   orchestrator/           # Core pipeline engine
     architecture/         #   Architecture phase (PRD, block diagram, constraints)
     langchain/            #   LLM agents (RTL gen, testbench, debug, timing)
@@ -261,7 +269,8 @@ socmate/
     config.yaml           #   Pipeline configuration
     tests/                #   Test suite
   scripts/                # Toolchain installer, Nix wrappers
-  run_pipeline.py         # CLI entry point
+  bin/coresmith           # CLI client for the coresmithd HTTP daemon
+  orchestrator/daemon/    # coresmithd FastAPI daemon (one per project_root)
   Makefile                # Build targets
   requirements.txt        # Python dependencies
 ```
@@ -278,13 +287,18 @@ The MCP server exposes tools for interactive pipeline control:
 - `resume_pipeline(action, ...)` -- Handle interrupts
 - `start_backend()` -- Begin physical design
 
-### Headless (CI)
+### Daemon mode (outer agent or human drives)
 
 ```bash
-python run_pipeline.py
+bin/coresmith daemon start --project-root $(pwd)
+bin/coresmith run start --project-root $(pwd)
+bin/coresmith state --project-root $(pwd)
+bin/coresmith resume --project-root $(pwd) --action approve
 ```
 
-Interrupts are auto-resolved: uArch specs are auto-approved, failures retry until max attempts, then skip.
+The daemon does **not** auto-approve interrupts. An outer agent (Claude on
+cron, a human, or another script) drives every decision via `coresmith
+resume`. See [CLAUDE.md](CLAUDE.md) for the full decision contract.
 
 ## Testing
 
