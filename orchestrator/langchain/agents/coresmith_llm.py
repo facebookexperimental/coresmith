@@ -356,6 +356,48 @@ def _parse_codex_json(stdout: str) -> tuple[str, dict]:
     return final_text, usage
 
 
+def _log_codex_turns(stdout: str, project_root: str, pid: int, wall_start: float) -> int:
+    """Append every Codex CLI turn to ``.coresmith/codex_turns.jsonl``.
+
+    Codex emits one JSON event per line on stdout when invoked with
+    ``--json``. We persist them verbatim (plus a synthetic ``pid``/``ts``
+    header) so the trajectory viewer can show the agent's actual
+    reasoning + tool calls instead of just the final response. Each line
+    stays a self-contained JSON object so callers can ``jq`` over the
+    file directly.
+
+    Returns the number of events written. Failures are swallowed so this
+    never breaks a live run.
+    """
+    try:
+        log = Path(project_root) / ".coresmith" / "codex_turns.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        n = 0
+        with log.open("a", encoding="utf-8") as f:
+            for raw in stdout.splitlines():
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    obj = _json.loads(raw)
+                except _json.JSONDecodeError:
+                    continue
+                # Wrap each codex event with a small header so the webview
+                # can correlate by pid (-> llm_start's pid -> run_name).
+                rec = {
+                    "ts": _time_mod.time(),
+                    "wall_start": wall_start,
+                    "pid": pid,
+                    "event": obj,
+                }
+                f.write(_json.dumps(rec, default=str))
+                f.write("\n")
+                n += 1
+        return n
+    except Exception:
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Model name mapping: short names -> Claude CLI model IDs
 # ---------------------------------------------------------------------------
@@ -1177,6 +1219,20 @@ class ClaudeLLM:
         # whatever assistant text leaked through.
         if self._provider == "codex_cli":
             response_text, usage = _parse_codex_json(stdout_text)
+            # Persist every codex turn (reasoning, tool calls, tool
+            # results, agent messages) so the trajectory viewer can show
+            # the agent's actual decision-making, not just the final
+            # answer. Keyed by pid so the webview can correlate to the
+            # llm_start event that carries the human-readable run_name.
+            try:
+                _log_codex_turns(
+                    stdout_text,
+                    project_root,
+                    process.pid if process.pid else 0,
+                    wall_start,
+                )
+            except Exception:
+                pass
         else:
             response_text, usage = _parse_stream_json(stdout_text)
         if not response_text:
