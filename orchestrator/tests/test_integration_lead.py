@@ -26,6 +26,7 @@ from orchestrator.langchain.agents.integration_lead import (
     IntegrationLeadAgent,
     SYSTEM_PROMPT,
     _PROMPT_FILE,
+    assert_blocks_instantiated,
 )
 
 
@@ -67,6 +68,26 @@ SAMPLE_CONNECTIONS = [
         "data_width": 8,
     },
 ]
+
+# Chip-top stubs used by integration_check_node tests. The
+# assert_blocks_instantiated postcondition (introduced after the codec
+# stub-substitution incident) requires every expected block to appear as
+# an instantiation in the generated chip_top, so the mocked chip_top text
+# must contain those instances or the postcondition will (rightly) reject
+# the agent output mid-test.
+CHIP_TOP_AB = """\
+module chip_top (input clk, input rst_n);
+    a u_a (.clk(clk), .rst_n(rst_n));
+    b u_b (.clk(clk), .rst_n(rst_n));
+endmodule
+"""
+
+CHIP_TOP_BLOCK_A_B = """\
+module test_top (input clk, input rst_n);
+    block_a u_a (.clk(clk), .rst_n(rst_n));
+    block_b u_b (.clk(clk), .rst_n(rst_n));
+endmodule
+"""
 
 SAMPLE_PORT_SUMMARIES = [
     {
@@ -570,7 +591,7 @@ class TestIntegrationCheckNode:
             return mod_b
 
         mock_integrate = AsyncMock(return_value={
-            "verilog": "module test_top();\nendmodule\n",
+            "verilog": CHIP_TOP_BLOCK_A_B,
             "mismatches": [],
             "module_name": "test_top",
             "wire_count": 1,
@@ -600,7 +621,7 @@ class TestIntegrationCheckNode:
             "orchestrator.langgraph.pipeline_graph.write_graph_event"
         ), patch(
             "pathlib.Path.read_text",
-            return_value=SAMPLE_VERILOG_A,
+            return_value=CHIP_TOP_BLOCK_A_B,
         ), patch(
             "pathlib.Path.mkdir",
         ), patch(
@@ -649,7 +670,7 @@ class TestIntegrationCheckNode:
             "orchestrator.langgraph.pipeline_graph.write_graph_event"
         ), patch(
             "pathlib.Path.read_text",
-            return_value="module a(); endmodule",
+            return_value=CHIP_TOP_AB,
         ):
             result = await integration_check_node(state)
 
@@ -696,7 +717,7 @@ class TestIntegrationCheckNode:
             "orchestrator.langgraph.pipeline_graph.write_graph_event"
         ), patch(
             "pathlib.Path.read_text",
-            return_value="module a(); endmodule",
+            return_value=CHIP_TOP_AB,
         ):
             result = await integration_check_node(state)
 
@@ -731,7 +752,7 @@ class TestIntegrationCheckNode:
             "orchestrator.langchain.agents.integration_lead.IntegrationLeadAgent.integrate",
             new_callable=AsyncMock,
             return_value={
-                "verilog": "module test();\nendmodule\n",
+                "verilog": CHIP_TOP_AB,
                 "mismatches": [],
                 "module_name": "chip_top",
                 "wire_count": 0,
@@ -748,7 +769,7 @@ class TestIntegrationCheckNode:
             "orchestrator.langgraph.pipeline_graph.write_graph_event"
         ), patch(
             "pathlib.Path.read_text",
-            return_value="module a(); endmodule",
+            return_value=CHIP_TOP_AB,
         ), patch(
             "pathlib.Path.mkdir",
         ), patch(
@@ -792,7 +813,7 @@ class TestIntegrationCheckNode:
             "orchestrator.langchain.agents.integration_lead.IntegrationLeadAgent.integrate",
             new_callable=AsyncMock,
             return_value={
-                "verilog": "module chip_top();\nendmodule\n",
+                "verilog": CHIP_TOP_AB,
                 "mismatches": [
                     {
                         "from_block": "a",
@@ -818,7 +839,7 @@ class TestIntegrationCheckNode:
             "orchestrator.langgraph.pipeline_graph.write_graph_event"
         ), patch(
             "pathlib.Path.read_text",
-            return_value="module a(); endmodule",
+            return_value=CHIP_TOP_AB,
         ), patch(
             "pathlib.Path.mkdir",
         ), patch(
@@ -860,7 +881,7 @@ class TestIntegrationCheckNode:
             "orchestrator.langchain.agents.integration_lead.IntegrationLeadAgent.integrate",
             new_callable=AsyncMock,
             return_value={
-                "verilog": "module test_top();\nendmodule\n",
+                "verilog": CHIP_TOP_AB,
                 "mismatches": [],
                 "module_name": "test_top",
                 "wire_count": 3,
@@ -874,7 +895,7 @@ class TestIntegrationCheckNode:
             "orchestrator.langgraph.pipeline_graph.write_graph_event"
         ), patch(
             "pathlib.Path.read_text",
-            return_value="module a(); endmodule",
+            return_value=CHIP_TOP_AB,
         ), patch(
             "pathlib.Path.mkdir",
         ), patch(
@@ -917,7 +938,7 @@ class TestIntegrationCheckNode:
             "orchestrator.langchain.agents.integration_lead.IntegrationLeadAgent.integrate",
             new_callable=AsyncMock,
             return_value={
-                "verilog": "module chip_top();\nendmodule\n",
+                "verilog": CHIP_TOP_AB,
                 "mismatches": [],
                 "module_name": "chip_top",
                 "wire_count": 0,
@@ -937,7 +958,7 @@ class TestIntegrationCheckNode:
             "orchestrator.langgraph.pipeline_graph.write_graph_event"
         ), patch(
             "pathlib.Path.read_text",
-            return_value="module a(); endmodule",
+            return_value=CHIP_TOP_AB,
         ), patch(
             "pathlib.Path.mkdir",
         ), patch(
@@ -1039,3 +1060,84 @@ class TestIntegrationHelpers:
         connections, name = load_architecture_connections(str(tmp_path))
         assert connections == []
         assert name == "chip_top"
+
+
+# ---------------------------------------------------------------------------
+# assert_blocks_instantiated postcondition
+# ---------------------------------------------------------------------------
+
+class TestAssertBlocksInstantiated:
+    """Postcondition for Integration Lead's chip_top output.
+
+    Catches the silent-block-drop / glue-stub-substitution failure mode
+    that produced the codec stub (cavlc_enc -> rle_to_packer_token_bridge).
+    """
+
+    def test_all_blocks_present_passes(self):
+        chip_top = """\
+module chip_top (input clk, input rst_n);
+    block_a u_a (.clk(clk), .rst_n(rst_n));
+    block_b u_b (.clk(clk), .rst_n(rst_n));
+endmodule
+"""
+        assert assert_blocks_instantiated(
+            chip_top, {"block_a", "block_b"}
+        ) is None
+
+    def test_missing_block_fails(self):
+        chip_top = """\
+module chip_top (input clk);
+    block_a u_a (.clk(clk));
+endmodule
+"""
+        err = assert_blocks_instantiated(chip_top, {"block_a", "block_b"})
+        assert err is not None
+        assert "block_b" in err
+        assert "postcondition failed" in err.lower()
+
+    def test_codec_stub_substitution_caught(self):
+        chip_top = """\
+module chip_top (input clk);
+    // cavlc_enc replaced with a glue stub
+    rle_to_packer_token_bridge u_bridge (.clk(clk));
+    other_block u_other (.clk(clk));
+endmodule
+"""
+        err = assert_blocks_instantiated(
+            chip_top, {"cavlc_enc", "other_block"}
+        )
+        assert err is not None
+        assert "cavlc_enc" in err
+
+    def test_parameterized_instantiation_recognized(self):
+        chip_top = """\
+module chip_top;
+    block_a #(.WIDTH(8)) u_a (.clk(clk));
+endmodule
+"""
+        assert assert_blocks_instantiated(chip_top, {"block_a"}) is None
+
+    def test_empty_chip_top_with_no_blocks_passes(self):
+        assert assert_blocks_instantiated("", set()) is None
+
+    def test_block_name_appearing_only_as_substring_fails(self):
+        chip_top = """\
+module chip_top;
+    my_block_alpha u_alpha (.clk(clk));
+    block_a_alt   u_alt   (.clk(clk));
+endmodule
+"""
+        err = assert_blocks_instantiated(chip_top, {"block_a"})
+        assert err is not None
+        assert "block_a" in err
+
+    def test_block_name_in_comment_does_not_count(self):
+        chip_top = """\
+module chip_top;
+    // The block_a module would go here but was dropped
+    other_block u (.clk(clk));
+endmodule
+"""
+        err = assert_blocks_instantiated(chip_top, {"block_a"})
+        assert err is not None
+        assert "block_a" in err

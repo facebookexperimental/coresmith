@@ -2414,6 +2414,35 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         module_name = agent_result.get("module_name", design_name)
         top_rtl_path = agent_result.get("rtl_path", output_path)
 
+        chip_top_text = ""
+        if top_rtl_path and os.path.exists(top_rtl_path):
+            try:
+                chip_top_text = Path(top_rtl_path).read_text()
+            except OSError:
+                chip_top_text = ""
+        if not chip_top_text:
+            chip_top_text = agent_result.get("verilog", "")
+
+        from orchestrator.langchain.agents.integration_lead import (
+            assert_blocks_instantiated,
+        )
+        postcond = assert_blocks_instantiated(
+            chip_top_text, set(block_rtl_sources.keys())
+        )
+        if postcond:
+            log(f"  [INTEGRATION] Postcondition failed: {postcond}", RED)
+            write_graph_event(pr, "Integration Check", "graph_node_exit", {
+                "error": "block_instantiation_postcondition_failed",
+                "missing_summary": postcond,
+            })
+            return {"integration_result": {
+                "skipped": True,
+                "reason": postcond,
+                "postcondition_failed": True,
+                "agent_notes": agent_result.get("notes", ""),
+                "top_rtl_path": top_rtl_path,
+            }}
+
         log(f"  [INTEGRATION] Agent generated {module_name}: "
             f"{len(modules)} blocks, "
             f"{agent_result.get('wire_count', 0)} wires", GREEN)
