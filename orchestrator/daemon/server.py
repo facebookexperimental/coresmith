@@ -151,6 +151,7 @@ async def run_start(req: StartRequest):
         )
 
     _preflight_or_400()
+    arch_warnings = _check_architecture_artifacts(_PROJECT_ROOT)
     await _pipeline.reset_for_new_run()
 
     events_path = Path(_PROJECT_ROOT) / ".coresmith" / "pipeline_events.jsonl"
@@ -172,7 +173,14 @@ async def run_start(req: StartRequest):
 
     graph_config = {"configurable": {"thread_id": _pipeline.thread_id}}
     await _pipeline.safe_start(initial_state, graph_config)
-    return {"started": True, "block_count": len(block_queue), "status": _pipeline.status}
+    response = {
+        "started": True,
+        "block_count": len(block_queue),
+        "status": _pipeline.status,
+    }
+    if arch_warnings:
+        response["warnings"] = arch_warnings
+    return response
 
 
 @app.post("/run/resume")
@@ -463,6 +471,48 @@ def _preflight_or_400():
             "details": check["errors"],
             "warnings": check.get("warnings", []),
         })
+
+
+def _check_architecture_artifacts(project_root: str) -> list[str]:
+    """Return a list of warnings if the frontend pipeline is about to run
+    without architecture-phase artifacts (PRD / ERS / block_diagram).
+
+    The frontend pipeline can run against just `blocks.yaml` + a
+    `generate_uarch_spec` per-block fallback, but the chip-level
+    `integration_review` and `validation_dv` nodes need the architecture
+    artifacts to do their job. When they're missing those nodes don't
+    hard-fail — they soft-fail / abort silently — so the user thinks the
+    run finished cleanly when it really skipped requirement validation.
+
+    Set CORESMITH_SKIP_ARCH_WARN=1 to suppress this warning (PPABench /
+    rapid-iteration flows that intentionally skip the architecture phase).
+    """
+    if os.environ.get("CORESMITH_SKIP_ARCH_WARN", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        return []
+
+    root = Path(project_root)
+    expected = {
+        "PRD spec": root / ".coresmith" / "prd_spec.json",
+        "ERS spec": root / "arch" / "ers_spec.md",
+        "block diagram": root / ".coresmith" / "block_diagram.json",
+    }
+    missing = [label for label, path in expected.items() if not path.exists()]
+    if not missing:
+        return []
+
+    return [
+        (
+            f"Architecture-phase artifacts missing: {', '.join(missing)}. "
+            "The frontend pipeline will still run from blocks.yaml + uArch "
+            "spec generation, but `integration_review` cannot verify "
+            "cross-block data_width and `validation_dv` will soft-abort "
+            "with 'No ERS found'. To exercise the full pipeline run "
+            "`coresmith architecture start --requirements <spec>.md` first. "
+            "Set CORESMITH_SKIP_ARCH_WARN=1 to silence this warning."
+        )
+    ]
 
 
 def _shape_state(state_snapshot) -> dict:

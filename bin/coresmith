@@ -247,7 +247,10 @@ def _run_start(args):
         "target_clock_mhz": args.target_clock_mhz,
         "blocks_file": args.blocks_file or "",
     }
-    print(json.dumps(_post(project_root, "/run/start", body), indent=2))
+    response = _post(project_root, "/run/start", body)
+    for w in response.get("warnings", []) or []:
+        print(f"warning: {w}", file=sys.stderr)
+    print(json.dumps(response, indent=2))
 
 
 def _run_pause(args):
