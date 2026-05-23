@@ -155,7 +155,11 @@ blocks:
 
 # Observer LLM (generates .coresmith/summary_*.md after significant node transitions)
 observer:
-  enabled: true
+  # Off by default: was ~22% of the run's LLM call budget for a feature
+  # most users don't actively consume. Re-enable here or via the env var
+  # CORESMITH_OBSERVER=1. When disabled, the dashboard's "Summary" card
+  # is hidden too (other doc cards remain).
+  enabled: false
   cooldown_s: 300  # minimum seconds between observer LLM calls per stage
 
 # Architecture stage configuration
