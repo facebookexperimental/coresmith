@@ -2,7 +2,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 #
-# Build the socmate Dockerfile and publish to ghcr.io so RunPod templates
+# Build the coresmith Dockerfile and publish to ghcr.io so RunPod templates
 # (and other downstream consumers) can pull a ready-to-run image instead
 # of building locally.
 #

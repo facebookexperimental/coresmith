@@ -2,4 +2,4 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""CoreSmith ASIC pipeline orchestrator -- Temporal + LangChain + LangSmith."""
+"""coresmithd -- FastAPI daemon for one coresmith pipeline run."""

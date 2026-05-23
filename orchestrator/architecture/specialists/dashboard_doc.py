@@ -52,7 +52,7 @@ async def generate_dashboard(
     """
     from opentelemetry import trace as _trace
 
-    tracer = _trace.get_tracer("socmate.architecture.dashboard_doc")
+    tracer = _trace.get_tracer("coresmith.architecture.dashboard_doc")
 
     with tracer.start_as_current_span("generate_dashboard") as span:
         root = Path(project_root)

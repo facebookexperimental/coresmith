@@ -113,7 +113,7 @@ def _initial_state(blocks: list[dict] | None = None, project_root: str = "/tmp/t
 
 
 def _setup_disk_fixtures(tmp_path, blocks: list[dict]) -> None:
-    """Create the on-disk fixtures (rtl, tb, .socmate/blocks/<name>/...)
+    """Create the on-disk fixtures (rtl, tb, .coresmith/blocks/<name>/...)
     expected by the disk-first pipeline nodes for the given blocks.
     """
     for blk in blocks:
@@ -126,7 +126,7 @@ def _setup_disk_fixtures(tmp_path, blocks: list[dict]) -> None:
         tb_path.parent.mkdir(parents=True, exist_ok=True)
         tb_path.write_text(f"# tb for {name}\n")
 
-        block_dir = tmp_path / ".socmate" / "blocks" / name
+        block_dir = tmp_path / ".coresmith" / "blocks" / name
         block_dir.mkdir(parents=True, exist_ok=True)
         (block_dir / "constraints.json").write_text("[]")
         (block_dir / "diagnosis.json").write_text("{}")
@@ -661,7 +661,7 @@ class TestRouteAfterIntegrationReview:
         approves, integration_review_node honors the approve. The previous
         auto-revise on issues_fixed>0 caused a non-terminating loop because
         the integration-review LLM agent edits specs on every run."""
-        monkeypatch.delenv("SOCMATE_STRICT_INTEGRATION_REVIEW", raising=False)
+        monkeypatch.delenv("CORESMITH_STRICT_INTEGRATION_REVIEW", raising=False)
         from orchestrator.langchain.agents import integration_review_agent
 
         def fake_init(self, *args, **kwargs):
@@ -713,9 +713,9 @@ class TestRouteAfterIntegrationReview:
 
     @pytest.mark.asyncio
     async def test_fixed_uarch_review_blocks_approve_under_strict_mode(self, tmp_path, monkeypatch):
-        """SOCMATE_STRICT_INTEGRATION_REVIEW=1 restores the original
+        """CORESMITH_STRICT_INTEGRATION_REVIEW=1 restores the original
         approve->revise auto-conversion when issues_fixed>0."""
-        monkeypatch.setenv("SOCMATE_STRICT_INTEGRATION_REVIEW", "1")
+        monkeypatch.setenv("CORESMITH_STRICT_INTEGRATION_REVIEW", "1")
         from orchestrator.langchain.agents import integration_review_agent
 
         def fake_init(self, *args, **kwargs):
@@ -825,7 +825,7 @@ class TestInternalNodes:
     async def test_init_block_creates_disk_dir(self, tmp_path):
         state = _block_state(_make_block("scrambler"), tmp_path=str(tmp_path))
         await init_block_node(state)
-        block_dir = tmp_path / ".socmate" / "blocks" / "scrambler"
+        block_dir = tmp_path / ".coresmith" / "blocks" / "scrambler"
         assert block_dir.is_dir()
         assert (block_dir / "constraints.json").exists()
         assert (block_dir / "diagnosis.json").exists()
@@ -873,7 +873,7 @@ class TestInternalNodes:
         state["sim_passed"] = True
         state["synth_success"] = True
         state["synth_gate_count"] = 1500
-        block_dir = tmp_path / ".socmate" / "blocks" / "scrambler"
+        block_dir = tmp_path / ".coresmith" / "blocks" / "scrambler"
         block_dir.mkdir(parents=True, exist_ok=True)
         (block_dir / "constraints.json").write_text("[]")
         result = await block_done_node(state)
@@ -885,7 +885,7 @@ class TestInternalNodes:
     async def test_block_done_skip(self, tmp_path):
         state = _block_state(_make_block("scrambler"), tmp_path=str(tmp_path))
         state["human_response"] = {"action": "skip"}
-        block_dir = tmp_path / ".socmate" / "blocks" / "scrambler"
+        block_dir = tmp_path / ".coresmith" / "blocks" / "scrambler"
         block_dir.mkdir(parents=True, exist_ok=True)
         (block_dir / "constraints.json").write_text("[]")
         (block_dir / "previous_error.txt").write_text("")
@@ -897,7 +897,7 @@ class TestInternalNodes:
     async def test_block_done_abort(self, tmp_path):
         state = _block_state(_make_block("scrambler"), tmp_path=str(tmp_path))
         state["human_response"] = {"action": "abort"}
-        block_dir = tmp_path / ".socmate" / "blocks" / "scrambler"
+        block_dir = tmp_path / ".coresmith" / "blocks" / "scrambler"
         block_dir.mkdir(parents=True, exist_ok=True)
         (block_dir / "constraints.json").write_text("[]")
         (block_dir / "previous_error.txt").write_text("")
@@ -926,7 +926,7 @@ class TestHappyPath:
         tb_dir = tmp_path / "tb" / "cocotb"
         tb_dir.mkdir(parents=True)
         (tb_dir / "test_scrambler.py").write_text("# test\n")
-        block_dir = tmp_path / ".socmate" / "blocks" / "scrambler"
+        block_dir = tmp_path / ".coresmith" / "blocks" / "scrambler"
         block_dir.mkdir(parents=True)
         (block_dir / "constraints.json").write_text("[]")
         (block_dir / "diagnosis.json").write_text("{}")
@@ -1386,7 +1386,7 @@ class TestAskHumanPayloadEnrichment:
 
     @pytest.mark.asyncio
     async def test_payload_has_step_log_paths(self, tmp_path):
-        block_dir = tmp_path / ".socmate" / "blocks" / "scrambler"
+        block_dir = tmp_path / ".coresmith" / "blocks" / "scrambler"
         block_dir.mkdir(parents=True)
         (block_dir / "diagnosis.json").write_text("{}")
         (block_dir / "attempt_history.json").write_text("[]")
@@ -1408,7 +1408,7 @@ class TestAskHumanPayloadEnrichment:
 
     @pytest.mark.asyncio
     async def test_payload_has_testbench_path(self, tmp_path):
-        block_dir = tmp_path / ".socmate" / "blocks" / "scrambler"
+        block_dir = tmp_path / ".coresmith" / "blocks" / "scrambler"
         block_dir.mkdir(parents=True)
         (block_dir / "diagnosis.json").write_text("{}")
         (block_dir / "attempt_history.json").write_text("[]")
@@ -1429,7 +1429,7 @@ class TestAskHumanPayloadEnrichment:
 
     @pytest.mark.asyncio
     async def test_payload_has_relative_paths(self, tmp_path):
-        block_dir = tmp_path / ".socmate" / "blocks" / "scrambler"
+        block_dir = tmp_path / ".coresmith" / "blocks" / "scrambler"
         block_dir.mkdir(parents=True)
         (block_dir / "diagnosis.json").write_text("{}")
         (block_dir / "attempt_history.json").write_text("[]")
@@ -1450,7 +1450,7 @@ class TestAskHumanPayloadEnrichment:
         assert rp["rtl"] == "rtl/dvbt/scrambler.v"
         assert rp["testbench"] == "tb/cocotb/test_scrambler.py"
         assert rp["uarch_spec"] == "arch/uarch_specs/scrambler.md"
-        assert rp["ers"] == ".socmate/ers_spec.json"
+        assert rp["ers"] == ".coresmith/ers_spec.json"
 
     @pytest.mark.asyncio
     async def test_payload_has_rtl_snippet_when_file_exists(self, tmp_path):
@@ -1477,8 +1477,8 @@ class TestAskHumanPayloadEnrichment:
 
     @pytest.mark.asyncio
     async def test_payload_has_ers_summary_when_file_exists(self, tmp_path):
-        socmate_dir = tmp_path / ".socmate"
-        socmate_dir.mkdir()
+        coresmith_dir = tmp_path / ".coresmith"
+        coresmith_dir.mkdir()
         ers = {
             "ers": {
                 "summary": "Test encoder block",
@@ -1489,7 +1489,7 @@ class TestAskHumanPayloadEnrichment:
             }
         }
         import json
-        (socmate_dir / "ers_spec.json").write_text(json.dumps(ers))
+        (coresmith_dir / "ers_spec.json").write_text(json.dumps(ers))
 
         with patch(
             "orchestrator.langgraph.pipeline_graph.interrupt"
@@ -1511,7 +1511,7 @@ class TestAskHumanPayloadEnrichment:
     @pytest.mark.asyncio
     async def test_missing_ers_does_not_crash(self, tmp_path):
         """ers_summary is optional -- no crash if ERS file is missing."""
-        block_dir = tmp_path / ".socmate" / "blocks" / "scrambler"
+        block_dir = tmp_path / ".coresmith" / "blocks" / "scrambler"
         block_dir.mkdir(parents=True)
         (block_dir / "diagnosis.json").write_text("{}")
         (block_dir / "attempt_history.json").write_text("[]")
@@ -1532,7 +1532,7 @@ class TestAskHumanPayloadEnrichment:
     @pytest.mark.asyncio
     async def test_missing_rtl_does_not_crash(self, tmp_path):
         """rtl_snippet is optional -- no crash if RTL file is missing."""
-        block_dir = tmp_path / ".socmate" / "blocks" / "scrambler"
+        block_dir = tmp_path / ".coresmith" / "blocks" / "scrambler"
         block_dir.mkdir(parents=True)
         (block_dir / "diagnosis.json").write_text("{}")
         (block_dir / "attempt_history.json").write_text("[]")
@@ -1567,7 +1567,7 @@ class TestFixRtlConstraintPersistence:
     @pytest.mark.asyncio
     async def test_fix_rtl_persists_description_as_constraint(self, tmp_path):
         import json
-        block_dir = tmp_path / ".socmate" / "blocks" / "scrambler"
+        block_dir = tmp_path / ".coresmith" / "blocks" / "scrambler"
         block_dir.mkdir(parents=True)
         (block_dir / "diagnosis.json").write_text("{}")
         (block_dir / "attempt_history.json").write_text("[]")
@@ -1594,7 +1594,7 @@ class TestFixRtlConstraintPersistence:
     @pytest.mark.asyncio
     async def test_fix_rtl_without_description_no_constraint(self, tmp_path):
         import json
-        block_dir = tmp_path / ".socmate" / "blocks" / "scrambler"
+        block_dir = tmp_path / ".coresmith" / "blocks" / "scrambler"
         block_dir.mkdir(parents=True)
         (block_dir / "diagnosis.json").write_text("{}")
         (block_dir / "attempt_history.json").write_text("[]")
@@ -1616,7 +1616,7 @@ class TestFixRtlConstraintPersistence:
     async def test_add_constraint_writes_to_disk(self, tmp_path):
         """add_constraint action should persist the constraint to disk."""
         import json
-        block_dir = tmp_path / ".socmate" / "blocks" / "scrambler"
+        block_dir = tmp_path / ".coresmith" / "blocks" / "scrambler"
         block_dir.mkdir(parents=True)
         (block_dir / "diagnosis.json").write_text("{}")
         (block_dir / "attempt_history.json").write_text("[]")
@@ -1641,7 +1641,7 @@ class TestFixRtlConstraintPersistence:
     @pytest.mark.asyncio
     async def test_fix_rtl_appends_to_existing_constraints(self, tmp_path):
         import json
-        block_dir = tmp_path / ".socmate" / "blocks" / "scrambler"
+        block_dir = tmp_path / ".coresmith" / "blocks" / "scrambler"
         block_dir.mkdir(parents=True)
         (block_dir / "diagnosis.json").write_text("{}")
         (block_dir / "attempt_history.json").write_text("[]")
@@ -1717,8 +1717,8 @@ class TestRouteAfterHumanEscapes:
 # Per-Document State Consumer Tests (post-refactor)
 #
 # After the architecture_state.json -> per-document migration, the pipeline
-# graph should read from .socmate/block_diagram.json instead of
-# .socmate/architecture_state.json.
+# graph should read from .coresmith/block_diagram.json instead of
+# .coresmith/architecture_state.json.
 # ═══════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.doc_persistence
@@ -1727,20 +1727,20 @@ class TestPipelineReadsPerDocFiles:
 
     def test_review_uarch_spec_reads_block_diagram_json(self, tmp_path):
         """review_uarch_spec_node should read block interfaces from
-        .socmate/block_diagram.json (not architecture_state.json).
+        .coresmith/block_diagram.json (not architecture_state.json).
         """
         import json
 
-        socmate = tmp_path / ".socmate"
-        socmate.mkdir()
+        coresmith = tmp_path / ".coresmith"
+        coresmith.mkdir()
 
         from orchestrator.tests.fft16_fixtures import FFT16_BLOCK_DIAGRAM
 
-        (socmate / "block_diagram.json").write_text(
+        (coresmith / "block_diagram.json").write_text(
             json.dumps(FFT16_BLOCK_DIAGRAM, indent=2)
         )
 
-        bd_path = socmate / "block_diagram.json"
+        bd_path = coresmith / "block_diagram.json"
         assert bd_path.exists()
 
         data = json.loads(bd_path.read_text())
@@ -1757,19 +1757,19 @@ class TestPipelineReadsPerDocFiles:
         """Pipeline should work without architecture_state.json present."""
         import json
 
-        socmate = tmp_path / ".socmate"
-        socmate.mkdir()
+        coresmith = tmp_path / ".coresmith"
+        coresmith.mkdir()
 
         from orchestrator.tests.fft16_fixtures import FFT16_BLOCK_DIAGRAM
 
-        (socmate / "block_diagram.json").write_text(
+        (coresmith / "block_diagram.json").write_text(
             json.dumps(FFT16_BLOCK_DIAGRAM, indent=2)
         )
 
-        arch_state = socmate / "architecture_state.json"
+        arch_state = coresmith / "architecture_state.json"
         assert not arch_state.exists()
 
-        data = json.loads((socmate / "block_diagram.json").read_text())
+        data = json.loads((coresmith / "block_diagram.json").read_text())
         assert len(data["blocks"]) == 3
 
 
@@ -1799,13 +1799,13 @@ class TestDiskFirstInitBlock:
     async def test_creates_block_disk_directory(self, tmp_path):
         state = _block_state(_make_block("enc_control"), tmp_path=str(tmp_path))
         await init_block_node(state)
-        block_dir = tmp_path / ".socmate" / "blocks" / "enc_control"
+        block_dir = tmp_path / ".coresmith" / "blocks" / "enc_control"
         assert block_dir.is_dir()
 
     @pytest.mark.asyncio
     async def test_resets_disk_files_on_init(self, tmp_path):
         import json
-        block_dir = tmp_path / ".socmate" / "blocks" / "quantizer"
+        block_dir = tmp_path / ".coresmith" / "blocks" / "quantizer"
         block_dir.mkdir(parents=True)
         (block_dir / "constraints.json").write_text('[{"rule": "old", "source": "debug_agent", "attempt": 1}]')
         (block_dir / "previous_error.txt").write_text("old error")

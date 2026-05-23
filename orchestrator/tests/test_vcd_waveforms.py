@@ -582,7 +582,7 @@ class TestInjectVcdWaveforms:
 class TestRealVcd:
     """Tests against actual simulation output from exp5 (skipped if missing)."""
 
-    VCD_PATH = Path.home() / "socmate_experiments" / "exp5" / "sim_build" / "adder_8bit" / "dump.vcd"
+    VCD_PATH = Path.home() / "coresmith_experiments" / "exp5" / "sim_build" / "adder_8bit" / "dump.vcd"
 
     @pytest.fixture(autouse=True)
     def _skip_if_missing(self):

@@ -13,7 +13,7 @@ from typing import Any
 
 from opentelemetry import trace
 
-from .socmate_llm import DEFAULT_MODEL, ClaudeLLM
+from .coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
 _tracer = trace.get_tracer(__name__)
 
@@ -33,7 +33,7 @@ class ValidationDVGenerator:
     def __init__(self, model: str = DEFAULT_MODEL, temperature: float = 0.1):
         self.llm = ClaudeLLM(
             model=model,
-            timeout=int(os.environ.get("SOCMATE_VALIDATION_DV_TIMEOUT", "2700")),
+            timeout=int(os.environ.get("CORESMITH_VALIDATION_DV_TIMEOUT", "2700")),
         )
 
     async def generate(

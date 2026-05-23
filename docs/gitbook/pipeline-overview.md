@@ -1,6 +1,6 @@
 # Pipeline Overview
 
-Socmate is implemented as a set of checkpointed LangGraph state machines. The
+Coresmith is implemented as a set of checkpointed LangGraph state machines. The
 graphs share a project root and write their durable state under `.coresmith/`.
 The same graphs can be driven by the CLI runner, `coresmithd`, or the MCP server.
 

@@ -67,7 +67,7 @@ requests==2.33.1
 requests-toolbelt==1.0.0
 rich==13.9.4
 rpds-py==0.30.0
--e git+https://github.com/facebookexperimental/socmate.git@815acd9fa01011402975cd49357351fd29f85572#egg=socmate_asic_orchestrator&subdirectory=orchestrator
+-e git+https://github.com/facebookexperimental/coresmith.git@815acd9fa01011402975cd49357351fd29f85572#egg=coresmith_asic_orchestrator&subdirectory=orchestrator
 sqlite-vec==0.1.9
 sse-starlette==3.4.1
 starlette==1.0.0

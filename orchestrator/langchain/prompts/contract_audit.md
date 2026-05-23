@@ -15,8 +15,8 @@ disk. Do not rely on truncated prompt content. Write the audit JSON to the
 exact output path named in the user message.
 
 Inputs available on disk may include:
-- Failure context JSON under `.socmate/contract_audit/`
-- ERS/PRD JSON and markdown under `.socmate/` and `arch/`
+- Failure context JSON under `.coresmith/contract_audit/`
+- ERS/PRD JSON and markdown under `.coresmith/` and `arch/`
 - Top-level RTL under `rtl/integration/`
 - Block RTL under `rtl/`
 - uArch specs under `arch/uarch_specs/`

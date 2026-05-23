@@ -42,7 +42,7 @@ GREEN = "\033[92m"
 RED = "\033[91m"
 RESET = "\033[0m"
 
-_LOG_RELPATH = ".socmate/pipeline_events.jsonl"
+_LOG_RELPATH = ".coresmith/pipeline_events.jsonl"
 _VALID_EXIT_STATUS = {"ok", "error", "skipped", "interrupted"}
 
 

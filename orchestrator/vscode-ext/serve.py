@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Standalone webview server for SoCMate.
+Standalone webview server for CoreSmith.
 
 Serves the same ReactFlow webview that the VS Code extension provides,
 but as a regular web page in any browser. Calls the same graph
@@ -18,13 +18,13 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-# Resolve project root: honour SOCMATE_PROJECT_ROOT env var (same as MCP server),
+# Resolve project root: honour CORESMITH_PROJECT_ROOT env var (same as MCP server),
 # then try .cursor/mcp.json, then fall back to relative path from this file.
 import os as _os
 
 def _resolve_project_root() -> Path:
     # 1. Env var (matches MCP server)
-    env_root = _os.environ.get("SOCMATE_PROJECT_ROOT")
+    env_root = _os.environ.get("CORESMITH_PROJECT_ROOT")
     if env_root:
         return Path(env_root)
     # 2. Read from .cursor/mcp.json in this workspace
@@ -35,7 +35,7 @@ def _resolve_project_root() -> Path:
             import json as _json
             cfg = _json.loads(mcp_cfg.read_text())
             for srv in cfg.get("mcpServers", {}).values():
-                root = (srv.get("env") or {}).get("SOCMATE_PROJECT_ROOT")
+                root = (srv.get("env") or {}).get("CORESMITH_PROJECT_ROOT")
                 if root:
                     return Path(root)
         except Exception:
@@ -71,7 +71,7 @@ def get_execution_status(graph_filter: str = "") -> dict:
         graph_filter: If set, only return events matching this graph name.
             Events without a "graph" field are treated as "frontend".
     """
-    events_file = PROJECT_ROOT / ".socmate" / "pipeline_events.jsonl"
+    events_file = PROJECT_ROOT / ".coresmith" / "pipeline_events.jsonl"
     status = {}
     if not events_file.exists():
         return status
@@ -106,8 +106,8 @@ def get_live_calls(node_name: str) -> list[dict]:
     Returns a list in the same format as get_node_traces():
         [{"attempt": 1, "spans": [...]}]
     """
-    events_file = PROJECT_ROOT / ".socmate" / "pipeline_events.jsonl"
-    llm_log = PROJECT_ROOT / ".socmate" / "llm_calls.jsonl"
+    events_file = PROJECT_ROOT / ".coresmith" / "pipeline_events.jsonl"
+    llm_log = PROJECT_ROOT / ".coresmith" / "llm_calls.jsonl"
 
     if not events_file.exists():
         return []
@@ -206,7 +206,7 @@ def get_live_calls(node_name: str) -> list[dict]:
                 break
 
     # Check for active or recently-done streaming LLM calls
-    live_dir = PROJECT_ROOT / ".socmate" / "live_streams"
+    live_dir = PROJECT_ROOT / ".coresmith" / "live_streams"
     _DONE_FILE_MAX_AGE_S = 120  # clean up done files after 2 minutes
     _ORPHAN_MAX_AGE_S = 300     # clean up non-done files whose PID is dead
     orphan_candidates = []      # files to check for orphan cleanup after matching
@@ -335,7 +335,7 @@ def get_timeline_data(graph_filter: str = "") -> dict:
       - pipeline_start / pipeline_end: epoch timestamps bounding the run.
       - graph: the graph filter applied (or "all").
     """
-    events_file = PROJECT_ROOT / ".socmate" / "pipeline_events.jsonl"
+    events_file = PROJECT_ROOT / ".coresmith" / "pipeline_events.jsonl"
     empty = {"blocks": [], "pipeline_start": None, "pipeline_end": None,
              "graph": graph_filter or "all"}
     if not events_file.exists():
@@ -549,7 +549,7 @@ def get_timeline_data(graph_filter: str = "") -> dict:
 
 def get_block_diagram_viz() -> dict:
     """Read the block diagram visualization JSON produced by the Create Documentation agent."""
-    viz_path = PROJECT_ROOT / ".socmate" / "block_diagram_viz.json"
+    viz_path = PROJECT_ROOT / ".coresmith" / "block_diagram_viz.json"
     if not viz_path.exists():
         return {}
     try:
@@ -683,7 +683,7 @@ def get_summary_cards(stage: str) -> dict:
 
 def _get_backend_cards(summary_text: str, summary_updated) -> dict:
     """Build structured backend card data from backend_results.json and reports."""
-    results_path = PROJECT_ROOT / ".socmate" / "backend_results.json"
+    results_path = PROJECT_ROOT / ".coresmith" / "backend_results.json"
     blocks: list[dict] = []
     target_clock_mhz = 0.0
 
@@ -736,7 +736,7 @@ def _get_backend_cards(summary_text: str, summary_updated) -> dict:
 
 def _read_gate_counts() -> dict[str, int]:
     """Read gate counts from pipeline events (frontend synthesis results)."""
-    events_file = PROJECT_ROOT / ".socmate" / "pipeline_events.jsonl"
+    events_file = PROJECT_ROOT / ".coresmith" / "pipeline_events.jsonl"
     counts: dict[str, int] = {}
     if not events_file.exists():
         return counts
@@ -759,7 +759,7 @@ def _read_gate_counts() -> dict[str, int]:
 
 def _build_backend_blocks_from_events() -> list[dict]:
     """Fallback: build block list from backend pipeline events."""
-    events_file = PROJECT_ROOT / ".socmate" / "pipeline_events.jsonl"
+    events_file = PROJECT_ROOT / ".coresmith" / "pipeline_events.jsonl"
     blocks: dict[str, dict] = {}
     if not events_file.exists():
         return []
@@ -841,7 +841,7 @@ def get_pending_interrupts() -> dict:
         "Escalate Exhausted": ["retry", "accept", "feedback", "abort"],
     }
 
-    events_file = PROJECT_ROOT / ".socmate" / "pipeline_events.jsonl"
+    events_file = PROJECT_ROOT / ".coresmith" / "pipeline_events.jsonl"
 
     if not events_file.exists():
         return {"interrupts": [], "count": 0}
@@ -972,7 +972,7 @@ def get_pending_interrupts() -> dict:
 
         # For PRD, try to attach answered Q&A from the PRD spec on disk
         if node == "Escalate PRD" and esc["status"] == "completed":
-            prd_path = PROJECT_ROOT / ".socmate" / "prd_spec.json"
+            prd_path = PROJECT_ROOT / ".coresmith" / "prd_spec.json"
             if prd_path.exists():
                 try:
                     prd_data = json.loads(prd_path.read_text(encoding="utf-8"))
@@ -992,7 +992,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SoCMate</title>
+  <title>CoreSmith</title>
   <link rel="stylesheet" href="/dist/webview.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1007,7 +1007,7 @@ INDEX_HTML = """<!DOCTYPE html>
   <script>
     (function() {
       try {
-        var t = localStorage.getItem('socmate-theme');
+        var t = localStorage.getItem('coresmith-theme');
         if (t === 'dark' || t === 'light') {
           document.documentElement.setAttribute('data-theme', t);
         } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
@@ -1118,7 +1118,7 @@ class WebviewHandler(SimpleHTTPRequestHandler):
             try:
                 from orchestrator.telemetry.reader import get_node_traces
 
-                db_path = str(PROJECT_ROOT / ".socmate" / "traces.db")
+                db_path = str(PROJECT_ROOT / ".coresmith" / "traces.db")
                 traces = get_node_traces(db_path, node_name)
                 self._json_response(traces)
             except Exception as exc:
@@ -1204,7 +1204,7 @@ class WebviewHandler(SimpleHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SoCMate — standalone server")
+    parser = argparse.ArgumentParser(description="CoreSmith — standalone server")
     parser.add_argument("--port", "-p", type=int, default=3000, help="Port (default: 3000)")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host (default: 127.0.0.1)")
     args = parser.parse_args()
@@ -1217,7 +1217,7 @@ def main():
 
     httpd = HTTPServer((args.host, args.port), WebviewHandler)
     print("╔══════════════════════════════════════════════╗")
-    print("║  SoCMate                                     ║")
+    print("║  CoreSmith                                     ║")
     print(f"║  http://{args.host}:{args.port}                   ║")
     print("╚══════════════════════════════════════════════╝")
     print(f"  Serving webview from {DIST_DIR}")

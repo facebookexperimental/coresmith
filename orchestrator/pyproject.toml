@@ -3,7 +3,7 @@
 # LICENSE file in the root directory of this source tree.
 
 [project]
-name = "socmate-asic-orchestrator"
+name = "coresmith-asic-orchestrator"
 version = "0.1.0"
 description = "AI-orchestrated ASIC design pipeline using LangGraph"
 requires-python = ">=3.11"

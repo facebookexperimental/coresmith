@@ -6,7 +6,7 @@ I-frame codec, grounded in the Python golden model at:
 `examples/multiframe_codec_v2/codec_golden.py`
 
 The architecture must start from this golden model and decompose it into RTL
-blocks suitable for SocMate generation. This is not required to be a compliant
+blocks suitable for CoreSmith generation. This is not required to be a compliant
 H.264 bitstream, but it should preserve the H.264-inspired coding structure.
 
 Required codec features:
@@ -33,7 +33,7 @@ Required codec features:
 - Simplified H.264-style deblocking filter on every 4-pixel boundary,
   including internal 4x4 boundaries inside selected 8x8 macroblocks.
 
-The block diagram should keep the design tractable for SocMate by using these
+The block diagram should keep the design tractable for CoreSmith by using these
 blocks unless the architecture stage finds a clearly better decomposition:
 
 - `intra_predict`

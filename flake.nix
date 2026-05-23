@@ -2,7 +2,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 #
-# socmate -- AI-orchestrated ASIC pipeline (local-dev Nix flake)
+# coresmith -- AI-orchestrated ASIC pipeline (local-dev Nix flake)
 #
 # Pins nixpkgs so every developer / CI run gets the same versions of
 # Yosys, OpenROAD, Magic, netgen, KLayout, Verilator, etc. Drops the
@@ -22,7 +22,7 @@
 #   experimental-features = nix-command flakes
 
 {
-  description = "socmate -- AI-orchestrated ASIC pipeline";
+  description = "coresmith -- AI-orchestrated ASIC pipeline";
 
   inputs = {
     # Pinned to a known-good nixos-24.05 channel commit. Bump after
@@ -65,7 +65,7 @@
       in {
         # Default devShell: `nix develop`
         devShells.default = pkgs.mkShell {
-          name = "socmate-dev";
+          name = "coresmith-dev";
           packages = edaTools ++ devTools;
 
           # Inside the shell, the bare tool names work, so the
@@ -73,20 +73,20 @@
           # backend tool config on shell entry to avoid the redundant
           # `nix shell` re-entry from inside `nix develop`.
           shellHook = ''
-            export SOCMATE_PROJECT_ROOT="''${SOCMATE_PROJECT_ROOT:-$PWD}"
-            export PDK_ROOT="''${PDK_ROOT:-$SOCMATE_PROJECT_ROOT/.pdk}"
+            export CORESMITH_PROJECT_ROOT="''${CORESMITH_PROJECT_ROOT:-$PWD}"
+            export PDK_ROOT="''${PDK_ROOT:-$CORESMITH_PROJECT_ROOT/.pdk}"
 
             # Point the orchestrator at the bare binaries on $PATH instead
             # of re-invoking `nix shell` for every EDA call. Leaves the
             # checked-in config.yaml unchanged on disk; the override is
             # via env vars consumed by backend_helpers._resolve_tool.
-            export SOCMATE_BACKEND_OPENROAD=$(command -v openroad)
-            export SOCMATE_BACKEND_MAGIC=$(command -v magic)
-            export SOCMATE_BACKEND_NETGEN=$(command -v netgen)
-            export SOCMATE_BACKEND_YOSYS=$(command -v yosys)
-            export SOCMATE_BACKEND_KLAYOUT=$(command -v klayout)
+            export CORESMITH_BACKEND_OPENROAD=$(command -v openroad)
+            export CORESMITH_BACKEND_MAGIC=$(command -v magic)
+            export CORESMITH_BACKEND_NETGEN=$(command -v netgen)
+            export CORESMITH_BACKEND_YOSYS=$(command -v yosys)
+            export CORESMITH_BACKEND_KLAYOUT=$(command -v klayout)
 
-            echo "[socmate] devShell ready."
+            echo "[coresmith] devShell ready."
             echo "  yosys     = $(command -v yosys)"
             echo "  openroad  = $(command -v openroad)"
             echo "  verilator = $(command -v verilator)"

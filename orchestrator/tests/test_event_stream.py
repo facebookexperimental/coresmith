@@ -29,8 +29,8 @@ from orchestrator.langgraph.event_stream import (
 @pytest.fixture
 def event_project(tmp_path):
     """Temporary project root for event stream tests."""
-    socmate_dir = tmp_path / ".socmate"
-    socmate_dir.mkdir()
+    coresmith_dir = tmp_path / ".coresmith"
+    coresmith_dir.mkdir()
     return str(tmp_path)
 
 
@@ -38,7 +38,7 @@ class TestWriteGraphEvent:
     def test_creates_jsonl_file(self, event_project):
         write_graph_event(event_project, "Test Node", "graph_node_enter", {"key": "value"})
 
-        log_path = Path(event_project) / ".socmate" / "pipeline_events.jsonl"
+        log_path = Path(event_project) / ".coresmith" / "pipeline_events.jsonl"
         assert log_path.exists()
 
         lines = log_path.read_text().strip().split("\n")
@@ -52,7 +52,7 @@ class TestWriteGraphEvent:
     def test_event_has_required_fields(self, event_project):
         write_graph_event(event_project, "Block Diagram", "graph_node_exit", {"round": 1})
 
-        log_path = Path(event_project) / ".socmate" / "pipeline_events.jsonl"
+        log_path = Path(event_project) / ".coresmith" / "pipeline_events.jsonl"
         record = json.loads(log_path.read_text().strip())
 
         assert "ts" in record
@@ -81,7 +81,7 @@ class TestWriteGraphEvent:
         write_graph_event(event_project, "B", "graph_node_exit")
         write_graph_event(event_project, "C", "graph_node_enter")
 
-        log_path = Path(event_project) / ".socmate" / "pipeline_events.jsonl"
+        log_path = Path(event_project) / ".coresmith" / "pipeline_events.jsonl"
         lines = log_path.read_text().strip().split("\n")
         assert len(lines) == 3
 
@@ -91,7 +91,7 @@ class TestWriteGraphEvent:
     def test_events_without_data(self, event_project):
         write_graph_event(event_project, "Node", "graph_node_enter")
 
-        log_path = Path(event_project) / ".socmate" / "pipeline_events.jsonl"
+        log_path = Path(event_project) / ".coresmith" / "pipeline_events.jsonl"
         record = json.loads(log_path.read_text().strip())
         assert record["node"] == "Node"
 

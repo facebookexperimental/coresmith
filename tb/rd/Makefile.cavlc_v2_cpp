@@ -1,5 +1,5 @@
 TOP = chip_top
-BUILD_DIR ?= .socmate/rd_v2_cpp_build
+BUILD_DIR ?= .coresmith/rd_v2_cpp_build
 
 VERILOG_SOURCES = \
   $(PWD)/rtl/integration/chip_top.v \

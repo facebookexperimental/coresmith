@@ -17,7 +17,7 @@ dist/
 .pdk/
 
 # Pipeline-generated artifacts -- regenerated per run.
-.socmate/
+.coresmith/
 rtl/
 tb/
 syn/

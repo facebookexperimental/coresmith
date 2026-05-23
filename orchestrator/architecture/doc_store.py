@@ -48,7 +48,7 @@ def _read_text(path: Path) -> str | None:
 
 
 def read_prd(project_root: str) -> dict | None:
-    return _read_json(Path(project_root) / ".socmate" / "prd_spec.json")
+    return _read_json(Path(project_root) / ".coresmith" / "prd_spec.json")
 
 
 def read_sad(project_root: str) -> str | None:
@@ -60,33 +60,33 @@ def read_frd(project_root: str) -> str | None:
 
 
 def read_block_diagram(project_root: str) -> dict | None:
-    return _read_json(Path(project_root) / ".socmate" / "block_diagram.json")
+    return _read_json(Path(project_root) / ".coresmith" / "block_diagram.json")
 
 
 def read_memory_map(project_root: str) -> dict | None:
-    return _read_json(Path(project_root) / ".socmate" / "memory_map.json")
+    return _read_json(Path(project_root) / ".coresmith" / "memory_map.json")
 
 
 def read_clock_tree(project_root: str) -> dict | None:
-    return _read_json(Path(project_root) / ".socmate" / "clock_tree.json")
+    return _read_json(Path(project_root) / ".coresmith" / "clock_tree.json")
 
 
 def read_register_spec(project_root: str) -> dict | None:
-    return _read_json(Path(project_root) / ".socmate" / "register_spec.json")
+    return _read_json(Path(project_root) / ".coresmith" / "register_spec.json")
 
 
 def read_ers(project_root: str) -> dict | None:
-    return _read_json(Path(project_root) / ".socmate" / "ers_spec.json")
+    return _read_json(Path(project_root) / ".coresmith" / "ers_spec.json")
 
 
 def read_block_specs(project_root: str) -> list | None:
-    return _read_json(Path(project_root) / ".socmate" / "block_specs.json")
+    return _read_json(Path(project_root) / ".coresmith" / "block_specs.json")
 
 
 def list_documents(project_root: str) -> dict[str, bool]:
     """Return a dict mapping document names to presence booleans."""
     root = Path(project_root)
-    socmate = root / ".socmate"
+    coresmith = root / ".coresmith"
     arch = root / "arch"
 
     md_only = {"sad_spec", "frd_spec"}
@@ -97,7 +97,7 @@ def list_documents(project_root: str) -> dict[str, bool]:
 
     result: dict[str, bool] = {}
     for doc in json_docs:
-        result[doc] = (socmate / f"{doc}.json").exists()
+        result[doc] = (coresmith / f"{doc}.json").exists()
     for doc in md_only:
         result[doc] = (arch / f"{doc}.md").exists()
 

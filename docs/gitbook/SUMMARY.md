@@ -1,6 +1,6 @@
 # Summary
 
-* [Socmate Pipeline](README.md)
+* [Coresmith Pipeline](README.md)
 * [Pipeline Overview](pipeline-overview.md)
 * [Architecture Phase](architecture-phase.md)
 * [Frontend RTL Pipeline](frontend-rtl-pipeline.md)

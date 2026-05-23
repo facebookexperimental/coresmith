@@ -660,7 +660,7 @@ def _get_llm():
     """Lazy-initialise the observer LLM (claude-sonnet-4-6 via Claude CLI)."""
     global _llm_instance
     if _llm_instance is None:
-        from orchestrator.langchain.agents.socmate_llm import ClaudeLLM
+        from orchestrator.langchain.agents.coresmith_llm import ClaudeLLM
         _llm_instance = ClaudeLLM(
             model="claude-sonnet-4-6",
             timeout=60,

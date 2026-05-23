@@ -17,7 +17,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DB_PATH = ".socmate/benchmark_cache.db"
+DEFAULT_DB_PATH = ".coresmith/benchmark_cache.db"
 
 
 def _params_hash(params: dict) -> str:

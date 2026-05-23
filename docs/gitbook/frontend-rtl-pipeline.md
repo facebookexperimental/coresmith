@@ -1,6 +1,6 @@
 # Frontend RTL Pipeline
 
-The frontend graph is the main Socmate implementation pipeline. It is defined
+The frontend graph is the main Coresmith implementation pipeline. It is defined
 in `orchestrator/langgraph/pipeline_graph.py` and launched with
 `build_pipeline_graph`.
 

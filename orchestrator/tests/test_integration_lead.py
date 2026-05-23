@@ -395,12 +395,12 @@ class TestIntegrate:
 
 class TestModelNameUpdates:
     def test_integration_lead_default_model(self):
-        from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
         agent = IntegrationLeadAgent()
         assert agent.llm.model == DEFAULT_MODEL
 
     def test_integration_testbench_default_model(self):
-        from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
         from orchestrator.langchain.agents.integration_testbench_generator import (
             IntegrationTestbenchGenerator,
         )
@@ -408,11 +408,11 @@ class TestModelNameUpdates:
         assert agent.llm.model == DEFAULT_MODEL
 
     def test_cli_model_map_has_sonnet_46(self):
-        from orchestrator.langchain.agents.socmate_llm import _CLI_MODEL_MAP
+        from orchestrator.langchain.agents.coresmith_llm import _CLI_MODEL_MAP
         assert "sonnet-4.6" in _CLI_MODEL_MAP
 
     def test_sonnet_46_resolves(self):
-        from orchestrator.langchain.agents.socmate_llm import _resolve_model
+        from orchestrator.langchain.agents.coresmith_llm import _resolve_model
         resolved = _resolve_model("claude-sonnet-4-6")
         assert "claude-sonnet-4-6" in resolved
 
@@ -1035,7 +1035,7 @@ class TestIntegrationHelpers:
             load_architecture_connections,
         )
 
-        (tmp_path / ".socmate").mkdir()
+        (tmp_path / ".coresmith").mkdir()
         connections, name = load_architecture_connections(str(tmp_path))
         assert connections == []
         assert name == "chip_top"

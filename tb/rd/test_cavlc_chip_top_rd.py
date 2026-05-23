@@ -8,9 +8,9 @@ from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge
 
 
-ROOT = Path(os.environ.get("SOCMATE_PROJECT_ROOT", "/home/ubuntu/socmate"))
+ROOT = Path(os.environ.get("CORESMITH_PROJECT_ROOT", "/home/ubuntu/coresmith"))
 DEFAULT_GIF = (
-    Path("/home/ubuntu/dashboards/dashboard/socmate-llm-bench")
+    Path("/home/ubuntu/dashboards/dashboard/coresmith-llm-bench")
     / "multiframe-codec-handwritten"
     / "mort_original.gif"
 )
@@ -22,8 +22,8 @@ MAX_FRAMES = int(os.environ.get("MAX_FRAMES", "1"))
 MAX_DRAIN_CYCLES = int(os.environ.get("MAX_DRAIN_CYCLES", "2000000"))
 QP_SEL = int(os.environ.get("QP_SEL", "0")) & 0x3
 QP_VALUE = {0: 24, 1: 36, 2: 48}[QP_SEL]
-RESULT_JSON = Path(os.environ.get("RESULT_JSON", str(ROOT / ".socmate" / "rd_v2" / "qp24.json")))
-OUTPUT_BYTES = Path(os.environ.get("OUTPUT_BYTES", str(ROOT / ".socmate" / "rd_v2" / "qp24_frame0.bin")))
+RESULT_JSON = Path(os.environ.get("RESULT_JSON", str(ROOT / ".coresmith" / "rd_v2" / "qp24.json")))
+OUTPUT_BYTES = Path(os.environ.get("OUTPUT_BYTES", str(ROOT / ".coresmith" / "rd_v2" / "qp24_frame0.bin")))
 COMPARE_GIF = os.environ.get("COMPARE_GIF")
 
 

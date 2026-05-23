@@ -1,9 +1,9 @@
 {
-  "name": "socmate-workflow-editor",
-  "displayName": "SoCMate",
-  "description": "Visual LangGraph workflow editor for the socmate ASIC pipeline",
+  "name": "coresmith-workflow-editor",
+  "displayName": "CoreSmith",
+  "description": "Visual LangGraph workflow editor for the coresmith ASIC pipeline",
   "version": "0.2.0",
-  "publisher": "socmate",
+  "publisher": "coresmith",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -11,21 +11,21 @@
     "Visualization"
   ],
   "activationEvents": [
-    "onCommand:socmate.openWorkflowEditor"
+    "onCommand:coresmith.openWorkflowEditor"
   ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "socmate.openWorkflowEditor",
-        "title": "socmate: Open Workflow Editor"
+        "command": "coresmith.openWorkflowEditor",
+        "title": "coresmith: Open Workflow Editor"
       }
     ],
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "socmate-workflow",
-          "title": "socmate Workflow",
+          "id": "coresmith-workflow",
+          "title": "coresmith Workflow",
           "icon": "$(circuit-board)"
         }
       ]

@@ -11,7 +11,7 @@ mismatches by editing the uArch spec files on disk.
 
 You will receive:
 1. The path to each uArch spec file (`arch/uarch_specs/<block>.md`)
-2. The block diagram connections (`.socmate/block_diagram.json`)
+2. The block diagram connections (`.coresmith/block_diagram.json`)
 3. The PRD/ERS summary for protocol and reset convention reference
 
 ## What to Check
@@ -32,7 +32,7 @@ For EVERY connection in the block diagram:
 
 ## How to Work
 
-1. Read `.socmate/block_diagram.json` to get the full connection list.
+1. Read `.coresmith/block_diagram.json` to get the full connection list.
 2. Read each uArch spec from `arch/uarch_specs/*.md`.
 3. For each connection, extract the relevant ports from both blocks'
    Section 9 stubs and verify the 5 checks above.

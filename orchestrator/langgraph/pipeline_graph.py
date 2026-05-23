@@ -45,7 +45,7 @@ Usage::
 
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-    async with AsyncSqliteSaver.from_conn_string(".socmate/pipeline_checkpoint.db") as cp:
+    async with AsyncSqliteSaver.from_conn_string(".coresmith/pipeline_checkpoint.db") as cp:
         graph = build_pipeline_graph(checkpointer=cp)
         result = await graph.ainvoke(initial_state, config)
 """
@@ -95,7 +95,7 @@ from orchestrator.langgraph.pipeline_helpers import (
     YELLOW,
 )
 
-_tracer = trace.get_tracer("socmate.langgraph.pipeline_graph")
+_tracer = trace.get_tracer("coresmith.langgraph.pipeline_graph")
 
 # Maximum local LLM fix attempts before escalating to diagnose.
 # Each agent node (lint, synthesize) tries to self-heal up to this
@@ -208,16 +208,16 @@ class BlockState(TypedDict):
     via tool use (claude CLI with Read/Write/Edit tools enabled).
 
     Per-block transient state on disk:
-      .socmate/blocks/<block>/constraints.json    -- accumulated constraints
-      .socmate/blocks/<block>/diagnosis.json      -- latest debug diagnosis
-      .socmate/blocks/<block>/attempt_history.json -- attempt history
-      .socmate/blocks/<block>/previous_error.txt  -- latest error context
+      .coresmith/blocks/<block>/constraints.json    -- accumulated constraints
+      .coresmith/blocks/<block>/diagnosis.json      -- latest debug diagnosis
+      .coresmith/blocks/<block>/attempt_history.json -- attempt history
+      .coresmith/blocks/<block>/previous_error.txt  -- latest error context
 
     Existing artifact locations (unchanged):
       arch/uarch_specs/<block>.md              -- uArch spec
       rtl/<rtl_target>                         -- generated RTL
       tb/cocotb/test_<block>.py                -- testbench
-      .socmate/step_logs/<block>/*.log            -- EDA tool logs
+      .coresmith/step_logs/<block>/*.log            -- EDA tool logs
     """
 
     # Config (injected via Send from orchestrator) ──────────────────────────
@@ -364,7 +364,7 @@ async def init_block_node(state: BlockState) -> dict:
     })
 
     # Initialize per-block disk state directory
-    block_dir = Path(_pr(state)) / ".socmate" / "blocks" / block_name
+    block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
     block_dir.mkdir(parents=True, exist_ok=True)
     # Reset transient files for a fresh block lifecycle
     for fname in ("constraints.json", "diagnosis.json",
@@ -506,7 +506,7 @@ async def generate_rtl_node(state: BlockState) -> dict:
     })
 
     best_result_path = (
-        Path(_pr(state)) / ".socmate" / "blocks" / block_name / "best_result.json"
+        Path(_pr(state)) / ".coresmith" / "blocks" / block_name / "best_result.json"
     )
 
     with _tracer.start_as_current_span(
@@ -552,7 +552,7 @@ async def generate_rtl_node(state: BlockState) -> dict:
                 write_graph_event(_pr(state), "Generate RTL", "graph_node_exit", {
                     "block": block_name, "attempt": attempt, "error": rtl_result["error"],
                 })
-                block_dir = Path(_pr(state)) / ".socmate" / "blocks" / block_name
+                block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
                 block_dir.mkdir(parents=True, exist_ok=True)
                 (block_dir / "previous_error.txt").write_text(
                     f"RTL generation failed: {rtl_result['error']}"
@@ -570,7 +570,7 @@ async def generate_rtl_node(state: BlockState) -> dict:
     if not rtl_path_obj.exists():
         error_msg = "RTL generation failed (no file on disk)"
         log(f"  [LINT] Skipped -- {error_msg}", RED)
-        block_dir = Path(_pr(state)) / ".socmate" / "blocks" / block_name
+        block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
         block_dir.mkdir(parents=True, exist_ok=True)
         (block_dir / "previous_error.txt").write_text(error_msg)
         write_graph_event(_pr(state), "Generate RTL", "graph_node_exit", {
@@ -587,7 +587,7 @@ async def generate_rtl_node(state: BlockState) -> dict:
     if rtl_source and not re.search(r"^\s*module\s+\w+", rtl_source, re.MULTILINE):
         corrupt_msg = "RTL file is corrupt (not valid Verilog). Needs regeneration."
         log(f"  [LINT] {corrupt_msg}", RED)
-        block_dir = Path(_pr(state)) / ".socmate" / "blocks" / block_name
+        block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
         block_dir.mkdir(parents=True, exist_ok=True)
         (block_dir / "previous_error.txt").write_text(corrupt_msg)
         write_graph_event(_pr(state), "Generate RTL", "graph_node_exit", {
@@ -648,7 +648,7 @@ async def generate_rtl_node(state: BlockState) -> dict:
 
     if not lint_clean and lint_result:
         lint_output = lint_result.get("errors", "") or lint_result.get("warnings", "")
-        block_dir = Path(_pr(state)) / ".socmate" / "blocks" / block_name
+        block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
         block_dir.mkdir(parents=True, exist_ok=True)
         (block_dir / "previous_error.txt").write_text(lint_output[-5000:])
 
@@ -772,7 +772,7 @@ async def generate_testbench_node(state: BlockState) -> dict:
         # --- Step 2: Simulate with local TB fix loop ---
         sim_passed = False
         sim_result = None
-        block_dir = Path(_pr(state)) / ".socmate" / "blocks" / block_name
+        block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
         block_dir.mkdir(parents=True, exist_ok=True)
 
         for sim_attempt in range(1 + MAX_LOCAL_RETRIES):
@@ -905,11 +905,11 @@ async def synthesize_node(state: BlockState) -> dict:
     block = state["current_block"]
     block_name = block["name"]
 
-    # Honor SOCMATE_SKIP_SYNTH=1 so hosts with no Sky130 PDK can still
+    # Honor CORESMITH_SKIP_SYNTH=1 so hosts with no Sky130 PDK can still
     # complete RTL + sim.  Treat as a no-op success.
     import os as _os
-    if _os.environ.get("SOCMATE_SKIP_SYNTH") == "1":
-        log(f"  [SYNTH] Skipped (SOCMATE_SKIP_SYNTH=1) for {block_name}", YELLOW)
+    if _os.environ.get("CORESMITH_SKIP_SYNTH") == "1":
+        log(f"  [SYNTH] Skipped (CORESMITH_SKIP_SYNTH=1) for {block_name}", YELLOW)
         return {"synth_success": True, "synth_gate_count": 0, "phase": "synth"}
 
     rtl_path = state.get("rtl_path", "")
@@ -988,7 +988,7 @@ async def synthesize_node(state: BlockState) -> dict:
         synth_log = result.get("log", "") or result.get("errors", "")
 
     if not synth_ok and result:
-        block_dir = Path(_pr(state)) / ".socmate" / "blocks" / block_name
+        block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
         block_dir.mkdir(parents=True, exist_ok=True)
         (block_dir / "previous_error.txt").write_text(synth_log[-5000:])
 
@@ -1028,7 +1028,7 @@ async def diagnose_node(state: BlockState) -> dict:
         "block": block_name, "phase": phase,
     })
 
-    block_dir = Path(_pr(state)) / ".socmate" / "blocks" / block_name
+    block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
     block_dir.mkdir(parents=True, exist_ok=True)
 
     error_file = block_dir / "previous_error.txt"
@@ -1214,11 +1214,11 @@ def _route_decision(debug_result: dict, attempt_history: list[dict],
     # ask_human escalation that resolved to instant retry with no new
     # context).  Skip the round-trip: the diagnosis.json is already on disk
     # and the next retry's prompt reads it.
-    #   Tunable via SOCMATE_AUTO_FIX_CONFIDENCE (default 0.85).
+    #   Tunable via CORESMITH_AUTO_FIX_CONFIDENCE (default 0.85).
     suggested_fix = str(debug_result.get("suggested_fix") or "").strip()
     local_fix_possible = debug_result.get("local_fix_possible", True)
     try:
-        auto_fix_threshold = float(os.environ.get("SOCMATE_AUTO_FIX_CONFIDENCE", "0.85"))
+        auto_fix_threshold = float(os.environ.get("CORESMITH_AUTO_FIX_CONFIDENCE", "0.85"))
     except ValueError:
         auto_fix_threshold = 0.85
     if (
@@ -1309,7 +1309,7 @@ async def decide_node(state: BlockState) -> dict:
                 update["attempt"] = new_attempt
                 log(f"  [RETRY] Attempt {new_attempt}/{state['max_attempts']}", YELLOW)
 
-                block_dir = Path(_pr(state)) / ".socmate" / "blocks" / block_name
+                block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
                 diag_path = block_dir / "diagnosis.json"
                 if diag_path.exists():
                     try:
@@ -1355,7 +1355,7 @@ async def ask_human_node(state: BlockState) -> dict:
     log(f"  [HUMAN] Intervention needed for {block_name}", YELLOW)
 
     import json as _json
-    block_dir = Path(_pr(state)) / ".socmate" / "blocks" / block_name
+    block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
     block_dir.mkdir(parents=True, exist_ok=True)
 
     diag_path = block_dir / "diagnosis.json"
@@ -1410,7 +1410,7 @@ async def ask_human_node(state: BlockState) -> dict:
             "rtl": block.get("rtl_target", ""),
             "testbench": block.get("testbench", ""),
             "uarch_spec": f"arch/uarch_specs/{block_name}.md",
-            "ers": ".socmate/ers_spec.json",
+            "ers": ".coresmith/ers_spec.json",
         },
         "supported_actions": [
             "retry", "fix_rtl", "fix_tb", "add_constraint", "skip", "abort",
@@ -1436,7 +1436,7 @@ async def ask_human_node(state: BlockState) -> dict:
     # Add ERS summary context (non-fatal if missing)
     try:
         import json as _json
-        ers_path = Path(state["project_root"]) / ".socmate" / "ers_spec.json"
+        ers_path = Path(state["project_root"]) / ".coresmith" / "ers_spec.json"
         if ers_path.exists():
             ers_data = _json.loads(ers_path.read_text(encoding="utf-8"))
             ers_doc = ers_data.get("ers", {})
@@ -1517,7 +1517,7 @@ async def block_done_node(state: BlockState) -> dict:
 
     step_log_paths = dict(state.get("step_log_paths") or {})
 
-    block_dir = Path(_pr(state)) / ".socmate" / "blocks" / block_name
+    block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
     constr_path = block_dir / "constraints.json"
     import json as _json
     constraints = _json.loads(constr_path.read_text()) if constr_path.exists() else []
@@ -1837,7 +1837,7 @@ async def integration_review_node(state: OrchestratorState) -> dict:
         from orchestrator.langchain.agents.integration_review_agent import (
             IntegrationReviewAgent,
         )
-        from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
         agent = IntegrationReviewAgent(model=DEFAULT_MODEL, temperature=0.1)
         result = await agent.review(
             block_names=block_names,
@@ -1924,17 +1924,17 @@ async def integration_review_node(state: OrchestratorState) -> dict:
         # NOTE: The integration_review agent edits specs on every run, even
         # cosmetically, so this auto-revise creates an infinite loop:
         # revise -> restart_block -> integration_review edits again -> revise...
-        # When the outer agent (human or run_top_headless auto-approve)
-        # explicitly approves, trust that decision; the integration_check
+        # When the outer agent explicitly approves, trust that decision;
+        # the integration_check
         # node at RTL level will catch any real cross-block lint/wiring
         # mismatch and surface it as a normal failure. Setting
-        # SOCMATE_STRICT_INTEGRATION_REVIEW=1 restores the old auto-revise.
+        # CORESMITH_STRICT_INTEGRATION_REVIEW=1 restores the old auto-revise.
         import os as _os
-        if _os.environ.get("SOCMATE_STRICT_INTEGRATION_REVIEW") == "1":
+        if _os.environ.get("CORESMITH_STRICT_INTEGRATION_REVIEW") == "1":
             log(
                 "  [INTEGRATION REVIEW] Approval rejected because uArch specs "
                 "were edited after block artifacts were generated; treating as revise "
-                "(SOCMATE_STRICT_INTEGRATION_REVIEW=1)",
+                "(CORESMITH_STRICT_INTEGRATION_REVIEW=1)",
                 YELLOW,
             )
             action = "revise"
@@ -1942,7 +1942,7 @@ async def integration_review_node(state: OrchestratorState) -> dict:
             log(
                 "  [INTEGRATION REVIEW] Spec edits were made; honoring explicit "
                 "approve (integration_check at RTL level will catch real mismatches). "
-                "Export SOCMATE_STRICT_INTEGRATION_REVIEW=1 to force revise.",
+                "Export CORESMITH_STRICT_INTEGRATION_REVIEW=1 to force revise.",
                 YELLOW,
             )
     if action == "revise" and issues_found == 0 and not review_failed:
@@ -2291,7 +2291,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
 
         prd_summary = ""
         for prd_name in ("prd_spec.json", "ers_spec.json"):
-            prd_path = Path(pr) / ".socmate" / prd_name
+            prd_path = Path(pr) / ".coresmith" / prd_name
             if prd_path.exists():
                 try:
                     prd_data = json.loads(prd_path.read_text(encoding="utf-8"))
@@ -2496,8 +2496,8 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 ),
                 "reference_files": {
                     "top_rtl": top_rtl_path,
-                    "architecture": ".socmate/architecture_state.json",
-                    "block_diagram": ".socmate/block_diagram_viz.json",
+                    "architecture": ".coresmith/architecture_state.json",
+                    "block_diagram": ".coresmith/block_diagram_viz.json",
                     "lint_log": lint_result.get("log_path", ""),
                 },
             }
@@ -2664,7 +2664,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
 
         prd_summary = ""
         for prd_name in ("prd_spec.json", "ers_spec.json"):
-            prd_path = Path(pr) / ".socmate" / prd_name
+            prd_path = Path(pr) / ".coresmith" / prd_name
             if prd_path.exists():
                 try:
                     prd_data = _json.loads(prd_path.read_text(encoding="utf-8"))
@@ -2918,7 +2918,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
             },
         }
 
-        if os.environ.get("SOCMATE_ALLOW_SKIP_INTEGRATION_DV", "").lower() in (
+        if os.environ.get("CORESMITH_ALLOW_SKIP_INTEGRATION_DV", "").lower() in (
             "1",
             "true",
             "yes",
@@ -2965,7 +2965,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
 
 def _load_ers_validation_context(project_root: str) -> tuple[str, int]:
     """Load ERS context for validation DV and count likely RTL-checkable reqs."""
-    ers_path = Path(project_root) / ".socmate" / "ers_spec.json"
+    ers_path = Path(project_root) / ".coresmith" / "ers_spec.json"
     if not ers_path.exists():
         return "", 0
 
@@ -3026,7 +3026,7 @@ async def _run_top_level_contract_audit(
     from orchestrator.langchain.agents.contract_audit_agent import ContractAuditAgent
 
     root = Path(project_root)
-    audit_dir = root / ".socmate" / "contract_audit"
+    audit_dir = root / ".coresmith" / "contract_audit"
     audit_dir.mkdir(parents=True, exist_ok=True)
     safe_stage = re.sub(r"[^a-zA-Z0-9_]+", "_", stage).strip("_") or "unknown"
     context_path = audit_dir / f"{safe_stage}_failure_context.json"
@@ -3043,9 +3043,9 @@ async def _run_top_level_contract_audit(
         "sim_log_path": sim_log_path,
         "block_rtl_paths": block_rtl_paths or {},
         "reference_files": {
-            "ers_json": str(root / ".socmate" / "ers_spec.json"),
-            "prd_json": str(root / ".socmate" / "prd_spec.json"),
-            "block_diagram": str(root / ".socmate" / "block_diagram.json"),
+            "ers_json": str(root / ".coresmith" / "ers_spec.json"),
+            "prd_json": str(root / ".coresmith" / "prd_spec.json"),
+            "block_diagram": str(root / ".coresmith" / "block_diagram.json"),
             "integration_vcd": str(root / "sim_build" / "integration" / "dump.vcd"),
             "integration_wavekit_audit": str(
                 root / "sim_build" / "integration" / "wavekit_audit.json"
@@ -3253,7 +3253,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                 ),
                 "reference_files": {
                     "top_rtl": top_rtl_path,
-                    "ers": str(Path(pr) / ".socmate" / "ers_spec.json"),
+                    "ers": str(Path(pr) / ".coresmith" / "ers_spec.json"),
                     "contract_audit": contract_audit.get("audit_path", ""),
                 },
             }
@@ -3378,12 +3378,12 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                 "top_rtl": top_rtl_path,
                 "testbench": tb_path,
                 "sim_log": sim_result.get("log_path", ""),
-                "ers": str(Path(pr) / ".socmate" / "ers_spec.json"),
+                "ers": str(Path(pr) / ".coresmith" / "ers_spec.json"),
                 "contract_audit": contract_audit.get("audit_path", ""),
             },
         }
 
-        if os.environ.get("SOCMATE_ALLOW_SKIP_VALIDATION_DV", "").lower() in (
+        if os.environ.get("CORESMITH_ALLOW_SKIP_VALIDATION_DV", "").lower() in (
             "1",
             "true",
             "yes",

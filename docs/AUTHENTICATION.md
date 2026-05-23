@@ -1,6 +1,6 @@
 # Authentication
 
-socmate's pipeline calls Anthropic's API through the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code/overview). The CLI accepts three credential sources, checked in this order:
+coresmith's pipeline calls Anthropic's API through the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code/overview). The CLI accepts three credential sources, checked in this order:
 
 1. **`CLAUDE_CODE_OAUTH_TOKEN`** — long-lived OAuth token from `claude setup-token`. Recommended for CI, Docker, RunPod, GitHub Codespaces.
 2. **`ANTHROPIC_API_KEY`** — raw API key from <https://console.anthropic.com/>. Bills your console workspace; *not* your Claude.ai/Pro subscription.
@@ -17,7 +17,7 @@ If you have a Claude Pro/Max subscription, **option 1 is the right choice** — 
 claude setup-token
 # Copy the printed token (starts with `sk-ant-oat01-...`).
 
-# On the machine that will run socmate:
+# On the machine that will run coresmith:
 export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
 ```
 
@@ -28,7 +28,7 @@ The token is long-lived; rotate it via the same command.
 ```bash
 docker run --rm -it \
     -e CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-... \
-    socmate:latest
+    coresmith:latest
 ```
 
 ### In RunPod
@@ -86,11 +86,11 @@ If `claude -p` hangs or returns an auth error, neither token nor key are being s
 
 ## What model gets used
 
-socmate defaults to `opus-4.7` (the most capable model). Override with `SOCMATE_MODEL`:
+coresmith defaults to `opus-4.7` (the most capable model). Override with `CORESMITH_MODEL`:
 
 ```bash
-export SOCMATE_MODEL=sonnet-4.6   # ~5x cheaper, slightly less reliable on hard blocks
-export SOCMATE_MODEL=haiku-4.5    # cheapest; fine for trivial blocks
+export CORESMITH_MODEL=sonnet-4.6   # ~5x cheaper, slightly less reliable on hard blocks
+export CORESMITH_MODEL=haiku-4.5    # cheapest; fine for trivial blocks
 ```
 
-The mapping from short names (`opus-4.7`, `sonnet-4.6`, `haiku-4.5`, …) to full CLI model IDs lives in `orchestrator/langchain/agents/socmate_llm.py`. Unknown short names pass through verbatim, so any model the CLI accepts works.
+The mapping from short names (`opus-4.7`, `sonnet-4.6`, `haiku-4.5`, …) to full CLI model IDs lives in `orchestrator/langchain/agents/coresmith_llm.py`. Unknown short names pass through verbatim, so any model the CLI accepts works.

@@ -9,7 +9,7 @@ Defines the ArchitectureState dataclass (the shared state across all
 specialist agents) and ArchitectureQuestion (the data model for agent-
 initiated questions to the human architect).
 
-State is persisted as JSON at .socmate/architecture_state.json so that
+State is persisted as JSON at .coresmith/architecture_state.json so that
 MCP tool calls across a Claude CLI conversation share the same state.
 In Phase 3, ArchitectureState can be converted to a LangGraph TypedDict
 with message reducers.
@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-STATE_DIR = ".socmate"
+STATE_DIR = ".coresmith"
 ARCH_DOC_DIR = "arch"
 STATE_FILE = "architecture_state.json"
 

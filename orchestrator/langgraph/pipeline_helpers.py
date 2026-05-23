@@ -41,14 +41,14 @@ import yaml
 
 PROJECT_ROOT = Path(
     os.environ.get(
-        "SOCMATE_PROJECT_ROOT",
+        "CORESMITH_PROJECT_ROOT",
         str(Path(__file__).resolve().parent.parent.parent),
     )
 )
 CODE_ROOT = Path(__file__).resolve().parent.parent.parent
 CONFIG_PATH = Path(
     os.environ.get(
-        "SOCMATE_CONFIG_PATH",
+        "CORESMITH_CONFIG_PATH",
         str(PROJECT_ROOT / "orchestrator" / "config.yaml"),
     )
 )
@@ -86,7 +86,7 @@ def preflight_check(phases: list[str] | None = None) -> dict:
 
     errors: list[str] = []
     warnings: list[str] = []
-    skip_synth = os.environ.get("SOCMATE_SKIP_SYNTH", "").strip().lower() in {
+    skip_synth = os.environ.get("CORESMITH_SKIP_SYNTH", "").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -97,7 +97,7 @@ def preflight_check(phases: list[str] | None = None) -> dict:
         if not shutil.which("verilator"):
             errors.append("verilator not found on PATH")
         if skip_synth:
-            warnings.append("SOCMATE_SKIP_SYNTH=1; skipping Yosys and PDK preflight checks")
+            warnings.append("CORESMITH_SKIP_SYNTH=1; skipping Yosys and PDK preflight checks")
         else:
             if not LIBERTY_FILE.exists():
                 errors.append(f"Liberty file not found: {LIBERTY_FILE}")
@@ -152,11 +152,11 @@ def log(msg: str, color: str = "") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Step log files  (<project>/.socmate/step_logs/<block>/<step>_attempt<N>.log)
+# Step log files  (<project>/.coresmith/step_logs/<block>/<step>_attempt<N>.log)
 # ---------------------------------------------------------------------------
 
 _LOG_DIR = Path(
-    os.environ.get("SOCMATE_LOG_DIR", str(PROJECT_ROOT / ".socmate" / "step_logs"))
+    os.environ.get("CORESMITH_LOG_DIR", str(PROJECT_ROOT / ".coresmith" / "step_logs"))
 )
 
 
@@ -223,7 +223,7 @@ def _write_step_log_error(
 def load_config() -> dict:
     """Load the project config from orchestrator/config.yaml.
 
-    If ``SOCMATE_BLOCKS_FILE`` is set, the ``blocks:`` section is replaced
+    If ``CORESMITH_BLOCKS_FILE`` is set, the ``blocks:`` section is replaced
     with the contents of that YAML file. Used by ``make demo`` and the
     nightly e2e job to swap in a small reference design without touching
     the canonical config.
@@ -237,7 +237,7 @@ def load_config() -> dict:
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
-    blocks_override = os.environ.get("SOCMATE_BLOCKS_FILE")
+    blocks_override = os.environ.get("CORESMITH_BLOCKS_FILE")
     if blocks_override:
         with open(blocks_override) as f:
             override = yaml.safe_load(f) or {}
@@ -449,7 +449,7 @@ async def generate_rtl(
     previous error from disk, and writes the Verilog to block["rtl_target"].
     """
     from orchestrator.langchain.agents.rtl_generator import RTLGeneratorAgent
-    from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL
+    from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
 
     rtl_path = PROJECT_ROOT / block["rtl_target"]
     rtl_path.parent.mkdir(parents=True, exist_ok=True)
@@ -565,7 +565,7 @@ async def generate_testbench(
 ) -> dict:
     """Generate cocotb testbench -- disk-first, agent reads/writes all files."""
     from orchestrator.langchain.agents.testbench_generator import TestbenchGeneratorAgent
-    from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL
+    from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
 
     rtl_path = str(PROJECT_ROOT / block["rtl_target"])
     tb_path_str = str(PROJECT_ROOT / block["testbench"])
@@ -643,7 +643,7 @@ def run_wavekit_vcd_audit(vcd_path: Path, audit_path: Path, clock_hint: str = "c
         if has_wavekit(sys.executable):
             return sys.executable
 
-        venv_dir = PROJECT_ROOT / ".socmate" / "tools" / "wavekit-venv"
+        venv_dir = PROJECT_ROOT / ".coresmith" / "tools" / "wavekit-venv"
         python = venv_dir / "bin" / "python"
         if not python.exists():
             subprocess.run(
@@ -1069,7 +1069,7 @@ async def fix_lint_errors(
     the Edit tool to fix in-place.  Returns True if the agent modified
     the file, None if it couldn't fix.
     """
-    from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
+    from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
     prompt_file = Path(__file__).resolve().parent.parent / "langchain" / "prompts" / "lint_fixer.md"
     if prompt_file.exists():
@@ -1085,7 +1085,7 @@ async def fix_lint_errors(
         f"## Working Files\n"
         f"- RTL file: {rtl_path}\n"
         f"- Lint log: {lint_log_path}\n"
-        f"- Constraints: .socmate/blocks/{block_name}/constraints.json\n\n"
+        f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n\n"
         f"Read the lint errors, then use the Edit tool to fix the RTL file "
         f"in-place. Do NOT rewrite the entire file -- make targeted fixes."
     )
@@ -1093,7 +1093,7 @@ async def fix_lint_errors(
     block_title = block_name.replace("_", " ").title()
     llm = ClaudeLLM(
         model=DEFAULT_MODEL,
-        timeout=scaled(600, env="SOCMATE_LINT_FIX_TIMEOUT"),
+        timeout=scaled(600, env="CORESMITH_LINT_FIX_TIMEOUT"),
     )
 
     try:
@@ -1123,7 +1123,7 @@ async def fix_synth_errors(
     the Edit tool to fix in-place.  Returns True if the agent modified
     the file, None if it couldn't fix.
     """
-    from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
+    from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
     prompt_file = Path(__file__).resolve().parent.parent / "langchain" / "prompts" / "synth_fixer.md"
     if prompt_file.exists():
@@ -1139,7 +1139,7 @@ async def fix_synth_errors(
         f"## Working Files\n"
         f"- RTL file: {rtl_path}\n"
         f"- Synthesis log: {synth_log_path}\n"
-        f"- Constraints: .socmate/blocks/{block_name}/constraints.json\n\n"
+        f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n\n"
         f"Read the synthesis errors, then use the Edit tool to fix the RTL file "
         f"in-place. Do NOT rewrite the entire file -- make targeted fixes."
     )
@@ -1147,7 +1147,7 @@ async def fix_synth_errors(
     block_title = block_name.replace("_", " ").title()
     llm = ClaudeLLM(
         model=DEFAULT_MODEL,
-        timeout=scaled(600, env="SOCMATE_SYNTH_FIX_TIMEOUT"),
+        timeout=scaled(600, env="CORESMITH_SYNTH_FIX_TIMEOUT"),
     )
 
     try:
@@ -1177,7 +1177,7 @@ async def fix_testbench_errors(
     and DV rules from disk, uses the Edit tool to fix in-place.
     Returns True if the agent modified the file, None if it couldn't fix.
     """
-    from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
+    from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
     system_prompt = (
         "You are an expert verification engineer. A cocotb testbench is "
@@ -1206,21 +1206,21 @@ async def fix_testbench_errors(
         f"- VCD waveform: sim_build/{block_name}/dump.vcd\n"
         f"- WaveKit audit: sim_build/{block_name}/wavekit_audit.json\n"
         f"- uArch Spec: arch/uarch_specs/{block_name}.md\n"
-        f"- Constraints: .socmate/blocks/{block_name}/constraints.json\n"
+        f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n"
         f"- DV Rules: arch/DV_RULES.md\n\n"
         f"Read the simulation log to understand the failure, then read the "
         f"testbench and RTL. Fix the testbench in-place using the Edit tool."
     )
 
     block_title = block_name.replace("_", " ").title()
-    # 600s default; bump via SOCMATE_TB_FIX_TIMEOUT for complex blocks
+    # 600s default; bump via CORESMITH_TB_FIX_TIMEOUT for complex blocks
     # whose TB rewrite genuinely needs more than 10 minutes. The previous
     # 300s default consistently timed out for non-trivial blocks (mcu3
     # 3-stage CPU, multi-stage pipelines) and produced partial fixes that
     # didn't address the root cause.
     llm = ClaudeLLM(
         model=DEFAULT_MODEL,
-        timeout=scaled(600, env="SOCMATE_TB_FIX_TIMEOUT"),
+        timeout=scaled(600, env="CORESMITH_TB_FIX_TIMEOUT"),
     )
 
     try:

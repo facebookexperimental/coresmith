@@ -38,7 +38,7 @@ A clear and concise description of what you expected to happen.
 
 - OS: [e.g. macOS 14.5, Ubuntu 22.04]
 - Python version: [e.g. 3.11.6]
-- socmate commit / version: [e.g. `git rev-parse HEAD`]
+- coresmith commit / version: [e.g. `git rev-parse HEAD`]
 - EDA toolchain versions (if relevant): [Yosys, Verilator, OpenROAD, ...]
 
 ## Additional context

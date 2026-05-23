@@ -12,7 +12,7 @@
 #   - simplified H.264-style deblocking filter
 #
 # Software preflight on the Mort GIF resized to 128x72 confirmed achievable
-# PSNR before launching SocMate:
+# PSNR before launching CoreSmith:
 #   qp=24: 2.8508 bpp, 47.98 dB, 667/1440 macroblocks selected as 8x8
 #   qp=36: 1.1574 bpp, 39.48 dB, 635/1440 macroblocks selected as 8x8
 #   qp=48: 0.3964 bpp, 32.00 dB, 925/1440 macroblocks selected as 8x8
