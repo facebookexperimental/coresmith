@@ -216,39 +216,34 @@ class TestArchitectureState:
 
 
 class TestConstraintChecker:
-    """Constraint checker now uses LLM. Tests mock ClaudeLLM to verify
-    that the checker correctly forwards violations from the LLM response."""
+    """Constraint checker is now a per-constraint subagent dispatcher.
+    Tests mock ClaudeLLM so the subagent fan-out happens with deterministic
+    per-call responses."""
 
-    def test_extracts_sram_budget_from_prd_kpi_text(self):
-        from orchestrator.architecture.constraints import _extract_sram_budget_kb
+    def _make_subagent_mock(self, per_check_response):
+        """Build an AsyncMock for ClaudeLLM.call that returns the configured
+        response per constraint id. Maps from constraint id (looked up via
+        run_name) to a {pass, violation_text, ...} dict."""
+        from unittest.mock import AsyncMock
+        import json as _json
 
-        ers = {
-            "dataflow": {
-                "buffering_strategy": "32 KB activation scratchpad plus 16 KB KV cache",
-            },
-            "area_budget": {
-                "notes": "combined activation scratchpad plus KV SRAM must not exceed 64 KB",
-            },
-        }
+        async def _fake_call(*args, **kwargs):
+            run_name = kwargs.get("run_name", "")
+            check_id = run_name.split(":", 1)[1] if ":" in run_name else ""
+            resp = per_check_response.get(check_id, {"pass": True, "evidence": "not applicable"})
+            return _json.dumps(resp)
 
-        assert _extract_sram_budget_kb(ers) == 64
-
-    def _mock_llm(self, violations):
-        """Return a patch context manager that mocks ClaudeLLM to return violations."""
-        from unittest.mock import patch
-
-        response = json.dumps({"violations": violations, "reasoning": "test"})
-        p = patch("orchestrator.architecture.constraints.ClaudeLLM")
-        return p, response
+        return AsyncMock(side_effect=_fake_call)
 
     @pytest.mark.asyncio
-    async def test_no_violations(self, sample_block_diagram):
-        from unittest.mock import AsyncMock, patch
+    async def test_all_subagents_pass_returns_no_violations(self, sample_block_diagram):
+        from unittest.mock import patch
         from orchestrator.architecture.constraints import check_constraints
 
-        llm_response = json.dumps({"violations": [], "reasoning": "All checks pass."})
+        # Every subagent returns PASS
+        mock_call = self._make_subagent_mock(per_check_response={})
         with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
-            MockLLM.return_value.call = AsyncMock(return_value=llm_response)
+            MockLLM.return_value.call = mock_call
             violations = await check_constraints(
                 block_diagram=sample_block_diagram,
                 memory_map={"result": {"peripherals": [], "sram": {}}},
@@ -258,113 +253,134 @@ class TestConstraintChecker:
         assert violations == []
 
     @pytest.mark.asyncio
-    async def test_memory_overlap(self):
-        from unittest.mock import AsyncMock, patch
+    async def test_one_subagent_failure_surfaces_as_violation(self, sample_block_diagram):
+        from unittest.mock import patch
         from orchestrator.architecture.constraints import check_constraints
 
-        overlap_violations = [
-            {"violation": "Memory overlap between a and b at 0x20000000",
-             "category": "structural", "check": "memory_overlap", "severity": "error"}
-        ]
-        llm_response = json.dumps({"violations": overlap_violations})
-        mm = {
-            "result": {
-                "sram": {"base_address_int": 0, "size": 0x8000},
-                "peripherals": [
-                    {"name": "a", "base_address_int": 0x10000000, "size": 0x20000000},
-                    {"name": "b", "base_address_int": 0x20000000, "size": 0x100},
-                ],
-                "top_csr": {"base_address_int": 0x80000000, "size": 0x100},
-            }
-        }
-
-        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
-            MockLLM.return_value.call = AsyncMock(return_value=llm_response)
-            violations = await check_constraints(
-                block_diagram={"blocks": [], "connections": []},
-                memory_map=mm,
-                clock_tree={},
-                register_spec={},
-            )
-        assert any("overlap" in v["violation"].lower() for v in violations)
-
-    @pytest.mark.asyncio
-    async def test_peripheral_overflow(self):
-        from unittest.mock import AsyncMock, patch
-        from orchestrator.architecture.constraints import check_constraints
-
-        overflow_violations = [
-            {"violation": "Peripheral count (10) exceeds 8-slot nibble decoder",
-             "category": "structural", "check": "peripheral_count", "severity": "error"}
-        ]
-        llm_response = json.dumps({"violations": overflow_violations})
-        blocks = [
-            {"name": f"block_{i}", "description": f"Block {i}", "tier": 1}
-            for i in range(10)
-        ]
-        diagram = {"blocks": blocks, "connections": []}
-
-        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
-            MockLLM.return_value.call = AsyncMock(return_value=llm_response)
-            violations = await check_constraints(
-                block_diagram=diagram,
-                memory_map={"result": {"peripherals": [], "sram": {}}},
-                clock_tree={},
-                register_spec={},
-            )
-        assert any("peripheral count" in v["violation"].lower() for v in violations)
-
-    @pytest.mark.asyncio
-    async def test_gate_budget_exceeded(self):
-        from unittest.mock import AsyncMock, patch
-        from orchestrator.architecture.constraints import check_constraints
-
-        gate_violations = [
-            {"violation": "Total gate count (3,000,000) exceeds budget (2,000,000)",
-             "category": "auto_fixable", "check": "gate_budget", "severity": "error"}
-        ]
-        llm_response = json.dumps({"violations": gate_violations})
+        # gate_budget subagent fails; others pass
+        mock_call = self._make_subagent_mock(per_check_response={
+            "gate_budget": {
+                "pass": False,
+                "violation_text": "Total gate count 3,000,000 exceeds budget 2,000,000.",
+                "evidence": "block_diagram.blocks[0].estimated_gates=3000000",
+                "suggested_fix": "Split huge_block into smaller blocks.",
+            },
+        })
         diagram = {
-            "blocks": [
-                {"name": "huge_block", "estimated_gates": 3_000_000, "tier": 3},
-            ],
+            "blocks": [{"name": "huge_block", "estimated_gates": 3_000_000, "tier": 3}],
             "connections": [],
         }
-
         with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
-            MockLLM.return_value.call = AsyncMock(return_value=llm_response)
+            MockLLM.return_value.call = mock_call
             violations = await check_constraints(
                 block_diagram=diagram,
-                memory_map={"result": {"peripherals": [], "sram": {}}},
+                memory_map={},
                 clock_tree={},
                 register_spec={},
             )
-        assert any("gate count" in v["violation"].lower() for v in violations)
+        assert len(violations) == 1
+        v = violations[0]
+        assert v["check"] == "gate_budget"
+        assert v["category"] == "auto_fixable"
+        assert v["severity"] == "error"
+        assert "3,000,000" in v["violation"]
+        assert "estimated_gates" in v["evidence"]
+        assert "Split huge_block" in v["suggested_fix"]
 
     @pytest.mark.asyncio
-    async def test_disconnected_blocks(self, sample_block_diagram):
+    async def test_applies_predicate_skips_subagent(self, sample_block_diagram):
+        """Constraints with applies() returning False shouldn't call the LLM
+        at all. CDC presence requires multiple clock domains; with an empty
+        clock_tree it must be skipped."""
+        from unittest.mock import patch
+        from orchestrator.architecture.constraints import check_constraints
+
+        called_ids: list[str] = []
+
+        async def _spy(*args, **kwargs):
+            run_name = kwargs.get("run_name", "")
+            check_id = run_name.split(":", 1)[1] if ":" in run_name else ""
+            called_ids.append(check_id)
+            import json as _json
+            return _json.dumps({"pass": True, "evidence": "ok"})
+
+        from unittest.mock import AsyncMock
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
+            MockLLM.return_value.call = AsyncMock(side_effect=_spy)
+            await check_constraints(
+                block_diagram=sample_block_diagram,
+                memory_map={},
+                clock_tree={},   # no domains
+                register_spec={},
+            )
+
+        # CDC subagent must NOT have been invoked
+        assert "clock_domain_crossings" not in called_ids
+        # block_connectivity always applies (>= 2 blocks in fixture)
+        assert "block_connectivity" in called_ids
+
+    @pytest.mark.asyncio
+    async def test_subagent_invalid_json_is_treated_as_failure(self, sample_block_diagram):
+        """If a subagent returns unparseable output, the check is reported as
+        a warning-severity violation rather than silently passing."""
         from unittest.mock import AsyncMock, patch
         from orchestrator.architecture.constraints import check_constraints
 
-        orphan_violations = [
-            {"violation": "Block orphan_block has no connections",
-             "category": "structural", "check": "connectivity", "severity": "error"}
-        ]
-        llm_response = json.dumps({"violations": orphan_violations})
-        diagram = dict(sample_block_diagram)
-        diagram["blocks"] = list(diagram["blocks"]) + [
-            {"name": "orphan_block", "description": "No connections", "tier": 1}
-        ]
-
         with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
-            MockLLM.return_value.call = AsyncMock(return_value=llm_response)
+            MockLLM.return_value.call = AsyncMock(return_value="I dunno, looks fine to me")
             violations = await check_constraints(
-                block_diagram=diagram,
-                memory_map={"result": {"peripherals": [], "sram": {}}},
+                block_diagram=sample_block_diagram,
+                memory_map={},
                 clock_tree={},
                 register_spec={},
             )
-        assert any("orphan_block" in v["violation"] for v in violations)
+
+        # Every applicable subagent will produce a violation (parse failure)
+        assert len(violations) > 0
+        for v in violations:
+            assert "Subagent response was not valid JSON" in v["violation"] or \
+                   v["check"].endswith("_subagent_error") or v["category"] == "structural"
+
+    @pytest.mark.asyncio
+    async def test_subagent_exception_is_warning(self, sample_block_diagram):
+        """A subagent that raises (timeout, API error) becomes a warning-severity
+        violation tagged with `_subagent_error`."""
+        from unittest.mock import AsyncMock, patch
+        from orchestrator.architecture.constraints import check_constraints
+
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
+            MockLLM.return_value.call = AsyncMock(side_effect=RuntimeError("LLM timeout"))
+            violations = await check_constraints(
+                block_diagram=sample_block_diagram,
+                memory_map={},
+                clock_tree={},
+                register_spec={},
+            )
+
+        assert any(
+            v["check"].endswith("_subagent_error") and v["severity"] == "warning"
+            for v in violations
+        )
+
+    def test_shuttle_checks_skipped_by_default(self, sample_block_diagram):
+        """The shuttle GPIO / area checks are opt-in; default off for soft IP."""
+        from orchestrator.architecture.constraints import _shuttle_constraints_enabled
+
+        assert _shuttle_constraints_enabled() is False
+
+    def test_anti_pattern_warnings_no_longer_in_corpus(self):
+        """Smoke test: the regex extractor was removed, so requirements-doc
+        anti-pattern phrases no longer feed a claim-extraction stage at all.
+        The subagent receives the requirements text verbatim and decides
+        per its system prompt how to treat anti-pattern lines."""
+        from orchestrator.architecture import constraints as cmod
+
+        for forbidden in ("_extract_dimension_facts", "_check_derived_constraints",
+                          "_check_performance_constraints", "_artifact_text",
+                          "_select_derived_geometry_pair"):
+            assert not hasattr(cmod, forbidden), (
+                f"Removed regex helper '{forbidden}' reappeared in constraints.py"
+            )
 
 
 # ---------------------------------------------------------------------------
