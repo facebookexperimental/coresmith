@@ -23,7 +23,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-from orchestrator.langchain.agents.socmate_llm import (
+from orchestrator.langchain.agents.coresmith_llm import (
     ClaudeLLM,
     DEFAULT_CODEX_MODEL,
     DEFAULT_MODEL,
@@ -43,8 +43,8 @@ from orchestrator.langchain.agents.socmate_llm import (
 
 @pytest.fixture(autouse=True)
 def _clear_provider_env(monkeypatch):
-    monkeypatch.delenv("SOCMATE_LLM_PROVIDER", raising=False)
-    monkeypatch.delenv("SOCMATE_CODEX_MODEL", raising=False)
+    monkeypatch.delenv("CORESMITH_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("CORESMITH_CODEX_MODEL", raising=False)
 
 
 class TestModelNameMapping:
@@ -73,19 +73,19 @@ class TestModelNameMapping:
         assert DEFAULT_MODEL in _CLI_MODEL_MAP
 
     def test_empty_model_falls_back_to_default(self, monkeypatch):
-        monkeypatch.delenv("SOCMATE_MODEL", raising=False)
+        monkeypatch.delenv("CORESMITH_MODEL", raising=False)
         assert _resolve_model("") == _CLI_MODEL_MAP[DEFAULT_MODEL]
 
-    def test_socmate_model_env_overrides_passed_value(self, monkeypatch):
-        monkeypatch.setenv("SOCMATE_MODEL", "haiku-4.5")
+    def test_coresmith_model_env_overrides_passed_value(self, monkeypatch):
+        monkeypatch.setenv("CORESMITH_MODEL", "haiku-4.5")
         assert _resolve_model("opus-4.7") == "claude-haiku-4-5-20251001"
 
-    def test_socmate_model_env_with_full_id_passes_through(self, monkeypatch):
-        monkeypatch.setenv("SOCMATE_MODEL", "claude-some-future-model-99")
+    def test_coresmith_model_env_with_full_id_passes_through(self, monkeypatch):
+        monkeypatch.setenv("CORESMITH_MODEL", "claude-some-future-model-99")
         assert _resolve_model("opus-4.7") == "claude-some-future-model-99"
 
-    def test_empty_socmate_model_does_not_override(self, monkeypatch):
-        monkeypatch.setenv("SOCMATE_MODEL", "")
+    def test_empty_coresmith_model_does_not_override(self, monkeypatch):
+        monkeypatch.setenv("CORESMITH_MODEL", "")
         assert _resolve_model("opus-4.7") == "claude-opus-4-7"
 
     def test_codex_opus_maps_to_gpt_55(self):
@@ -95,18 +95,18 @@ class TestModelNameMapping:
         assert DEFAULT_CODEX_MODEL == "gpt-5.5"
         assert _CODEX_MODEL_MAP["opus-4.7"] == DEFAULT_CODEX_MODEL
 
-    def test_socmate_codex_model_env_overrides_passed_value(self, monkeypatch):
-        monkeypatch.setenv("SOCMATE_CODEX_MODEL", "gpt-5.5")
+    def test_coresmith_codex_model_env_overrides_passed_value(self, monkeypatch):
+        monkeypatch.setenv("CORESMITH_CODEX_MODEL", "gpt-5.5")
         assert _resolve_model("sonnet-4.6", "codex_cli") == "gpt-5.5"
 
 
 class TestProviderDetection:
     def test_defaults_to_claude_cli(self, monkeypatch):
-        monkeypatch.delenv("SOCMATE_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("CORESMITH_LLM_PROVIDER", raising=False)
         assert _detect_provider() == "claude_cli"
 
     def test_codex_provider_env(self, monkeypatch):
-        monkeypatch.setenv("SOCMATE_LLM_PROVIDER", "codex")
+        monkeypatch.setenv("CORESMITH_LLM_PROVIDER", "codex")
         assert _detect_provider() == "codex_cli"
 
 
@@ -124,7 +124,7 @@ class TestCodexJsonParsing:
 
 class TestLLMTelemetry:
     def test_log_llm_call_backdates_otel_span(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("SOCMATE_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
         recorded = {}
 
         class FakeSpan:
@@ -146,7 +146,7 @@ class TestLLMTelemetry:
 
         start_ns = time.time_ns() - 2_500_000_000
         with patch(
-            "orchestrator.langchain.agents.socmate_llm._get_llm_tracer",
+            "orchestrator.langchain.agents.coresmith_llm._get_llm_tracer",
             return_value=FakeTracer(),
         ):
             _log_llm_call(
@@ -226,7 +226,7 @@ class TestProcessRegistry:
 class TestCommandConstruction:
     """Verify the CLI command runs headlessly via --permission-mode auto."""
 
-    @patch("orchestrator.langchain.agents.socmate_llm._find_claude_binary")
+    @patch("orchestrator.langchain.agents.coresmith_llm._find_claude_binary")
     def test_permission_mode_auto_in_cmd(self, mock_find):
         mock_find.return_value = "/usr/bin/claude"
 
@@ -242,7 +242,7 @@ class TestCommandConstruction:
             assert cmd[cmd.index("--permission-mode") + 1] == "auto"
             assert "--dangerously-skip-permissions" not in cmd
 
-    @patch("orchestrator.langchain.agents.socmate_llm._find_claude_binary")
+    @patch("orchestrator.langchain.agents.coresmith_llm._find_claude_binary")
     def test_print_mode_flags(self, mock_find):
         mock_find.return_value = "/usr/bin/claude"
 
@@ -260,11 +260,11 @@ class TestCommandConstruction:
             # CLI requires --verbose alongside stream-json under --print
             assert "--verbose" in cmd
 
-    @patch("orchestrator.langchain.agents.socmate_llm._find_codex_binary")
+    @patch("orchestrator.langchain.agents.coresmith_llm._find_codex_binary")
     def test_codex_exec_flags_and_gpt_55_model(self, mock_find, monkeypatch):
-        monkeypatch.setenv("SOCMATE_LLM_PROVIDER", "codex")
-        monkeypatch.delenv("SOCMATE_CODEX_MODEL", raising=False)
-        monkeypatch.delenv("SOCMATE_MODEL", raising=False)
+        monkeypatch.setenv("CORESMITH_LLM_PROVIDER", "codex")
+        monkeypatch.delenv("CORESMITH_CODEX_MODEL", raising=False)
+        monkeypatch.delenv("CORESMITH_MODEL", raising=False)
         mock_find.return_value = "/usr/bin/codex"
 
         model = ClaudeLLM(model="opus-4.7", timeout=10)
@@ -284,7 +284,7 @@ class TestCommandConstruction:
 class TestWatchdogBehaviour:
     """Test stall detection and timeout in _run_cli_with_watchdog."""
 
-    @patch("orchestrator.langchain.agents.socmate_llm._find_claude_binary")
+    @patch("orchestrator.langchain.agents.coresmith_llm._find_claude_binary")
     def test_timeout_returns_partial_output(self, mock_find):
         """When the hard timeout fires, partial output should be captured."""
         mock_find.return_value = "/usr/bin/echo"
@@ -294,7 +294,7 @@ class TestWatchdogBehaviour:
         result = model._generate_via_cli("system prompt", "hello")
         assert isinstance(result, str)
 
-    @patch("orchestrator.langchain.agents.socmate_llm._find_claude_binary")
+    @patch("orchestrator.langchain.agents.coresmith_llm._find_claude_binary")
     def test_stall_detection_with_short_threshold(self, mock_find):
         """A process that produces no output should be killed by stall detection."""
         mock_find.return_value = "/bin/sleep"

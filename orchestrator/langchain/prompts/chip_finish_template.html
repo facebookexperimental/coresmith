@@ -80,7 +80,7 @@ canvas{max-width:100%;}
 </style>
 <script>
 (function(){
-  var t = localStorage.getItem('socmate-theme');
+  var t = localStorage.getItem('coresmith-theme');
   if (!t && window.matchMedia('(prefers-color-scheme: light)').matches) t = 'light';
   if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
 })();
@@ -503,7 +503,7 @@ function toggleTheme() {
   var next = html.getAttribute('data-theme') === 'light' ? '' : 'light';
   if (next) html.setAttribute('data-theme', 'light');
   else html.removeAttribute('data-theme');
-  localStorage.setItem('socmate-theme', next || 'dark');
+  localStorage.setItem('coresmith-theme', next || 'dark');
   _updateThemeBtn();
 }
 function _updateThemeBtn() {

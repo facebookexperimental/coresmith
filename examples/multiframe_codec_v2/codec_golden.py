@@ -290,7 +290,7 @@ def cavlc_encode_coefficients(coeffs):
     This local CAVLC model emits TotalCoeff, TrailingOnes, trailing-one signs,
     remaining signed levels, TotalZeros, and reverse-order RunBefore values.
     Compact Exp-Golomb codewords carry the variable fields so the stream stays
-    self-delimiting for the SocMate golden model.
+    self-delimiting for the CoreSmith golden model.
     """
     scanned = _scan_coefficients(coeffs)
     nonzero = [(i, v) for i, v in enumerate(scanned) if v != 0]

@@ -16,12 +16,12 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_GIF = Path(
-    "/home/ubuntu/dashboards/dashboard/socmate-llm-bench/"
+    "/home/ubuntu/dashboards/dashboard/coresmith-llm-bench/"
     "multiframe-codec-handwritten/mort_original.gif"
 )
 WIDTH = 640
 HEIGHT = 360
-FRAMES = int(os.environ.get("SOCMATE_RD_FRAMES", "10"))
+FRAMES = int(os.environ.get("CORESMITH_RD_FRAMES", "10"))
 
 
 def make_raw(gif: Path, out_raw: Path) -> Path:
@@ -60,7 +60,7 @@ def make_raw(gif: Path, out_raw: Path) -> Path:
 
 def build(out_dir: Path) -> Path:
     build_dir = out_dir / "cpp_build"
-    build_jobs = int(os.environ.get("SOCMATE_RD_BUILD_JOBS", str(os.cpu_count() or 1)))
+    build_jobs = int(os.environ.get("CORESMITH_RD_BUILD_JOBS", str(os.cpu_count() or 1)))
     sources = [
         ROOT / "rtl" / "integration" / "chip_top.v",
         ROOT / "rtl" / "integration" / "multiframe_codec_v2_top.v",
@@ -158,13 +158,13 @@ def point(exe: Path, raw: Path, out_dir: Path, qp: int, golden) -> dict:
 
 def main() -> int:
     gif = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_GIF
-    out_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else ROOT / ".socmate" / "rd_current_cpp"
+    out_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else ROOT / ".coresmith" / "rd_current_cpp"
     out_dir.mkdir(parents=True, exist_ok=True)
     raw = make_raw(gif, out_dir / "mort_10f_640x360.raw")
     exe = build(out_dir)
     golden = load_golden()
-    qps = [int(v) for v in os.environ.get("SOCMATE_RD_QPS", "24,36,48").split(",") if v]
-    jobs = int(os.environ.get("SOCMATE_RD_JOBS", str(os.cpu_count() or 1)))
+    qps = [int(v) for v in os.environ.get("CORESMITH_RD_QPS", "24,36,48").split(",") if v]
+    jobs = int(os.environ.get("CORESMITH_RD_JOBS", str(os.cpu_count() or 1)))
     points = []
     with ThreadPoolExecutor(max_workers=max(1, min(jobs, len(qps)))) as pool:
         futures = {pool.submit(point, exe, raw, out_dir, qp, golden): qp for qp in qps}

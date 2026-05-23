@@ -3,7 +3,7 @@
 Build a Sky130 Verilog-2005 soft IP block for a 32-bit unsigned adder and use
 it as a full frontend plus backend smoke test.
 
-The design is intentionally small. It should exercise the complete SocMate flow
+The design is intentionally small. It should exercise the complete CoreSmith flow
 from architecture through RTL generation, cocotb simulation, synthesis,
 OpenROAD placement/routing, Magic DRC, and LVS when the local toolchain is
 available.

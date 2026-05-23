@@ -52,7 +52,7 @@ from opentelemetry import trace
 from orchestrator.architecture.state import ARCH_DOC_DIR
 from orchestrator.langgraph.event_stream import write_graph_event
 
-_tracer = trace.get_tracer("socmate.langgraph.architecture_graph")
+_tracer = trace.get_tracer("coresmith.langgraph.architecture_graph")
 
 
 # ---------------------------------------------------------------------------
@@ -76,8 +76,8 @@ def _stage_enabled(enable_env: str, legacy_skip_env: str = "") -> bool:
     """Return whether an optional architecture stage should run.
 
     These stages are bypassed by default for streaming soft-IP exploration.
-    Set the SOCMATE_ENABLE_* variable to 1/true/yes/on to run the stage.  The
-    older SOCMATE_SKIP_* variables are still honored as an explicit skip.
+    Set the CORESMITH_ENABLE_* variable to 1/true/yes/on to run the stage.  The
+    older CORESMITH_SKIP_* variables are still honored as an explicit skip.
     """
     import os
 
@@ -175,17 +175,17 @@ def _persist_prd(
     """Write the PRD to disk as JSON and Markdown immediately after generation.
 
     Files written:
-      .socmate/prd_spec.json  -- structured PRD for programmatic use
+      .coresmith/prd_spec.json  -- structured PRD for programmatic use
       arch/prd_spec.md     -- human-readable Markdown summary
     """
-    socmate_dir = Path(project_root) / ".socmate"
-    socmate_dir.mkdir(parents=True, exist_ok=True)
+    coresmith_dir = Path(project_root) / ".coresmith"
+    coresmith_dir.mkdir(parents=True, exist_ok=True)
     arch_dir = Path(project_root) / ARCH_DOC_DIR
     arch_dir.mkdir(parents=True, exist_ok=True)
 
     from orchestrator.utils import atomic_write
 
-    json_path = socmate_dir / "prd_spec.json"
+    json_path = coresmith_dir / "prd_spec.json"
     atomic_write(json_path, json.dumps(prd_result, indent=2, default=str))
 
     prd = prd_result.get("prd", {})
@@ -351,17 +351,17 @@ def _persist_memory_map(project_root: str, mm_result: dict) -> None:
     """Write the memory map to disk as JSON and Markdown.
 
     Files written:
-      .socmate/memory_map.json  -- structured memory map for programmatic use
+      .coresmith/memory_map.json  -- structured memory map for programmatic use
       arch/memory_map.md     -- human-readable Markdown
     """
-    socmate_dir = Path(project_root) / ".socmate"
-    socmate_dir.mkdir(parents=True, exist_ok=True)
+    coresmith_dir = Path(project_root) / ".coresmith"
+    coresmith_dir.mkdir(parents=True, exist_ok=True)
     arch_dir = Path(project_root) / ARCH_DOC_DIR
     arch_dir.mkdir(parents=True, exist_ok=True)
 
     from orchestrator.utils import atomic_write
 
-    atomic_write(socmate_dir / "memory_map.json", json.dumps(mm_result, indent=2, default=str))
+    atomic_write(coresmith_dir / "memory_map.json", json.dumps(mm_result, indent=2, default=str))
 
     mm = mm_result.get("result", mm_result)
     peripherals = mm.get("peripherals", [])
@@ -418,17 +418,17 @@ def _persist_clock_tree(project_root: str, ct_result: dict) -> None:
     """Write the clock tree to disk as JSON and Markdown.
 
     Files written:
-      .socmate/clock_tree.json  -- structured clock tree for programmatic use
+      .coresmith/clock_tree.json  -- structured clock tree for programmatic use
       arch/clock_tree.md     -- human-readable Markdown
     """
-    socmate_dir = Path(project_root) / ".socmate"
-    socmate_dir.mkdir(parents=True, exist_ok=True)
+    coresmith_dir = Path(project_root) / ".coresmith"
+    coresmith_dir.mkdir(parents=True, exist_ok=True)
     arch_dir = Path(project_root) / ARCH_DOC_DIR
     arch_dir.mkdir(parents=True, exist_ok=True)
 
     from orchestrator.utils import atomic_write
 
-    atomic_write(socmate_dir / "clock_tree.json", json.dumps(ct_result, indent=2, default=str))
+    atomic_write(coresmith_dir / "clock_tree.json", json.dumps(ct_result, indent=2, default=str))
 
     ct = ct_result.get("result", ct_result)
     domains = ct.get("domains", [])
@@ -485,17 +485,17 @@ def _persist_block_diagram(project_root: str, bd_result: dict) -> None:
     """Write the block diagram to disk as JSON and Markdown.
 
     Files written:
-      .socmate/block_diagram.json  -- structured block diagram for programmatic use
+      .coresmith/block_diagram.json  -- structured block diagram for programmatic use
       arch/block_diagram.md     -- human-readable Markdown
     """
-    socmate_dir = Path(project_root) / ".socmate"
-    socmate_dir.mkdir(parents=True, exist_ok=True)
+    coresmith_dir = Path(project_root) / ".coresmith"
+    coresmith_dir.mkdir(parents=True, exist_ok=True)
     arch_dir = Path(project_root) / ARCH_DOC_DIR
     arch_dir.mkdir(parents=True, exist_ok=True)
 
     from orchestrator.utils import atomic_write
 
-    atomic_write(socmate_dir / "block_diagram.json", json.dumps(bd_result, indent=2, default=str))
+    atomic_write(coresmith_dir / "block_diagram.json", json.dumps(bd_result, indent=2, default=str))
 
     blocks = bd_result.get("blocks", [])
     connections = bd_result.get("connections", [])
@@ -539,17 +539,17 @@ def _persist_register_spec(project_root: str, rs_result: dict) -> None:
     """Write the register spec to disk as JSON and Markdown.
 
     Files written:
-      .socmate/register_spec.json  -- structured register spec for programmatic use
+      .coresmith/register_spec.json  -- structured register spec for programmatic use
       arch/register_spec.md     -- human-readable Markdown
     """
-    socmate_dir = Path(project_root) / ".socmate"
-    socmate_dir.mkdir(parents=True, exist_ok=True)
+    coresmith_dir = Path(project_root) / ".coresmith"
+    coresmith_dir.mkdir(parents=True, exist_ok=True)
     arch_dir = Path(project_root) / ARCH_DOC_DIR
     arch_dir.mkdir(parents=True, exist_ok=True)
 
     from orchestrator.utils import atomic_write
 
-    atomic_write(socmate_dir / "register_spec.json", json.dumps(rs_result, indent=2, default=str))
+    atomic_write(coresmith_dir / "register_spec.json", json.dumps(rs_result, indent=2, default=str))
 
     rs = rs_result.get("result", rs_result)
     reg_blocks = rs.get("blocks", [])
@@ -581,17 +581,17 @@ def _persist_ers(project_root: str, ers_result: dict) -> None:
     """Write the final ERS to disk as JSON and Markdown.
 
     Files written:
-      .socmate/ers_spec.json  -- structured ERS for programmatic use
+      .coresmith/ers_spec.json  -- structured ERS for programmatic use
       arch/ers_spec.md     -- human-readable Markdown
     """
-    socmate_dir = Path(project_root) / ".socmate"
-    socmate_dir.mkdir(parents=True, exist_ok=True)
+    coresmith_dir = Path(project_root) / ".coresmith"
+    coresmith_dir.mkdir(parents=True, exist_ok=True)
     arch_dir = Path(project_root) / ARCH_DOC_DIR
     arch_dir.mkdir(parents=True, exist_ok=True)
 
     from orchestrator.utils import atomic_write
 
-    atomic_write(socmate_dir / "ers_spec.json", json.dumps(ers_result, indent=2, default=str))
+    atomic_write(coresmith_dir / "ers_spec.json", json.dumps(ers_result, indent=2, default=str))
 
     ers = ers_result.get("ers", {})
     md_lines = [
@@ -1000,14 +1000,14 @@ async def memory_map_node(state: ArchGraphState) -> dict:
     """Generate memory map via LLM specialist.
 
     Bypassed by default for streaming designs. Set
-    ``SOCMATE_ENABLE_MEMORY_MAP=1`` to run it. The legacy
-    ``SOCMATE_SKIP_MEMORY_MAP=1`` still forces a skip.
+    ``CORESMITH_ENABLE_MEMORY_MAP=1`` to run it. The legacy
+    ``CORESMITH_SKIP_MEMORY_MAP=1`` still forces a skip.
     """
-    if not _stage_enabled("SOCMATE_ENABLE_MEMORY_MAP", "SOCMATE_SKIP_MEMORY_MAP"):
+    if not _stage_enabled("CORESMITH_ENABLE_MEMORY_MAP", "CORESMITH_SKIP_MEMORY_MAP"):
         _event(state, "Memory Map", "graph_node_enter", {"round": state["round"], "skipped": True})
         empty = {"skipped": True,
                  "result": {"skipped": True, "peripheral_count": 0, "peripherals": []},
-                 "rationale": "bypassed by default; set SOCMATE_ENABLE_MEMORY_MAP=1 to run"}
+                 "rationale": "bypassed by default; set CORESMITH_ENABLE_MEMORY_MAP=1 to run"}
         _event(state, "Memory Map", "graph_node_exit", {"round": state["round"], "skipped": True})
         update = {"memory_map": empty, "phase": "memory_map"}
         _persist_intermediate_state(state, update)
@@ -1047,13 +1047,13 @@ async def clock_tree_node(state: ArchGraphState) -> dict:
     """Generate clock tree via LLM specialist.
 
     Bypassed by default for streaming soft-IP exploration. Set
-    ``SOCMATE_ENABLE_CLOCK_TREE=1`` to run it.
+    ``CORESMITH_ENABLE_CLOCK_TREE=1`` to run it.
     """
-    if not _stage_enabled("SOCMATE_ENABLE_CLOCK_TREE", "SOCMATE_SKIP_CLOCK_TREE"):
+    if not _stage_enabled("CORESMITH_ENABLE_CLOCK_TREE", "CORESMITH_SKIP_CLOCK_TREE"):
         _event(state, "Clock Tree", "graph_node_enter", {"round": state["round"], "skipped": True})
         empty = {"skipped": True,
                  "result": {"skipped": True, "num_domains": 0, "domains": []},
-                 "rationale": "bypassed by default; set SOCMATE_ENABLE_CLOCK_TREE=1 to run"}
+                 "rationale": "bypassed by default; set CORESMITH_ENABLE_CLOCK_TREE=1 to run"}
         _event(state, "Clock Tree", "graph_node_exit", {"round": state["round"], "skipped": True})
         update = {"clock_tree": empty, "phase": "clock_tree"}
         _persist_intermediate_state(state, update)
@@ -1092,14 +1092,14 @@ async def register_spec_node(state: ArchGraphState) -> dict:
     """Generate register spec via LLM specialist.
 
     Bypassed by default for streaming designs with no CSR surface. Set
-    ``SOCMATE_ENABLE_REGISTER_SPEC=1`` to run it. The legacy
-    ``SOCMATE_SKIP_REGISTER_SPEC=1`` still forces a skip.
+    ``CORESMITH_ENABLE_REGISTER_SPEC=1`` to run it. The legacy
+    ``CORESMITH_SKIP_REGISTER_SPEC=1`` still forces a skip.
     """
-    if not _stage_enabled("SOCMATE_ENABLE_REGISTER_SPEC", "SOCMATE_SKIP_REGISTER_SPEC"):
+    if not _stage_enabled("CORESMITH_ENABLE_REGISTER_SPEC", "CORESMITH_SKIP_REGISTER_SPEC"):
         _event(state, "Register Spec", "graph_node_enter", {"round": state["round"], "skipped": True})
         empty = {"skipped": True,
                  "result": {"skipped": True, "total_blocks": 0, "register_blocks": []},
-                 "rationale": "bypassed by default; set SOCMATE_ENABLE_REGISTER_SPEC=1 to run"}
+                 "rationale": "bypassed by default; set CORESMITH_ENABLE_REGISTER_SPEC=1 to run"}
         _event(state, "Register Spec", "graph_node_exit", {"round": state["round"], "skipped": True})
         update = {"register_spec": empty, "phase": "register_spec"}
         _persist_intermediate_state(state, update)
@@ -1282,7 +1282,7 @@ async def finalize_node(state: ArchGraphState) -> dict:
         # Write block_specs.json for RTL pipeline handoff (atomic write)
         from orchestrator.utils import atomic_write
 
-        specs_path = Path(project_root) / ".socmate" / "block_specs.json"
+        specs_path = Path(project_root) / ".coresmith" / "block_specs.json"
         atomic_write(specs_path, json.dumps(block_specs, indent=2))
 
         span.set_attribute("block_count", len(block_specs))

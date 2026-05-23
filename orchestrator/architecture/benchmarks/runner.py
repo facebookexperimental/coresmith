@@ -34,7 +34,7 @@ BENCHMARK_SYNTH_TIMEOUT_S = 60
 BENCHMARK_STA_TIMEOUT_S = 30
 
 # Directory for generated benchmark RTL and synthesis output
-BENCHMARK_OUTPUT_DIR = ".socmate/benchmarks"
+BENCHMARK_OUTPUT_DIR = ".coresmith/benchmarks"
 
 # Templates directory (relative to this file)
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -117,7 +117,7 @@ async def run_benchmark(
         max_clock_mhz, worst_slack_ns, synthesis_time_s, cached.
     """
     # Check cache first
-    cache_db = os.path.join(project_root, ".socmate", "benchmark_cache.db")
+    cache_db = os.path.join(project_root, ".coresmith", "benchmark_cache.db")
     cache = BenchmarkCache(cache_db)
 
     cached = cache.get(component, params, pdk_config.name, target_clock_mhz)

@@ -14,7 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_GIF = Path(
-    "/home/ubuntu/dashboards/dashboard/socmate-llm-bench/"
+    "/home/ubuntu/dashboards/dashboard/coresmith-llm-bench/"
     "multiframe-codec-handwritten/mort_original.gif"
 )
 
@@ -124,12 +124,12 @@ def run_point(qp: int, out_dir: Path, frames_npy: Path) -> dict:
 
 def main() -> int:
     gif_path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_GIF
-    out_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else ROOT / ".socmate" / "rd_current"
+    out_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else ROOT / ".coresmith" / "rd_current"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     frames_npy = make_frames(gif_path, out_dir / "mort_10f_640x360.npy")
-    qps = [int(v) for v in os.environ.get("SOCMATE_RD_QPS", "24,36,48").split(",") if v]
-    jobs = int(os.environ.get("SOCMATE_RD_JOBS", "1"))
+    qps = [int(v) for v in os.environ.get("CORESMITH_RD_QPS", "24,36,48").split(",") if v]
+    jobs = int(os.environ.get("CORESMITH_RD_JOBS", "1"))
 
     results: list[dict] = []
     with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:

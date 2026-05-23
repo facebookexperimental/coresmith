@@ -25,7 +25,7 @@ from typing import Any
 
 from opentelemetry import trace
 
-from .socmate_llm import ClaudeLLM
+from .coresmith_llm import ClaudeLLM
 
 _tracer = trace.get_tracer(__name__)
 
@@ -106,7 +106,7 @@ class DebugAgent:
     """
 
     def __init__(self, model: str | None = None, temperature: float = 0.1):
-        from orchestrator.langchain.agents.socmate_llm import block_model
+        from orchestrator.langchain.agents.coresmith_llm import block_model
         model = model or block_model()
         self.llm = ClaudeLLM(model=model, timeout=900)
 
@@ -165,8 +165,8 @@ class DebugAgent:
                 f"Failed phase: {phase}\n\n"
                 f"## Working Files\n"
                 f"Read these files to understand the failure:\n"
-                f"- Error log: .socmate/blocks/{block_name}/previous_error.txt\n"
-                f"- Step logs: .socmate/step_logs/{block_name}/ (read the latest {phase}_attempt*.log)\n"
+                f"- Error log: .coresmith/blocks/{block_name}/previous_error.txt\n"
+                f"- Step logs: .coresmith/step_logs/{block_name}/ (read the latest {phase}_attempt*.log)\n"
                 f"- VCD waveform: sim_build/{block_name}/dump.vcd\n"
                 f"- WaveKit audit: sim_build/{block_name}/wavekit_audit.json\n"
                 f"- Integration VCD, if this is a chip-level failure: sim_build/integration/dump.vcd\n"
@@ -174,18 +174,18 @@ class DebugAgent:
                 f"- RTL source: find the .v file for this block under rtl/\n"
                 f"- Testbench: tb/cocotb/test_{block_name}.py\n"
                 f"- uArch spec: arch/uarch_specs/{block_name}.md\n"
-                f"- Constraints: .socmate/blocks/{block_name}/constraints.json\n"
-                f"- Attempt history: .socmate/blocks/{block_name}/attempt_history.json\n"
-                f"- Block diagram: .socmate/block_diagram.json (for interface context)\n"
+                f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n"
+                f"- Attempt history: .coresmith/blocks/{block_name}/attempt_history.json\n"
+                f"- Block diagram: .coresmith/block_diagram.json (for interface context)\n"
                 f"- ERS: arch/ers_spec.md\n\n"
                 f"## Instructions\n"
                 f"1. Read the error log, step logs, VCD, and WaveKit audit to understand what failed\n"
                 f"2. Read the full RTL source and testbench to understand the design\n"
                 f"3. Read the uArch spec for design intent\n"
                 f"4. Diagnose the root cause\n"
-                f"5. Write your diagnosis to .socmate/blocks/{block_name}/diagnosis.json\n"
+                f"5. Write your diagnosis to .coresmith/blocks/{block_name}/diagnosis.json\n"
                 f"6. If you identify new constraints, append them to "
-                f".socmate/blocks/{block_name}/constraints.json\n\n"
+                f".coresmith/blocks/{block_name}/constraints.json\n\n"
                 f"The diagnosis.json must contain these fields:\n"
                 f'  diagnosis, category, suggested_fix, affected_blocks, '
                 f'escalate, confidence, constraints, needs_human, '
@@ -202,7 +202,7 @@ class DebugAgent:
                 run_name=run_name,
             )
 
-            diag_path = Path(project_root) / ".socmate" / "blocks" / block_name / "diagnosis.json"
+            diag_path = Path(project_root) / ".coresmith" / "blocks" / block_name / "diagnosis.json"
             if diag_path.exists():
                 return json.loads(diag_path.read_text())
 
@@ -246,11 +246,11 @@ class DebugAgent:
             user_message = (
                 f"Block: {block_name}\n\n"
                 f"## Working Files\n"
-                f"- Attempt history: .socmate/blocks/{block_name}/attempt_history.json\n"
-                f"- Error log: .socmate/blocks/{block_name}/previous_error.txt\n"
+                f"- Attempt history: .coresmith/blocks/{block_name}/attempt_history.json\n"
+                f"- Error log: .coresmith/blocks/{block_name}/previous_error.txt\n"
                 f"- RTL: find the .v file for this block under rtl/\n"
                 f"- uArch spec: arch/uarch_specs/{block_name}.md\n"
-                f"- Block diagram: .socmate/block_diagram.json\n"
+                f"- Block diagram: .coresmith/block_diagram.json\n"
                 f"- ERS: arch/ers_spec.md\n\n"
                 f"Review whether the failure requires architectural changes."
             )

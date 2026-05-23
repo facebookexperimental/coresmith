@@ -44,7 +44,7 @@ async def analyze_register_spec(
     """
     from opentelemetry import trace as _trace
 
-    tracer = _trace.get_tracer("socmate.architecture.register_spec")
+    tracer = _trace.get_tracer("coresmith.architecture.register_spec")
 
     with tracer.start_as_current_span("analyze_register_spec") as span:
         blocks = block_diagram.get("blocks", [])
@@ -80,7 +80,7 @@ async def analyze_register_spec(
                 except OSError:
                     pass
 
-        target_path = _P(project_root) / ".socmate" / "register_spec.json" if project_root else _P.cwd() / ".socmate" / "register_spec.json"
+        target_path = _P(project_root) / ".coresmith" / "register_spec.json" if project_root else _P.cwd() / ".coresmith" / "register_spec.json"
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         parts.append(
@@ -90,7 +90,7 @@ async def analyze_register_spec(
 
         user_message = "\n".join(parts)
 
-        from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
 

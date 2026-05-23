@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Postprocess the CAVLC SocMate run for dashboard publication.
+"""Postprocess the CAVLC CoreSmith run for dashboard publication.
 
 This hook is intentionally conservative.  It only marks the run done when the
 integrated RTL appears to be the v2 CAVLC top and Verilator collateral exists.
@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DASH_ROOT = Path("/home/ubuntu/dashboards/dashboard/socmate-llm-bench")
+DASH_ROOT = Path("/home/ubuntu/dashboards/dashboard/coresmith-llm-bench")
 OUT_DIR = DASH_ROOT / "codex-cavlc-multiframe-codec"
 SOURCE_GIF = DASH_ROOT / "multiframe-codec-handwritten" / "mort_original.gif"
 QPS = [18, 24, 30, 36, 42, 48]
@@ -77,7 +77,7 @@ def sweep_golden() -> dict:
 
     golden = import_golden()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    frames = load_frames(SOURCE_GIF, max_frames=int(__import__("os").environ.get("SOCMATE_RD_MAX_FRAMES", "10")))
+    frames = load_frames(SOURCE_GIF, max_frames=int(__import__("os").environ.get("CORESMITH_RD_MAX_FRAMES", "10")))
     height, width = frames[0].shape
     points = []
 
@@ -161,8 +161,8 @@ def copy_collateral() -> None:
         "examples/multiframe_codec_v2/requirements.md",
         "examples/multiframe_codec_v2/blocks.yaml",
         "examples/multiframe_codec_v2/codec_golden.py",
-        ".socmate/pipeline_events.jsonl",
-        ".socmate/run-20260513-top-codex-gpt55-cavlc.log",
+        ".coresmith/pipeline_events.jsonl",
+        ".coresmith/run-20260513-top-codex-gpt55-cavlc.log",
     ]:
         src = ROOT / rel
         if src.exists():
@@ -203,7 +203,7 @@ h1{{font-size:30px;margin:0 0 10px}} h2{{font-size:17px;margin:0 0 12px}} p{{col
 table{{width:100%;border-collapse:collapse}} th,td{{padding:10px 12px;border-bottom:1px solid #2b2f38;text-align:left}} th{{font-size:11px;color:#828997;text-transform:uppercase;letter-spacing:.06em}} .num{{font-family:monospace;text-align:right}}
 .chart{{background:white}} @media(max-width:850px){{.stats,.grid{{grid-template-columns:1fr 1fr}}}} @media(max-width:560px){{.stats,.grid{{grid-template-columns:1fr}}}}
 </style></head><body><main class="wrap">
-<div class="top"><strong>socmate-llm-bench</strong><a href="../">back to overview</a></div>
+<div class="top"><strong>coresmith-llm-bench</strong><a href="../">back to overview</a></div>
 <h1>Codex GPT-5.5 · CAVLC multiframe codec v2</h1>
 <p>This run starts from the top-level architecture prompt and uses GPT-5.5 through the Codex provider in bypass-permissions mode. The target is the improved H.264-inspired soft IP: all-intra frames, selectable 8x8 or 4x4 macroblocks, DC/vertical/horizontal prediction, CAVLC coefficient coding, and a deblocking filter.</p>
 <div class="stats">
@@ -242,16 +242,16 @@ def main() -> int:
     copy_collateral()
     write_dashboard(data, ready, status)
     update_parent_index()
-    (ROOT / ".socmate" / "postprocess_cavlc.status.json").write_text(
+    (ROOT / ".coresmith" / "postprocess_cavlc.status.json").write_text(
         json.dumps({"verilator_ready": ready, "status": status, "dashboard": str(OUT_DIR)}, indent=2),
         encoding="utf-8",
     )
     if ready:
         # The monitor keeps running until a real v2 Verilator R-D hook replaces
         # this preview marker.  Avoid a false success on software-only data.
-        (ROOT / ".socmate" / "postprocess_cavlc.partial").write_text(status + "\n", encoding="utf-8")
+        (ROOT / ".coresmith" / "postprocess_cavlc.partial").write_text(status + "\n", encoding="utf-8")
         return 2
-    (ROOT / ".socmate" / "postprocess_cavlc.partial").write_text(status + "\n", encoding="utf-8")
+    (ROOT / ".coresmith" / "postprocess_cavlc.partial").write_text(status + "\n", encoding="utf-8")
     return 2
 
 

@@ -675,9 +675,9 @@ def _check_derived_constraints(
                     })
 
     try:
-        socmate_dir = Path(project_root) / ".socmate"
-        socmate_dir.mkdir(parents=True, exist_ok=True)
-        (socmate_dir / "derived_constraints_audit.json").write_text(
+        coresmith_dir = Path(project_root) / ".coresmith"
+        coresmith_dir.mkdir(parents=True, exist_ok=True)
+        (coresmith_dir / "derived_constraints_audit.json").write_text(
             json.dumps({"facts": facts, "violations": violations}, indent=2, default=str),
             encoding="utf-8",
         )
@@ -808,12 +808,12 @@ def _check_performance_constraints(
 def _shuttle_constraints_enabled(requirements: str = "", ers_spec: dict | None = None) -> bool:
     """Return whether package/shuttle constraints should be enforced.
 
-    Most SocMate frontend runs generate reusable soft IP, where block ports are
+    Most CoreSmith frontend runs generate reusable soft IP, where block ports are
     internal module interfaces rather than package GPIO. Shuttle pad/area checks
     are useful for MPW benchmark wrappers, but they must be opt-in to avoid
     forcing every soft IP through an OpenFrame pin budget.
     """
-    value = os.environ.get("SOCMATE_ENABLE_SHUTTLE_CONSTRAINTS", "").strip().lower()
+    value = os.environ.get("CORESMITH_ENABLE_SHUTTLE_CONSTRAINTS", "").strip().lower()
     if value in {"1", "true", "yes", "on"}:
         return True
     if value in {"0", "false", "no", "off"}:
@@ -860,7 +860,7 @@ async def check_constraints(
     """
     from opentelemetry import trace as _trace
 
-    tracer = _trace.get_tracer("socmate.architecture.constraints")
+    tracer = _trace.get_tracer("coresmith.architecture.constraints")
 
     with tracer.start_as_current_span("check_constraints") as span:
         # --- Deterministic shuttle checks (opt-in for package/top-level runs) ---
@@ -936,7 +936,7 @@ async def check_constraints(
                 "11-12. Skipped for this run. The architecture target is reusable "
                 "soft IP, so block interfaces are internal RTL ports rather than "
                 "package GPIO. Enforce shuttle GPIO/area only when "
-                "SOCMATE_ENABLE_SHUTTLE_CONSTRAINTS=1 or the requirements "
+                "CORESMITH_ENABLE_SHUTTLE_CONSTRAINTS=1 or the requirements "
                 "explicitly target an MPW/OpenFrame/Caravel wrapper.\n"
             )
 
@@ -1047,7 +1047,7 @@ async def check_constraints(
 
         user_message = "\n".join(parts)
 
-        from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=600)
 

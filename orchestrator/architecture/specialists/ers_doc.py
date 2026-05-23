@@ -52,7 +52,7 @@ async def generate_ers_doc(
     """
     from opentelemetry import trace as _trace
 
-    tracer = _trace.get_tracer("socmate.architecture.ers_doc")
+    tracer = _trace.get_tracer("coresmith.architecture.ers_doc")
 
     with tracer.start_as_current_span("generate_ers_doc") as span:
         def _ctx(data, key=None, text_key=None):
@@ -102,7 +102,7 @@ async def generate_ers_doc(
             golden_model_context=golden_model_context,
         )
 
-        target_path = Path(project_root) / ".socmate" / "ers_spec.json"
+        target_path = Path(project_root) / ".coresmith" / "ers_spec.json"
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         user_message = (
@@ -113,7 +113,7 @@ async def generate_ers_doc(
             "After writing, respond with only the file path confirmation."
         )
 
-        from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
 

@@ -417,7 +417,7 @@ def generate_block_diagram_doc(
         "metadata": {
             "design_name": design_name,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "source": "socmate_architecture",
+            "source": "coresmith_architecture",
             "block_count": len(blocks),
             "connection_count": len(connections),
         },
@@ -457,7 +457,7 @@ def persist_block_diagram_doc(doc: dict, project_root: str) -> Path:
     Returns:
         Path to the written file.
     """
-    out_path = Path(project_root) / ".socmate" / "block_diagram_viz.json"
+    out_path = Path(project_root) / ".coresmith" / "block_diagram_viz.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(doc, indent=2, default=str))
     log.info("Block diagram doc written to %s", out_path)

@@ -3,11 +3,11 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Shared test fixtures for the socmate orchestrator test suite.
+Shared test fixtures for the coresmith orchestrator test suite.
 
 Provides:
 - State isolation fixtures (isolated_project, fft16_initial_state) that use
-  tmp_path so tests never touch the real .socmate/ directory.
+  tmp_path so tests never touch the real .coresmith/ directory.
 - Graph fixtures (arch_graph, pipeline_graph, backend_graph) with in-memory
   MemorySaver checkpointers -- no SQLite files created.
 - MCP server reset fixture for tests that exercise the tool layer.
@@ -58,13 +58,13 @@ _ensure_constraint_prompt()
 
 @pytest.fixture
 def isolated_project(tmp_path):
-    """Temporary project root with a clean .socmate/ directory.
+    """Temporary project root with a clean .coresmith/ directory.
 
     Use for any test that writes state to disk (ERS, block_specs, etc.).
     The tmp_path is auto-deleted by pytest after the test.
     """
-    socmate_dir = tmp_path / ".socmate"
-    socmate_dir.mkdir()
+    coresmith_dir = tmp_path / ".coresmith"
+    coresmith_dir.mkdir()
     return str(tmp_path)
 
 
@@ -162,9 +162,9 @@ def fft16_full_docs(isolated_project):
     Use for tests that start mid-flow or need to verify consumer reads
     against the per-document state architecture.
     """
-    socmate = Path(isolated_project) / ".socmate"
+    coresmith = Path(isolated_project) / ".coresmith"
     for name, data in _FFT16_JSON_DOC_MAP.items():
-        (socmate / name).write_text(json.dumps(data, indent=2))
+        (coresmith / name).write_text(json.dumps(data, indent=2))
     arch = Path(isolated_project) / "arch"
     arch.mkdir(parents=True, exist_ok=True)
     for name, text in _FFT16_MD_DOC_MAP.items():
@@ -180,7 +180,7 @@ _MD_ONLY_DOCS = {"sad_spec", "frd_spec"}
 
 
 def assert_doc_files(project_root: str, expected: list[str]) -> None:
-    """Assert that each doc has .md in arch/ and optionally .json in .socmate/.
+    """Assert that each doc has .md in arch/ and optionally .json in .coresmith/.
 
     SAD and FRD are markdown-only (no .json). All others have both.
 
@@ -190,7 +190,7 @@ def assert_doc_files(project_root: str, expected: list[str]) -> None:
 
     Raises AssertionError with a descriptive message on failure.
     """
-    socmate = Path(project_root) / ".socmate"
+    coresmith = Path(project_root) / ".coresmith"
     arch = Path(project_root) / "arch"
     for doc in expected:
         md_path = arch / f"{doc}.md"
@@ -199,7 +199,7 @@ def assert_doc_files(project_root: str, expected: list[str]) -> None:
         assert md_text.startswith("#"), f"{md_path} doesn't start with a heading"
 
         if doc not in _MD_ONLY_DOCS:
-            json_path = socmate / f"{doc}.json"
+            json_path = coresmith / f"{doc}.json"
             assert json_path.exists(), f"Missing {json_path}"
             data = json.loads(json_path.read_text())
             assert isinstance(data, dict), f"{json_path} is not a JSON object"
@@ -218,37 +218,37 @@ def reset_mcp_state(tmp_path, monkeypatch):
     """
     import orchestrator.mcp_server as mcp
 
-    (tmp_path / ".socmate").mkdir()
+    (tmp_path / ".coresmith").mkdir()
 
     monkeypatch.setattr(mcp, "_PROJECT_ROOT", str(tmp_path))
     monkeypatch.setattr(
         mcp, "_ARCH_CHECKPOINT_DB",
-        str(tmp_path / ".socmate" / "architecture_checkpoint.db"),
+        str(tmp_path / ".coresmith" / "architecture_checkpoint.db"),
     )
     monkeypatch.setattr(
         mcp, "_CHECKPOINT_DB",
-        str(tmp_path / ".socmate" / "pipeline_checkpoint.db"),
+        str(tmp_path / ".coresmith" / "pipeline_checkpoint.db"),
     )
     monkeypatch.setattr(
         mcp, "_BACKEND_CHECKPOINT_DB",
-        str(tmp_path / ".socmate" / "backend_checkpoint.db"),
+        str(tmp_path / ".coresmith" / "backend_checkpoint.db"),
     )
 
     mcp._architecture = mcp.GraphLifecycle(
         name="architecture",
-        checkpoint_db=str(tmp_path / ".socmate" / "architecture_checkpoint.db"),
+        checkpoint_db=str(tmp_path / ".coresmith" / "architecture_checkpoint.db"),
         builder_fn_path="orchestrator.langgraph.architecture_graph",
         builder_fn_name="build_architecture_graph",
     )
     mcp._pipeline = mcp.GraphLifecycle(
         name="pipeline",
-        checkpoint_db=str(tmp_path / ".socmate" / "pipeline_checkpoint.db"),
+        checkpoint_db=str(tmp_path / ".coresmith" / "pipeline_checkpoint.db"),
         builder_fn_path="orchestrator.langgraph.pipeline_graph",
         builder_fn_name="build_pipeline_graph",
     )
     mcp._backend = mcp.GraphLifecycle(
         name="backend",
-        checkpoint_db=str(tmp_path / ".socmate" / "backend_checkpoint.db"),
+        checkpoint_db=str(tmp_path / ".coresmith" / "backend_checkpoint.db"),
         builder_fn_path="orchestrator.langgraph.backend_graph",
         builder_fn_name="build_backend_graph",
     )

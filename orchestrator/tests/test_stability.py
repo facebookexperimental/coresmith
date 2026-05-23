@@ -3,7 +3,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-End-to-end stability tests for the socmate architecture pipeline.
+End-to-end stability tests for the coresmith architecture pipeline.
 
 Verifies that the full flow doesn't crash, transitions between stages
 work correctly, and the FFT16 reference design passes through the
@@ -401,7 +401,7 @@ class TestPipelineStability:
         stack = ExitStack()
         _mod = "orchestrator.langgraph.pipeline_graph"
 
-        (tmp_dir / ".socmate").mkdir(exist_ok=True)
+        (tmp_dir / ".coresmith").mkdir(exist_ok=True)
 
         def _make_rtl(block, *a, **kw):
             name = block["name"]
@@ -638,7 +638,7 @@ class TestDocumentSetCompleteness:
             "register_spec", "ers_spec",
         ])
 
-        assert (Path(project_root) / ".socmate" / "block_specs.json").exists()
+        assert (Path(project_root) / ".coresmith" / "block_specs.json").exists()
 
     @pytest.mark.asyncio
     async def test_no_architecture_state_json_after_full_flow(self, fft16_initial_state):
@@ -665,7 +665,7 @@ class TestDocumentSetCompleteness:
         assert result["success"] is True
 
         project_root = fft16_initial_state["project_root"]
-        arch_state = Path(project_root) / ".socmate" / "architecture_state.json"
+        arch_state = Path(project_root) / ".coresmith" / "architecture_state.json"
         if arch_state.exists():
             pytest.xfail(
                 "architecture_state.json still written "

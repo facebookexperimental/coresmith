@@ -59,7 +59,7 @@ def test_derived_geometry_passes_for_consistent_contract(tmp_path):
     )
 
     assert violations == []
-    audit = json.loads((tmp_path / ".socmate" / "derived_constraints_audit.json").read_text())
+    audit = json.loads((tmp_path / ".coresmith" / "derived_constraints_audit.json").read_text())
     assert audit["facts"]["source_dim"][:2] == [640, 360]
 
 
@@ -85,7 +85,7 @@ def test_derived_geometry_ignores_physical_and_subblock_dimensions(tmp_path):
     )
 
     assert violations == []
-    audit = json.loads((tmp_path / ".socmate" / "derived_constraints_audit.json").read_text())
+    audit = json.loads((tmp_path / ".coresmith" / "derived_constraints_audit.json").read_text())
     assert audit["facts"]["source_dim"][:2] == [640, 360]
 
 

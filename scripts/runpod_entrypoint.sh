@@ -3,14 +3,14 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 #
-# runpod_entrypoint.sh -- container entrypoint for the socmate Docker image.
+# runpod_entrypoint.sh -- container entrypoint for the coresmith Docker image.
 #
-# Picks one of three modes based on the SOCMATE_MODE env var:
+# Picks one of three modes based on the CORESMITH_MODE env var:
 #
-#   SOCMATE_MODE=pipeline   Run `make pipeline` headlessly (default for CI / batch)
-#   SOCMATE_MODE=mcp        Start the MCP server on stdio (for `claude --mcp ...`)
-#   SOCMATE_MODE=mcp-http   Start the MCP server behind mcp-proxy on $MCP_PORT (default 8765)
-#   SOCMATE_MODE=shell      Drop into an interactive bash (default for `docker run -it`)
+#   CORESMITH_MODE=pipeline   Start coresmithd in foreground (driven by an outer agent)
+#   CORESMITH_MODE=mcp        Start the MCP server on stdio (for `claude --mcp ...`)
+#   CORESMITH_MODE=mcp-http   Start the MCP server behind mcp-proxy on $MCP_PORT (default 8765)
+#   CORESMITH_MODE=shell      Drop into an interactive bash (default for `docker run -it`)
 #
 # Authentication:
 #   - If $CLAUDE_CODE_OAUTH_TOKEN is set, it is exported untouched -- the
@@ -21,14 +21,14 @@
 #     a RunPod hour on a misconfigured pod.
 #
 # Optional overrides:
-#   SOCMATE_MODEL=sonnet-4.6   Pin a specific model (short name or full ID)
-#   SOCMATE_REQUIREMENTS_FILE  Path to a text file with architecture requirements
+#   CORESMITH_MODEL=sonnet-4.6   Pin a specific model (short name or full ID)
+#   CORESMITH_REQUIREMENTS_FILE  Path to a text file with architecture requirements
 #                              (used in mcp / pipeline modes that need a starter prompt)
 #   PUBLIC_KEY                 SSH public key to install for root. If set, the
 #                              entrypoint starts sshd in the background so the
 #                              container is reachable on port 22 (RunPod sets
 #                              this automatically from the pod template).
-#   SOCMATE_KEEP_ALIVE=1       In pipeline mode, keep the container running
+#   CORESMITH_KEEP_ALIVE=1       In pipeline mode, keep the container running
 #                              after the pipeline exits (so SSH / RunPod web
 #                              terminal can still attach for inspection).
 #                              Implied when PUBLIC_KEY is set.
@@ -38,18 +38,18 @@ set -euo pipefail
 # Pick up build-time-baked env (currently: CLAUDE_CLI_PATH so the orchestrator
 # can't fail to resolve `claude` if a downstream PATH munge drops the nix
 # profile dir).
-if [[ -f /etc/socmate.env ]]; then
+if [[ -f /etc/coresmith.env ]]; then
     # shellcheck disable=SC1091
-    . /etc/socmate.env
+    . /etc/coresmith.env
     [[ -n "${CLAUDE_CLI_PATH:-}" ]] && export CLAUDE_CLI_PATH
 fi
 
 # --- Project root -----------------------------------------------------------
-PROJECT_ROOT="${SOCMATE_PROJECT_ROOT:-/socmate}"
+PROJECT_ROOT="${CORESMITH_PROJECT_ROOT:-/coresmith}"
 cd "${PROJECT_ROOT}"
 
-mode="${SOCMATE_MODE:-shell}"
-echo "[socmate] entrypoint: mode=${mode} project_root=${PROJECT_ROOT}"
+mode="${CORESMITH_MODE:-shell}"
+echo "[coresmith] entrypoint: mode=${mode} project_root=${PROJECT_ROOT}"
 
 # --- Optional sshd bootstrap (RunPod / interactive use) ---------------------
 # Started for every mode -- harmless if no PUBLIC_KEY is set (returns early).
@@ -60,7 +60,7 @@ maybe_start_sshd() {
     local sshd_bin
     sshd_bin="$(command -v sshd 2>/dev/null || true)"
     if [[ -z "${sshd_bin}" ]]; then
-        echo "[socmate] PUBLIC_KEY set but sshd not installed; skipping ssh setup" >&2
+        echo "[coresmith] PUBLIC_KEY set but sshd not installed; skipping ssh setup" >&2
         return 0
     fi
     mkdir -p /root/.ssh /var/run/sshd /run/sshd
@@ -70,9 +70,9 @@ maybe_start_sshd() {
     fi
     chmod 600 /root/.ssh/authorized_keys
     if "${sshd_bin}"; then
-        echo "[socmate] sshd started on :22 (PUBLIC_KEY accepted)"
+        echo "[coresmith] sshd started on :22 (PUBLIC_KEY accepted)"
     else
-        echo "[socmate] sshd failed to start (rc=$?)" >&2
+        echo "[coresmith] sshd failed to start (rc=$?)" >&2
     fi
 }
 maybe_start_sshd
@@ -80,18 +80,18 @@ maybe_start_sshd
 # --- Auth check (skipped in shell mode so users can poke around) ------------
 require_auth() {
     if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
-        echo "[socmate] auth: using CLAUDE_CODE_OAUTH_TOKEN"
+        echo "[coresmith] auth: using CLAUDE_CODE_OAUTH_TOKEN"
         export CLAUDE_CODE_OAUTH_TOKEN
         return 0
     fi
     if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-        echo "[socmate] auth: using ANTHROPIC_API_KEY"
+        echo "[coresmith] auth: using ANTHROPIC_API_KEY"
         export ANTHROPIC_API_KEY
         return 0
     fi
     cat <<'MSG' >&2
 
-[socmate] ERROR: no Claude credentials found.
+[coresmith] ERROR: no Claude credentials found.
 
 Set one of:
 
@@ -101,22 +101,22 @@ Set one of:
 For RunPod, add the variable in the pod template's "Environment Variables"
 section. For docker run, pass it via -e:
 
-  docker run -e ANTHROPIC_API_KEY=sk-ant-... socmate:latest
+  docker run -e ANTHROPIC_API_KEY=sk-ant-... coresmith:latest
 
-Set SOCMATE_MODE=shell to drop into a debug shell without auth.
+Set CORESMITH_MODE=shell to drop into a debug shell without auth.
 
 MSG
     exit 2
 }
 
 # --- Optional model override echo -------------------------------------------
-if [[ -n "${SOCMATE_MODEL:-}" ]]; then
-    echo "[socmate] model override: SOCMATE_MODEL=${SOCMATE_MODEL}"
+if [[ -n "${CORESMITH_MODEL:-}" ]]; then
+    echo "[coresmith] model override: CORESMITH_MODEL=${CORESMITH_MODEL}"
 fi
 
 # --- Preflight: bail early if the toolchain is broken (skipped in shell) ---
 run_preflight() {
-    echo "[socmate] running preflight..."
+    echo "[coresmith] running preflight..."
     if ! python3 -c "
 from orchestrator.langgraph.pipeline_helpers import preflight_check
 import json, sys
@@ -124,7 +124,7 @@ r = preflight_check(['pipeline', 'backend'])
 print(json.dumps(r, indent=2))
 sys.exit(0 if r['ok'] else 1)
 "; then
-        echo "[socmate] preflight failed; aborting." >&2
+        echo "[coresmith] preflight failed; aborting." >&2
         exit 3
     fi
 }
@@ -138,34 +138,38 @@ case "${mode}" in
         if [[ $# -gt 0 ]]; then
             exec "$@"
         fi
-        echo "[socmate] dropping into bash. Try: make help"
+        echo "[coresmith] dropping into bash. Try: make help"
         exec bash
         ;;
 
     pipeline)
         require_auth
         run_preflight
-        log_file="${SOCMATE_PIPELINE_LOG:-/socmate/.socmate/pipeline.log}"
+        log_file="${CORESMITH_PIPELINE_LOG:-/coresmith/.coresmith/pipeline.log}"
         mkdir -p "$(dirname "${log_file}")"
-        echo "[socmate] starting frontend pipeline (run_pipeline.py); log -> ${log_file}"
+        echo "[coresmith] starting coresmithd in the foreground; log -> ${log_file}"
 
-        # Run the pipeline with stdout/stderr teed to a persistent log on
-        # the volume. Using `set +e` + PIPESTATUS so a non-zero pipeline
-        # rc doesn't kill the script before the keep-alive branch.
+        # The daemon parks on every interrupt and does NOT auto-approve. An
+        # outer agent (Claude on cron, a human, or another script) is
+        # expected to drive resume decisions via `bin/coresmith resume`.
+        # If you want a fully unattended run, write a small driver that
+        # polls /run/state and POSTs /run/resume; do not bake auto-approve
+        # back into the daemon.
         set +e
-        python3 run_pipeline.py "$@" 2>&1 | tee "${log_file}"
+        export CORESMITH_PROJECT_ROOT="${CORESMITH_PROJECT_ROOT:-/coresmith}"
+        python3 -m orchestrator.daemon.server "$@" 2>&1 | tee "${log_file}"
         rc=${PIPESTATUS[0]}
         set -e
-        echo "[socmate] pipeline exited rc=${rc}"
+        echo "[coresmith] daemon exited rc=${rc}"
 
         # Keep PID 1 alive on RunPod (PUBLIC_KEY set) or when the operator
-        # explicitly opts in via SOCMATE_KEEP_ALIVE=1, so SSH and the
+        # explicitly opts in via CORESMITH_KEEP_ALIVE=1, so SSH and the
         # RunPod web terminal can still attach for post-mortem. For plain
         # `docker run` users with neither set, exit cleanly with the
         # pipeline's rc.
-        if [[ "${SOCMATE_KEEP_ALIVE:-0}" == "1" ]] || [[ -n "${PUBLIC_KEY:-}" ]]; then
-            echo "[socmate] keeping container alive for inspection (rc=${rc})."
-            echo "[socmate] tailing ${log_file} as PID 1; ssh in to inspect state."
+        if [[ "${CORESMITH_KEEP_ALIVE:-0}" == "1" ]] || [[ -n "${PUBLIC_KEY:-}" ]]; then
+            echo "[coresmith] keeping container alive for inspection (rc=${rc})."
+            echo "[coresmith] tailing ${log_file} as PID 1; ssh in to inspect state."
             exec tail -F "${log_file}"
         fi
         exit "${rc}"
@@ -174,7 +178,7 @@ case "${mode}" in
     mcp)
         require_auth
         run_preflight
-        echo "[socmate] starting MCP server on stdio"
+        echo "[coresmith] starting MCP server on stdio"
         exec python3 -m orchestrator.mcp_server "$@"
         ;;
 
@@ -183,24 +187,24 @@ case "${mode}" in
         run_preflight
         port="${MCP_PORT:-8765}"
         if ! command -v mcp-proxy >/dev/null 2>&1; then
-            echo "[socmate] mcp-proxy not installed; installing now (npm)"
+            echo "[coresmith] mcp-proxy not installed; installing now (npm)"
             npm install -g @modelcontextprotocol/proxy >/dev/null 2>&1 \
                 || pip install mcp-proxy >/dev/null 2>&1 \
-                || { echo "[socmate] cannot install mcp-proxy" >&2; exit 4; }
+                || { echo "[coresmith] cannot install mcp-proxy" >&2; exit 4; }
         fi
-        echo "[socmate] starting MCP server behind HTTP proxy on :${port}"
+        echo "[coresmith] starting MCP server behind HTTP proxy on :${port}"
         exec mcp-proxy --port "${port}" -- python3 -m orchestrator.mcp_server "$@"
         ;;
 
     test)
         run_preflight || true
-        echo "[socmate] running test suite (excluding live_llm and e2e)"
+        echo "[coresmith] running test suite (excluding live_llm and e2e)"
         exec python3 -m pytest orchestrator/tests/ -v \
             -m "not live_llm and not requires_nix and not e2e" "$@"
         ;;
 
     *)
-        echo "[socmate] unknown SOCMATE_MODE=${mode}" >&2
+        echo "[coresmith] unknown CORESMITH_MODE=${mode}" >&2
         echo "  valid: shell | pipeline | mcp | mcp-http | test" >&2
         exit 1
         ;;

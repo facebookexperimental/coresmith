@@ -9,11 +9,11 @@ Provides a simple ``call(system, prompt) -> str`` interface that all agents
 (RTLGenerator, TestbenchGenerator, DebugAgent, TimingClosureAgent, etc.) use.
 
 Uses the ``claude`` binary (Claude Code CLI) by default. Set
-``SOCMATE_LLM_PROVIDER=codex`` to use ``codex exec`` instead.
+``CORESMITH_LLM_PROVIDER=codex`` to use ``codex exec`` instead.
 
 Telemetry
 ---------
-Every LLM call is logged to ``.socmate/llm_calls.jsonl`` with full prompt
+Every LLM call is logged to ``.coresmith/llm_calls.jsonl`` with full prompt
 and response content, enabling prompt engineering iteration.  Calls are
 also wrapped in OpenTelemetry spans with ``input.value`` and ``output.value``
 attributes for the webview trace viewer.
@@ -154,7 +154,7 @@ def kill_active_cli_processes() -> int:
 # LLM call telemetry -- JSONL + OpenTelemetry
 # ---------------------------------------------------------------------------
 
-_LLM_LOG_RELPATH = ".socmate/llm_calls.jsonl"
+_LLM_LOG_RELPATH = ".coresmith/llm_calls.jsonl"
 _TRUNCATE_ATTR = 32_000  # OTel attribute max (span attrs); JSONL is untruncated
 
 
@@ -164,9 +164,9 @@ def _default_project_root() -> str:
 
 def _llm_log_root() -> str:
     return (
-        os.environ.get("SOCMATE_LLM_LOG_ROOT", "").strip()
-        or os.environ.get("SOCMATE_TELEMETRY_ROOT", "").strip()
-        or os.environ.get("SOCMATE_PROJECT_ROOT", "").strip()
+        os.environ.get("CORESMITH_LLM_LOG_ROOT", "").strip()
+        or os.environ.get("CORESMITH_TELEMETRY_ROOT", "").strip()
+        or os.environ.get("CORESMITH_PROJECT_ROOT", "").strip()
         or _default_project_root()
     )
 
@@ -175,7 +175,7 @@ def _get_llm_tracer():
     """Lazy import to avoid circular deps at module load time."""
     try:
         from opentelemetry import trace
-        return trace.get_tracer("socmate.llm")
+        return trace.get_tracer("coresmith.llm")
     except Exception:
         return None
 
@@ -196,7 +196,7 @@ def _log_llm_call(
 ) -> None:
     """Write an LLM call record to the JSONL log and an OTel span.
 
-    The JSONL log at ``.socmate/llm_calls.jsonl`` contains the FULL
+    The JSONL log at ``.coresmith/llm_calls.jsonl`` contains the FULL
     prompt and response (never truncated).  OTel span attributes are
     truncated to ~32K chars to stay within exporter limits.
     """
@@ -370,7 +370,7 @@ _CLI_MODEL_MAP = {
 }
 
 _CODEX_MODEL_MAP = {
-    # Preserve existing SocMate model tiers when switching providers.
+    # Preserve existing CoreSmith model tiers when switching providers.
     "opus-4.7": "gpt-5.5",
     "opus-4.6": "gpt-5.5",
     "sonnet-4.6": "gpt-5.4-mini",
@@ -379,7 +379,7 @@ _CODEX_MODEL_MAP = {
     "haiku-3.5": "gpt-5.4-mini",
 }
 
-# Default model used by every agent unless overridden. Set the SOCMATE_MODEL
+# Default model used by every agent unless overridden. Set the CORESMITH_MODEL
 # environment variable (to either a short name above or a full Claude CLI
 # model ID) to override at runtime without code changes -- useful when the
 # default version is unavailable on a fresh CLI install.
@@ -388,21 +388,21 @@ DEFAULT_CODEX_MODEL = "gpt-5.5"
 
 # Cheaper model for per-block agents (uarch, rtl, testbench, diagnose, lint
 # fix, tb fix).  Integration and review agents still call DEFAULT_MODEL.
-# Override with SOCMATE_BLOCK_MODEL env var.
+# Override with CORESMITH_BLOCK_MODEL env var.
 BLOCK_MODEL = "sonnet-4.6"
 
 
 def _resolve_model(model: str, provider: str = "claude_cli") -> str:
     """Map short model name to the selected CLI model ID.
 
-    Honours the ``SOCMATE_MODEL`` environment variable as a runtime
+    Honours the ``CORESMITH_MODEL`` environment variable as a runtime
     override: if set, it wins over whatever the caller passed in. Empty
     or unset model strings fall back to ``DEFAULT_MODEL``.
     """
     if provider == "codex_cli":
         env_override = (
-            os.environ.get("SOCMATE_CODEX_MODEL", "").strip()
-            or os.environ.get("SOCMATE_MODEL", "").strip()
+            os.environ.get("CORESMITH_CODEX_MODEL", "").strip()
+            or os.environ.get("CORESMITH_MODEL", "").strip()
         )
         if env_override:
             return _CODEX_MODEL_MAP.get(env_override, env_override)
@@ -410,7 +410,7 @@ def _resolve_model(model: str, provider: str = "claude_cli") -> str:
             return DEFAULT_CODEX_MODEL
         return _CODEX_MODEL_MAP.get(model, model)
 
-    env_override = os.environ.get("SOCMATE_MODEL", "").strip()
+    env_override = os.environ.get("CORESMITH_MODEL", "").strip()
     if env_override:
         model = env_override
     elif not model:
@@ -422,26 +422,26 @@ def block_model() -> str:
     """Return the model to use for per-block agents.
 
     Defaults to ``BLOCK_MODEL`` (Sonnet) but can be overridden with the
-    ``SOCMATE_BLOCK_MODEL`` env var.  Used by uarch/rtl/testbench/diagnose
+    ``CORESMITH_BLOCK_MODEL`` env var.  Used by uarch/rtl/testbench/diagnose
     agents so the bulk of a run goes through Sonnet, with Opus reserved
     for the chip-level integration step.
     """
-    return os.environ.get("SOCMATE_BLOCK_MODEL", "").strip() or BLOCK_MODEL
+    return os.environ.get("CORESMITH_BLOCK_MODEL", "").strip() or BLOCK_MODEL
 
 
 def _detect_provider() -> str:
     """Detect which LLM provider to use.
 
-    Defaults to Claude CLI.  Set ``SOCMATE_LLM_PROVIDER=codex`` (or
+    Defaults to Claude CLI.  Set ``CORESMITH_LLM_PROVIDER=codex`` (or
     ``codex_cli``) to route calls through ``codex exec``.
     """
-    provider = os.environ.get("SOCMATE_LLM_PROVIDER", "").strip().lower()
+    provider = os.environ.get("CORESMITH_LLM_PROVIDER", "").strip().lower()
     if provider in {"codex", "codex_cli"}:
         return "codex_cli"
     if provider in {"claude", "claude_cli", ""}:
         return "claude_cli"
     raise ValueError(
-        "Unsupported SOCMATE_LLM_PROVIDER={!r}. Use 'claude' or 'codex'.".format(provider)
+        "Unsupported CORESMITH_LLM_PROVIDER={!r}. Use 'claude' or 'codex'.".format(provider)
     )
     return "claude_cli"
 
@@ -525,7 +525,7 @@ class ClaudeLLM:
         text = await llm.call(system="You are ...", prompt="Generate ...")
 
     The ``model`` argument may be left empty to fall back to ``DEFAULT_MODEL``,
-    and the ``SOCMATE_MODEL`` env var overrides both at call time.
+    and the ``CORESMITH_MODEL`` env var overrides both at call time.
     """
 
     def __init__(
@@ -627,7 +627,7 @@ class ClaudeLLM:
     # Stall detection: if no new stdout/stderr output for this many seconds
     # the process is likely hung on a permission prompt or similar.
     # Set to 1200s (20 min) for slower specialist calls (clock tree, memory map, etc.)
-    # Scaled by SOCMATE_TIMEOUT_MULTIPLIER (default 1.0) so slow local models
+    # Scaled by CORESMITH_TIMEOUT_MULTIPLIER (default 1.0) so slow local models
     # like Qwen 3.6 27B (~25 tok/s on a single RTX PRO 6000) can finish
     # their 25-30K-token reasoning + write trajectories without being killed.
     _STALL_THRESHOLD_S: int = 1200  # scaled by scaled() at use sites; see orchestrator._timeouts
@@ -835,16 +835,16 @@ class ClaudeLLM:
         resolved_model = _resolve_model(self.model, self._provider)
 
         workdir = (
-            os.environ.get("SOCMATE_CODEX_WORKDIR", "").strip()
-            or os.environ.get("SOCMATE_PROJECT_ROOT", "").strip()
+            os.environ.get("CORESMITH_CODEX_WORKDIR", "").strip()
+            or os.environ.get("CORESMITH_PROJECT_ROOT", "").strip()
             or _default_project_root()
         )
-        isolate_workdir = os.environ.get("SOCMATE_CODEX_ISOLATE_WORKDIR", "1").strip().lower()
+        isolate_workdir = os.environ.get("CORESMITH_CODEX_ISOLATE_WORKDIR", "1").strip().lower()
         if isolate_workdir not in {"0", "false", "no", "off"}:
             Path(workdir).mkdir(parents=True, exist_ok=True)
             workdir = tempfile.mkdtemp(prefix="codex-call-", dir=workdir)
         log_root = _llm_log_root()
-        sandbox = os.environ.get("SOCMATE_CODEX_SANDBOX", "workspace-write").strip()
+        sandbox = os.environ.get("CORESMITH_CODEX_SANDBOX", "workspace-write").strip()
 
         cmd: list[str] = [
             self.codex_path,
@@ -1051,7 +1051,7 @@ class ClaudeLLM:
         t_err.start()
 
         # Set up live streaming trajectory file for realtime webview updates
-        live_dir = Path(project_root) / ".socmate" / "live_streams"
+        live_dir = Path(project_root) / ".coresmith" / "live_streams"
         live_dir.mkdir(parents=True, exist_ok=True)
         stream_path = live_dir / f"{process.pid}.json"
         wall_start = _time_mod.time()  # wall clock for event correlation

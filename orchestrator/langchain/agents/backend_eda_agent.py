@@ -19,7 +19,7 @@ import json
 import logging
 from pathlib import Path
 
-from .socmate_llm import DEFAULT_MODEL
+from .coresmith_llm import DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ class BackendEDAAgent:
             The LLM-modified script content. Falls back to the baseline
             on any LLM failure.
         """
-        from orchestrator.langchain.agents.socmate_llm import ClaudeLLM
+        from orchestrator.langchain.agents.coresmith_llm import ClaudeLLM
 
         ctx = {**context, "baseline_script": baseline_script}
         try:
@@ -138,7 +138,7 @@ class BackendEDAAgent:
             Parsed JSON dict from the LLM. Falls back to a default
             result on failure.
         """
-        from orchestrator.langchain.agents.socmate_llm import ClaudeLLM
+        from orchestrator.langchain.agents.coresmith_llm import ClaudeLLM
 
         try:
             system_prompt = self._prompt_template.format(**context)

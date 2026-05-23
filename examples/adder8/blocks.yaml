@@ -8,7 +8,7 @@
 # and it runs in a few minutes even on the slowest CI runner.
 #
 # Loaded into orchestrator/config.yaml's blocks: section via the
-# SOCMATE_BLOCKS_FILE env var (see orchestrator/langgraph/pipeline_helpers.py).
+# CORESMITH_BLOCKS_FILE env var (see orchestrator/langgraph/pipeline_helpers.py).
 
 blocks:
   adder8:
@@ -31,5 +31,5 @@ blocks:
       (Sky130). Single-cycle combinational; no pipeline registers.
 
       Target: Sky130 sky130_fd_sc_hd. This is a smoke-test reference design
-      used to validate a fresh socmate install end-to-end; it is not a
+      used to validate a fresh coresmith install end-to-end; it is not a
       realistic production block.

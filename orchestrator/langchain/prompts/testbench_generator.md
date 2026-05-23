@@ -230,7 +230,7 @@ on disk. If it does:
 3. If the module interface has NOT changed (same ports, same widths), do
    NOT rewrite the testbench from scratch. Instead, make targeted edits
    to fix only the failing tests based on the constraints in
-   `.socmate/blocks/<block>/constraints.json`
+   `.coresmith/blocks/<block>/constraints.json`
 4. Only do a full rewrite if the module interface changed (ports
    added/removed/resized) or the testbench has fundamental structural
    problems (import errors, wrong module name, etc.)

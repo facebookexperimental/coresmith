@@ -2,7 +2,7 @@
 #
 # Reference golden model: examples/multiframe_codec/codec_golden.py
 # (the Python encoder/decoder we hand-validated end-to-end at PSNR 41.84 dB,
-# 0.80 bpp on the test image; see dashboards/socmate-llm-bench/
+# 0.80 bpp on the test image; see dashboards/coresmith-llm-bench/
 # multiframe-codec-handwritten/ for the dashboard archive).
 #
 # Each block points at the SAME codec_golden.py file -- agents pick out the

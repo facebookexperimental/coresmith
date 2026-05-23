@@ -3,10 +3,10 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Lightweight OpenTelemetry bootstrap for the socmate ASIC pipeline.
+Lightweight OpenTelemetry bootstrap for the coresmith ASIC pipeline.
 
 Call ``init_telemetry(project_root)`` once per process before any graph
-code runs.  Spans are exported to ``.socmate/traces.db`` via the
+code runs.  Spans are exported to ``.coresmith/traces.db`` via the
 :class:`SqliteSpanExporter`.
 """
 
@@ -26,14 +26,14 @@ _init_lock = threading.Lock()
 _initialized = False
 
 
-def init_telemetry(project_root: str, service_name: str = "socmate-asic") -> None:
+def init_telemetry(project_root: str, service_name: str = "coresmith-asic") -> None:
     """Initialise the global OTel TracerProvider with a SQLite exporter.
 
     Safe to call multiple times -- subsequent calls are no-ops.
 
     Args:
         project_root: Project root directory.  The trace database is
-            created at ``<project_root>/.socmate/traces.db``.
+            created at ``<project_root>/.coresmith/traces.db``.
         service_name: OTel service name resource attribute.
     """
     global _initialized
@@ -44,7 +44,7 @@ def init_telemetry(project_root: str, service_name: str = "socmate-asic") -> Non
         if _initialized:
             return
 
-        db_dir = os.path.join(project_root, ".socmate")
+        db_dir = os.path.join(project_root, ".coresmith")
         os.makedirs(db_dir, exist_ok=True)
         db_path = os.path.join(db_dir, "traces.db")
 

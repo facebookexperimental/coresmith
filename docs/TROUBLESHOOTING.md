@@ -68,7 +68,7 @@ echo "say hi" | claude -p   # should round-trip in <5 s
 
 ### Pipeline fails with `--dangerously-skip-permissions cannot be used with root/sudo privileges`
 
-Older socmate revisions used this flag; current code uses `--permission-mode auto` which works under any UID. Make sure your checkout is up to date.
+Older coresmith revisions used this flag; current code uses `--permission-mode auto` which works under any UID. Make sure your checkout is up to date.
 
 ---
 
@@ -81,17 +81,17 @@ Default is 1800 s (30 min) for RTL/TB and 2700 s (45 min) for uarch / integratio
 **Fix:** bump the relevant env var before re-running:
 
 ```bash
-export SOCMATE_RTL_TIMEOUT=3600
-export SOCMATE_TB_TIMEOUT=3600
-export SOCMATE_UARCH_TIMEOUT=3600
-export SOCMATE_TIMING_CLOSURE_TIMEOUT=3600
-export SOCMATE_INTEGRATION_LEAD_TIMEOUT=3600
-export SOCMATE_INTEGRATION_TB_TIMEOUT=3600
-export SOCMATE_INTEGRATION_REVIEW_TIMEOUT=3600
+export CORESMITH_RTL_TIMEOUT=3600
+export CORESMITH_TB_TIMEOUT=3600
+export CORESMITH_UARCH_TIMEOUT=3600
+export CORESMITH_TIMING_CLOSURE_TIMEOUT=3600
+export CORESMITH_INTEGRATION_LEAD_TIMEOUT=3600
+export CORESMITH_INTEGRATION_TB_TIMEOUT=3600
+export CORESMITH_INTEGRATION_REVIEW_TIMEOUT=3600
 make pipeline    # auto-resumes from the last successful checkpoint
 ```
 
-The graph is checkpointed in `.socmate/pipeline_checkpoint.db`, so re-running picks up where the previous run left off — you don't lose work.
+The graph is checkpointed in `.coresmith/pipeline_checkpoint.db`, so re-running picks up where the previous run left off — you don't lose work.
 
 ### `make pipeline` runs forever / one block dominates
 
@@ -99,10 +99,10 @@ The graph is checkpointed in `.socmate/pipeline_checkpoint.db`, so re-running pi
 
 ```bash
 make traces      # span counts + slowest 10 spans
-sqlite3 .socmate/traces.db   # interactive SQL
+sqlite3 .coresmith/traces.db   # interactive SQL
 ```
 
-Look for blocks with many `rtl_attempt_*` or `synth_attempt_*` spans — those are retry loops. The block-specific log under `.socmate/step_logs/<block>/` has the verbatim LLM output.
+Look for blocks with many `rtl_attempt_*` or `synth_attempt_*` spans — those are retry loops. The block-specific log under `.coresmith/step_logs/<block>/` has the verbatim LLM output.
 
 ### OpenROAD OOM on large blocks
 
@@ -122,16 +122,16 @@ pip install -r requirements.txt
 
 ### Verilator dumps thousands of `WARNING-WIDTH` messages
 
-These are real width-mismatch warnings from generated RTL. The pipeline's lint loop usually fixes them automatically; if you're seeing them on a final run, the LLM gave up and merged anyway. Inspect the block's `.socmate/step_logs/<block>/lint_*.log` to see what was tried.
+These are real width-mismatch warnings from generated RTL. The pipeline's lint loop usually fixes them automatically; if you're seeing them on a final run, the LLM gave up and merged anyway. Inspect the block's `.coresmith/step_logs/<block>/lint_*.log` to see what was tried.
 
 ---
 
 ## Where to find more signal
 
-- `.socmate/pipeline_results.json` — final per-block status
-- `.socmate/pipeline_events.jsonl` — every state transition, line-delimited JSON
-- `.socmate/step_logs/<block>/` — verbatim LLM call inputs + outputs per step
-- `.socmate/traces.db` — OpenTelemetry spans (use `make traces`)
-- `.socmate/llm_calls.jsonl` — every LLM call with tokens + cost (recent runs)
+- `.coresmith/pipeline_results.json` — final per-block status
+- `.coresmith/pipeline_events.jsonl` — every state transition, line-delimited JSON
+- `.coresmith/step_logs/<block>/` — verbatim LLM call inputs + outputs per step
+- `.coresmith/traces.db` — OpenTelemetry spans (use `make traces`)
+- `.coresmith/llm_calls.jsonl` — every LLM call with tokens + cost (recent runs)
 
-If you find a reproducible bug not listed above, please open an issue with `.socmate/pipeline_events.jsonl` and the relevant block's step logs attached.
+If you find a reproducible bug not listed above, please open an issue with `.coresmith/pipeline_events.jsonl` and the relevant block's step logs attached.

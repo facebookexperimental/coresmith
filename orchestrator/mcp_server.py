@@ -33,7 +33,7 @@ Usage:
     python -m orchestrator.mcp_server
 
     # Or add to Claude CLI config:
-    # ~/.claude/config.json -> mcpServers -> socmate-architecture
+    # ~/.claude/config.json -> mcpServers -> coresmith-architecture
 """
 
 from __future__ import annotations
@@ -59,11 +59,11 @@ from mcp.server.fastmcp import FastMCP
 # ---------------------------------------------------------------------------
 
 _PROJECT_ROOT = os.environ.get(
-    "SOCMATE_PROJECT_ROOT",
+    "CORESMITH_PROJECT_ROOT",
     str(Path(__file__).resolve().parent.parent),
 )
-os.environ["SOCMATE_PROJECT_ROOT"] = _PROJECT_ROOT
-_TELEMETRY_ROOT = os.environ.get("SOCMATE_TELEMETRY_ROOT", _PROJECT_ROOT)
+os.environ["CORESMITH_PROJECT_ROOT"] = _PROJECT_ROOT
+_TELEMETRY_ROOT = os.environ.get("CORESMITH_TELEMETRY_ROOT", _PROJECT_ROOT)
 
 from orchestrator.architecture.state import ARCH_DOC_DIR  # noqa: E402
 from orchestrator.telemetry import init_telemetry  # noqa: E402
@@ -84,7 +84,7 @@ def _project_root() -> str:
 def _get_diagnostics(graph_filter: str = "") -> dict:
     """Query traces.db for failure diagnostics to include in MCP responses."""
     from orchestrator.telemetry.reader import get_failure_diagnostics
-    db_path = os.path.join(_project_root(), ".socmate", "traces.db")
+    db_path = os.path.join(_project_root(), ".coresmith", "traces.db")
     if not os.path.exists(db_path):
         return {}
     try:
@@ -97,215 +97,38 @@ def _get_diagnostics(graph_filter: str = "") -> dict:
 # MCP Server setup
 # ---------------------------------------------------------------------------
 
-server = FastMCP("socmate-architecture")
+server = FastMCP("coresmith-architecture")
 
 
 # ---------------------------------------------------------------------------
 # GraphLifecycle -- unified lifecycle manager for all three graphs
+#
+# Extracted to orchestrator/graph_lifecycle.py so the FastAPI daemon
+# (orchestrator/daemon/server.py) can reuse the same start/resume/pause
+# semantics. The MCP server pins ``project_root`` to ``_PROJECT_ROOT`` via
+# the thin subclass below.
 # ---------------------------------------------------------------------------
 
-class GraphLifecycle:
-    """Manages the lifecycle of a running LangGraph graph.
+from orchestrator.graph_lifecycle import GraphLifecycle as _GraphLifecycle  # noqa: E402
 
-    Consolidates the previously duplicated _ensure_*_graph, _cleanup_*,
-    and _run_*_task patterns into a single reusable class.
 
-    An asyncio.Lock serialises start/resume/pause operations to prevent
-    TOCTOU races from concurrent MCP calls.
-    """
+class GraphLifecycle(_GraphLifecycle):
+    """MCP-flavoured subclass: defaults ``project_root`` to ``_PROJECT_ROOT``."""
 
     def __init__(self, name: str, checkpoint_db: str, builder_fn_path: str, builder_fn_name: str):
-        self.name = name
-        self.checkpoint_db = checkpoint_db
-        self._builder_fn_path = builder_fn_path
-        self._builder_fn_name = builder_fn_name
-
-        self.graph: Any = None
-        self.checkpointer: Any = None
-        self.task: Optional[asyncio.Task] = None
-        self.thread_id: str = name
-        self.status: str = "idle"
-        self.error_message: str = ""
-
-        self._checkpointer_cm: Any = None
-        self._lock = asyncio.Lock()
-
-    # -- Recovery helpers ---------------------------------------------------
-
-    def _close_orphaned_events(self) -> None:
-        """Write synthetic exit events for any enter events without a matching exit.
-
-        After a server crash, the JSONL timeline may have a ``graph_node_enter``
-        without a corresponding ``graph_node_exit``, causing the webview to show
-        the node as perpetually running.  This scans the tail of the log and
-        writes a closing event for each orphan.
-        """
-        try:
-            from orchestrator.langgraph.event_stream import write_graph_event
-            log_path = os.path.join(_PROJECT_ROOT, ".socmate", "pipeline_events.jsonl")
-            if not os.path.isfile(log_path):
-                return
-            # Read events from tail (last 200 lines is plenty)
-            with open(log_path, "r", encoding="utf-8") as fh:
-                lines = fh.readlines()
-            # Track open enter events by node name
-            open_enters: dict[str, dict] = {}
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    ev = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                etype = ev.get("event", "")
-                node = ev.get("node", "")
-                if etype == "graph_node_enter" and node:
-                    open_enters[node] = ev
-                elif etype == "graph_node_exit" and node:
-                    open_enters.pop(node, None)
-            # Write synthetic exit for any orphans
-            for node, ev in open_enters.items():
-                write_graph_event(_PROJECT_ROOT, node, "graph_node_exit", {
-                    "block": ev.get("block", ""),
-                    "server_restart": True,
-                    "note": "Server restarted; closing orphaned enter event",
-                })
-        except Exception:
-            logging.getLogger(__name__).warning(
-                "%s: failed to close orphaned events", self.name, exc_info=True,
-            )
-
-    async def ensure_graph(self) -> None:
-        """Lazily build the graph and checkpointer (thread-safe)."""
-        if self.graph is not None:
-            return
-
-        async with self._lock:
-            if self.graph is not None:
-                return
-
-            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-            import importlib
-
-            os.makedirs(os.path.dirname(self.checkpoint_db), exist_ok=True)
-            self._checkpointer_cm = AsyncSqliteSaver.from_conn_string(self.checkpoint_db)
-            self.checkpointer = await self._checkpointer_cm.__aenter__()
-
-            # Ensure durability across process crashes
-            try:
-                await self.checkpointer.conn.execute("PRAGMA journal_mode=WAL")
-                await self.checkpointer.conn.execute("PRAGMA synchronous=FULL")
-                await self.checkpointer.conn.execute("PRAGMA busy_timeout=5000")
-            except Exception:
-                logging.getLogger(__name__).warning(
-                    "%s: failed to set WAL pragmas", self.name, exc_info=True,
-                )
-
-            module = importlib.import_module(self._builder_fn_path)
-            builder_fn = getattr(module, self._builder_fn_name)
-            self.graph = builder_fn(checkpointer=self.checkpointer)
-
-            # Startup recovery: check if a previous run was interrupted
-            if self.thread_id and self.status == "idle":
-                try:
-                    config = {"configurable": {"thread_id": self.thread_id}}
-                    state = await self.graph.aget_state(config)
-                    if state and state.values:
-                        # The graph has state -- determine status from checkpoint
-                        if state.tasks:
-                            for t in state.tasks:
-                                if t.interrupts:
-                                    self.status = "interrupted"
-                                    break
-                        if self.status == "idle":
-                            # Has state but no interrupts -- previously completed or errored
-                            self.status = "done"
-                except Exception:
-                    logging.getLogger(__name__).warning(
-                        "%s: startup recovery check failed", self.name, exc_info=True,
-                    )
-
-            # Close any orphaned timeline events from a prior crash
-            self._close_orphaned_events()
-
-    async def cleanup(self) -> None:
-        """Clean up the async SQLite checkpointer on shutdown."""
-        if self._checkpointer_cm is not None:
-            try:
-                await self._checkpointer_cm.__aexit__(None, None, None)
-            except Exception:
-                logging.getLogger(__name__).warning(
-                    "%s: cleanup failed", self.name, exc_info=True,
-                )
-            self._checkpointer_cm = None
-            self.graph = None
-            self.checkpointer = None
-
-    async def reset_for_new_run(self) -> None:
-        """Wipe checkpoint data and rebuild graph for a fresh run."""
-        await self.cleanup()
-        for suffix in ("", "-wal", "-shm", "-journal"):
-            p = self.checkpoint_db + suffix
-            if os.path.exists(p):
-                os.unlink(p)
-        self.graph = None
-        self.status = "idle"
-        self.error_message = ""
-        await self.ensure_graph()
-
-    async def run_task(self, initial_input: Any, config: dict) -> None:
-        """Background task wrapper that runs the graph and updates status."""
-        from orchestrator.langchain.agents.socmate_llm import _breaker_context
-        _breaker_context.set(self.name)
-        from langgraph.errors import GraphInterrupt
-        try:
-            from orchestrator.langchain.agents.socmate_llm import CircuitBreakerOpen
-        except Exception:
-            CircuitBreakerOpen = type("CircuitBreakerOpen", (Exception,), {})
-        try:
-            self.status = "running"
-            await self.graph.ainvoke(initial_input, config)
-            state = await self.graph.aget_state(config)
-            if state and state.tasks:
-                for t in state.tasks:
-                    if t.interrupts:
-                        self.status = "interrupted"
-                        return
-            self.status = "done"
-        except GraphInterrupt:
-            self.status = "interrupted"
-        except CircuitBreakerOpen:
-            self.status = "error"
-            self.error_message = traceback.format_exc()[:10000]
-        except asyncio.CancelledError:
-            self.status = "paused"
-        except Exception:
-            self.status = "error"
-            self.error_message = traceback.format_exc()[:10000]
-
-    async def safe_start(self, initial_input: Any, config: dict) -> None:
-        """Start a new background task, guarded by the lock.
-
-        Prevents duplicate tasks from concurrent MCP calls.
-        """
-        async with self._lock:
-            if self.task is not None and not self.task.done():
-                raise RuntimeError(f"{self.name} graph is already running")
-            self.task = asyncio.create_task(self.run_task(initial_input, config))
-
-    async def safe_resume(self, resume_input: Any, config: dict) -> None:
-        """Resume the graph after an interrupt, guarded by the lock."""
-        async with self._lock:
-            if self.task is not None and not self.task.done():
-                raise RuntimeError(f"{self.name} graph is already running")
-            self.task = asyncio.create_task(self.run_task(resume_input, config))
+        super().__init__(
+            name=name,
+            checkpoint_db=checkpoint_db,
+            builder_fn_path=builder_fn_path,
+            builder_fn_name=builder_fn_name,
+            project_root=_PROJECT_ROOT,
+        )
 
 
 # --- Architecture runner ---
 _architecture = GraphLifecycle(
     name="architecture",
-    checkpoint_db=os.path.join(_PROJECT_ROOT, ".socmate", "architecture_checkpoint.db"),
+    checkpoint_db=os.path.join(_PROJECT_ROOT, ".coresmith", "architecture_checkpoint.db"),
     builder_fn_path="orchestrator.langgraph.architecture_graph",
     builder_fn_name="build_architecture_graph",
 )
@@ -314,7 +137,7 @@ _ARCH_CHECKPOINT_DB = _architecture.checkpoint_db
 # --- Frontend (pipeline) runner ---
 _pipeline = GraphLifecycle(
     name="pipeline",
-    checkpoint_db=os.path.join(_PROJECT_ROOT, ".socmate", "pipeline_checkpoint.db"),
+    checkpoint_db=os.path.join(_PROJECT_ROOT, ".coresmith", "pipeline_checkpoint.db"),
     builder_fn_path="orchestrator.langgraph.pipeline_graph",
     builder_fn_name="build_pipeline_graph",
 )
@@ -323,7 +146,7 @@ _CHECKPOINT_DB = _pipeline.checkpoint_db
 # --- Backend runner ---
 _backend = GraphLifecycle(
     name="backend",
-    checkpoint_db=os.path.join(_PROJECT_ROOT, ".socmate", "backend_checkpoint.db"),
+    checkpoint_db=os.path.join(_PROJECT_ROOT, ".coresmith", "backend_checkpoint.db"),
     builder_fn_path="orchestrator.langgraph.backend_graph",
     builder_fn_name="build_backend_graph",
 )
@@ -332,7 +155,7 @@ _BACKEND_CHECKPOINT_DB = _backend.checkpoint_db
 # --- Tapeout runner ---
 _tapeout = GraphLifecycle(
     name="tapeout",
-    checkpoint_db=os.path.join(_PROJECT_ROOT, ".socmate", "tapeout_checkpoint.db"),
+    checkpoint_db=os.path.join(_PROJECT_ROOT, ".coresmith", "tapeout_checkpoint.db"),
     builder_fn_path="orchestrator.langgraph.tapeout_graph",
     builder_fn_name="build_tapeout_graph",
 )
@@ -1280,7 +1103,7 @@ async def pause_architecture() -> str:
         })
 
     # Kill any stuck CLI subprocesses first so the task can actually cancel
-    from orchestrator.langchain.agents.socmate_llm import kill_active_cli_processes
+    from orchestrator.langchain.agents.coresmith_llm import kill_active_cli_processes
     kill_active_cli_processes()
 
     if _architecture.task and not _architecture.task.done():
@@ -1513,7 +1336,7 @@ async def get_pipeline_status(last_n: int = 25) -> str:
 
     Shows graph transitions (node enter/exit), LLM calls (model, prompt
     size, elapsed time, output size), and block progress. Reads from
-    the JSONL event log at .socmate/pipeline_events.jsonl.
+    the JSONL event log at .coresmith/pipeline_events.jsonl.
 
     Also includes:
     - Escalation response events (what the outer agent sent back)
@@ -1659,7 +1482,7 @@ def _trajectory_debug_info(project_root: str) -> str:
     lines = ["\n\n--- TRAJECTORY DEBUG FILES ---"]
     lines.append("Use these files to inspect full LLM prompts and completions:")
 
-    llm_log = root / ".socmate" / "llm_calls.jsonl"
+    llm_log = root / ".coresmith" / "llm_calls.jsonl"
     if llm_log.exists():
         with open(llm_log) as f:
             count = sum(1 for _ in f)
@@ -1669,7 +1492,7 @@ def _trajectory_debug_info(project_root: str) -> str:
     else:
         lines.append(f"  LLM calls:       {llm_log}  (not yet created)")
 
-    events_log = root / ".socmate" / "pipeline_events.jsonl"
+    events_log = root / ".coresmith" / "pipeline_events.jsonl"
     if events_log.exists():
         with open(events_log) as f:
             count = sum(1 for _ in f)
@@ -1678,7 +1501,7 @@ def _trajectory_debug_info(project_root: str) -> str:
     else:
         lines.append(f"  Pipeline events: {events_log}  (not yet created)")
 
-    traces_db = root / ".socmate" / "traces.db"
+    traces_db = root / ".coresmith" / "traces.db"
     if traces_db.exists():
         size_kb = traces_db.stat().st_size / 1024
         lines.append(f"  OTel traces DB:  {traces_db}  ({size_kb:.0f} KB)")
@@ -1719,7 +1542,7 @@ async def get_pipeline_events(
 ) -> str:
     """Query pipeline events with optional filters.
 
-    Returns raw JSON events from .socmate/pipeline_events.jsonl, useful
+    Returns raw JSON events from .coresmith/pipeline_events.jsonl, useful
     for programmatic analysis or debugging specific blocks/phases.
 
     Args:
@@ -1782,7 +1605,7 @@ async def start_pipeline(
 
     # Auto-pause architecture if it's still running (mirrors pause_architecture)
     if _architecture.status == "running":
-        from orchestrator.langchain.agents.socmate_llm import kill_active_cli_processes
+        from orchestrator.langchain.agents.coresmith_llm import kill_active_cli_processes
         if _architecture.task and not _architecture.task.done():
             _architecture.task.cancel()
             try:
@@ -1808,7 +1631,7 @@ async def start_pipeline(
 
     # Priority 2: architecture-generated block specs
     if not block_queue:
-        specs_path = Path(_project_root()) / ".socmate" / "block_specs.json"
+        specs_path = Path(_project_root()) / ".coresmith" / "block_specs.json"
         if specs_path.exists():
             block_queue = json.loads(specs_path.read_text())
 
@@ -1862,7 +1685,7 @@ async def start_pipeline(
 
     # Clear previous frontend/pipeline events but preserve architecture
     # and backend events so they remain visible in the timeline.
-    events_path = Path(_project_root()) / ".socmate" / "pipeline_events.jsonl"
+    events_path = Path(_project_root()) / ".coresmith" / "pipeline_events.jsonl"
     events_path.parent.mkdir(parents=True, exist_ok=True)
     if events_path.exists():
         kept_lines = []
@@ -2383,7 +2206,7 @@ async def pause_pipeline() -> str:
         })
 
     # Kill any stuck CLI subprocesses first so the task can actually cancel
-    from orchestrator.langchain.agents.socmate_llm import kill_active_cli_processes
+    from orchestrator.langchain.agents.coresmith_llm import kill_active_cli_processes
     kill_active_cli_processes()
 
     if _pipeline.task and not _pipeline.task.done():
@@ -2555,7 +2378,7 @@ async def restart_block(
     root = Path(_project_root())
 
     # ── Load block spec from block_specs.json ─────────────────────────
-    specs_path = root / ".socmate" / "block_specs.json"
+    specs_path = root / ".coresmith" / "block_specs.json"
     block_spec = None
     if specs_path.exists():
         try:
@@ -2569,7 +2392,7 @@ async def restart_block(
 
     if not block_spec:
         return json.dumps({
-            "error": f"Block '{block_name}' not found in .socmate/block_specs.json",
+            "error": f"Block '{block_name}' not found in .coresmith/block_specs.json",
             "hint": "The block must exist in the architecture output.",
         })
 
@@ -2842,7 +2665,7 @@ async def run_step(
 
     Runs lint, simulate, or synthesize directly on the specified block's
     RTL. Useful for quick iteration after editing RTL on disk. Results
-    include full log file paths in .socmate/step_logs/.
+    include full log file paths in .coresmith/step_logs/.
 
     This does NOT use the pipeline graph or checkpoints -- it's a direct
     tool invocation. Use restart_node() if you need full graph state
@@ -2870,7 +2693,7 @@ async def run_step(
 
     if not resolved_rtl:
         # Priority 1: block_specs.json (architecture output)
-        specs_path = root / ".socmate" / "block_specs.json"
+        specs_path = root / ".coresmith" / "block_specs.json"
         if specs_path.exists():
             try:
                 specs = json.loads(specs_path.read_text())
@@ -2906,7 +2729,7 @@ async def run_step(
         return json.dumps({
             "error": f"RTL file not found for block '{block_name}'",
             "searched": [
-                ".socmate/block_specs.json",
+                ".coresmith/block_specs.json",
                 "config.yaml blocks section",
                 f"rtl/{block_name}/{block_name}.v",
             ],
@@ -3105,7 +2928,7 @@ async def start_backend(
         pass
 
     # Fall back to block_specs.json
-    specs_path = Path(_project_root()) / ".socmate" / "block_specs.json"
+    specs_path = Path(_project_root()) / ".coresmith" / "block_specs.json"
     if specs_path.exists():
         block_queue = json.loads(specs_path.read_text())
     else:
@@ -3436,7 +3259,7 @@ async def pause_backend() -> str:
         })
 
     # Kill any stuck CLI subprocesses first so the task can actually cancel
-    from orchestrator.langchain.agents.socmate_llm import kill_active_cli_processes
+    from orchestrator.langchain.agents.coresmith_llm import kill_active_cli_processes
     kill_active_cli_processes()
 
     if _backend.task and not _backend.task.done():
@@ -3739,7 +3562,7 @@ async def start_tapeout(
 
     # Fallback: load block specs from disk
     if not blocks:
-        specs_path = root / ".socmate" / "block_specs.json"
+        specs_path = root / ".coresmith" / "block_specs.json"
         if specs_path.exists():
             blocks = json.loads(specs_path.read_text())
 
@@ -3891,7 +3714,7 @@ async def resume_tapeout(action: str) -> str:
     Args:
         action: One of 'retry', 'fix_pnr', 'skip', 'abort'.
             Use 'fix_pnr' to re-run PnR with adjusted parameters read from
-            .socmate/pnr_overrides.json.  The outer agent should write that file
+            .coresmith/pnr_overrides.json.  The outer agent should write that file
             (via the Write tool) before calling resume with 'fix_pnr'.
     """
     valid_actions = {"retry", "fix_pnr", "skip", "abort"}
@@ -3946,10 +3769,10 @@ async def resume_tapeout(action: str) -> str:
 # get_project_info() -- inventory of on-disk files, sizes, runner statuses
 #
 # Multi-project workflow:
-#   Each MCP server instance is bound to a single SOCMATE_PROJECT_ROOT. To run
+#   Each MCP server instance is bound to a single CORESMITH_PROJECT_ROOT. To run
 #   two projects in parallel, add a second entry in .cursor/mcp.json with
-#   a different SOCMATE_PROJECT_ROOT (and optionally a different server name).
-#   All .socmate/ state, generated RTL, sim builds, and synthesis output are
+#   a different CORESMITH_PROJECT_ROOT (and optionally a different server name).
+#   All .coresmith/ state, generated RTL, sim builds, and synthesis output are
 #   scoped to the project root, so they won't collide.
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -4019,7 +3842,7 @@ async def reset_project(
 
     Args:
         scope: What to reset. Options:
-            "all"          -- Everything in .socmate/ (default).
+            "all"          -- Everything in .coresmith/ (default).
             "architecture" -- Architecture checkpoint, ERS, block specs,
                               uarch specs, architecture summary.
             "pipeline"     -- Pipeline checkpoint, events, results,
@@ -4041,14 +3864,14 @@ async def reset_project(
         })
 
     root = Path(_project_root())
-    socmate_dir = root / ".socmate"
+    coresmith_dir = root / ".coresmith"
     deleted: list[str] = []
     errors: list[str] = []
 
     # --- Architecture ---
     if scope in ("all", "architecture"):
         await _stop_runner(_architecture)
-        _remove_sqlite(socmate_dir / "architecture_checkpoint.db",
+        _remove_sqlite(coresmith_dir / "architecture_checkpoint.db",
                         deleted, errors, root)
         for name in ("architecture_state.json",
                       "prd_spec.json",
@@ -4056,7 +3879,7 @@ async def reset_project(
                       "frd_spec.json",   # .json is legacy; clean up if present
                       "ers_spec.json",
                       "block_specs.json"):
-            _remove_file(socmate_dir / name, deleted, errors, root)
+            _remove_file(coresmith_dir / name, deleted, errors, root)
         # Clean arch/ directory (markdown docs + uarch specs + dashboard)
         arch_dir = root / ARCH_DOC_DIR
         for name in ("prd_spec.md", "sad_spec.md", "frd_spec.md",
@@ -4068,17 +3891,17 @@ async def reset_project(
     # --- Pipeline ---
     if scope in ("all", "pipeline"):
         await _stop_runner(_pipeline)
-        _remove_sqlite(socmate_dir / "pipeline_checkpoint.db",
+        _remove_sqlite(coresmith_dir / "pipeline_checkpoint.db",
                         deleted, errors, root)
         for name in ("pipeline_events.jsonl", "pipeline_results.json"):
-            _remove_file(socmate_dir / name, deleted, errors, root)
+            _remove_file(coresmith_dir / name, deleted, errors, root)
         _remove_file(root / ARCH_DOC_DIR / "summary_frontend.md",
                       deleted, errors, root)
 
     # --- Backend ---
     if scope in ("all", "backend"):
         await _stop_runner(_backend)
-        _remove_sqlite(socmate_dir / "backend_checkpoint.db",
+        _remove_sqlite(coresmith_dir / "backend_checkpoint.db",
                         deleted, errors, root)
         _remove_file(root / ARCH_DOC_DIR / "summary_backend.md",
                       deleted, errors, root)
@@ -4086,20 +3909,20 @@ async def reset_project(
     # --- Tapeout ---
     if scope in ("all", "tapeout"):
         await _stop_runner(_tapeout)
-        _remove_sqlite(socmate_dir / "tapeout_checkpoint.db",
+        _remove_sqlite(coresmith_dir / "tapeout_checkpoint.db",
                         deleted, errors, root)
         _remove_dir(root / "openframe_submission",
                      deleted, errors, root)
 
     # --- Benchmarks ---
     if scope in ("all", "benchmarks"):
-        _remove_sqlite(socmate_dir / "benchmark_cache.db",
+        _remove_sqlite(coresmith_dir / "benchmark_cache.db",
                         deleted, errors, root)
-        _remove_dir(socmate_dir / "benchmarks", deleted, errors, root)
+        _remove_dir(coresmith_dir / "benchmarks", deleted, errors, root)
 
     # --- Traces ---
     if scope in ("all", "traces"):
-        traces_db = socmate_dir / "traces.db"
+        traces_db = coresmith_dir / "traces.db"
         if traces_db.exists():
             # Truncate the table rather than deleting the file so the
             # live OTel BatchSpanProcessor keeps a valid connection.
@@ -4112,7 +3935,7 @@ async def reset_project(
                 conn.close()
             try:
                 await asyncio.to_thread(_truncate_traces)
-                deleted.append(".socmate/traces.db (truncated)")
+                deleted.append(".coresmith/traces.db (truncated)")
             except Exception:
                 _remove_sqlite(traces_db, deleted, errors, root)
 
@@ -4148,19 +3971,19 @@ def _human_size(size_bytes: int) -> str:
 async def get_project_info() -> str:
     """Get an overview of the current project's on-disk state.
 
-    Shows the project root, .socmate/ contents with sizes and timestamps,
+    Shows the project root, .coresmith/ contents with sizes and timestamps,
     graph runner statuses, and generated output directory sizes.
     Useful before calling reset_project() to see what exists.
     """
     root = Path(_project_root())
-    socmate_dir = root / ".socmate"
+    coresmith_dir = root / ".coresmith"
 
     def _scan_filesystem():
-        # --- Collect .socmate/ file inventory ---
+        # --- Collect .coresmith/ file inventory ---
         state_files: dict[str, dict[str, Any]] = {}
         total_state_size = 0
-        if socmate_dir.exists():
-            for f in sorted(socmate_dir.rglob("*")):
+        if coresmith_dir.exists():
+            for f in sorted(coresmith_dir.rglob("*")):
                 if not f.is_file():
                     continue
                 try:
@@ -4223,7 +4046,7 @@ async def get_project_info() -> str:
 
     return json.dumps({
         "project_root": str(root),
-        "state_directory": str(socmate_dir),
+        "state_directory": str(coresmith_dir),
         "state_file_count": len(state_files),
         "state_total_size": _human_size(total_state_size),
         "state_files": state_files,

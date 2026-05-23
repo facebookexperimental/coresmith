@@ -10,15 +10,15 @@ import shutil
 import subprocess
 import time
 
-from orchestrator.langchain.agents import socmate_llm as _slm
+from orchestrator.langchain.agents import coresmith_llm as _slm
 
 logger = logging.getLogger(__name__)
 
 # Find opencode binary (npm-global install puts it at /usr/local/bin/opencode)
 _OPENCODE_PATH = shutil.which("opencode") or "/usr/local/bin/opencode"
 
-# How socmate names models -> what opencode calls them.
-# socmate config.yaml lets you pin per-agent models; map them to whatever local
+# How coresmith names models -> what opencode calls them.
+# coresmith config.yaml lets you pin per-agent models; map them to whatever local
 # provider you've registered in ~/.config/opencode/opencode.json.
 # Examples assume a "local" provider pointing at a vLLM endpoint with
 # Qwen/Qwen3.6-27B registered.
@@ -55,7 +55,7 @@ def _opencode_call(self, system_prompt: str, user_prompt: str) -> str:
         capture_output=True,
         text=True,
         timeout=scaled(self._STALL_THRESHOLD_S),
-        cwd=os.environ.get("SOCMATE_PROJECT_ROOT", os.getcwd()),
+        cwd=os.environ.get("CORESMITH_PROJECT_ROOT", os.getcwd()),
     )
     elapsed = time.monotonic() - t0
 

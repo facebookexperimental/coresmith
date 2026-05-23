@@ -30,7 +30,7 @@ Usage::
 
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-    async with AsyncSqliteSaver.from_conn_string(".socmate/backend_checkpoint.db") as cp:
+    async with AsyncSqliteSaver.from_conn_string(".coresmith/backend_checkpoint.db") as cp:
         graph = build_backend_graph(checkpointer=cp)
         result = await graph.ainvoke(initial_state, config)
 """
@@ -58,7 +58,7 @@ from orchestrator.langgraph.pipeline_helpers import (
     YELLOW,
 )
 
-_tracer = trace.get_tracer("socmate.langgraph.backend_graph")
+_tracer = trace.get_tracer("coresmith.langgraph.backend_graph")
 
 
 def _last(a, b):
@@ -176,7 +176,7 @@ async def _run_llm_eda_step(
     Returns:
         Parsed result dict from the JSON file, or a failure dict.
     """
-    from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
+    from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
     prompt_path = _PROMPT_DIR / prompt_file
     system_prompt = prompt_path.read_text().format(**context)
@@ -565,7 +565,7 @@ async def run_pnr_node(state: BackendState) -> dict:
     utilization = 35
     density = 0.6
     margin = 10
-    overrides_path = Path(_pr(state)) / ".socmate" / "pnr_overrides.json"
+    overrides_path = Path(_pr(state)) / ".coresmith" / "pnr_overrides.json"
     if overrides_path.exists():
         try:
             overrides = json.loads(overrides_path.read_text())
@@ -636,7 +636,7 @@ async def run_pnr_node(state: BackendState) -> dict:
     spef = result.get("spef_path", str(Path(output_dir) / f"{block_name}.spef"))
 
     if pnr_ok:
-        img_dir = Path(_pr(state)) / ".socmate" / "images"
+        img_dir = Path(_pr(state)) / ".coresmith" / "images"
         img_dir.mkdir(parents=True, exist_ok=True)
         render_layout_image(routed_def, str(img_dir / f"{block_name}_floorplan.png"))
 
@@ -760,7 +760,7 @@ async def drc_node(state: BackendState) -> dict:
         span.set_attribute("violation_count", drc_count)
 
     if gds_path and Path(gds_path).exists():
-        img_dir = Path(_pr(state)) / ".socmate" / "images"
+        img_dir = Path(_pr(state)) / ".coresmith" / "images"
         img_dir.mkdir(parents=True, exist_ok=True)
         render_layout_image(gds_path, str(img_dir / f"{block_name}_gds.png"))
 
@@ -1262,7 +1262,7 @@ async def diagnose_node(state: BackendState) -> dict:
         confidence = diag.get("confidence", 0.3)
 
         if action == "auto_retry" and diag.get("pnr_overrides"):
-            overrides_path = Path(_pr(state)) / ".socmate" / "pnr_overrides.json"
+            overrides_path = Path(_pr(state)) / ".coresmith" / "pnr_overrides.json"
             overrides_path.write_text(json.dumps(diag["pnr_overrides"], indent=2))
             log(f"  [DIAGNOSE-BACKEND] Auto-retry with overrides: {diag['pnr_overrides']}", YELLOW)
 
@@ -1594,7 +1594,7 @@ async def backend_complete_node(state: BackendState) -> dict:
                     entry["drc_clean"] = drc.get("clean", False)
                     entry["drc_violations"] = drc.get("violation_count", -1)
             # Check for rendered images
-            img_dir = pr / ".socmate" / "images"
+            img_dir = pr / ".coresmith" / "images"
             fp_img = img_dir / f"{name}_floorplan.png"
             gds_img = img_dir / f"{name}_gds.png"
             if fp_img.exists():
@@ -1604,7 +1604,7 @@ async def backend_complete_node(state: BackendState) -> dict:
 
         results_payload["blocks"].append(entry)
 
-    results_path = pr / ".socmate" / "backend_results.json"
+    results_path = pr / ".coresmith" / "backend_results.json"
     try:
         results_path.write_text(json.dumps(results_payload, indent=2))
     except OSError:

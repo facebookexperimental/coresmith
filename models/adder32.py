@@ -1,4 +1,4 @@
-"""Golden model for the SocMate adder32 smoke design."""
+"""Golden model for the CoreSmith adder32 smoke design."""
 
 from __future__ import annotations
 

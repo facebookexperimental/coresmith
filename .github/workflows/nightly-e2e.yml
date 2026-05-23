@@ -33,19 +33,19 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build socmate image
+      - name: Build coresmith image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: Dockerfile
-          tags: socmate:nightly
+          tags: coresmith:nightly
           load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Preflight check inside container
         run: |
-          docker run --rm socmate:nightly bash -lc 'cd /socmate && make preflight'
+          docker run --rm coresmith:nightly bash -lc 'cd /coresmith && make preflight'
 
   e2e-demo:
     name: Run make demo on adder8
@@ -54,19 +54,19 @@ jobs:
     timeout-minutes: 30
     # Skip the LLM-driven leg if the auth secret isn't configured -- avoids
     # noisy red CI on forks that haven't wired up a token.
-    if: ${{ github.repository == 'facebookexperimental/socmate' }}
+    if: ${{ github.repository == 'facebookexperimental/coresmith' }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Restore socmate image
+      - name: Restore coresmith image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: Dockerfile
-          tags: socmate:nightly
+          tags: coresmith:nightly
           load: true
           cache-from: type=gha
 
@@ -86,9 +86,9 @@ jobs:
         run: |
           docker run --rm \
               -e CLAUDE_CODE_OAUTH_TOKEN \
-              -e SOCMATE_MODEL=sonnet-4.6 \
-              -v "${{ github.workspace }}/.socmate:/socmate/.socmate" \
-              socmate:nightly bash -lc 'cd /socmate && make demo'
+              -e CORESMITH_MODEL=sonnet-4.6 \
+              -v "${{ github.workspace }}/.coresmith:/coresmith/.coresmith" \
+              coresmith:nightly bash -lc 'cd /coresmith && make demo'
 
       - name: Skip note (no token)
         if: steps.have_token.outputs.present != 'true'
@@ -102,9 +102,9 @@ jobs:
         with:
           name: pipeline-results-${{ github.run_id }}
           path: |
-            .socmate/pipeline_results.json
-            .socmate/pipeline_events.jsonl
-            .socmate/traces.db
+            .coresmith/pipeline_results.json
+            .coresmith/pipeline_events.jsonl
+            .coresmith/traces.db
             rtl/adder8/
             syn/output/adder8/
           if-no-files-found: ignore

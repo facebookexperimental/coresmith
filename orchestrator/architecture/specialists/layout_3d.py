@@ -352,7 +352,7 @@ def gds_to_gltf(
     child_nodes = [Node(mesh=i, name=meshes[i].name) for i in range(len(meshes))]
 
     gltf = GLTF2(
-        asset=Asset(version="2.0", generator="socmate-asic-pipeline"),
+        asset=Asset(version="2.0", generator="coresmith-asic-pipeline"),
         scene=0,
         scenes=[Scene(nodes=[0])],
         nodes=[root_node] + child_nodes,

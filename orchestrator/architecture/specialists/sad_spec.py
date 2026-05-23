@@ -85,7 +85,7 @@ async def generate_sad(
     """
     from opentelemetry import trace as _trace
 
-    tracer = _trace.get_tracer("socmate.architecture.sad_spec")
+    tracer = _trace.get_tracer("coresmith.architecture.sad_spec")
 
     with tracer.start_as_current_span("generate_sad") as span:
         prd_doc = prd_spec.get("prd", {}) if prd_spec else {}
@@ -110,7 +110,7 @@ async def generate_sad(
             f"After writing, respond with only the file path confirmation."
         )
 
-        from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
 

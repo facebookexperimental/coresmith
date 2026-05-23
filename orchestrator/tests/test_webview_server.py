@@ -54,7 +54,7 @@ if not _SERVE_PATH.exists():
 def _import_serve(project_root: Path):
     """Import serve.py via importlib from its file path, with PROJECT_ROOT
     pointed at the given directory."""
-    os.environ["SOCMATE_PROJECT_ROOT"] = str(project_root)
+    os.environ["CORESMITH_PROJECT_ROOT"] = str(project_root)
     spec = importlib.util.spec_from_file_location("serve", str(_SERVE_PATH))
     mod = importlib.util.module_from_spec(spec)
     # Prevent re-registration in sys.modules causing cross-test pollution
@@ -66,16 +66,16 @@ def _import_serve(project_root: Path):
 
 @pytest.fixture(autouse=True)
 def _isolate_project_root(tmp_path, monkeypatch):
-    """Ensure every test gets its own project root and .socmate directory."""
-    socmate_dir = tmp_path / ".socmate"
-    socmate_dir.mkdir()
-    monkeypatch.setenv("SOCMATE_PROJECT_ROOT", str(tmp_path))
+    """Ensure every test gets its own project root and .coresmith directory."""
+    coresmith_dir = tmp_path / ".coresmith"
+    coresmith_dir.mkdir()
+    monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
 
 
 @pytest.fixture
 def serve_module(tmp_path, monkeypatch):
     """Import serve.py with PROJECT_ROOT pointed at the temp directory."""
-    monkeypatch.setenv("SOCMATE_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
     spec = importlib.util.spec_from_file_location(
         "serve_under_test", str(_SERVE_PATH)
     )
@@ -92,7 +92,7 @@ def serve_module(tmp_path, monkeypatch):
 
 def write_events(tmp_path: Path, events: list[dict]):
     """Write a list of event dicts to pipeline_events.jsonl."""
-    log_path = tmp_path / ".socmate" / "pipeline_events.jsonl"
+    log_path = tmp_path / ".coresmith" / "pipeline_events.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "w") as f:
         for ev in events:
@@ -101,7 +101,7 @@ def write_events(tmp_path: Path, events: list[dict]):
 
 def write_llm_calls(tmp_path: Path, calls: list[dict]):
     """Write LLM call records to llm_calls.jsonl."""
-    log_path = tmp_path / ".socmate" / "llm_calls.jsonl"
+    log_path = tmp_path / ".coresmith" / "llm_calls.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "w") as f:
         for call in calls:
@@ -110,7 +110,7 @@ def write_llm_calls(tmp_path: Path, calls: list[dict]):
 
 def write_live_stream(tmp_path: Path, pid: int, data: dict):
     """Write a live stream JSON file for a subprocess."""
-    live_dir = tmp_path / ".socmate" / "live_streams"
+    live_dir = tmp_path / ".coresmith" / "live_streams"
     live_dir.mkdir(parents=True, exist_ok=True)
     stream_file = live_dir / f"{pid}.json"
     stream_file.write_text(json.dumps(data))
@@ -121,7 +121,7 @@ def create_traces_db(tmp_path: Path, spans: list[dict]):
 
     Column names match the reader.py query: status_msg (not status_message).
     """
-    db_path = tmp_path / ".socmate" / "traces.db"
+    db_path = tmp_path / ".coresmith" / "traces.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.execute("""
@@ -474,7 +474,7 @@ class TestTimelineEventAccuracy:
     def test_malformed_jsonl_lines_skipped(self, tmp_path, serve_module):
         """Corrupt lines in the JSONL should not crash timeline parsing."""
         t0 = 1700000000.0
-        log_path = tmp_path / ".socmate" / "pipeline_events.jsonl"
+        log_path = tmp_path / ".coresmith" / "pipeline_events.jsonl"
         with open(log_path, "w") as f:
             f.write("NOT VALID JSON\n")
             f.write(json.dumps({"ts": t0, "event": "graph_node_enter",
@@ -675,7 +675,7 @@ class TestLiveLLMStreaming:
             "done_ts": old_done_ts,
         })
 
-        stream_file = tmp_path / ".socmate" / "live_streams" / "11111.json"
+        stream_file = tmp_path / ".coresmith" / "live_streams" / "11111.json"
         assert stream_file.exists()
 
         serve_module.get_live_calls("Generate RTL")
@@ -927,7 +927,7 @@ class TestLLMLogDisplay:
         create_traces_db(tmp_path, spans)
 
         from orchestrator.telemetry.reader import get_node_traces
-        db_path = str(tmp_path / ".socmate" / "traces.db")
+        db_path = str(tmp_path / ".coresmith" / "traces.db")
         result = get_node_traces(db_path, "Generate RTL")
 
         assert len(result) >= 1

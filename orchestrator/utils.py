@@ -3,7 +3,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Shared utilities for the socmate orchestrator.
+Shared utilities for the coresmith orchestrator.
 
 Contains:
   - atomic_write: crash-safe file writes via tmp+rename
@@ -149,7 +149,7 @@ def read_back_json(
 
     # Codex runs may be isolated in a per-call worktree under the project
     # root. In that mode a file-writing specialist can correctly write
-    # ".socmate/<name>.json" inside "codex-call-*", return only a path
+    # ".coresmith/<name>.json" inside "codex-call-*", return only a path
     # confirmation, and leave the canonical project-root file absent or stale.
     # Recover by looking for the newest matching artifact in those isolated
     # worktrees before falling back to parsing the response text.

@@ -106,7 +106,7 @@ async def gather_prd(
     """
     from opentelemetry import trace as _trace
 
-    tracer = _trace.get_tracer("socmate.architecture.prd_spec")
+    tracer = _trace.get_tracer("coresmith.architecture.prd_spec")
 
     with tracer.start_as_current_span("gather_prd") as span:
         span.set_attribute("has_answers", user_answers is not None)
@@ -123,7 +123,7 @@ async def gather_prd(
             answers_context=answers_context,
         )
 
-        target_path = Path(project_root) / ".socmate" / "prd_spec.json"
+        target_path = Path(project_root) / ".coresmith" / "prd_spec.json"
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Build user message
@@ -146,7 +146,7 @@ async def gather_prd(
                 f"area, power, dataflow."
             )
 
-        from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
 

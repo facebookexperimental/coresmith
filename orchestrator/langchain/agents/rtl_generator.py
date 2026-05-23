@@ -21,7 +21,7 @@ from typing import Any
 
 from opentelemetry import trace
 
-from .socmate_llm import DEFAULT_MODEL, ClaudeLLM
+from .coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
 _tracer = trace.get_tracer(__name__)
 
@@ -141,14 +141,14 @@ class RTLGeneratorAgent:
 
     def __init__(self, model: str | None = None, temperature: float = 0.1):
         # RTL generation is the load-bearing step, so it defaults to the
-        # project's DEFAULT_MODEL (Opus). Override via SOCMATE_MODEL or the
+        # project's DEFAULT_MODEL (Opus). Override via CORESMITH_MODEL or the
         # model= kwarg if a cheaper model is acceptable for a given run.
         model = model or DEFAULT_MODEL
-        # 1800s default; bump via SOCMATE_RTL_TIMEOUT env var for complex blocks
+        # 1800s default; bump via CORESMITH_RTL_TIMEOUT env var for complex blocks
         # like CPUs / multi-stage pipelines that need more agent turns to write.
         self.llm = ClaudeLLM(
             model=model,
-            timeout=int(os.environ.get("SOCMATE_RTL_TIMEOUT", "1800")),
+            timeout=int(os.environ.get("CORESMITH_RTL_TIMEOUT", "1800")),
         )
 
     async def generate(
@@ -200,14 +200,14 @@ class RTLGeneratorAgent:
                 "Read these files to understand the design:",
                 f"- uArch Spec: arch/uarch_specs/{block_name}.md",
                 "- ERS: arch/ers_spec.md",
-                f"- Constraints: .socmate/blocks/{block_name}/constraints.json",
+                f"- Constraints: .coresmith/blocks/{block_name}/constraints.json",
                 f"- Golden Model: {python_source_path}",
-                "- Block Diagram: .socmate/block_diagram.json (for interface context)",
+                "- Block Diagram: .coresmith/block_diagram.json (for interface context)",
             ]
 
             if attempt > 1:
                 parts.extend([
-                    f"- Previous Error: .socmate/blocks/{block_name}/previous_error.txt",
+                    f"- Previous Error: .coresmith/blocks/{block_name}/previous_error.txt",
                     f"- Existing RTL: {rtl_target} (use Edit to fix incrementally if possible)",
                 ])
 

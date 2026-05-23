@@ -9,7 +9,7 @@ Uses ClaudeLLM for LLM inference. Analyzes the block diagram to
 determine whether multiple clock domains are needed, designs CDC crossings,
 and specifies the reset strategy.
 
-The prompt encodes socmate conventions (single-domain baseline, synchronous
+The prompt encodes coresmith conventions (single-domain baseline, synchronous
 active-low reset, 2-FF synchronizer) while allowing the LLM to propose
 multi-domain architectures when the block diagram warrants it.
 """
@@ -44,7 +44,7 @@ async def analyze_clock_tree(
     """
     from opentelemetry import trace as _trace
 
-    tracer = _trace.get_tracer("socmate.architecture.clock_tree")
+    tracer = _trace.get_tracer("coresmith.architecture.clock_tree")
 
     with tracer.start_as_current_span("analyze_clock_tree") as span:
         blocks = block_diagram.get("blocks", [])
@@ -76,7 +76,7 @@ async def analyze_clock_tree(
                 except OSError:
                     pass
 
-        target_path = _P(project_root) / ".socmate" / "clock_tree.json" if project_root else _P.cwd() / ".socmate" / "clock_tree.json"
+        target_path = _P(project_root) / ".coresmith" / "clock_tree.json" if project_root else _P.cwd() / ".coresmith" / "clock_tree.json"
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         parts.append(
@@ -86,7 +86,7 @@ async def analyze_clock_tree(
 
         user_message = "\n".join(parts)
 
-        from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
 

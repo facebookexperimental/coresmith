@@ -7,7 +7,7 @@ content in the prompt -- read the FULL files from disk. Write your diagnosis
 JSON to the path specified in the user message.
 
 Given (read from disk -- file paths provided in user message):
-- Error logs (step logs in .socmate/step_logs/ and .socmate/blocks/<block>/previous_error.txt)
+- Error logs (step logs in .coresmith/step_logs/ and .coresmith/blocks/<block>/previous_error.txt)
 - VCD waveform artifacts (`sim_build/<block>/dump.vcd` or
   `sim_build/integration/dump.vcd`) and WaveKit audit reports
 - RTL source code (full Verilog file)

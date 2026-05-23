@@ -9,7 +9,7 @@ Uses ClaudeLLM for LLM inference. Takes the block diagram and
 system requirements to produce a structured memory map with SRAM,
 peripheral CSR blocks, and top-level CSR.
 
-The prompt encodes the socmate bus conventions (nibble decode, peripheral
+The prompt encodes the coresmith bus conventions (nibble decode, peripheral
 stride, SRAM range) so the LLM produces architecturally correct output
 while making intelligent decisions about sizing and layout.
 """
@@ -73,7 +73,7 @@ async def analyze_memory_map(
     """
     from opentelemetry import trace as _trace
 
-    tracer = _trace.get_tracer("socmate.architecture.memory_map")
+    tracer = _trace.get_tracer("coresmith.architecture.memory_map")
 
     with tracer.start_as_current_span("analyze_memory_map") as span:
         blocks = block_diagram.get("blocks", [])
@@ -134,7 +134,7 @@ async def analyze_memory_map(
                 except OSError:
                     pass
 
-        target_path = _P(project_root) / ".socmate" / "memory_map.json"
+        target_path = _P(project_root) / ".coresmith" / "memory_map.json"
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         parts.append(
@@ -144,7 +144,7 @@ async def analyze_memory_map(
 
         user_message = "\n".join(parts)
 
-        from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
         system_prompt = SYSTEM_PROMPT.format(topology_context=topology_context)

@@ -50,7 +50,7 @@ def _scan_golden_models(
     roots: list[Path] = []
     for candidate in (
         Path(project_root),
-        Path(os.environ.get("SOCMATE_SOURCE_ROOT", "") or "."),
+        Path(os.environ.get("CORESMITH_SOURCE_ROOT", "") or "."),
         Path(__file__).resolve().parents[3],
     ):
         resolved = candidate.resolve()
@@ -177,7 +177,7 @@ def _auto_discover_model_dirs(root: Path) -> list[tuple[str, str]]:
     import ast
 
     skip = {"__pycache__", ".git", "venv", ".venv", "node_modules",
-            "orchestrator", "sim_build", "syn", ".socmate"}
+            "orchestrator", "sim_build", "syn", ".coresmith"}
 
     found: list[tuple[str, str]] = []
     for child in sorted(root.iterdir()):
@@ -239,7 +239,7 @@ async def analyze_block_diagram(
     """
     from opentelemetry import trace as _trace
 
-    tracer = _trace.get_tracer("socmate.architecture.block_diagram")
+    tracer = _trace.get_tracer("coresmith.architecture.block_diagram")
 
     with tracer.start_as_current_span("analyze_block_diagram") as span:
         span.set_attribute("target_clock_mhz", target_clock_mhz)
@@ -328,7 +328,7 @@ async def analyze_block_diagram(
                 f"{json.dumps(existing_diagram, indent=2)}"
             )
 
-        target_path = Path(project_root) / ".socmate" / "block_diagram.json"
+        target_path = Path(project_root) / ".coresmith" / "block_diagram.json"
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         parts.append(
@@ -346,7 +346,7 @@ async def analyze_block_diagram(
         )
 
         # Import here to avoid circular deps and allow mocking in tests
-        from orchestrator.langchain.agents.socmate_llm import DEFAULT_MODEL, ClaudeLLM
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
 

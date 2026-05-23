@@ -963,7 +963,7 @@ class TestBlockDiagramVizIntermediateSync:
 
         _persist_intermediate_state(state, updates)
 
-        viz_path = Path(isolated_project) / ".socmate" / "block_diagram_viz.json"
+        viz_path = Path(isolated_project) / ".coresmith" / "block_diagram_viz.json"
         assert viz_path.exists(), "block_diagram_viz.json was not written"
 
         viz = json.loads(viz_path.read_text())
@@ -1006,7 +1006,7 @@ class TestBlockDiagramVizIntermediateSync:
         # First persist: write initial viz with cavlc_encoder
         _persist_intermediate_state(state, {"block_diagram": old_diagram, "phase": "block_diagram"})
 
-        viz_path = Path(isolated_project) / ".socmate" / "block_diagram_viz.json"
+        viz_path = Path(isolated_project) / ".coresmith" / "block_diagram_viz.json"
         viz_v1 = json.loads(viz_path.read_text())
         v1_names = [n["data"]["device_name"] for n in viz_v1["architecture"]["systemNodes"]]
         assert "cavlc_encoder" in v1_names
@@ -1053,7 +1053,7 @@ class TestBlockDiagramVizIntermediateSync:
 
         _persist_intermediate_state(state, updates)
 
-        viz_path = Path(isolated_project) / ".socmate" / "block_diagram_viz.json"
+        viz_path = Path(isolated_project) / ".coresmith" / "block_diagram_viz.json"
         viz = json.loads(viz_path.read_text())
 
         butterfly_nodes = [
@@ -1083,7 +1083,7 @@ class TestBlockDiagramVizIntermediateSync:
 
         _persist_intermediate_state(state, updates)
 
-        viz_path = Path(isolated_project) / ".socmate" / "block_diagram_viz.json"
+        viz_path = Path(isolated_project) / ".coresmith" / "block_diagram_viz.json"
         assert not viz_path.exists(), (
             "block_diagram_viz.json should not be written for empty block diagram"
         )
@@ -1104,7 +1104,7 @@ class TestBlockDiagramVizIntermediateSync:
 
         _persist_intermediate_state(state, updates)
 
-        viz_path = Path(isolated_project) / ".socmate" / "block_diagram_viz.json"
+        viz_path = Path(isolated_project) / ".coresmith" / "block_diagram_viz.json"
         assert not viz_path.exists(), (
             "block_diagram_viz.json should not be written when only memory_map is updated"
         )
@@ -1279,8 +1279,8 @@ class TestPerDocPersistence:
             await block_diagram_node(state)
 
         from pathlib import Path
-        socmate = Path(isolated_project) / ".socmate"
-        assert (socmate / "block_diagram.json").exists()
+        coresmith = Path(isolated_project) / ".coresmith"
+        assert (coresmith / "block_diagram.json").exists()
         arch = Path(isolated_project) / "arch"
         assert (arch / "block_diagram.md").exists()
 
@@ -1306,8 +1306,8 @@ class TestPerDocPersistence:
             await memory_map_node(state)
 
         from pathlib import Path
-        socmate = Path(isolated_project) / ".socmate"
-        assert (socmate / "memory_map.json").exists()
+        coresmith = Path(isolated_project) / ".coresmith"
+        assert (coresmith / "memory_map.json").exists()
         arch = Path(isolated_project) / "arch"
         assert (arch / "memory_map.md").exists()
 
@@ -1333,7 +1333,7 @@ class TestPerDocPersistence:
             await memory_map_node(state)
 
         from pathlib import Path
-        arch_state = Path(isolated_project) / ".socmate" / "architecture_state.json"
+        arch_state = Path(isolated_project) / ".coresmith" / "architecture_state.json"
         # This assertion will pass only after the refactor removes
         # _persist_intermediate_state and replaces it with per-doc helpers
         if arch_state.exists():

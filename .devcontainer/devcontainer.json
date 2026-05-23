@@ -1,6 +1,6 @@
 {
     "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
-    "name": "socmate",
+    "name": "coresmith",
 
     // Pull the prebuilt image published by .github/workflows/publish-image.yml
     // on every push to main. First codespace start drops from ~15-20 min
@@ -8,22 +8,22 @@
     // pull). The tradeoff: codespaces on a feature branch will NOT pick up
     // Dockerfile changes from that branch -- they always boot from
     // `:latest` (= last green main). For Dockerfile/toolchain work, build
-    // locally with `docker build -t socmate:dev .` and test outside
+    // locally with `docker build -t coresmith:dev .` and test outside
     // Codespaces, or temporarily flip this back to a `build` block.
-    "image": "ghcr.io/facebookexperimental/socmate:latest",
+    "image": "ghcr.io/facebookexperimental/coresmith:latest",
 
     // The openlane2 base image already runs as root with /nix/store on
     // PATH; keep the dev container as root so the entrypoint can write
-    // under /socmate/.socmate, /rtl, etc.
+    // under /coresmith/.coresmith, /rtl, etc.
     "remoteUser": "root",
     "containerUser": "root",
 
-    "workspaceFolder": "/socmate",
-    "workspaceMount": "source=${localWorkspaceFolder},target=/socmate,type=bind,consistency=cached",
+    "workspaceFolder": "/coresmith",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/coresmith,type=bind,consistency=cached",
 
     "containerEnv": {
-        "SOCMATE_PROJECT_ROOT": "/socmate",
-        "PDK_ROOT": "/socmate/.pdk",
+        "CORESMITH_PROJECT_ROOT": "/coresmith",
+        "PDK_ROOT": "/coresmith/.pdk",
         "PYTHONUNBUFFERED": "1"
     },
 
@@ -31,7 +31,7 @@
     "forwardPorts": [8765],
     "portsAttributes": {
         "8765": {
-            "label": "socmate MCP HTTP",
+            "label": "coresmith MCP HTTP",
             "onAutoForward": "silent"
         }
     },
@@ -51,7 +51,7 @@
                 "anthropic.claude-code"
             ],
             "settings": {
-                "python.defaultInterpreterPath": "/opt/socmate-venv/bin/python",
+                "python.defaultInterpreterPath": "/opt/coresmith-venv/bin/python",
                 "python.terminal.activateEnvironment": false
             }
         }

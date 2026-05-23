@@ -81,7 +81,7 @@ class TestDocStoreIntegration:
         assert result["sad_spec"] is False
         assert read_sad(fft16_full_docs) is None
 
-    def test_no_socmate_dir_returns_all_none(self, tmp_path):
+    def test_no_coresmith_dir_returns_all_none(self, tmp_path):
         from orchestrator.architecture.doc_store import (
             list_documents, read_prd, read_sad,
         )
@@ -176,9 +176,9 @@ class TestJsonMarkdownConsistency:
         _persist_sad(isolated_project, FFT16_SAD_MARKDOWN)
 
         arch = Path(isolated_project) / "arch"
-        socmate = Path(isolated_project) / ".socmate"
+        coresmith = Path(isolated_project) / ".coresmith"
         assert (arch / "sad_spec.md").exists()
-        assert not (socmate / "sad_spec.json").exists(), "SAD should no longer produce .json"
+        assert not (coresmith / "sad_spec.json").exists(), "SAD should no longer produce .json"
         md_text = (arch / "sad_spec.md").read_text()
         assert "16-Point FFT Processor" in md_text
 
@@ -188,9 +188,9 @@ class TestJsonMarkdownConsistency:
         _persist_frd(isolated_project, FFT16_FRD_MARKDOWN)
 
         arch = Path(isolated_project) / "arch"
-        socmate = Path(isolated_project) / ".socmate"
+        coresmith = Path(isolated_project) / ".coresmith"
         assert (arch / "frd_spec.md").exists()
-        assert not (socmate / "frd_spec.json").exists(), "FRD should no longer produce .json"
+        assert not (coresmith / "frd_spec.json").exists(), "FRD should no longer produce .json"
         md_text = (arch / "frd_spec.md").read_text()
         assert "16-Point FFT Processor" in md_text
 
@@ -199,9 +199,9 @@ class TestJsonMarkdownConsistency:
 
         _persist_block_diagram(isolated_project, FFT16_BLOCK_DIAGRAM)
 
-        socmate = Path(isolated_project) / ".socmate"
+        coresmith = Path(isolated_project) / ".coresmith"
         arch = Path(isolated_project) / "arch"
-        data = json.loads((socmate / "block_diagram.json").read_text())
+        data = json.loads((coresmith / "block_diagram.json").read_text())
         md_text = (arch / "block_diagram.md").read_text()
 
         for block in data["blocks"]:
@@ -214,9 +214,9 @@ class TestJsonMarkdownConsistency:
 
         _persist_memory_map(isolated_project, FFT16_MEMORY_MAP)
 
-        socmate = Path(isolated_project) / ".socmate"
+        coresmith = Path(isolated_project) / ".coresmith"
         arch = Path(isolated_project) / "arch"
-        data = json.loads((socmate / "memory_map.json").read_text())
+        data = json.loads((coresmith / "memory_map.json").read_text())
         md_text = (arch / "memory_map.md").read_text()
 
         for periph in data["result"]["peripherals"]:
@@ -227,9 +227,9 @@ class TestJsonMarkdownConsistency:
 
         _persist_register_spec(isolated_project, FFT16_REGISTER_SPEC)
 
-        socmate = Path(isolated_project) / ".socmate"
+        coresmith = Path(isolated_project) / ".coresmith"
         arch = Path(isolated_project) / "arch"
-        data = json.loads((socmate / "register_spec.json").read_text())
+        data = json.loads((coresmith / "register_spec.json").read_text())
         md_text = (arch / "register_spec.md").read_text()
 
         for block in data["result"]["blocks"]:
