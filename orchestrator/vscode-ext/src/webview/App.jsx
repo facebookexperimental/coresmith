@@ -244,6 +244,17 @@ function App() {
     fetchNodeDescriptions().then(setNodeDescriptions);
   }, []);
 
+  // Server-side feature flags (e.g. observer_enabled) so UI hides
+  // controls for features that won't produce data.
+  const [serverConfig, setServerConfig] = useState({ observer_enabled: false });
+  useEffect(() => {
+    if (!isStandalone) return;
+    fetch('/api/server_config')
+      .then((r) => r.ok ? r.json() : null)
+      .then((c) => { if (c) setServerConfig(c); })
+      .catch(() => {});
+  }, []);
+
 
   useEffect(() => { viewModeRef.current = viewMode; }, [viewMode]);
   useEffect(() => { graphNameRef.current = graphName; }, [graphName]);
@@ -549,6 +560,7 @@ function App() {
               updated={summaryUpdated}
               width={summaryWidth}
               cardData={summaryCardData}
+              observerEnabled={serverConfig.observer_enabled}
             />
             <div
               className="resize-handle resize-handle-right"

@@ -129262,7 +129262,7 @@ function MarkdownDocCard({ content, emptyMessage }) {
   }
   return /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-markdown", dangerouslySetInnerHTML: { __html: html } });
 }
-function ArchitectureCards({ cardData, updated }) {
+function ArchitectureCards({ cardData, updated, hideSummaryCard }) {
   const {
     summary = "",
     prd_content = "",
@@ -129273,7 +129273,7 @@ function ArchitectureCards({ cardData, updated }) {
     memory_map_content = ""
   } = cardData || {};
   return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(import_jsx_runtime15.Fragment, { children: [
-    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: "Summary", defaultOpen: true, children: /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
+    !hideSummaryCard && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: "Summary", defaultOpen: true, children: /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
       MarkdownDocCard,
       {
         content: summary,
@@ -129329,14 +129329,14 @@ function UarchSpecCard({ blockName, spec }) {
   const specHtml = (0, import_react21.useMemo)(() => markdownToHtml2(full_content), [full_content]);
   return /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: blockName, defaultOpen: true, children: full_content ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-markdown", dangerouslySetInnerHTML: { __html: specHtml } }) : /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-empty", children: "Spec content not available." }) });
 }
-function FrontendCards({ summary, uarchSpecs, updated }) {
+function FrontendCards({ summary, uarchSpecs, updated, hideSummaryCard }) {
   const summaryHtml = (0, import_react21.useMemo)(() => markdownToHtml2(summary), [summary]);
   const specEntries = (0, import_react21.useMemo)(
     () => Object.entries(uarchSpecs || {}).sort(([a], [b]) => a.localeCompare(b)),
     [uarchSpecs]
   );
   return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(import_jsx_runtime15.Fragment, { children: [
-    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: "Summary", defaultOpen: true, children: summary ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-markdown", dangerouslySetInnerHTML: { __html: summaryHtml } }) : /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-empty", children: "No summary available yet. The observer will generate one as the pipeline runs." }) }),
+    !hideSummaryCard && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: "Summary", defaultOpen: true, children: summary ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-markdown", dangerouslySetInnerHTML: { __html: summaryHtml } }) : /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-empty", children: "No summary available yet. The observer will generate one as the pipeline runs." }) }),
     specEntries.length > 0 ? specEntries.map(([blockName, spec]) => /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(UarchSpecCard, { blockName, spec }, blockName)) : /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: "Microarchitecture", defaultOpen: true, children: /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-empty", children: "No uArch specs generated yet. They will appear here as blocks are processed." }) })
   ] });
 }
@@ -129547,7 +129547,7 @@ function BlockBackendCard({ block, targetClock }) {
     }
   );
 }
-function BackendCards({ cardData, updated }) {
+function BackendCards({ cardData, updated, hideSummaryCard }) {
   const {
     summary = "",
     blocks = [],
@@ -129594,7 +129594,7 @@ function BackendCards({ cardData, updated }) {
       },
       block.name
     )),
-    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: "Summary", defaultOpen: blocks.length === 0, children: summary ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-markdown", dangerouslySetInnerHTML: { __html: summaryHtml } }) : /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-empty", children: "No backend summary available yet. Results will appear as blocks complete PnR, DRC, and LVS." }) })
+    !hideSummaryCard && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: "Summary", defaultOpen: blocks.length === 0, children: summary ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-markdown", dangerouslySetInnerHTML: { __html: summaryHtml } }) : /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-empty", children: "No backend summary available yet. Results will appear as blocks complete PnR, DRC, and LVS." }) })
   ] });
 }
 var SummaryPanel = import_react21.default.memo(function SummaryPanel2({
@@ -129602,7 +129602,8 @@ var SummaryPanel = import_react21.default.memo(function SummaryPanel2({
   content,
   updated,
   width,
-  cardData
+  cardData,
+  observerEnabled
 }) {
   const renderedHtml = (0, import_react21.useMemo)(() => markdownToHtml2(content), [content]);
   const scrollRef = (0, import_react21.useRef)(null);
@@ -129622,12 +129623,14 @@ var SummaryPanel = import_react21.default.memo(function SummaryPanel2({
     }
   };
   const renderCards = () => {
+    const hideSummaryCard = observerEnabled === false;
     if (stage === "architecture") {
       return /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
         ArchitectureCards,
         {
           cardData: cardData || { summary: content },
-          updated
+          updated,
+          hideSummaryCard
         }
       );
     }
@@ -129637,7 +129640,8 @@ var SummaryPanel = import_react21.default.memo(function SummaryPanel2({
         {
           summary: cardData ? cardData.summary : content,
           uarchSpecs: cardData ? cardData.uarch_specs : null,
-          updated
+          updated,
+          hideSummaryCard
         }
       );
     }
@@ -129646,10 +129650,13 @@ var SummaryPanel = import_react21.default.memo(function SummaryPanel2({
         BackendCards,
         {
           cardData: cardData || { summary: content },
-          updated
+          updated,
+          hideSummaryCard
         }
       );
     }
+    if (hideSummaryCard)
+      return null;
     return content ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
       "div",
       {
@@ -129925,6 +129932,16 @@ function App() {
     if (!isStandalone)
       return;
     fetchNodeDescriptions().then(setNodeDescriptions);
+  }, []);
+  const [serverConfig, setServerConfig] = (0, import_react23.useState)({ observer_enabled: false });
+  (0, import_react23.useEffect)(() => {
+    if (!isStandalone)
+      return;
+    fetch("/api/server_config").then((r) => r.ok ? r.json() : null).then((c) => {
+      if (c)
+        setServerConfig(c);
+    }).catch(() => {
+    });
   }, []);
   (0, import_react23.useEffect)(() => {
     viewModeRef.current = viewMode;
@@ -130221,7 +130238,8 @@ function App() {
             content: summaryContent,
             updated: summaryUpdated,
             width: summaryWidth,
-            cardData: summaryCardData
+            cardData: summaryCardData,
+            observerEnabled: serverConfig.observer_enabled
           }
         ),
         /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(

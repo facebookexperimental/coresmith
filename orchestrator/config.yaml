@@ -154,8 +154,12 @@ blocks:
       Verilog-2005. Target ~50 MHz on Sky130 sky130_fd_sc_hd.
 
 # Observer LLM (generates .socmate/summary_*.md after significant node transitions)
+# Off by default -- was ~22% of the LLM call budget for a feature most users
+# don't actively consume. Re-enable here or via the env var
+# CORESMITH_OBSERVER=1. When disabled, the dashboard's "Summary" card is
+# hidden too (other doc cards remain).
 observer:
-  enabled: true
+  enabled: false
   cooldown_s: 300  # minimum seconds between observer LLM calls per stage
 
 # Architecture stage configuration

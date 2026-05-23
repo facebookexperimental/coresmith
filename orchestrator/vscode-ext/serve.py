@@ -326,6 +326,46 @@ def get_live_calls(node_name: str) -> list[dict]:
     return result
 
 
+def _get_server_config() -> dict:
+    """Surface server-side feature flags to the webview so it can hide
+    UI for disabled features (e.g. the Observer-summary card)."""
+    cfg = {
+        "observer_enabled": False,
+        "observer_cooldown_s": None,
+    }
+    # Env-var override takes precedence (matches the engine's behaviour).
+    import os as _os
+    env = _os.environ.get("CORESMITH_OBSERVER", "").strip().lower()
+    if env in {"1", "true", "yes", "on"}:
+        cfg["observer_enabled"] = True
+    elif env in {"0", "false", "no", "off"}:
+        cfg["observer_enabled"] = False
+    else:
+        try:
+            import yaml
+            # Prefer the engine repo's config.yaml when reachable; fall back
+            # to a per-project override if a copy exists in PROJECT_ROOT.
+            candidates = [
+                _CODE_ROOT / "orchestrator" / "config.yaml",
+                PROJECT_ROOT / "orchestrator" / "config.yaml",
+                PROJECT_ROOT / ".coresmith" / "config.yaml",
+            ]
+            for p in candidates:
+                if not p.exists():
+                    continue
+                with open(p) as f:
+                    raw = yaml.safe_load(f) or {}
+                obs = raw.get("observer", {}) or {}
+                if "enabled" in obs:
+                    cfg["observer_enabled"] = bool(obs.get("enabled"))
+                if "cooldown_s" in obs:
+                    cfg["observer_cooldown_s"] = float(obs.get("cooldown_s"))
+                break
+        except Exception:
+            pass
+    return cfg
+
+
 def _list_collateral() -> dict:
     """List generated chip-design artefacts grouped by kind so the
     Collateral tab can browse RTL, testbenches, synthesis outputs, and
@@ -1791,6 +1831,15 @@ class WebviewHandler(SimpleHTTPRequestHandler):
         if path.startswith("/api/summary_cards/"):
             stage = path.split("/api/summary_cards/", 1)[1].strip("/")
             self._json_response(get_summary_cards(stage))
+            return
+
+        # API: server-side feature flags (observer enabled, etc.) so the
+        # webview can hide UI for disabled features.
+        if path == "/api/server_config":
+            try:
+                self._json_response(_get_server_config())
+            except Exception as exc:
+                self._json_response({"error": str(exc)}, status=500)
             return
 
         # API: collateral listing (RTL / testbench / synthesis / waveforms)
