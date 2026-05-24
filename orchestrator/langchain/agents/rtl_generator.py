@@ -203,7 +203,26 @@ class RTLGeneratorAgent:
                 f"- Constraints: .coresmith/blocks/{block_name}/constraints.json",
                 f"- Golden Model: {python_source_path}",
                 "- Block Diagram: .coresmith/block_diagram.json (for interface context)",
+                "- Interface Contracts: .coresmith/interface_contracts.json "
+                "(canonical bit-level edge contracts — see inline excerpt below)",
             ]
+
+            # Inject the canonical contract slice for this block directly
+            # into the prompt. The v7 autopilot run proved that telling the
+            # agent "go read interface_contracts.json" is not enough — the
+            # RTL generator routinely ignored the file's bootstrap_policy.
+            # Inlining the relevant edges forces the contract into the
+            # generator's context window.
+            from .contract_lookup import (
+                load_block_contracts,
+                format_block_contracts_prompt,
+            )
+            _contracts_view = load_block_contracts(project_root, block_name)
+            _contracts_fragment = format_block_contracts_prompt(
+                block_name, _contracts_view
+            )
+            if _contracts_fragment:
+                parts.append(_contracts_fragment)
 
             if attempt > 1:
                 parts.extend([
