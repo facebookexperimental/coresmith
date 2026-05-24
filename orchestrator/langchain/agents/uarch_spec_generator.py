@@ -177,6 +177,22 @@ class UarchSpecGenerator:
                     except (OSError, _json.JSONDecodeError):
                         pass
 
+                # Inject canonical interface_contracts.json slice for this
+                # block. The Interface Definition arch stage produces this
+                # as the authoritative source for bit-level edge contracts
+                # (handshake protocol, field positions, bootstrap policy).
+                # Inlining prevents the spec author from drifting from it.
+                from .contract_lookup import (
+                    load_block_contracts,
+                    format_block_contracts_prompt,
+                )
+                _contracts_view = load_block_contracts(project_root, block_name)
+                _contracts_fragment = format_block_contracts_prompt(
+                    block_name, _contracts_view
+                )
+                if _contracts_fragment:
+                    parts.append(_contracts_fragment)
+
                 # FRD for testable requirements context
                 frd_path = _root / "arch" / "frd_spec.md"
                 if frd_path.exists():
