@@ -275,3 +275,49 @@ class IntegrationLeadAgent:
             result["notes"] += " WARNING: verilog field does not contain a module declaration."
 
         return result
+
+
+def assert_blocks_instantiated(
+    chip_top_verilog: str, expected_block_names: set[str]
+) -> str | None:
+    """Postcondition: every expected block must appear as an instantiation
+    inside the Integration Lead's chip_top Verilog. Returns None on success
+    or a descriptive error string listing the missing blocks.
+
+    The Integration Lead has historically been observed to silently drop
+    blocks from block_diagram.json and substitute glue stubs (e.g.,
+    cavlc_enc -> rle_to_packer_token_bridge). Lint passes because the
+    substitute compiles, but the chip is structurally wrong.
+    """
+    if not chip_top_verilog or not expected_block_names:
+        return None
+
+    # Strip line and block comments to avoid matching block names that
+    # appear only in commentary.
+    code = re.sub(r"//[^\n]*", "", chip_top_verilog)
+    code = re.sub(r"/\*.*?\*/", "", code, flags=re.DOTALL)
+
+    missing: list[str] = []
+    for block_name in expected_block_names:
+        # An instantiation is either
+        #   <module> <inst_name> ( ... );           non-parameterized
+        # or
+        #   <module> #( <params> ) <inst_name> (    parameterized
+        # We accept either by allowing the next token after the module name
+        # to be `#` (parameter override) or an identifier followed by `(`.
+        pattern = (
+            rf"\b{re.escape(block_name)}\s+"
+            rf"(?:#|[a-zA-Z_]\w*\s*\()"
+        )
+        if not re.search(pattern, code):
+            missing.append(block_name)
+
+    if missing:
+        return (
+            f"Integration Lead postcondition failed: chip_top RTL does NOT "
+            f"instantiate {len(missing)} expected block(s): "
+            f"{sorted(missing)}. The Integration Lead may have silently "
+            f"dropped blocks or substituted glue stubs (the cavlc_enc -> "
+            f"rle_to_packer_token_bridge failure mode). Refusing to proceed."
+        )
+    return None
