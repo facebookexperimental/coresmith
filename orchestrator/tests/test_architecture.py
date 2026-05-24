@@ -710,7 +710,12 @@ class TestEndToEndStateFlow:
                 {"name": "top_csr", "num_config": 8, "num_status": 8, "registers": []},
             ],
         })
-        cc_response = json.dumps({"violations": [], "reasoning": "All checks pass."})
+        cc_response = json.dumps({
+            "pass": True,
+            "violation_text": "",
+            "evidence": "All checks pass.",
+            "suggested_fix": "",
+        })
 
         state = ArchitectureState(
             requirements="DVB-T transceiver",
