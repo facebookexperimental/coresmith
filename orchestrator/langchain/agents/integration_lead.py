@@ -40,6 +40,20 @@ else:
         "blocks together. Respond with JSON only."
     )
 
+# Pull the handshake-protocol skills into the system prompt so the
+# Integration Lead has access to the same packing / bootstrap / sideband
+# conventions the uArch spec generator used. Missing skills degrade
+# silently.
+from orchestrator.langchain.prompts.skills import load_skills as _load_skills
+
+_SKILLS_TEXT = _load_skills("axi_stream", "srdy_drdy")
+if _SKILLS_TEXT:
+    SYSTEM_PROMPT = (
+        SYSTEM_PROMPT
+        + "\n\n# Reference Skills (use when wiring chip_top)\n\n"
+        + _SKILLS_TEXT
+    )
+
 
 class IntegrationLeadAgent:
     """Agent for chip-level integration: compatibility check + top-level RTL."""

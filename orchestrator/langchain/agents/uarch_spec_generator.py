@@ -39,6 +39,20 @@ else:
         "Produce a detailed microarchitecture specification from a Python model."
     )
 
+# Inject handshake skills so every uArch spec author has access to the
+# coresmith conventions for AXI-Stream and sRdy/dRdy. Skills are loaded
+# at import time so a missing skill file is visible immediately rather
+# than at first agent call.
+from orchestrator.langchain.prompts.skills import load_skills as _load_skills
+
+_SKILLS_TEXT = _load_skills("axi_stream", "srdy_drdy")
+if _SKILLS_TEXT:
+    SYSTEM_PROMPT = (
+        SYSTEM_PROMPT
+        + "\n\n# Reference Skills (use when authoring interfaces)\n\n"
+        + _SKILLS_TEXT
+    )
+
 
 class UarchSpecGenerator:
     """Agent for generating microarchitecture specifications."""
