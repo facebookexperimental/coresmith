@@ -134,9 +134,29 @@ COCOTB RULES (same as per-block):
 - Use cocotb with Python 3.11+ syntax.
 - Use `cocotb.clock.Clock` for clock generation (match PRD target clock).
 - Use active-low reset (`rst_n`): assert low for 5 cycles, then release.
-- Each DUT clock signal must have exactly one live cocotb Clock driver. Reuse a
-  module-level clock task across tests or explicitly stop the previous task;
-  never start a new free-running clock in every test without cleanup.
+- Each DUT clock signal must have exactly one live cocotb Clock driver, started
+  fresh per `@cocotb.test()` invocation. DO NOT cache the clock task handle
+  in a module-level global with an "if cache is None" guard:
+
+      # ❌ WRONG -- breaks tests 2+ when scheduler invalidates the task but
+      # the Python global persists, causing SimFailure: Simulator shut down
+      # prematurely (observed 3+ times in real coresmith runs).
+      _clock_task = None
+      async def start_clock(dut):
+          global _clock_task
+          if _clock_task is None:
+              _clock_task = cocotb.start_soon(Clock(...).start())
+
+  Each `@cocotb.test()` runs in a fresh scheduling scope; coroutines from
+  the previous test are cancelled, but module-level globals are not reset.
+  A cached handle from test 1 will be non-None during test 2, the guard
+  short-circuits, no new clock starts, and the simulator finishes with no
+  events.
+
+      # ✅ CORRECT -- start a fresh clock every test, no module-level cache.
+      async def start_clock(dut):
+          cocotb.start_soon(Clock(dut.clk, CLOCK_PERIOD_NS, units="ns").start())
+          await RisingEdge(dut.clk)
 - ALWAYS drive `m_tready = 1` BEFORE sending data on any input interface.
 - Use `cocotb.start_soon()` for concurrent sender/receiver coroutines.
   NEVER use `cocotb.start_fork()` (removed in cocotb 2.0).
