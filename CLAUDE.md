@@ -54,8 +54,26 @@ export CORESMITH_ENABLE_MEMORY_MAP=0
 export CORESMITH_ENABLE_CLOCK_TREE=0
 export CORESMITH_ENABLE_REGISTER_SPEC=0
 
-# Start the daemon + a fresh pipeline run
+# Start the daemon
 bin/coresmith daemon start --project-root $RUN_DIR
+
+# (1) Architecture phase — generates PRD, ERS, FRD, block_diagram.json
+#     and the initial arch/uarch_specs/<block>.md files from a
+#     natural-language requirements doc. Parks at PRD review, block
+#     diagram review, constraint check, etc.; outer agent resumes
+#     each via `coresmith resume`.
+bin/coresmith architecture start --project-root $RUN_DIR \
+    --requirements $RUN_DIR/inputs/requirements.md
+
+# (2) Frontend pipeline — runs against the architecture artifacts from (1)
+#     OR against a hand-written examples/<design>/blocks.yaml if you are
+#     intentionally skipping the architecture phase. Skipping is supported
+#     but the daemon will print a warning at /run/start because
+#     `integration_review` then can't verify cross-block data_width and
+#     `validation_dv` soft-aborts on missing ERS. Set
+#     CORESMITH_SKIP_ARCH_WARN=1 to silence the warning for rapid
+#     iteration / PPABench-style runs where you only care about the
+#     per-block frontend loop.
 bin/coresmith run start --project-root $RUN_DIR \
     --blocks-file /home/ubuntu/coresmith/examples/<design>/blocks.yaml
 
