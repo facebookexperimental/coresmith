@@ -48,7 +48,7 @@ const SIMPLE_DIAGRAM = {
   metadata: {
     design_name: 'Test Design',
     timestamp: '2025-01-01T00:00:00Z',
-    source: 'socmate_architecture',
+    source: 'coresmith_architecture',
     block_count: 2,
     connection_count: 1,
   },
@@ -118,7 +118,7 @@ const BUS_DIAGRAM = {
   metadata: {
     design_name: 'Bus Test Design',
     timestamp: '2025-01-01T00:00:00Z',
-    source: 'socmate_architecture',
+    source: 'coresmith_architecture',
     block_count: 3,
     connection_count: 4,
   },
@@ -242,7 +242,7 @@ const SUBSYSTEM_DIAGRAM = {
   metadata: {
     design_name: 'Subsystem Test Design',
     timestamp: '2025-01-01T00:00:00Z',
-    source: 'socmate_architecture',
+    source: 'coresmith_architecture',
     block_count: 3,
     connection_count: 2,
   },
@@ -329,7 +329,7 @@ const FULL_DIAGRAM = {
   metadata: {
     design_name: 'Full Architecture Test',
     timestamp: '2025-01-01T00:00:00Z',
-    source: 'socmate_architecture',
+    source: 'coresmith_architecture',
     block_count: 5,
     connection_count: 6,
   },
@@ -569,7 +569,7 @@ describe('BlockDiagramCanvas', () => {
       metadata: {
         design_name: 'Bus Only',
         timestamp: '2025-01-01T00:00:00Z',
-        source: 'socmate_architecture',
+        source: 'coresmith_architecture',
         block_count: 1,
         connection_count: 0,
       },

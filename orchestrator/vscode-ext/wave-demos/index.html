@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Waveform viewer eval · Coresmith</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 14px/1.5 system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    margin: 0;
+    padding: 40px 32px;
+    color: #1f2330;
+    background: #f6f7fb;
+  }
+  h1 { margin: 0 0 8px; font-size: 22px; }
+  .sub { color: #6b6f80; font-size: 13px; margin-bottom: 24px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 18px;
+    max-width: 980px;
+  }
+  .card {
+    background: #fff;
+    border: 1px solid #d8dbe5;
+    border-radius: 8px;
+    padding: 18px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .card h2 { margin: 0; font-size: 15px; }
+  .badges { display: flex; gap: 6px; flex-wrap: wrap; }
+  .badge {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 2px 7px;
+    border-radius: 10px;
+    background: #eef0f7;
+    color: #4b5063;
+  }
+  .badge.tech { background: #ede9fe; color: #6d28d9; }
+  .badge.size { background: #d1fae5; color: #065f46; }
+  .badge.host { background: #fef3c7; color: #92400e; }
+  .badge.local { background: #dbeafe; color: #1d4ed8; }
+  p { margin: 0; color: #4b5063; font-size: 12.5px; line-height: 1.55; }
+  .open {
+    margin-top: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+    color: #1d4ed8;
+    text-decoration: none;
+    font-size: 13px;
+  }
+  .open:hover { text-decoration: underline; }
+  .vcd-note {
+    margin-top: 28px;
+    padding: 12px 16px;
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    border-radius: 6px;
+    font-size: 12.5px;
+    color: #78350f;
+    max-width: 980px;
+  }
+  .vcd-note code {
+    background: #fef3c7;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #0f1117; color: #e7e9f0; }
+    .card { background: #181b24; border-color: #2d3244; }
+    p { color: #b9bccd; }
+    .badge { background: #1e2233; color: #cdd0dc; }
+    .vcd-note { background: rgba(251, 191, 36, 0.08); border-color: #78350f; color: #fde68a; }
+    .vcd-note code { background: rgba(251, 191, 36, 0.18); }
+  }
+</style>
+</head>
+<body>
+  <h1>In-browser waveform viewer · eval</h1>
+  <div class="sub">All four demos load <code style="background:#eef0f7;padding:1px 5px;border-radius:3px">sim_build/adder32/dump.vcd</code> from this server's <code style="background:#eef0f7;padding:1px 5px;border-radius:3px">/api/artifacts/</code>.</div>
+
+  <div class="grid">
+
+    <a class="card" href="./surfer-hosted.html">
+      <h2>Surfer · public hosted</h2>
+      <div class="badges">
+        <span class="badge tech">Rust → WASM</span>
+        <span class="badge host">3rd-party origin</span>
+        <span class="badge size">no local bundle</span>
+      </div>
+      <p>iframe to <code>app.surfer-project.org</code>, auto-loads the VCD via <code>postMessage({command:"LoadUrl"})</code>.</p>
+      <span class="open">Open →</span>
+    </a>
+
+    <a class="card" href="./surfer-local.html">
+      <h2>Surfer · self-hosted</h2>
+      <div class="badges">
+        <span class="badge tech">Rust → WASM</span>
+        <span class="badge local">same origin</span>
+        <span class="badge size">~14 MB WASM</span>
+      </div>
+      <p>Same Surfer UI, but the WASM bundle is served by this Python process. No external traffic.</p>
+      <span class="open">Open →</span>
+    </a>
+
+    <a class="card" href="./wavedrom.html">
+      <h2>WaveDrom + vcdrom</h2>
+      <div class="badges">
+        <span class="badge tech">pure JS</span>
+        <span class="badge local">same origin</span>
+        <span class="badge size">~1.3 MB JS</span>
+      </div>
+      <p>Drag-and-drop / open VCD; renders via the npm <code>vcdrom</code> standalone PWA.</p>
+      <span class="open">Open →</span>
+    </a>
+
+    <a class="card" href="./fliplot.html">
+      <h2>fliplot</h2>
+      <div class="badges">
+        <span class="badge tech">HTML / JS</span>
+        <span class="badge host">3rd-party origin</span>
+        <span class="badge size">no local bundle</span>
+      </div>
+      <p>iframe to the live GitHub Pages demo (<code>raczben.github.io/fliplot</code>). GTKWave-style UI.</p>
+      <span class="open">Open →</span>
+    </a>
+
+  </div>
+
+  <div class="vcd-note">
+    <strong>Heads up:</strong> the Surfer-hosted and fliplot demos run on a different origin from this server, so the VCD has to be fetched cross-origin. The <code>/api/artifacts/</code> endpoint ships <code>Access-Control-Allow-Origin: *</code> so this should just work. If a demo can't auto-load the file, you can also download it manually and drag it into the viewer: <a href="/api/artifacts/sim_build/adder32/dump.vcd" download="adder32_dump.vcd">adder32_dump.vcd</a>.
+  </div>
+</body>
+</html>

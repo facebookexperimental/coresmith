@@ -4,6 +4,7 @@ import { ReactFlowProvider } from 'reactflow';
 import GraphCanvas from './components/GraphCanvas';
 import GanttTimeline from './components/GanttTimeline';
 import BlockDiagramCanvas from './components/BlockDiagramCanvas';
+import CollateralViewer from './components/CollateralViewer';
 import NodePromptModal from './components/NodePromptModal';
 import SummaryPanel from './components/SummaryPanel';
 import StatusBar from './components/StatusBar';
@@ -26,7 +27,7 @@ class ErrorBoundary extends Component {
   }
 
   componentDidCatch(error, errorInfo) {
-    console.error('SoCMate ErrorBoundary caught:', error, errorInfo);
+    console.error('Coresmith ErrorBoundary caught:', error, errorInfo);
   }
 
   render() {
@@ -69,7 +70,7 @@ const isStandalone = !vscode;
 function useTheme() {
   const [theme, setThemeState] = useState(() => {
     try {
-      const stored = localStorage.getItem('socmate-theme');
+      const stored = localStorage.getItem('coresmith-theme');
       if (stored === 'dark' || stored === 'light') return stored;
     } catch {}
     return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -77,7 +78,7 @@ function useTheme() {
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
-    try { localStorage.setItem('socmate-theme', theme); } catch {}
+    try { localStorage.setItem('coresmith-theme', theme); } catch {}
   }, [theme]);
 
   const toggle = useCallback(() => {
@@ -149,6 +150,26 @@ async function fetchLiveCallsHttp(nodeId) {
   }
 }
 
+async function fetchNodeTrajectoryHttp(nodeId) {
+  try {
+    const res = await fetch(`/api/node_trajectory/${encodeURIComponent(nodeId)}`);
+    if (!res.ok) return [];
+    return res.json();
+  } catch {
+    return [];
+  }
+}
+
+async function fetchNodeDescriptions() {
+  try {
+    const res = await fetch('/api/node_descriptions');
+    if (!res.ok) return {};
+    return res.json();
+  } catch {
+    return {};
+  }
+}
+
 async function fetchSummaryHttp(stage) {
   try {
     const res = await fetch(`/api/summary/${stage}`);
@@ -215,6 +236,24 @@ function App() {
   const [summaryWidth, setSummaryWidth] = useState(360);
   const [detailWidth, setDetailWidth] = useState(420);
   const draggingRef = useRef(null); // 'summary' | 'detail' | null
+
+  // Node descriptions for the detail panel header (fetched once)
+  const [nodeDescriptions, setNodeDescriptions] = useState({});
+  useEffect(() => {
+    if (!isStandalone) return;
+    fetchNodeDescriptions().then(setNodeDescriptions);
+  }, []);
+
+  // Server-side feature flags (e.g. observer_enabled) so UI hides
+  // controls for features that won't produce data.
+  const [serverConfig, setServerConfig] = useState({ observer_enabled: false });
+  useEffect(() => {
+    if (!isStandalone) return;
+    fetch('/api/server_config')
+      .then((r) => r.ok ? r.json() : null)
+      .then((c) => { if (c) setServerConfig(c); })
+      .catch(() => {});
+  }, []);
 
 
   useEffect(() => { viewModeRef.current = viewMode; }, [viewMode]);
@@ -378,23 +417,33 @@ function App() {
       setTraceData(null);
     }
     if (isStandalone) {
-      // Fetch both OTel traces and live calls in parallel.  Live calls
-      // cover the gap between LLM completion and OTel batch export, and
-      // include streaming data that OTel never captures.
+      // Prefer the unified trajectory endpoint which interleaves LLM calls
+      // with tool runs (lint/simulate/synthesize step_logs). Fall back to
+      // OTel traces / live_calls if that endpoint returns nothing (older
+      // runs, or nodes with no LLM activity).
       Promise.all([
+        fetchNodeTrajectoryHttp(nodeId),
         fetchTracesHttp(nodeId),
         fetchLiveCallsHttp(nodeId),
-      ]).then(([traces, live]) => {
-        const hasTraces = traces && traces.length > 0;
+      ]).then(([trajectory, traces, live]) => {
+        const hasTraj = trajectory && trajectory.length > 0;
         const hasLive = live && live.length > 0;
+        const hasTraces = traces && traces.length > 0;
 
-        if (hasLive) {
-          // Live calls (from llm_calls.jsonl) are the authoritative
-          // source of LLM interaction data -- they're always written
-          // and never dropped.  OTel traces often have incomplete child
-          // spans due to BatchSpanProcessor drops or context propagation
-          // failures across asyncio.to_thread boundaries.  Always prefer
-          // live calls when available.
+        if (hasTraj) {
+          // Convert trajectory to the same {attempt, spans, steps} shape
+          // DetailPanel already consumes, but tag steps so we can render
+          // LLM calls and tool runs differently.
+          setTraceData(trajectory.map((a) => ({
+            attempt: a.attempt,
+            block: a.block,
+            duration_s: a.duration_s,
+            status: a.status,
+            exit_event: a.exit_event,
+            steps: a.steps,
+            trajectory: true,
+          })));
+        } else if (hasLive) {
           setTraceData(live.map((g) => ({ ...g, live: true })));
         } else if (hasTraces) {
           setTraceData(traces);
@@ -413,6 +462,9 @@ function App() {
   }, []);
 
   const handleTabSwitch = useCallback((tab) => {
+    // Close the per-node modal on tab switch; otherwise it lingers showing
+    // a node from the previous graph, on top of unrelated content.
+    setModalOpen(false);
     if (tab === 'timeline') {
       setViewMode('timeline');
       setGraphName('timeline');
@@ -421,6 +473,9 @@ function App() {
       } else {
         vscode.postMessage({ type: 'requestTimeline' });
       }
+    } else if (tab === 'collateral') {
+      setViewMode('collateral');
+      setGraphName('collateral');
     } else if (tab === 'block_diagram') {
       setViewMode('block_diagram');
       setGraphName('block_diagram');
@@ -438,7 +493,7 @@ function App() {
     <div className="app-shell">
       {/* ── Header bar with view selector tabs + inline status ── */}
       <div className="app-header">
-        <span className="app-title">SoCMate</span>
+        <span className="app-title">Coresmith</span>
         <div className="graph-selector">
           <button
             className={graphName === 'architecture' ? 'active' : ''}
@@ -470,6 +525,12 @@ function App() {
           >
             Timeline
           </button>
+          <button
+            className={graphName === 'collateral' ? 'active' : ''}
+            onClick={() => handleTabSwitch('collateral')}
+          >
+            Collateral
+          </button>
           <span className="selector-divider" />
           <button
             className={`summary-toggle-btn ${showSummary ? 'active' : ''}`}
@@ -491,7 +552,7 @@ function App() {
 
       {/* ── Main content area with optional summary sidebar ── */}
       <div className="app-body">
-        {showSummary && (
+        {showSummary && viewMode !== 'collateral' && (
           <>
             <SummaryPanel
               stage={summaryStage}
@@ -499,6 +560,7 @@ function App() {
               updated={summaryUpdated}
               width={summaryWidth}
               cardData={summaryCardData}
+              observerEnabled={serverConfig.observer_enabled}
             />
             <div
               className="resize-handle resize-handle-right"
@@ -516,6 +578,7 @@ function App() {
               graphName={graphName}
               detailWidth={detailWidth}
               onDetailResize={handleDragStart('detail')}
+              nodeDescriptions={nodeDescriptions}
             />
           </div>
         ) : viewMode === 'block_diagram' ? (
@@ -523,6 +586,10 @@ function App() {
             <ReactFlowProvider>
               <BlockDiagramCanvas diagramData={blockDiagramData} />
             </ReactFlowProvider>
+          </div>
+        ) : viewMode === 'collateral' ? (
+          <div className="canvas-container">
+            <CollateralViewer />
           </div>
         ) : (
           <div className="canvas-container">

@@ -191,7 +191,12 @@ function GanttRow({ block, toPercent, effectiveEnd, onSegmentClick, selectedSegK
     <div className="gantt-row" ref={rowRef}>
       <div className="gantt-label">
         <div className="gantt-block-info">
-          <span className="gantt-block-name">{block.name.replace(/_/g, ' ')}</span>
+          <span
+            className="gantt-block-name"
+            title={block.name.replace(/_/g, ' ')}
+          >
+            {block.name.replace(/_/g, ' ')}
+          </span>
           <div className="gantt-block-meta">
             {block.tier && <span className="gantt-tier-badge">T{block.tier}</span>}
             {maxAttempt > 1 && (
@@ -290,6 +295,23 @@ const LEGEND_ITEMS = {
   ],
 };
 
+// On the Timeline tab the user sees ALL phases at once, so the frontend-only
+// legend confused the architecture row's color choices. Combine the most
+// common items across phases so every color in view has a label.
+LEGEND_ITEMS.all = [
+  { label: 'Architecture', color: SEGMENT_COLORS['Block Diagram'].bg },
+  { label: 'Generate RTL', color: SEGMENT_COLORS['Generate RTL'].bg },
+  { label: 'Lint / Sim', color: SEGMENT_COLORS['Lint Check'].bg },
+  { label: 'Testbench', color: SEGMENT_COLORS['Generate Testbench'].bg },
+  { label: 'Synthesize', color: SEGMENT_COLORS['Synthesize'].bg },
+  { label: 'Diagnose', color: SEGMENT_COLORS['Diagnose Failure'].bg },
+  { label: 'Constraints', color: SEGMENT_COLORS['Constraint Check'].bg },
+  { label: 'Init/Advance', color: SEGMENT_COLORS['Init Block'].bg },
+  { label: 'Human Review', color: SEGMENT_COLORS['Review Uarch Spec'].bg },
+  { label: 'PnR (DRC/LVS/Timing)', color: '#a78bfa' },
+];
+LEGEND_ITEMS.timeline = LEGEND_ITEMS.all;
+
 const GRAPH_TITLES = {
   frontend: 'Pipeline Execution Timeline',
   architecture: 'Architecture Execution Timeline',
@@ -325,7 +347,7 @@ function Legend({ graphType }) {
   );
 }
 
-export default function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, detailWidth, onDetailResize }) {
+export default function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, detailWidth, onDetailResize, nodeDescriptions }) {
   const [now, setNow] = useState(Date.now() / 1000);
   const [selectedSeg, setSelectedSeg] = useState(null);
   const [selectedSegKey, setSelectedSegKey] = useState(null);
@@ -336,14 +358,22 @@ export default function GanttTimeline({ timelineData, traceData, onRequestTraces
   const chartRef = useRef(null);
   const chartScrollRef = useRef(0);
 
-  // Only tick the clock when blocks are actively processing (not just waiting for human)
-  const hasActiveWork = timelineData?.blocks?.some((b) => {
+  // A run is "actively working" only if the latest event is recent. Per-block
+  // status defaults to "running" and stays that way unless very specific
+  // completion nodes fire, so trusting it alone causes the elapsed counter
+  // to tick against a 6-day-old run.
+  const lastEventTs = timelineData?.pipeline_end || 0;
+  const secondsSinceLastEvent = lastEventTs > 0
+    ? (Date.now() / 1000) - lastEventTs
+    : Infinity;
+  const isHistoricalRun = secondsSinceLastEvent > 60;
+  const hasActiveWork = !isHistoricalRun && (timelineData?.blocks?.some((b) => {
     if (b.status !== 'running') return false;
     const segs = b.attempts?.flatMap((a) => a.segments) ?? [];
     const hasOpenWaiting = segs.some((s) => !s.end_ts && s.status === 'waiting');
     const hasOpenRunning = segs.some((s) => !s.end_ts && s.status === 'running');
     return !hasOpenWaiting || hasOpenRunning;
-  }) ?? false;
+  }) ?? false);
 
   // Preserve chart scroll position across re-renders
   const handleChartScroll = useCallback(() => {
@@ -484,6 +514,13 @@ export default function GanttTimeline({ timelineData, traceData, onRequestTraces
       }, pipeline_start);
   const totalDuration = effectiveEnd - pipeline_start;
 
+  // Fit the entire pipeline horizontally to the viewport on load so all
+  // phases (Architecture / Frontend / Backend) are visible at first glance.
+  // Aggressive auto-fit-to-content used to push the chart past 20k px wide,
+  // leaving the user staring at the Architecture row at t=0 with everything
+  // else scrolled off-screen. They can drag-select to zoom into any region.
+  const fitWidthPx = 0;
+
   // Compute visible time window based on zoom
   const zoomStart = zoomRange ? pipeline_start + zoomRange.start * totalDuration : pipeline_start;
   const zoomEnd = zoomRange ? pipeline_start + zoomRange.end * totalDuration : effectiveEnd;
@@ -556,7 +593,13 @@ export default function GanttTimeline({ timelineData, traceData, onRequestTraces
         </div>
 
         {/* Chart area */}
-        <div className="gantt-chart" ref={chartRef} onMouseDown={handleChartMouseDown} onScroll={handleChartScroll}>
+        <div
+          className="gantt-chart"
+          ref={chartRef}
+          onMouseDown={handleChartMouseDown}
+          onScroll={handleChartScroll}
+          style={fitWidthPx && !zoomRange ? { '--gantt-fit-width': `${fitWidthPx}px` } : undefined}
+        >
           {/* Zoom controls */}
           {zoomRange && (
             <div className="gantt-zoom-bar">
@@ -602,18 +645,55 @@ export default function GanttTimeline({ timelineData, traceData, onRequestTraces
             </div>
           </div>
 
-          {/* Block rows */}
+          {/* Block rows, grouped by phase (graph) with section headers so
+              the timeline structure -- phase orchestrator vs per-block rows
+              -- is obvious to readers who didn't write the pipeline. */}
           <div className="gantt-rows">
-            {blocks.map((block) => (
-              <GanttRow
-                key={block.name}
-                block={block}
-                toPercent={toPercent}
-                effectiveEnd={effectiveEnd}
-                onSegmentClick={handleSegmentClick}
-                selectedSegKey={selectedSegKey}
-              />
-            ))}
+            {(() => {
+              const PHASE_ORDER = ['architecture', 'frontend', 'backend'];
+              const PHASE_LABEL = {
+                architecture: 'Architecture',
+                frontend: 'Frontend (RTL pipeline)',
+                backend: 'Backend (PnR pipeline)',
+              };
+              // Group blocks by graph, preserving start_ts order within each phase
+              const grouped = new Map();
+              for (const b of blocks) {
+                const g = b.graph || 'other';
+                if (!grouped.has(g)) grouped.set(g, []);
+                grouped.get(g).push(b);
+              }
+              // Render in PHASE_ORDER, then any unknown phases at the end
+              const orderedPhases = [
+                ...PHASE_ORDER.filter((p) => grouped.has(p)),
+                ...[...grouped.keys()].filter((p) => !PHASE_ORDER.includes(p)),
+              ];
+              const out = [];
+              for (const phase of orderedPhases) {
+                const phaseBlocks = grouped.get(phase);
+                out.push(
+                  <div key={`hdr-${phase}`} className="gantt-phase-header">
+                    {PHASE_LABEL[phase] || phase}
+                    <span className="gantt-phase-count">
+                      {phaseBlocks.length === 1 ? '1 row' : `${phaseBlocks.length} rows`}
+                    </span>
+                  </div>
+                );
+                for (const block of phaseBlocks) {
+                  out.push(
+                    <GanttRow
+                      key={`${phase}-${block.name}`}
+                      block={block}
+                      toPercent={toPercent}
+                      effectiveEnd={effectiveEnd}
+                      onSegmentClick={handleSegmentClick}
+                      selectedSegKey={selectedSegKey}
+                    />
+                  );
+                }
+              }
+              return out;
+            })()}
           </div>
         </div>
 
@@ -628,7 +708,15 @@ export default function GanttTimeline({ timelineData, traceData, onRequestTraces
             onMouseDown={onDetailResize}
           />
           <DetailPanel
-            node={selectedSeg}
+            node={{
+              ...selectedSeg,
+              // selectedSeg is built in handleSegmentClick with id+label
+              // already set to the node name. Look up description via the
+              // label key, not selectedSeg.node (which doesn't exist).
+              description: selectedSeg.description
+                          || nodeDescriptions?.[selectedSeg.label]
+                          || nodeDescriptions?.[selectedSeg.id],
+            }}
             traceData={traceData}
             onRequestTraces={onRequestTraces}
             onClose={handleClosePanel}
