@@ -2507,6 +2507,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 "supported_actions": [
                     "retry",
                     "fix_rtl",
+                    "accept",
                     "skip",
                     "abort",
                 ],
@@ -2521,7 +2522,13 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                     "4. LINT_ERRORS: Read the lint log and edit "
                     f"{top_rtl_path} directly.\n"
                     "5. After fixing, resume_pipeline(action='fix_rtl').\n"
-                    "6. Only escalate for architectural issues."
+                    "6. ACCEPT: if the chip_top compiled cleanly "
+                    "(lint_clean=True) and the mismatches are architecture-"
+                    "vs-RTL spec drift that adapters already bridge in the "
+                    "generated top (the agent inserted *_adapter modules), "
+                    "resume_pipeline(action='accept') to proceed to DV. DV "
+                    "is the real arbiter of whether the bridges work.\n"
+                    "7. Only escalate for architectural issues."
                 ),
                 "reference_files": {
                     "top_rtl": top_rtl_path,
@@ -2546,6 +2553,23 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             elif action == "abort":
                 integration_result["aborted"] = True
                 log("  [INTEGRATION] Aborted", RED)
+            elif action == "accept":
+                # Outer agent acknowledged the mismatches and chose to
+                # proceed to DV anyway. Zero out the counts the router
+                # checks so route_after_integration sends us to
+                # integration_dv. Original counts stay in mismatches for
+                # forensics.
+                integration_result["accepted_with_mismatches"] = True
+                integration_result["original_error_count"] = (
+                    integration_result.get("error_count", 0)
+                )
+                integration_result["error_count"] = 0
+                # lint_clean must remain True for the route to proceed.
+                log(
+                    "  [INTEGRATION] Accepted with mismatches "
+                    "(outer agent override); proceeding to DV",
+                    YELLOW,
+                )
             elif action in ("retry", "fix_rtl"):
                 fix_desc = response.get("rtl_fix_description", "")
                 log(f"  [INTEGRATION] Fix applied: {fix_desc}", GREEN)
