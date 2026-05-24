@@ -1090,7 +1090,7 @@ var require_react_development = __commonJS({
           }
           return dispatcher.useContext(Context);
         }
-        function useState10(initialState2) {
+        function useState11(initialState2) {
           var dispatcher = resolveDispatcher();
           return dispatcher.useState(initialState2);
         }
@@ -1098,11 +1098,11 @@ var require_react_development = __commonJS({
           var dispatcher = resolveDispatcher();
           return dispatcher.useReducer(reducer, initialArg, init2);
         }
-        function useRef9(initialValue) {
+        function useRef10(initialValue) {
           var dispatcher = resolveDispatcher();
           return dispatcher.useRef(initialValue);
         }
-        function useEffect9(create2, deps) {
+        function useEffect10(create2, deps) {
           var dispatcher = resolveDispatcher();
           return dispatcher.useEffect(create2, deps);
         }
@@ -1118,7 +1118,7 @@ var require_react_development = __commonJS({
           var dispatcher = resolveDispatcher();
           return dispatcher.useCallback(callback, deps);
         }
-        function useMemo6(create2, deps) {
+        function useMemo7(create2, deps) {
           var dispatcher = resolveDispatcher();
           return dispatcher.useMemo(create2, deps);
         }
@@ -1409,7 +1409,7 @@ var require_react_development = __commonJS({
             }
           }
         }
-        function checkPropTypes(typeSpecs, values, location, componentName, element) {
+        function checkPropTypes(typeSpecs, values, location2, componentName, element) {
           {
             var has = Function.call.bind(hasOwnProperty);
             for (var typeSpecName in typeSpecs) {
@@ -1417,23 +1417,23 @@ var require_react_development = __commonJS({
                 var error$1 = void 0;
                 try {
                   if (typeof typeSpecs[typeSpecName] !== "function") {
-                    var err = Error((componentName || "React class") + ": " + location + " type `" + typeSpecName + "` is invalid; it must be a function, usually from the `prop-types` package, but received `" + typeof typeSpecs[typeSpecName] + "`.This often happens because of typos such as `PropTypes.function` instead of `PropTypes.func`.");
+                    var err = Error((componentName || "React class") + ": " + location2 + " type `" + typeSpecName + "` is invalid; it must be a function, usually from the `prop-types` package, but received `" + typeof typeSpecs[typeSpecName] + "`.This often happens because of typos such as `PropTypes.function` instead of `PropTypes.func`.");
                     err.name = "Invariant Violation";
                     throw err;
                   }
-                  error$1 = typeSpecs[typeSpecName](values, typeSpecName, componentName, location, null, "SECRET_DO_NOT_PASS_THIS_OR_YOU_WILL_BE_FIRED");
+                  error$1 = typeSpecs[typeSpecName](values, typeSpecName, componentName, location2, null, "SECRET_DO_NOT_PASS_THIS_OR_YOU_WILL_BE_FIRED");
                 } catch (ex) {
                   error$1 = ex;
                 }
                 if (error$1 && !(error$1 instanceof Error)) {
                   setCurrentlyValidatingElement(element);
-                  error("%s: type specification of %s `%s` is invalid; the type checker function must return `null` or an `Error` but returned a %s. You may have forgotten to pass an argument to the type checker creator (arrayOf, instanceOf, objectOf, oneOf, oneOfType, and shape all require an argument).", componentName || "React class", location, typeSpecName, typeof error$1);
+                  error("%s: type specification of %s `%s` is invalid; the type checker function must return `null` or an `Error` but returned a %s. You may have forgotten to pass an argument to the type checker creator (arrayOf, instanceOf, objectOf, oneOf, oneOfType, and shape all require an argument).", componentName || "React class", location2, typeSpecName, typeof error$1);
                   setCurrentlyValidatingElement(null);
                 }
                 if (error$1 instanceof Error && !(error$1.message in loggedTypeFailures)) {
                   loggedTypeFailures[error$1.message] = true;
                   setCurrentlyValidatingElement(element);
-                  error("Failed %s type: %s", location, error$1.message);
+                  error("Failed %s type: %s", location2, error$1.message);
                   setCurrentlyValidatingElement(null);
                 }
               }
@@ -1885,15 +1885,15 @@ var require_react_development = __commonJS({
         exports.useContext = useContext2;
         exports.useDebugValue = useDebugValue2;
         exports.useDeferredValue = useDeferredValue;
-        exports.useEffect = useEffect9;
+        exports.useEffect = useEffect10;
         exports.useId = useId;
         exports.useImperativeHandle = useImperativeHandle;
         exports.useInsertionEffect = useInsertionEffect;
         exports.useLayoutEffect = useLayoutEffect4;
-        exports.useMemo = useMemo6;
+        exports.useMemo = useMemo7;
         exports.useReducer = useReducer;
-        exports.useRef = useRef9;
-        exports.useState = useState10;
+        exports.useRef = useRef10;
+        exports.useState = useState11;
         exports.useSyncExternalStore = useSyncExternalStore;
         exports.useTransition = useTransition;
         exports.version = ReactVersion;
@@ -2389,9 +2389,9 @@ var require_react_dom_development = __commonJS({
         if (typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ !== "undefined" && typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart === "function") {
           __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart(new Error());
         }
-        var React22 = require_react();
+        var React23 = require_react();
         var Scheduler = require_scheduler();
-        var ReactSharedInternals = React22.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED;
+        var ReactSharedInternals = React23.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED;
         var suppressWarning = false;
         function setSuppressWarning(newSuppressWarning) {
           {
@@ -2440,7 +2440,7 @@ var require_react_dom_development = __commonJS({
         var HostPortal = 4;
         var HostComponent = 5;
         var HostText = 6;
-        var Fragment9 = 7;
+        var Fragment10 = 7;
         var Mode = 8;
         var ContextConsumer = 9;
         var ContextProvider = 10;
@@ -3596,7 +3596,7 @@ var require_react_dom_development = __commonJS({
               return "DehydratedFragment";
             case ForwardRef:
               return getWrappedName$1(type, type.render, "ForwardRef");
-            case Fragment9:
+            case Fragment10:
               return "Fragment";
             case HostComponent:
               return type;
@@ -3996,7 +3996,7 @@ var require_react_dom_development = __commonJS({
           {
             if (props.value == null) {
               if (typeof props.children === "object" && props.children !== null) {
-                React22.Children.forEach(props.children, function(child) {
+                React23.Children.forEach(props.children, function(child) {
                   if (child == null) {
                     return;
                   }
@@ -10780,7 +10780,7 @@ var require_react_dom_development = __commonJS({
             }
           }
         }
-        function checkPropTypes(typeSpecs, values, location, componentName, element) {
+        function checkPropTypes(typeSpecs, values, location2, componentName, element) {
           {
             var has2 = Function.call.bind(hasOwnProperty);
             for (var typeSpecName in typeSpecs) {
@@ -10788,23 +10788,23 @@ var require_react_dom_development = __commonJS({
                 var error$1 = void 0;
                 try {
                   if (typeof typeSpecs[typeSpecName] !== "function") {
-                    var err = Error((componentName || "React class") + ": " + location + " type `" + typeSpecName + "` is invalid; it must be a function, usually from the `prop-types` package, but received `" + typeof typeSpecs[typeSpecName] + "`.This often happens because of typos such as `PropTypes.function` instead of `PropTypes.func`.");
+                    var err = Error((componentName || "React class") + ": " + location2 + " type `" + typeSpecName + "` is invalid; it must be a function, usually from the `prop-types` package, but received `" + typeof typeSpecs[typeSpecName] + "`.This often happens because of typos such as `PropTypes.function` instead of `PropTypes.func`.");
                     err.name = "Invariant Violation";
                     throw err;
                   }
-                  error$1 = typeSpecs[typeSpecName](values, typeSpecName, componentName, location, null, "SECRET_DO_NOT_PASS_THIS_OR_YOU_WILL_BE_FIRED");
+                  error$1 = typeSpecs[typeSpecName](values, typeSpecName, componentName, location2, null, "SECRET_DO_NOT_PASS_THIS_OR_YOU_WILL_BE_FIRED");
                 } catch (ex) {
                   error$1 = ex;
                 }
                 if (error$1 && !(error$1 instanceof Error)) {
                   setCurrentlyValidatingElement(element);
-                  error("%s: type specification of %s `%s` is invalid; the type checker function must return `null` or an `Error` but returned a %s. You may have forgotten to pass an argument to the type checker creator (arrayOf, instanceOf, objectOf, oneOf, oneOfType, and shape all require an argument).", componentName || "React class", location, typeSpecName, typeof error$1);
+                  error("%s: type specification of %s `%s` is invalid; the type checker function must return `null` or an `Error` but returned a %s. You may have forgotten to pass an argument to the type checker creator (arrayOf, instanceOf, objectOf, oneOf, oneOfType, and shape all require an argument).", componentName || "React class", location2, typeSpecName, typeof error$1);
                   setCurrentlyValidatingElement(null);
                 }
                 if (error$1 instanceof Error && !(error$1.message in loggedTypeFailures)) {
                   loggedTypeFailures[error$1.message] = true;
                   setCurrentlyValidatingElement(element);
-                  error("Failed %s type: %s", location, error$1.message);
+                  error("Failed %s type: %s", location2, error$1.message);
                   setCurrentlyValidatingElement(null);
                 }
               }
@@ -11997,7 +11997,7 @@ var require_react_dom_development = __commonJS({
             }
           }
           function updateFragment2(returnFiber, current2, fragment, lanes, key) {
-            if (current2 === null || current2.tag !== Fragment9) {
+            if (current2 === null || current2.tag !== Fragment10) {
               var created = createFiberFromFragment(fragment, returnFiber.mode, lanes, key);
               created.return = returnFiber;
               return created;
@@ -12400,7 +12400,7 @@ var require_react_dom_development = __commonJS({
               if (child.key === key) {
                 var elementType = element.type;
                 if (elementType === REACT_FRAGMENT_TYPE) {
-                  if (child.tag === Fragment9) {
+                  if (child.tag === Fragment10) {
                     deleteRemainingChildren(returnFiber, child.sibling);
                     var existing = useFiber(child, element.props.children);
                     existing.return = returnFiber;
@@ -17877,7 +17877,7 @@ var require_react_dom_development = __commonJS({
               var _resolvedProps2 = workInProgress2.elementType === type ? _unresolvedProps2 : resolveDefaultProps(type, _unresolvedProps2);
               return updateForwardRef(current2, workInProgress2, type, _resolvedProps2, renderLanes2);
             }
-            case Fragment9:
+            case Fragment10:
               return updateFragment(current2, workInProgress2, renderLanes2);
             case Mode:
               return updateMode(current2, workInProgress2, renderLanes2);
@@ -18150,7 +18150,7 @@ var require_react_dom_development = __commonJS({
             case SimpleMemoComponent:
             case FunctionComponent:
             case ForwardRef:
-            case Fragment9:
+            case Fragment10:
             case Mode:
             case Profiler:
             case ContextConsumer:
@@ -22409,7 +22409,7 @@ var require_react_dom_development = __commonJS({
           return fiber;
         }
         function createFiberFromFragment(elements, mode, lanes, key) {
-          var fiber = createFiber(Fragment9, elements, key, mode);
+          var fiber = createFiber(Fragment10, elements, key, mode);
           fiber.lanes = lanes;
           return fiber;
         }
@@ -23567,7 +23567,7 @@ var require_use_sync_external_store_shim_development = __commonJS({
         return x === y && (0 !== x || 1 / x === 1 / y) || x !== x && y !== y;
       }
       function useSyncExternalStore$2(subscribe, getSnapshot) {
-        didWarnOld18Alpha || void 0 === React22.startTransition || (didWarnOld18Alpha = true, console.error(
+        didWarnOld18Alpha || void 0 === React23.startTransition || (didWarnOld18Alpha = true, console.error(
           "You are using an outdated, pre-release alpha of React 18 that does not support useSyncExternalStore. The use-sync-external-store shim will not work correctly. Upgrade to a newer pre-release."
         ));
         var value = getSnapshot();
@@ -23577,7 +23577,7 @@ var require_use_sync_external_store_shim_development = __commonJS({
             "The result of getSnapshot should be cached to avoid an infinite loop"
           ), didWarnUncachedGetSnapshot = true);
         }
-        cachedValue = useState10({
+        cachedValue = useState11({
           inst: { value, getSnapshot }
         });
         var inst = cachedValue[0].inst, forceUpdate = cachedValue[1];
@@ -23589,7 +23589,7 @@ var require_use_sync_external_store_shim_development = __commonJS({
           },
           [subscribe, value, getSnapshot]
         );
-        useEffect9(
+        useEffect10(
           function() {
             checkIfSnapshotChanged(inst) && forceUpdate({ inst });
             return subscribe(function() {
@@ -23615,8 +23615,8 @@ var require_use_sync_external_store_shim_development = __commonJS({
         return getSnapshot();
       }
       "undefined" !== typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ && "function" === typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart && __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart(Error());
-      var React22 = require_react(), objectIs = "function" === typeof Object.is ? Object.is : is, useState10 = React22.useState, useEffect9 = React22.useEffect, useLayoutEffect4 = React22.useLayoutEffect, useDebugValue2 = React22.useDebugValue, didWarnOld18Alpha = false, didWarnUncachedGetSnapshot = false, shim = "undefined" === typeof window || "undefined" === typeof window.document || "undefined" === typeof window.document.createElement ? useSyncExternalStore$1 : useSyncExternalStore$2;
-      exports.useSyncExternalStore = void 0 !== React22.useSyncExternalStore ? React22.useSyncExternalStore : shim;
+      var React23 = require_react(), objectIs = "function" === typeof Object.is ? Object.is : is, useState11 = React23.useState, useEffect10 = React23.useEffect, useLayoutEffect4 = React23.useLayoutEffect, useDebugValue2 = React23.useDebugValue, didWarnOld18Alpha = false, didWarnUncachedGetSnapshot = false, shim = "undefined" === typeof window || "undefined" === typeof window.document || "undefined" === typeof window.document.createElement ? useSyncExternalStore$1 : useSyncExternalStore$2;
+      exports.useSyncExternalStore = void 0 !== React23.useSyncExternalStore ? React23.useSyncExternalStore : shim;
       "undefined" !== typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ && "function" === typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStop && __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStop(Error());
     })();
   }
@@ -23643,15 +23643,15 @@ var require_with_selector_development = __commonJS({
         return x === y && (0 !== x || 1 / x === 1 / y) || x !== x && y !== y;
       }
       "undefined" !== typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ && "function" === typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart && __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart(Error());
-      var React22 = require_react(), shim = require_shim(), objectIs = "function" === typeof Object.is ? Object.is : is, useSyncExternalStore = shim.useSyncExternalStore, useRef9 = React22.useRef, useEffect9 = React22.useEffect, useMemo6 = React22.useMemo, useDebugValue2 = React22.useDebugValue;
+      var React23 = require_react(), shim = require_shim(), objectIs = "function" === typeof Object.is ? Object.is : is, useSyncExternalStore = shim.useSyncExternalStore, useRef10 = React23.useRef, useEffect10 = React23.useEffect, useMemo7 = React23.useMemo, useDebugValue2 = React23.useDebugValue;
       exports.useSyncExternalStoreWithSelector = function(subscribe, getSnapshot, getServerSnapshot, selector4, isEqual) {
-        var instRef = useRef9(null);
+        var instRef = useRef10(null);
         if (null === instRef.current) {
           var inst = { hasValue: false, value: null };
           instRef.current = inst;
         } else
           inst = instRef.current;
-        instRef = useMemo6(
+        instRef = useMemo7(
           function() {
             function memoizedSelector(nextSnapshot) {
               if (!hasMemo) {
@@ -23687,7 +23687,7 @@ var require_with_selector_development = __commonJS({
           [getSnapshot, getServerSnapshot, selector4, isEqual]
         );
         var value = useSyncExternalStore(subscribe, instRef[0], instRef[1]);
-        useEffect9(
+        useEffect10(
           function() {
             inst.hasValue = true;
             inst.value = value;
@@ -23721,7 +23721,7 @@ var require_react_jsx_runtime_development = __commonJS({
     if (true) {
       (function() {
         "use strict";
-        var React22 = require_react();
+        var React23 = require_react();
         var REACT_ELEMENT_TYPE = Symbol.for("react.element");
         var REACT_PORTAL_TYPE = Symbol.for("react.portal");
         var REACT_FRAGMENT_TYPE = Symbol.for("react.fragment");
@@ -23747,7 +23747,7 @@ var require_react_jsx_runtime_development = __commonJS({
           }
           return null;
         }
-        var ReactSharedInternals = React22.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED;
+        var ReactSharedInternals = React23.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED;
         function error(format) {
           {
             {
@@ -24133,7 +24133,7 @@ var require_react_jsx_runtime_development = __commonJS({
             }
           }
         }
-        function checkPropTypes(typeSpecs, values, location, componentName, element) {
+        function checkPropTypes(typeSpecs, values, location2, componentName, element) {
           {
             var has = Function.call.bind(hasOwnProperty);
             for (var typeSpecName in typeSpecs) {
@@ -24141,23 +24141,23 @@ var require_react_jsx_runtime_development = __commonJS({
                 var error$1 = void 0;
                 try {
                   if (typeof typeSpecs[typeSpecName] !== "function") {
-                    var err = Error((componentName || "React class") + ": " + location + " type `" + typeSpecName + "` is invalid; it must be a function, usually from the `prop-types` package, but received `" + typeof typeSpecs[typeSpecName] + "`.This often happens because of typos such as `PropTypes.function` instead of `PropTypes.func`.");
+                    var err = Error((componentName || "React class") + ": " + location2 + " type `" + typeSpecName + "` is invalid; it must be a function, usually from the `prop-types` package, but received `" + typeof typeSpecs[typeSpecName] + "`.This often happens because of typos such as `PropTypes.function` instead of `PropTypes.func`.");
                     err.name = "Invariant Violation";
                     throw err;
                   }
-                  error$1 = typeSpecs[typeSpecName](values, typeSpecName, componentName, location, null, "SECRET_DO_NOT_PASS_THIS_OR_YOU_WILL_BE_FIRED");
+                  error$1 = typeSpecs[typeSpecName](values, typeSpecName, componentName, location2, null, "SECRET_DO_NOT_PASS_THIS_OR_YOU_WILL_BE_FIRED");
                 } catch (ex) {
                   error$1 = ex;
                 }
                 if (error$1 && !(error$1 instanceof Error)) {
                   setCurrentlyValidatingElement(element);
-                  error("%s: type specification of %s `%s` is invalid; the type checker function must return `null` or an `Error` but returned a %s. You may have forgotten to pass an argument to the type checker creator (arrayOf, instanceOf, objectOf, oneOf, oneOfType, and shape all require an argument).", componentName || "React class", location, typeSpecName, typeof error$1);
+                  error("%s: type specification of %s `%s` is invalid; the type checker function must return `null` or an `Error` but returned a %s. You may have forgotten to pass an argument to the type checker creator (arrayOf, instanceOf, objectOf, oneOf, oneOfType, and shape all require an argument).", componentName || "React class", location2, typeSpecName, typeof error$1);
                   setCurrentlyValidatingElement(null);
                 }
                 if (error$1 instanceof Error && !(error$1.message in loggedTypeFailures)) {
                   loggedTypeFailures[error$1.message] = true;
                   setCurrentlyValidatingElement(element);
-                  error("Failed %s type: %s", location, error$1.message);
+                  error("Failed %s type: %s", location2, error$1.message);
                   setCurrentlyValidatingElement(null);
                 }
               }
@@ -24597,11 +24597,11 @@ var require_react_jsx_runtime_development = __commonJS({
             return jsxWithValidation(type, props, key, false);
           }
         }
-        var jsx17 = jsxWithValidationDynamic;
-        var jsxs17 = jsxWithValidationStatic;
+        var jsx18 = jsxWithValidationDynamic;
+        var jsxs18 = jsxWithValidationStatic;
         exports.Fragment = REACT_FRAGMENT_TYPE;
-        exports.jsx = jsx17;
-        exports.jsxs = jsxs17;
+        exports.jsx = jsx18;
+        exports.jsxs = jsxs18;
       })();
     }
   }
@@ -117303,7 +117303,7 @@ var require_elk_bundled = __commonJS({
 });
 
 // src/webview/App.jsx
-var import_react22 = __toESM(require_react());
+var import_react23 = __toESM(require_react());
 var import_client = __toESM(require_client());
 
 // node_modules/@reactflow/core/dist/esm/index.mjs
@@ -120158,8 +120158,8 @@ Transform.prototype = {
   applyY: function(y) {
     return y * this.k + this.y;
   },
-  invert: function(location) {
-    return [(location[0] - this.x) / this.k, (location[1] - this.y) / this.k];
+  invert: function(location2) {
+    return [(location2[0] - this.x) / this.k, (location2[1] - this.y) / this.k];
   },
   invertX: function(x) {
     return (x - this.x) / this.k;
@@ -121149,6 +121149,10 @@ var getNodesBounds = (nodes, nodeOrigin = [0, 0]) => {
     }));
   }, { x: Infinity, y: Infinity, x2: -Infinity, y2: -Infinity });
   return boxToRect(box);
+};
+var getRectOfNodes = (nodes, nodeOrigin = [0, 0]) => {
+  console.warn("[DEPRECATED] `getRectOfNodes` is deprecated. Instead use `getNodesBounds` https://reactflow.dev/api-reference/utils/get-nodes-bounds.");
+  return getNodesBounds(nodes, nodeOrigin);
 };
 var getNodesInside = (nodeInternals, rect, [tx, ty, tScale] = [0, 0, 1], partially = false, excludeNonSelectableNodes = false, nodeOrigin = [0, 0]) => {
   const paneRect = {
@@ -125455,36 +125459,103 @@ function extractBlockName(spans) {
 function regroupTraces(traceData) {
   if (!traceData || traceData.length === 0)
     return [];
+  const isTrajectory = traceData[0]?.trajectory === true || Array.isArray(traceData[0]?.steps);
   const groups = traceData.map((group) => ({
     ...group,
-    blockName: extractBlockName(group.spans)
+    blockName: group.block || group.blockName || extractBlockName(group.spans)
   }));
-  const blockNames = new Set(groups.map((g) => g.blockName).filter(Boolean));
-  const hasMultipleBlocks = blockNames.size > 1;
-  if (!hasMultipleBlocks) {
-    return groups.map((g) => ({
-      key: `a${g.attempt}`,
-      label: groups.length === 1 ? "Run" : `#${g.attempt}`,
-      attempt: g.attempt,
-      blockName: g.blockName,
-      spans: g.spans
+  for (const g of groups) {
+    if (Array.isArray(g.steps) && g.steps.length > 0) {
+      continue;
+    }
+    const calls = extractLLMCalls(g.spans);
+    g.steps = calls.map((c) => ({
+      type: c.streaming ? "llm_call_streaming" : "llm_call",
+      ts: c.ts || 0,
+      model: c.model,
+      duration_s: c.duration_ms ? c.duration_ms / 1e3 : null,
+      duration_ms: c.duration_ms,
+      system_prompt: c.systemPrompt,
+      user_prompt: c.prompt,
+      response: c.response,
+      status: c.status,
+      streaming: c.streaming,
+      _span: c
     }));
   }
+  const blockNames = new Set(groups.map((g) => g.blockName).filter(Boolean));
+  const hasMultipleBlocks = blockNames.size > 1;
+  function attemptDurMs(g) {
+    if (g.duration_s)
+      return g.duration_s * 1e3;
+    if (g.duration_ms)
+      return g.duration_ms;
+    return getAttemptDuration(g.spans);
+  }
+  const seenKeys = /* @__PURE__ */ new Map();
   return groups.map((g) => {
-    const name = (g.blockName || "unknown").replace(/_/g, " ");
+    const steps = g.steps || [];
+    const toolCount = steps.filter((s) => s.type === "tool_run").length;
+    const llmCount = steps.filter((s) => s.type === "llm_call" || s.type === "llm_call_streaming" || !s.type).length;
+    let roundNum = null;
+    for (const s of steps) {
+      if (s.type === "result_summary" && s.metrics) {
+        const r = s.metrics.round ?? s.metrics.new_round;
+        if (r != null) {
+          roundNum = r;
+          break;
+        }
+      }
+    }
+    const baseKey = hasMultipleBlocks ? `${g.blockName || "unknown"}:${g.attempt}` : `a${g.attempt}`;
+    const count = (seenKeys.get(baseKey) || 0) + 1;
+    seenKeys.set(baseKey, count);
+    const repeatCount = groups.filter((og) => {
+      const k = hasMultipleBlocks ? `${og.blockName || "unknown"}:${og.attempt}` : `a${og.attempt}`;
+      return k === baseKey;
+    }).length;
+    const isRepeat = repeatCount > 1;
+    let label = hasMultipleBlocks ? `${(g.blockName || "unknown").replace(/_/g, " ")} \xB7 Attempt ${g.attempt}` : groups.length === 1 ? "Run" : `Attempt ${g.attempt}`;
+    if (isRepeat) {
+      const parts = [];
+      if (roundNum != null)
+        parts.push(`Round ${roundNum}`);
+      parts.push(`Iter ${count}`);
+      label += ` \xB7 ${parts.join(" \xB7 ")}`;
+    }
     return {
-      key: `${g.blockName || "unknown"}:${g.attempt}`,
-      label: `${name} #${g.attempt}`,
+      key: `${baseKey}#${count}`,
+      label,
+      durMs: attemptDurMs(g),
       attempt: g.attempt,
       blockName: g.blockName,
-      spans: g.spans
+      round: roundNum,
+      iteration: count,
+      status: g.status,
+      exitEvent: g.exit_event,
+      spans: g.spans,
+      steps,
+      llmCount,
+      toolCount,
+      isTrajectory
     };
   });
 }
 function getAttemptDuration(spans) {
   if (!spans || spans.length === 0)
     return null;
-  return spans.reduce((sum, s) => sum + (s.duration_ms || 0), 0);
+  let total = 0;
+  for (const s of spans) {
+    if (s.duration_ms) {
+      total += s.duration_ms;
+    } else if (s.children && s.children.length) {
+      for (const c of s.children) {
+        if (c.duration_ms)
+          total += c.duration_ms;
+      }
+    }
+  }
+  return total || null;
 }
 function getAttemptStatus(spans) {
   if (!spans || spans.length === 0)
@@ -125518,7 +125589,17 @@ function markdownToHtml(md) {
       return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
     }
     function inlineFmt(text) {
-      return escapeHtml(text).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>").replace(/_([^_]+)_/g, "<em>$1</em>");
+      const escaped = escapeHtml(text);
+      const parts = escaped.split(/(`[^`\n]+`)/g);
+      return parts.map((part) => {
+        if (part.length >= 2 && part.startsWith("`") && part.endsWith("`")) {
+          return `<code>${part.slice(1, -1)}</code>`;
+        }
+        return part.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*\n]+)\*/g, "<em>$1</em>").replace(
+          /(^|[^A-Za-z0-9_])_([^_\n\s][^_\n]*?)_(?=[^A-Za-z0-9_]|$)/g,
+          "$1<em>$2</em>"
+        );
+      }).join("");
     }
     for (const line of lines) {
       const trimmed = line.trim();
@@ -125566,10 +125647,100 @@ function markdownToHtml(md) {
     return html.join("\n");
   }).join("");
 }
-function FormattedText({ text, maxCollapsed = 2e3 }) {
+function _tryParseJson(text) {
+  if (!text || typeof text !== "string")
+    return null;
+  const trimmed = text.trim();
+  if (!trimmed)
+    return null;
+  const first = trimmed[0];
+  const last = trimmed[trimmed.length - 1];
+  if (!(first === "{" && last === "}" || first === "[" && last === "]")) {
+    return null;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+function _highlightJsonHtml(jsonStr) {
+  const escaped = jsonStr.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return escaped.replace(
+    /("(\\.|[^"\\])*")\s*:|("(\\.|[^"\\])*")|\b(true|false|null)\b|\b(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/g,
+    (match, key, _k2, str, _s2, kw, num) => {
+      if (key) {
+        const k = key.replace(/:$/, "").trim();
+        return `<span class="json-key">${k}</span>:`;
+      }
+      if (str)
+        return `<span class="json-string">${str}</span>`;
+      if (kw)
+        return `<span class="json-${kw}">${kw}</span>`;
+      if (num)
+        return `<span class="json-number">${num}</span>`;
+      return match;
+    }
+  );
+}
+var _REASONING_KEYS = [
+  "reasoning",
+  "thinking",
+  "diagnosis",
+  "analysis",
+  "rationale",
+  "explanation",
+  "summary"
+];
+var _ACTION_KEYS = ["action", "decision", "next_step", "suggested_fix"];
+function FormattedText({ text, maxCollapsed = 2e3, autoJson = true }) {
   const [expanded, setExpanded] = (0, import_react15.useState)(false);
   if (!text)
     return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-no-content", children: "No content" });
+  const parsed = autoJson ? _tryParseJson(text) : null;
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    let reasoningKey = null;
+    let actionKey = null;
+    for (const k of _REASONING_KEYS) {
+      if (typeof parsed[k] === "string" && parsed[k].trim()) {
+        reasoningKey = k;
+        break;
+      }
+    }
+    for (const k of _ACTION_KEYS) {
+      if (parsed[k] != null && (typeof parsed[k] === "string" || typeof parsed[k] === "number")) {
+        actionKey = k;
+        break;
+      }
+    }
+    const pretty = JSON.stringify(parsed, null, 2);
+    const isLong2 = pretty.length > maxCollapsed;
+    const display2 = isLong2 && !expanded ? pretty.slice(0, maxCollapsed) : pretty;
+    return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-formatted llm-json-response", children: [
+      (reasoningKey || actionKey) && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-thinking", children: [
+        reasoningKey && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-thinking-section", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-thinking-label", children: reasoningKey === "reasoning" ? "Thinking" : reasoningKey.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-thinking-body", children: parsed[reasoningKey] })
+        ] }),
+        actionKey && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-thinking-section llm-thinking-action", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-thinking-label", children: actionKey.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-thinking-body", children: String(parsed[actionKey]) })
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("pre", { className: "llm-code-block json-code-block", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-code-lang", children: "json" }),
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("code", { dangerouslySetInnerHTML: { __html: _highlightJsonHtml(display2) } })
+      ] }),
+      isLong2 && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+        "button",
+        {
+          className: "llm-expand-btn",
+          onClick: () => setExpanded(!expanded),
+          children: expanded ? "Show less" : `Show more (${(pretty.length / 1e3).toFixed(1)}k chars)`
+        }
+      )
+    ] });
+  }
   const isLong = text.length > maxCollapsed;
   const display = isLong && !expanded ? text.slice(0, maxCollapsed) : text;
   const html = markdownToHtml(display);
@@ -125603,17 +125774,297 @@ function Collapsible({ label, icon, defaultOpen, children: children2, className 
     open && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-collapsible-body", children: children2 })
   ] });
 }
-function LLMCallCard({ call }) {
+function _classifyToolStep(step) {
+  const map = {
+    lint: { label: "Lint", icon: "\u{1F50D}" },
+    simulate: { label: "Simulate", icon: "\u25B6" },
+    synthesize: { label: "Synthesize", icon: "\u2699" },
+    integration_lint: { label: "Integration Lint", icon: "\u{1F50D}" },
+    integration_sim: { label: "Integration Sim", icon: "\u25B6" },
+    flat_top_synth: { label: "Flat Top Synth", icon: "\u2699" },
+    place: { label: "Place", icon: "\u25EB" },
+    route: { label: "Route", icon: "\u2AF8" },
+    cts: { label: "CTS", icon: "\u{1F552}" },
+    drc: { label: "DRC", icon: "\u2713" },
+    lvs: { label: "LVS", icon: "\u2713" }
+  };
+  return map[step] || { label: step.replace(/_/g, " "), icon: "\u{1F527}" };
+}
+function ToolRunCard({ run, index, total }) {
+  const [open, setOpen] = (0, import_react15.useState)(false);
+  const { label, icon } = _classifyToolStep(run.step || "tool");
+  const rc = run.return_code;
+  const ok = rc === 0;
+  const statusIcon = ok ? "\u2713" : rc != null ? "\u2717" : "\u2014";
+  const statusCls = ok ? "ok" : rc != null ? "error" : "unset";
+  const content = run.content || "";
+  const stdoutMatch = content.match(/=== STDOUT ===([\s\S]*?)(?:=== STDERR ===|$)/);
+  const stderrMatch = content.match(/=== STDERR ===([\s\S]*?)$/);
+  const stdout = (stdoutMatch?.[1] || "").trim();
+  const stderr = (stderrMatch?.[1] || "").trim();
+  const hasOnlyStdout = stdout && !stderr;
+  const hasOnlyStderr = !stdout && stderr;
+  return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: `llm-card tool-card tool-card-${statusCls}`, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-card-header", children: [
+      total > 1 && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-call-index", title: `Step ${index + 1} of ${total}`, children: `${index + 1}/${total}` }),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "tool-card-icon", "aria-hidden": "true", children: icon }),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-model-name tool-card-label", children: label }),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "llm-card-meta", children: [
+        run.command && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "tool-card-cmd", title: run.command, children: (() => {
+          const first = run.command.split(/\s+/)[0] || "";
+          const tool = first.split("/").pop() || first;
+          return tool;
+        })() }),
+        rc != null && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: `tool-card-rc tool-card-rc-${statusCls}`, children: [
+          "rc=",
+          rc
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `llm-stat llm-stat-${statusCls}`, children: statusIcon })
+      ] })
+    ] }),
+    run.command && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "tool-card-command", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "tool-card-command-label", children: "$" }),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("code", { className: "tool-card-command-text", children: run.command })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
+      "button",
+      {
+        className: "tool-card-toggle",
+        onClick: () => setOpen((v) => !v),
+        children: [
+          open ? "\u25BC Hide output" : "\u25B6 Show output",
+          run.size != null && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "tool-card-size", children: run.size > 1024 ? `${(run.size / 1024).toFixed(1)} KB` : `${run.size} B` })
+        ]
+      }
+    ),
+    open && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "tool-card-output", children: [
+      stdout && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("details", { open: hasOnlyStdout, className: "tool-output-section", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("summary", { children: "stdout" }),
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("pre", { className: "tool-output-pre", children: stdout })
+      ] }),
+      stderr && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("details", { open: hasOnlyStderr || !ok, className: "tool-output-section tool-output-stderr", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("summary", { children: "stderr" }),
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("pre", { className: "tool-output-pre", children: stderr })
+      ] }),
+      !stdout && !stderr && content && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("pre", { className: "tool-output-pre", children: content })
+    ] })
+  ] });
+}
+function ResultSummaryCard({ metrics, index, total }) {
+  const entries = Object.entries(metrics || {}).filter(([, v]) => v != null);
+  if (!entries.length)
+    return null;
+  function fmt(key, value) {
+    if (value == null)
+      return "\u2014";
+    if (typeof value === "boolean")
+      return value ? "\u2713 yes" : "\u2717 no";
+    if (Array.isArray(value)) {
+      if (value.length === 0)
+        return "(none)";
+      if (value.length <= 4)
+        return value.join(", ");
+      return `${value.slice(0, 3).join(", ")}, +${value.length - 3} more`;
+    }
+    if (key === "dashboard_path" || key === "path" || key === "log_path" || key === "layout_2d_png_path" || key === "viewer_path") {
+      const s = String(value);
+      return s.length > 80 ? "\u2026" + s.slice(-80) : s;
+    }
+    if (key === "html_size" || key === "size" || key === "stdout_bytes") {
+      const n = Number(value);
+      if (!Number.isFinite(n))
+        return String(value);
+      return n > 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`;
+    }
+    if (key === "utilization_pct") {
+      const n = Number(value);
+      if (Number.isFinite(n))
+        return `${n.toFixed(1)}%`;
+    }
+    if (key === "confidence") {
+      const n = Number(value);
+      if (Number.isFinite(n)) {
+        const pct = n <= 1 ? n * 100 : n;
+        return `${pct.toFixed(0)}%`;
+      }
+    }
+    if (typeof value === "number") {
+      if (Math.abs(value) >= 1e3)
+        return value.toLocaleString();
+      if (Number.isInteger(value))
+        return String(value);
+      return value.toFixed(3);
+    }
+    return String(value);
+  }
+  const LABEL = {
+    gate_count: "Gate count",
+    chip_area_um2: "Chip area (\xB5m\xB2)",
+    design_area_um2: "Design area (\xB5m\xB2)",
+    utilization_pct: "Utilization",
+    wns_ns: "WNS (ns)",
+    tns_ns: "TNS (ns)",
+    total_power_mw: "Total power (mW)",
+    max_freq_mhz: "Max freq (MHz)",
+    violations: "Violations",
+    violation_count: "Violations",
+    error_count: "Errors",
+    sim_passed: "Sim passed",
+    lint_passed: "Lint passed",
+    lint_clean: "Lint clean",
+    success: "Success",
+    passed: "Passed",
+    clean: "Clean",
+    all_pass: "All passed",
+    match: "LVS match",
+    dashboard_path: "Dashboard",
+    log_path: "Log file",
+    path: "Output path",
+    html_size: "Dashboard size",
+    layout_2d_png_path: "Layout image",
+    viewer_path: "3D viewer",
+    ers_generated: "ERS generated",
+    node_count: "Nodes",
+    edge_count: "Edges",
+    block_count: "Blocks",
+    blocks: "Blocks",
+    tb_fixes_attempted: "TB fixes",
+    local_fixes_attempted: "Local fixes",
+    validation_errors: "Validation errors",
+    tier: "Tier",
+    round: "Round",
+    new_round: "New round",
+    max_rounds: "Max rounds",
+    total_rounds: "Total rounds",
+    design_name: "Design",
+    integration_top: "Integration top",
+    category: "Category",
+    confidence: "Confidence",
+    action: "Action",
+    decision: "Decision",
+    phase: "Phase",
+    skipped: "Skipped",
+    needs_human: "Needs human",
+    diagnosis_preview: "Diagnosis",
+    suggested_fix: "Suggested fix",
+    last_error: "Last error",
+    text_len: "Text length",
+    has_structural: "Structural violations",
+    has_feedback: "Feedback",
+    feedback: "Feedback",
+    issues_found: "Issues",
+    device_delta: "Device delta",
+    net_delta: "Net delta",
+    analysis: "Analysis",
+    answer_count: "Answers",
+    answer_keys: "Answered",
+    has_answers: "Has answers",
+    attempt: "Attempt",
+    new_tier_index: "Next tier",
+    question_count: "Questions",
+    total: "Total",
+    expected: "Expected",
+    completed_so_far: "Completed",
+    passed_so_far: "Passed"
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-card result-card", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-card-header", children: [
+      total > 1 && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-call-index", title: `Step ${index + 1} of ${total}`, children: `${index + 1}/${total}` }),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "tool-card-icon", "aria-hidden": "true", children: "\u{1F4CB}" }),
+      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-model-name tool-card-label", children: "Outcome" })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "result-card-grid", children: entries.map(([k, v]) => {
+      const isWide = k === "dashboard_path" || k === "path" || k === "log_path" || k === "design_name" || k === "category" || k === "analysis" || k === "diagnosis_preview" || k === "suggested_fix" || k === "feedback" || k === "last_error" || k === "layout_2d_png_path" || k === "viewer_path" || Array.isArray(v) || typeof v === "string" && v.length > 28;
+      const isBool = typeof v === "boolean";
+      const isNumeric2 = typeof v === "number";
+      return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: `result-card-row ${isWide ? "full-width" : ""}`, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "result-card-key", children: LABEL[k] || k.replace(/_/g, " ") }),
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `result-card-val ${isBool ? v ? "ok" : "error" : ""} ${isNumeric2 ? "numeric" : ""}`, children: fmt(k, v) })
+      ] }, k);
+    }) })
+  ] });
+}
+function TrajectorySteps({ steps }) {
+  const total = steps.length;
+  return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-call-list trajectory-steps", children: steps.map((step, i) => {
+    if (step.type === "tool_run") {
+      return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(ToolRunCard, { run: step, index: i, total }, `tool-${i}`);
+    }
+    if (step.type === "result_summary") {
+      return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(ResultSummaryCard, { metrics: step.metrics, index: i, total }, `res-${i}`);
+    }
+    const call = {
+      id: step._span?.id || `step-${i}`,
+      model: step.model || "LLM",
+      runName: step.run_name || "",
+      heartbeats: step.heartbeats || [],
+      codexTurns: step.codex_turns || [],
+      promptTokens: step.usage?.prompt_tokens || step.usage?.input_tokens,
+      completionTokens: step.usage?.completion_tokens || step.usage?.output_tokens,
+      totalTokens: step.usage?.total_tokens,
+      duration_ms: step.duration_ms || (step.duration_s ? step.duration_s * 1e3 : null),
+      status: step.status || (step.error ? "error" : "ok"),
+      prompt: step.user_prompt || "",
+      systemPrompt: step.system_prompt || "",
+      response: step.response || "",
+      streaming: step.streaming
+    };
+    return call.streaming ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(StreamingLLMCard, { call }, `stream-${i}`) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(LLMCallCard, { call, index: i, total }, `llm-${i}`);
+  }) });
+}
+var _TURN_META = {
+  reasoning: { label: "Reasoning", icon: "\u{1F9E0}", cls: "turn-reasoning" },
+  agent_message: { label: "Message", icon: "\u{1F4AC}", cls: "turn-message" },
+  local_shell_call: { label: "Shell", icon: "$", cls: "turn-shell" },
+  local_shell_output: { label: "Shell output", icon: "\u21E5", cls: "turn-shell-out" },
+  tool_call: { label: "Tool", icon: "\u{1F527}", cls: "turn-tool" },
+  tool_result: { label: "Tool result", icon: "\u21E5", cls: "turn-tool-out" },
+  turn_complete: { label: "Turn end", icon: "\xB7", cls: "turn-end" }
+};
+function CodexTurn({ turn, index }) {
+  const [open, setOpen] = (0, import_react15.useState)(false);
+  const meta = _TURN_META[turn.kind] || { label: turn.kind || "Turn", icon: "\xB7", cls: "turn-other" };
+  const fullJson = (() => {
+    try {
+      return JSON.stringify(turn.full, null, 2);
+    } catch {
+      return String(turn.full);
+    }
+  })();
+  return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: `codex-turn ${meta.cls}`, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
+      "button",
+      {
+        className: "codex-turn-header",
+        onClick: () => setOpen((v) => !v),
+        children: [
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "codex-turn-index", children: index + 1 }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "codex-turn-icon", "aria-hidden": "true", children: meta.icon }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "codex-turn-label", children: meta.label }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "codex-turn-summary", children: turn.summary || "(no preview)" }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "codex-turn-chev", children: open ? "\u25BE" : "\u25B8" })
+        ]
+      }
+    ),
+    open && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("pre", { className: "codex-turn-full", children: fullJson })
+  ] });
+}
+function LLMCallCard({ call, index, total }) {
   const statusSymbol = call.status === "ok" ? "\u2713" : call.status === "error" ? "\u2717" : "\u2014";
   const statusCls = call.status === "ok" ? "ok" : call.status === "error" ? "error" : "unset";
   const tokenLabel = formatTokens(call.totalTokens);
+  const heading = call.runName || call.model;
+  const sub = call.runName ? call.model : null;
+  const hbCount = (call.heartbeats || []).length;
   return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
     "div",
     {
       className: `llm-card ${call.status === "error" ? "llm-card-error" : ""}`,
       children: [
         /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-card-header", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-model-name", children: call.model }),
+          total > 1 && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-call-index", title: `Call ${index + 1} of ${total}`, children: `${index + 1}/${total}` }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-model-name", title: call.runName || "", children: heading }),
+          sub && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-model-sub", children: sub }),
           /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "llm-card-meta", children: [
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-dur", children: formatDuration(call.duration_ms) }),
             tokenLabel && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "llm-tok", children: [
@@ -125623,7 +126074,34 @@ function LLMCallCard({ call }) {
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `llm-stat llm-stat-${statusCls}`, children: statusSymbol })
           ] })
         ] }),
-        call.systemPrompt && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(Collapsible, { label: "System Prompt", icon: "\\u2699", className: "llm-sys", children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(FormattedText, { text: call.systemPrompt }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-step-chain", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step llm-step-sys", title: "System prompt set", children: "sys" }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step-line" }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step llm-step-usr", title: "User prompt", children: "in" }),
+          hbCount > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(import_jsx_runtime9.Fragment, { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step-line" }),
+            call.heartbeats.map((h, i) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+              "span",
+              {
+                className: "llm-step llm-step-hb",
+                title: `Heartbeat @${(h.elapsed_s || 0).toFixed(0)}s \xB7 stdout ${h.stdout_bytes || 0}B`,
+                children: "\xB7"
+              },
+              `hb-${i}`
+            ))
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-step-line" }),
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `llm-step llm-step-resp llm-step-${statusCls}`, title: "Response", children: "out" })
+        ] }),
+        Array.isArray(call.codexTurns) && call.codexTurns.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-codex-turns", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-codex-turns-label", children: [
+            call.codexTurns.length,
+            " agent turn",
+            call.codexTurns.length !== 1 ? "s" : ""
+          ] }),
+          call.codexTurns.map((turn, i) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(CodexTurn, { turn, index: i }, `turn-${i}`))
+        ] }),
+        call.systemPrompt && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(Collapsible, { label: "System Prompt", icon: "\u2699", className: "llm-sys", children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(FormattedText, { text: call.systemPrompt }) }),
         call.prompt && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(Collapsible, { label: "Prompt", icon: "\u25B6", className: "llm-usr", children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(FormattedText, { text: call.prompt }) }),
         call.response && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-response", children: [
           /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "llm-response-label", children: [
@@ -125685,21 +126163,57 @@ function StreamingLLMCard({ call }) {
     ] })
   ] });
 }
-function AttemptSummary({ spans, llmCount, hasStreamingCalls }) {
-  const duration = getAttemptDuration(spans);
+function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
+  let llmN = llmCount || 0;
+  let toolN = 0;
+  let toolErr = 0;
+  let resultN = 0;
+  let resultErr = 0;
+  let stepDurMs = 0;
+  if (Array.isArray(steps) && steps.length) {
+    llmN = 0;
+    for (const s of steps) {
+      if (s.type === "tool_run") {
+        toolN++;
+        if (s.return_code != null && s.return_code !== 0)
+          toolErr++;
+      } else if (s.type === "result_summary") {
+        resultN++;
+        const m = s.metrics || {};
+        if (m.success === false || m.passed === false || m.clean === false || m.lint_passed === false || m.sim_passed === false || m.match === false || m.all_pass === false) {
+          resultErr++;
+        }
+      } else {
+        llmN++;
+      }
+      const d = s.duration_ms || (s.duration_s ? s.duration_s * 1e3 : 0);
+      if (d)
+        stepDurMs += d;
+    }
+  }
+  const duration = stepDurMs || getAttemptDuration(spans);
   const status = getAttemptStatus(spans);
-  const isError = status === "error";
+  const isError = status === "error" || toolErr > 0 || resultErr > 0;
   const isStreaming = hasStreamingCalls;
+  const noActivity = llmN === 0 && toolN === 0 && resultN === 0;
   return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: `llm-summary-bar ${isStreaming ? "streaming" : isError ? "error" : "ok"}`, children: [
     /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: `llm-summary-status ${isStreaming ? "streaming" : isError ? "error" : "ok"}`, children: isStreaming ? "\u25CF Generating" : isError ? "\u2717 Failed" : "\u2713 Completed" }),
     /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "llm-summary-detail", children: [
-      !isStreaming && formatDuration(duration),
-      llmCount > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "llm-summary-count", children: [
-        llmCount,
+      !isStreaming && duration ? formatDuration(duration) : null,
+      llmN > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "llm-summary-count", children: [
+        llmN,
         " LLM call",
-        llmCount !== 1 ? "s" : "",
+        llmN !== 1 ? "s" : "",
         isStreaming ? " (1 active)" : ""
-      ] })
+      ] }),
+      toolN > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "llm-summary-count tool-summary-count", children: [
+        toolN,
+        " tool run",
+        toolN !== 1 ? "s" : "",
+        toolErr > 0 ? ` (${toolErr} failed)` : ""
+      ] }),
+      llmN === 0 && toolN === 0 && resultN > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-summary-count", children: "result-only" }),
+      noActivity && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "llm-summary-count", children: "no activity" })
     ] })
   ] });
 }
@@ -126023,20 +126537,21 @@ var DetailPanel = import_react15.default.memo(function DetailPanel2({
       return;
     }
     if (node?.attempt) {
-      const match = tabGroups.find((g) => g.attempt === node.attempt);
-      if (match) {
-        setActiveTabKey(match.key);
+      const sameAttempt = tabGroups.filter((g) => g.attempt === node.attempt);
+      const withTools2 = sameAttempt.find((g) => (g.toolCount || 0) > 0);
+      const exact = sameAttempt[0];
+      const pick = withTools2 || exact;
+      if (pick) {
+        setActiveTabKey(pick.key);
         return;
       }
     }
     const nonStreaming = tabGroups.filter(
       (g) => !g.spans?.some((s) => s.children?.some((c) => c.status === "streaming"))
     );
-    if (nonStreaming.length > 0) {
-      setActiveTabKey(nonStreaming[nonStreaming.length - 1].key);
-    } else {
-      setActiveTabKey(tabGroups[tabGroups.length - 1].key);
-    }
+    const candidates = nonStreaming.length ? nonStreaming : tabGroups;
+    const withTools = [...candidates].reverse().find((g) => (g.toolCount || 0) > 0);
+    setActiveTabKey((withTools || candidates[candidates.length - 1]).key);
   }, [tabGroups]);
   const handleRefresh = (0, import_react15.useCallback)(() => {
     if (onRequestTraces && node) {
@@ -126100,9 +126615,21 @@ var DetailPanel = import_react15.default.memo(function DetailPanel2({
           ] })),
           tabGroups.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(import_jsx_runtime9.Fragment, { children: [
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "trace-tabs", children: tabGroups.map((group) => {
-              const hasError = group.spans?.some(
+              const spanError = group.spans?.some(
                 (s) => s.status === "error"
               );
+              const stepError = group.steps?.some((s) => {
+                if (s.type === "tool_run") {
+                  return s.return_code != null && s.return_code !== 0;
+                }
+                if (s.type === "result_summary") {
+                  const m = s.metrics || {};
+                  return m.success === false || m.passed === false || m.clean === false || m.lint_passed === false || m.sim_passed === false || m.match === false;
+                }
+                return s.status === "error";
+              });
+              const groupStatusError = group.status === "failed";
+              const hasError = spanError || stepError || groupStatusError;
               return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
                 "button",
                 {
@@ -126110,7 +126637,18 @@ var DetailPanel = import_react15.default.memo(function DetailPanel2({
                   onClick: () => setActiveTabKey(group.key),
                   children: [
                     hasError && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "trace-tab-icon", children: "\u26A0" }),
-                    group.label
+                    /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "trace-tab-label", children: group.label }),
+                    group.durMs ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "trace-tab-dur", children: formatDuration(group.durMs) }) : null,
+                    (group.llmCount > 0 || group.toolCount > 0) && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "trace-tab-counts", children: [
+                      group.llmCount > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "trace-tab-count-llm", title: `${group.llmCount} LLM call${group.llmCount !== 1 ? "s" : ""}`, children: [
+                        "\u2726",
+                        group.llmCount
+                      ] }),
+                      group.toolCount > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "trace-tab-count-tool", title: `${group.toolCount} tool run${group.toolCount !== 1 ? "s" : ""}`, children: [
+                        "\u{1F527}",
+                        group.toolCount
+                      ] })
+                    ] })
                   ]
                 },
                 group.key
@@ -126120,13 +126658,22 @@ var DetailPanel = import_react15.default.memo(function DetailPanel2({
               AttemptSummary,
               {
                 spans: activeGroup?.spans,
+                steps: activeGroup?.steps,
                 llmCount: llmCalls.length,
                 hasStreamingCalls: llmCalls.some((c) => c.streaming)
               }
             ),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "trace-content", ref: scrollRef, children: llmCalls.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-call-list", children: llmCalls.map((call, i) => call.streaming ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(StreamingLLMCard, { call }, call.id || `stream-${i}`) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(LLMCallCard, { call }, call.id || i)) }) : node.metadata && Object.keys(node.metadata).length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(NodeMetadataSummary, { node }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "trace-empty-tab", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "trace-content", ref: scrollRef, children: activeGroup?.steps && activeGroup.steps.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(TrajectorySteps, { steps: activeGroup.steps }) : llmCalls.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "llm-call-list", children: llmCalls.map((call, i) => call.streaming ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(StreamingLLMCard, { call }, call.id || `stream-${i}`) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+              LLMCallCard,
+              {
+                call,
+                index: i,
+                total: llmCalls.length
+              },
+              call.id || i
+            )) }) : node.metadata && Object.keys(node.metadata).length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(NodeMetadataSummary, { node }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "trace-empty-tab", children: [
               /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "trace-empty-icon", children: "\u{1F4CB}" }),
-              "No LLM interactions in this run."
+              "No activity recorded in this run."
             ] }) })
           ] })
         ] })
@@ -126180,10 +126727,12 @@ async function applyElkLayout(nodes, edges, direction = "RIGHT") {
     const isBus = node.data?.node_type === "bus";
     const isGroup = groupNodeIds.has(node.id);
     const parent = childToParent[node.id];
+    const explicitW = Number(node.style?.width || node.width);
+    const explicitH = Number(node.style?.height || node.style?.minHeight || node.height);
     const elkNode = {
       id: node.id,
-      width: isBus ? BUS_NODE_WIDTH : isGroup ? 0 : DEFAULT_NODE_WIDTH,
-      height: isBus ? BUS_NODE_HEIGHT : isGroup ? 0 : DEFAULT_NODE_HEIGHT
+      width: isGroup ? 0 : explicitW > 0 ? explicitW : isBus ? BUS_NODE_WIDTH : DEFAULT_NODE_WIDTH,
+      height: isGroup ? 0 : explicitH > 0 ? explicitH : isBus ? BUS_NODE_HEIGHT : DEFAULT_NODE_HEIGHT
     };
     if (!isGroup) {
       if (entryNodeIds.has(node.id)) {
@@ -126255,18 +126804,20 @@ async function applyElkLayout(nodes, edges, direction = "RIGHT") {
       "elk.algorithm": "layered",
       "elk.direction": direction,
       "org.eclipse.elk.direction": direction,
-      "org.eclipse.elk.spacing.nodeNode": "60",
-      "org.eclipse.elk.spacing.edgeNode": "40",
-      "elk.spacing.nodeNode": "60",
-      "elk.layered.spacing.nodeNodeBetweenLayers": "100",
-      "elk.layered.spacing.edgeEdgeBetweenLayers": "30",
-      "elk.layered.spacing.edgeNodeBetweenLayers": "40",
+      // More generous spacing so labels and edge routing don't collide;
+      // a tight layout made the Architecture tab hard to read.
+      "org.eclipse.elk.spacing.nodeNode": "90",
+      "org.eclipse.elk.spacing.edgeNode": "60",
+      "elk.spacing.nodeNode": "90",
+      "elk.layered.spacing.nodeNodeBetweenLayers": "140",
+      "elk.layered.spacing.edgeEdgeBetweenLayers": "40",
+      "elk.layered.spacing.edgeNodeBetweenLayers": "60",
       "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
       "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
       "elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES",
       "elk.layered.thoroughness": "15",
       "elk.edgeRouting": "SPLINES",
-      "elk.spacing.componentComponent": "80",
+      "elk.spacing.componentComponent": "110",
       "elk.hierarchyHandling": "INCLUDE_CHILDREN"
     },
     children: topLevelElkNodes,
@@ -126275,12 +126826,27 @@ async function applyElkLayout(nodes, edges, direction = "RIGHT") {
   const layouted = await elk.layout(graph);
   const positionMap = {};
   const sizeMap = {};
-  function collectPositions(elkChildren, offsetX = 0, offsetY = 0) {
+  const childIdSet = /* @__PURE__ */ new Set();
+  for (const id2 in childToParent)
+    childIdSet.add(id2);
+  function collectPositions(elkChildren, offsetX = 0, offsetY = 0, depth = 0) {
     for (const child of elkChildren || []) {
-      positionMap[child.id] = { x: child.x + offsetX, y: child.y + offsetY };
+      const isReactFlowChild = childIdSet.has(child.id);
+      if (isReactFlowChild) {
+        positionMap[child.id] = { x: child.x, y: child.y };
+      } else {
+        positionMap[child.id] = { x: child.x + offsetX, y: child.y + offsetY };
+      }
       sizeMap[child.id] = { width: child.width, height: child.height };
       if (child.children) {
-        collectPositions(child.children, child.x + offsetX, child.y + offsetY);
+        const childAbsX = (isReactFlowChild ? offsetX : 0) + child.x;
+        const childAbsY = (isReactFlowChild ? offsetY : 0) + child.y;
+        collectPositions(
+          child.children,
+          childAbsX + (isReactFlowChild ? 0 : offsetX),
+          childAbsY + (isReactFlowChild ? 0 : offsetY),
+          depth + 1
+        );
       }
     }
   }
@@ -126347,13 +126913,20 @@ var EDGE_STROKE = {
   agent: "#1111FF"
 };
 var HIDDEN_NODES = /* @__PURE__ */ new Set(["Abort"]);
+function _defaultDirection(_name) {
+  return "RIGHT";
+}
 function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, traceData, onRequestTraces, detailWidth, onDetailResize }) {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [selectedNode, setSelectedNode] = (0, import_react16.useState)(null);
   const [layoutDone, setLayoutDone] = (0, import_react16.useState)(false);
-  const [direction, setDirection] = (0, import_react16.useState)("RIGHT");
+  const [direction, setDirection] = (0, import_react16.useState)(() => _defaultDirection(graphName));
+  (0, import_react16.useEffect)(() => {
+    setDirection(_defaultDirection(graphName));
+  }, [graphName]);
   const layoutGraphRef = (0, import_react16.useRef)(null);
+  const reactFlow = useReactFlow();
   const { rfNodes, rfEdges } = (0, import_react16.useMemo)(() => {
     if (!graphData)
       return { rfNodes: [], rfEdges: [] };
@@ -126436,6 +127009,41 @@ function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, tr
       doLayout(direction);
     }
   }, [graphData, doLayout, direction]);
+  (0, import_react16.useEffect)(() => {
+    if (!layoutDone)
+      return;
+    const tid = setTimeout(() => {
+      try {
+        const wrapper = document.querySelector(".graph-canvas-wrapper");
+        if (!wrapper)
+          return;
+        const W = wrapper.clientWidth;
+        const H = wrapper.clientHeight;
+        const rfNodesNow = reactFlow.getNodes();
+        if (!rfNodesNow || rfNodesNow.length === 0)
+          return;
+        const bounds = getRectOfNodes(rfNodesNow);
+        if (!bounds.width || !bounds.height)
+          return;
+        const PADDING = 40;
+        const fitX = (W - PADDING * 2) / bounds.width;
+        const fitY = (H - PADDING * 2) / bounds.height;
+        const fit = Math.min(fitX, fitY);
+        const MIN_ZOOM = 0.6;
+        const MAX_ZOOM = 1;
+        const zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, fit));
+        const cx = bounds.x + bounds.width / 2;
+        const cy = bounds.y + bounds.height / 2;
+        reactFlow.setViewport(
+          { x: W / 2 - cx * zoom, y: H / 2 - cy * zoom, zoom },
+          { duration: 250 }
+        );
+      } catch (e) {
+        console.warn("graph fit error", e);
+      }
+    }, 80);
+    return () => clearTimeout(tid);
+  }, [layoutDone, graphName, reactFlow]);
   const onNodeClick = (0, import_react16.useCallback)((_event, node) => {
     setSelectedNode(node.data);
     if (onRequestTraces) {
@@ -126468,9 +127076,7 @@ function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, tr
         nodeTypes,
         edgeTypes,
         onNodeClick,
-        fitView: true,
-        fitViewOptions: { padding: 0.15 },
-        minZoom: 0.02,
+        minZoom: 0.05,
         maxZoom: 1.5,
         nodesDraggable: true,
         nodesConnectable: false,
@@ -126698,7 +127304,14 @@ function GanttRow({ block, toPercent, effectiveEnd, onSegmentClick, selectedSegK
   const handleLeave = (0, import_react17.useCallback)(() => setTooltip(null), []);
   return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-row", ref: rowRef, children: [
     /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "gantt-label", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-block-info", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "gantt-block-name", children: block.name.replace(/_/g, " ") }),
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+        "span",
+        {
+          className: "gantt-block-name",
+          title: block.name.replace(/_/g, " "),
+          children: block.name.replace(/_/g, " ")
+        }
+      ),
       /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-block-meta", children: [
         block.tier && /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("span", { className: "gantt-tier-badge", children: [
           "T",
@@ -126799,6 +127412,19 @@ var LEGEND_ITEMS = {
     { label: "Timing", color: "#fbbf24" }
   ]
 };
+LEGEND_ITEMS.all = [
+  { label: "Architecture", color: SEGMENT_COLORS["Block Diagram"].bg },
+  { label: "Generate RTL", color: SEGMENT_COLORS["Generate RTL"].bg },
+  { label: "Lint / Sim", color: SEGMENT_COLORS["Lint Check"].bg },
+  { label: "Testbench", color: SEGMENT_COLORS["Generate Testbench"].bg },
+  { label: "Synthesize", color: SEGMENT_COLORS["Synthesize"].bg },
+  { label: "Diagnose", color: SEGMENT_COLORS["Diagnose Failure"].bg },
+  { label: "Constraints", color: SEGMENT_COLORS["Constraint Check"].bg },
+  { label: "Init/Advance", color: SEGMENT_COLORS["Init Block"].bg },
+  { label: "Human Review", color: SEGMENT_COLORS["Review Uarch Spec"].bg },
+  { label: "PnR (DRC/LVS/Timing)", color: "#a78bfa" }
+];
+LEGEND_ITEMS.timeline = LEGEND_ITEMS.all;
 function Legend({ graphType }) {
   const items = LEGEND_ITEMS[graphType] || LEGEND_ITEMS.frontend;
   return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-legend", children: [
@@ -126821,7 +127447,7 @@ function Legend({ graphType }) {
     ] })
   ] });
 }
-function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, detailWidth, onDetailResize }) {
+function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, detailWidth, onDetailResize, nodeDescriptions }) {
   const [now2, setNow] = (0, import_react17.useState)(Date.now() / 1e3);
   const [selectedSeg, setSelectedSeg] = (0, import_react17.useState)(null);
   const [selectedSegKey, setSelectedSegKey] = (0, import_react17.useState)(null);
@@ -126829,14 +127455,17 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
   const [dragState, setDragState] = (0, import_react17.useState)(null);
   const chartRef = (0, import_react17.useRef)(null);
   const chartScrollRef = (0, import_react17.useRef)(0);
-  const hasActiveWork = timelineData?.blocks?.some((b) => {
+  const lastEventTs = timelineData?.pipeline_end || 0;
+  const secondsSinceLastEvent = lastEventTs > 0 ? Date.now() / 1e3 - lastEventTs : Infinity;
+  const isHistoricalRun = secondsSinceLastEvent > 60;
+  const hasActiveWork = !isHistoricalRun && (timelineData?.blocks?.some((b) => {
     if (b.status !== "running")
       return false;
     const segs = b.attempts?.flatMap((a) => a.segments) ?? [];
     const hasOpenWaiting = segs.some((s) => !s.end_ts && s.status === "waiting");
     const hasOpenRunning = segs.some((s) => !s.end_ts && s.status === "running");
     return !hasOpenWaiting || hasOpenRunning;
-  }) ?? false;
+  }) ?? false);
   const handleChartScroll = (0, import_react17.useCallback)(() => {
     if (chartRef.current) {
       chartScrollRef.current = chartRef.current.scrollTop;
@@ -126951,6 +127580,7 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
     return latest;
   }, pipeline_start);
   const totalDuration = effectiveEnd - pipeline_start;
+  const fitWidthPx = 0;
   const zoomStart = zoomRange ? pipeline_start + zoomRange.start * totalDuration : pipeline_start;
   const zoomEnd = zoomRange ? pipeline_start + zoomRange.end * totalDuration : effectiveEnd;
   const zoomDuration = zoomEnd - zoomStart;
@@ -127009,53 +127639,97 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
           ] })
         ] })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-chart", ref: chartRef, onMouseDown: handleChartMouseDown, onScroll: handleChartScroll, children: [
-        zoomRange && /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-zoom-bar", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("span", { className: "gantt-zoom-label", children: [
-            "Zoomed: ",
-            formatDuration2(zoomStart - pipeline_start),
-            " \u2013 ",
-            formatDuration2(zoomEnd - pipeline_start)
-          ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("button", { className: "gantt-zoom-reset", onClick: handleResetZoom, children: "Reset zoom" })
-        ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-time-axis", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "gantt-label-spacer" }),
-          /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-time-track", children: [
-            ticksAdjusted.map((t) => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
-              "div",
-              {
-                className: "gantt-tick",
-                style: { left: `${toPercent(zoomStart + t)}%` },
-                children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "gantt-tick-label", children: formatDuration2(zoomStart - pipeline_start + t) })
-              },
-              t
-            )),
-            hasRunning && toPercent(now2) >= 0 && toPercent(now2) <= 100 && /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "gantt-now-marker", style: { left: `${toPercent(now2)}%` }, children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "gantt-now-label", children: "now" }) }),
-            dragState && dragState.selLo != null && /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
-              "div",
-              {
-                className: "gantt-drag-selection",
-                style: {
-                  left: `${dragState.selLo * 100}%`,
-                  width: `${(dragState.selHi - dragState.selLo) * 100}%`
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(
+        "div",
+        {
+          className: "gantt-chart",
+          ref: chartRef,
+          onMouseDown: handleChartMouseDown,
+          onScroll: handleChartScroll,
+          style: fitWidthPx && !zoomRange ? { "--gantt-fit-width": `${fitWidthPx}px` } : void 0,
+          children: [
+            zoomRange && /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-zoom-bar", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("span", { className: "gantt-zoom-label", children: [
+                "Zoomed: ",
+                formatDuration2(zoomStart - pipeline_start),
+                " \u2013 ",
+                formatDuration2(zoomEnd - pipeline_start)
+              ] }),
+              /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("button", { className: "gantt-zoom-reset", onClick: handleResetZoom, children: "Reset zoom" })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-time-axis", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "gantt-label-spacer" }),
+              /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-time-track", children: [
+                ticksAdjusted.map((t) => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+                  "div",
+                  {
+                    className: "gantt-tick",
+                    style: { left: `${toPercent(zoomStart + t)}%` },
+                    children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "gantt-tick-label", children: formatDuration2(zoomStart - pipeline_start + t) })
+                  },
+                  t
+                )),
+                hasRunning && toPercent(now2) >= 0 && toPercent(now2) <= 100 && /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "gantt-now-marker", style: { left: `${toPercent(now2)}%` }, children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "gantt-now-label", children: "now" }) }),
+                dragState && dragState.selLo != null && /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+                  "div",
+                  {
+                    className: "gantt-drag-selection",
+                    style: {
+                      left: `${dragState.selLo * 100}%`,
+                      width: `${(dragState.selHi - dragState.selLo) * 100}%`
+                    }
+                  }
+                )
+              ] })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "gantt-rows", children: (() => {
+              const PHASE_ORDER = ["architecture", "frontend", "backend"];
+              const PHASE_LABEL = {
+                architecture: "Architecture",
+                frontend: "Frontend (RTL pipeline)",
+                backend: "Backend (PnR pipeline)"
+              };
+              const grouped = /* @__PURE__ */ new Map();
+              for (const b of blocks) {
+                const g = b.graph || "other";
+                if (!grouped.has(g))
+                  grouped.set(g, []);
+                grouped.get(g).push(b);
+              }
+              const orderedPhases = [
+                ...PHASE_ORDER.filter((p) => grouped.has(p)),
+                ...[...grouped.keys()].filter((p) => !PHASE_ORDER.includes(p))
+              ];
+              const out = [];
+              for (const phase of orderedPhases) {
+                const phaseBlocks = grouped.get(phase);
+                out.push(
+                  /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "gantt-phase-header", children: [
+                    PHASE_LABEL[phase] || phase,
+                    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "gantt-phase-count", children: phaseBlocks.length === 1 ? "1 row" : `${phaseBlocks.length} rows` })
+                  ] }, `hdr-${phase}`)
+                );
+                for (const block of phaseBlocks) {
+                  out.push(
+                    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+                      GanttRow,
+                      {
+                        block,
+                        toPercent,
+                        effectiveEnd,
+                        onSegmentClick: handleSegmentClick,
+                        selectedSegKey
+                      },
+                      `${phase}-${block.name}`
+                    )
+                  );
                 }
               }
-            )
-          ] })
-        ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "gantt-rows", children: blocks.map((block) => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
-          GanttRow,
-          {
-            block,
-            toPercent,
-            effectiveEnd,
-            onSegmentClick: handleSegmentClick,
-            selectedSegKey
-          },
-          block.name
-        )) })
-      ] }),
+              return out;
+            })() })
+          ]
+        }
+      ),
       /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(Legend, { graphType: graphName || timelineData.graph || "frontend" })
     ] }),
     selectedSeg && /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(import_jsx_runtime11.Fragment, { children: [
@@ -127069,7 +127743,13 @@ function GanttTimeline({ timelineData, traceData, onRequestTraces, graphName, de
       /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
         DetailPanel_default,
         {
-          node: selectedSeg,
+          node: {
+            ...selectedSeg,
+            // selectedSeg is built in handleSegmentClick with id+label
+            // already set to the node name. Look up description via the
+            // label key, not selectedSeg.node (which doesn't exist).
+            description: selectedSeg.description || nodeDescriptions?.[selectedSeg.label] || nodeDescriptions?.[selectedSeg.id]
+          },
           traceData,
           onRequestTraces,
           onClose: handleClosePanel,
@@ -127349,13 +128029,25 @@ function BlockDiagramCanvas({ diagramData }) {
     if (!diagramData?.architecture)
       return;
     const arch = diagramData.architecture;
-    const rawNodes = (arch.systemNodes || []).map((n) => ({
-      ...n,
-      type: n.type || "nodeArchGraph",
-      position: n.position || { x: 0, y: 0 },
-      style: n.data?.is_subsystem ? { width: 600, height: 400 } : { width: 340, minHeight: 160 },
-      ...n.data?.is_subsystem && n.data?.node_parentId !== "graph_root" ? { parentId: n.data.node_parentId, extent: "parent" } : {}
-    }));
+    const subsystemIds = new Set(
+      (arch.systemNodes || []).filter((n) => n.data?.is_subsystem).map((n) => n.id)
+    );
+    const rawNodes = (arch.systemNodes || []).map((n) => {
+      const isSubsystem = !!n.data?.is_subsystem;
+      const parentId = n.data?.node_parentId;
+      const parentValid = parentId && parentId !== "graph_root" && subsystemIds.has(parentId);
+      const base = {
+        ...n,
+        type: n.type || "nodeArchGraph",
+        position: n.position || { x: 0, y: 0 },
+        style: isSubsystem ? { width: 600, height: 400 } : { width: 340, minHeight: 160 }
+      };
+      if (parentValid) {
+        base.parentId = parentId;
+        base.extent = "parent";
+      }
+      return base;
+    });
     const rawEdges = (arch.systemEdges || []).map((e) => ({
       ...e,
       type: e.type || "edgeArchGraph"
@@ -127489,9 +128181,844 @@ function BlockDiagramCanvas({ diagramData }) {
   ] });
 }
 
-// src/webview/components/NodePromptModal.jsx
+// src/webview/components/CollateralViewer.jsx
 var import_react19 = __toESM(require_react());
 var import_jsx_runtime13 = __toESM(require_jsx_runtime());
+var TEXT_EXTS = /* @__PURE__ */ new Set([
+  ".v",
+  ".sv",
+  ".py",
+  ".sdc",
+  ".ys",
+  ".tcl",
+  ".txt",
+  ".json",
+  ".md",
+  ".rpt",
+  ".log",
+  ".def",
+  ".html",
+  ".htm",
+  ".csv",
+  ".map"
+]);
+function _extOf(name) {
+  const i = name.lastIndexOf(".");
+  return i < 0 ? "" : name.slice(i).toLowerCase();
+}
+function _formatBytes(n) {
+  if (n < 1024)
+    return `${n} B`;
+  if (n < 1024 * 1024)
+    return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+var VERILOG_KEYWORDS = /* @__PURE__ */ new Set([
+  "module",
+  "endmodule",
+  "input",
+  "output",
+  "inout",
+  "wire",
+  "reg",
+  "logic",
+  "assign",
+  "always",
+  "always_ff",
+  "always_comb",
+  "begin",
+  "end",
+  "if",
+  "else",
+  "case",
+  "endcase",
+  "casex",
+  "casez",
+  "default",
+  "parameter",
+  "localparam",
+  "integer",
+  "genvar",
+  "generate",
+  "endgenerate",
+  "for",
+  "while",
+  "function",
+  "endfunction",
+  "task",
+  "endtask",
+  "return",
+  "posedge",
+  "negedge",
+  "or",
+  "and",
+  "not",
+  "xor",
+  "initial",
+  "forever",
+  "repeat",
+  "do",
+  "fork",
+  "join",
+  "disable",
+  "wait",
+  "macromodule",
+  "primitive",
+  "endprimitive",
+  "specify",
+  "endspecify",
+  "typedef",
+  "enum",
+  "struct",
+  "packed",
+  "unique",
+  "priority",
+  "unique0",
+  "package",
+  "endpackage",
+  "import",
+  "export",
+  "class",
+  "endclass",
+  "extends",
+  "virtual",
+  "pure",
+  "static",
+  "automatic",
+  "rand",
+  "randc",
+  "constraint",
+  "property",
+  "sequence"
+]);
+function _escHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function highlightVerilog(text) {
+  if (!text)
+    return "";
+  const out = [];
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    const c2 = text[i + 1];
+    if (c === "/" && c2 === "/") {
+      let j = text.indexOf("\n", i);
+      if (j < 0)
+        j = n;
+      out.push(`<span class="syntax-comment">${_escHtml(text.slice(i, j))}</span>`);
+      i = j;
+      continue;
+    }
+    if (c === "/" && c2 === "*") {
+      let j = text.indexOf("*/", i + 2);
+      if (j < 0)
+        j = n;
+      else
+        j += 2;
+      out.push(`<span class="syntax-comment">${_escHtml(text.slice(i, j))}</span>`);
+      i = j;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < n) {
+        if (text[j] === "\\") {
+          j += 2;
+          continue;
+        }
+        if (text[j] === '"') {
+          j++;
+          break;
+        }
+        j++;
+      }
+      out.push(`<span class="syntax-string">${_escHtml(text.slice(i, j))}</span>`);
+      i = j;
+      continue;
+    }
+    const sizedMatch = text.slice(i).match(/^\d+'(?:[bdoh])[0-9a-fA-F_xz?]+/);
+    if (sizedMatch) {
+      out.push(`<span class="syntax-number">${_escHtml(sizedMatch[0])}</span>`);
+      i += sizedMatch[0].length;
+      continue;
+    }
+    if (/[0-9]/.test(c)) {
+      const numMatch = text.slice(i).match(/^\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+      if (numMatch) {
+        out.push(`<span class="syntax-number">${_escHtml(numMatch[0])}</span>`);
+        i += numMatch[0].length;
+        continue;
+      }
+    }
+    if (/[a-zA-Z_]/.test(c)) {
+      const idMatch = text.slice(i).match(/^[a-zA-Z_][a-zA-Z0-9_$]*/);
+      if (idMatch) {
+        const ident = idMatch[0];
+        if (VERILOG_KEYWORDS.has(ident)) {
+          out.push(`<span class="syntax-keyword">${ident}</span>`);
+        } else {
+          out.push(_escHtml(ident));
+        }
+        i += ident.length;
+        continue;
+      }
+    }
+    out.push(_escHtml(c));
+    i++;
+  }
+  return out.join("");
+}
+var TCL_KEYWORDS = /* @__PURE__ */ new Set([
+  // Core Tcl
+  "set",
+  "unset",
+  "if",
+  "else",
+  "elseif",
+  "for",
+  "foreach",
+  "while",
+  "switch",
+  "proc",
+  "return",
+  "break",
+  "continue",
+  "expr",
+  "puts",
+  "gets",
+  "string",
+  "lindex",
+  "llength",
+  "lappend",
+  "list",
+  "array",
+  "dict",
+  "global",
+  "upvar",
+  "variable",
+  "namespace",
+  "source",
+  "package",
+  "catch",
+  "error",
+  "eval",
+  "exec",
+  "open",
+  "close",
+  "read",
+  "regexp",
+  "regsub",
+  "format",
+  "scan",
+  "incr",
+  "append",
+  "concat",
+  // SDC commands
+  "create_clock",
+  "create_generated_clock",
+  "set_input_delay",
+  "set_output_delay",
+  "set_clock_uncertainty",
+  "set_clock_latency",
+  "set_clock_groups",
+  "set_false_path",
+  "set_multicycle_path",
+  "set_max_delay",
+  "set_min_delay",
+  "set_disable_timing",
+  "set_load",
+  "set_drive",
+  "set_driving_cell",
+  "set_max_fanout",
+  "set_max_transition",
+  "set_max_capacitance",
+  "set_min_capacitance",
+  "set_case_analysis",
+  "set_propagated_clock",
+  "group_path",
+  "all_inputs",
+  "all_outputs",
+  "all_clocks",
+  "all_registers",
+  "get_ports",
+  "get_pins",
+  "get_nets",
+  "get_cells",
+  "get_clocks",
+  "current_design",
+  "read_sdc",
+  "write_sdc",
+  "check_timing",
+  // Yosys-ish
+  "design",
+  "read_verilog",
+  "synth",
+  "flatten",
+  "opt",
+  "abc",
+  "write_verilog",
+  "hierarchy",
+  "proc",
+  "memory",
+  "opt_clean",
+  "stat",
+  "check"
+]);
+function highlightTcl(text) {
+  if (!text)
+    return "";
+  const out = [];
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (c === "#" && (i === 0 || /\s/.test(text[i - 1]))) {
+      let j = text.indexOf("\n", i);
+      if (j < 0)
+        j = n;
+      out.push(`<span class="syntax-comment">${_escHtml(text.slice(i, j))}</span>`);
+      i = j;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < n && text[j] !== '"') {
+        if (text[j] === "\\")
+          j += 2;
+        else
+          j++;
+      }
+      j = Math.min(j + 1, n);
+      out.push(`<span class="syntax-string">${_escHtml(text.slice(i, j))}</span>`);
+      i = j;
+      continue;
+    }
+    if (c === "$" && /[A-Za-z_]/.test(text[i + 1] || "")) {
+      const m = text.slice(i).match(/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/);
+      if (m) {
+        out.push(`<span class="syntax-attr">${_escHtml(m[0])}</span>`);
+        i += m[0].length;
+        continue;
+      }
+    }
+    if (/[0-9]/.test(c)) {
+      const m = text.slice(i).match(/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+      if (m) {
+        out.push(`<span class="syntax-number">${_escHtml(m[0])}</span>`);
+        i += m[0].length;
+        continue;
+      }
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      const m = text.slice(i).match(/^[A-Za-z_][A-Za-z0-9_]*/);
+      if (m) {
+        const ident = m[0];
+        if (TCL_KEYWORDS.has(ident)) {
+          out.push(`<span class="syntax-keyword">${ident}</span>`);
+        } else {
+          out.push(_escHtml(ident));
+        }
+        i += ident.length;
+        continue;
+      }
+    }
+    out.push(_escHtml(c));
+    i++;
+  }
+  return out.join("");
+}
+function highlightMarkdown(text) {
+  if (!text)
+    return "";
+  const lines = text.split("\n");
+  const out = [];
+  let inFence = false;
+  let fenceLang = "";
+  let fenceBuf = [];
+  function flushFence() {
+    const inner = _escHtml(fenceBuf.join("\n"));
+    const langTag = fenceLang ? ` <span class="syntax-attr">${_escHtml(fenceLang)}</span>` : "";
+    out.push(`<span class="syntax-md-code-block"><span class="syntax-md-fence">\`\`\`${langTag}</span>
+${inner}
+<span class="syntax-md-fence">\`\`\`</span></span>`);
+    fenceBuf = [];
+    fenceLang = "";
+  }
+  for (const line of lines) {
+    if (inFence) {
+      const m = line.match(/^```\s*$/);
+      if (m) {
+        flushFence();
+        inFence = false;
+      } else {
+        fenceBuf.push(line);
+      }
+      continue;
+    }
+    const fenceStart = line.match(/^```(\w*)/);
+    if (fenceStart) {
+      inFence = true;
+      fenceLang = fenceStart[1];
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      out.push(`<span class="syntax-md-heading">${_escHtml(line)}</span>`);
+      continue;
+    }
+    const list = line.match(/^(\s*)([-*+]|\d+\.)\s/);
+    if (list) {
+      const lead = line.slice(0, list[0].length);
+      const rest = line.slice(list[0].length);
+      out.push(`<span class="syntax-md-list">${_escHtml(lead)}</span>${_inlineMd(rest)}`);
+      continue;
+    }
+    out.push(_inlineMd(line));
+  }
+  if (inFence)
+    flushFence();
+  return out.join("\n");
+}
+function _inlineMd(line) {
+  const out = [];
+  let i = 0;
+  const n = line.length;
+  while (i < n) {
+    const c = line[i];
+    if (c === "`") {
+      const end = line.indexOf("`", i + 1);
+      if (end > i) {
+        out.push(`<span class="syntax-md-code">${_escHtml(line.slice(i, end + 1))}</span>`);
+        i = end + 1;
+        continue;
+      }
+    }
+    if (c === "*" && line[i + 1] === "*") {
+      const end = line.indexOf("**", i + 2);
+      if (end > i + 2) {
+        const inner = _escHtml(line.slice(i + 2, end));
+        out.push(`<span class="syntax-md-bold">**${inner}**</span>`);
+        i = end + 2;
+        continue;
+      }
+    }
+    if (c === "*") {
+      const end = line.indexOf("*", i + 1);
+      if (end > i + 1 && !/^\s/.test(line[i + 1])) {
+        out.push(`<span class="syntax-md-em">${_escHtml(line.slice(i, end + 1))}</span>`);
+        i = end + 1;
+        continue;
+      }
+    }
+    if (c === "[") {
+      const closeBr = line.indexOf("](", i + 1);
+      const endParen = closeBr > i ? line.indexOf(")", closeBr + 2) : -1;
+      if (closeBr > i && endParen > closeBr) {
+        out.push(`<span class="syntax-md-link">${_escHtml(line.slice(i, endParen + 1))}</span>`);
+        i = endParen + 1;
+        continue;
+      }
+    }
+    out.push(_escHtml(c));
+    i++;
+  }
+  return out.join("");
+}
+function highlightHtml(text) {
+  if (!text)
+    return "";
+  let escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  escaped = escaped.replace(
+    /(&lt;\/?)([a-zA-Z][a-zA-Z0-9-]*)/g,
+    (m, lead, tag) => `${lead}<span class="syntax-tag">${tag}</span>`
+  );
+  escaped = escaped.replace(
+    /([a-zA-Z-]+)=&quot;([^&]*?)&quot;/g,
+    (m, attr, val) => `<span class="syntax-attr">${attr}</span>=<span class="syntax-string">"${val}"</span>`
+  );
+  escaped = escaped.replace(
+    /&lt;!--([\s\S]*?)--&gt;/g,
+    (m) => `<span class="syntax-comment">${m}</span>`
+  );
+  return escaped;
+}
+function highlightJson(text) {
+  if (!text)
+    return "";
+  let escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return escaped.replace(
+    /("(\\.|[^"\\])*")\s*:|("(\\.|[^"\\])*")|\b(true|false|null)\b|\b(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/g,
+    (match, key, _k2, str, _s2, kw, num) => {
+      if (key) {
+        const k = key.replace(/:$/, "").trim();
+        return `<span class="json-key">${k}</span>:`;
+      }
+      if (str)
+        return `<span class="json-string">${str}</span>`;
+      if (kw)
+        return `<span class="json-${kw}">${kw}</span>`;
+      if (num)
+        return `<span class="json-number">${num}</span>`;
+      return match;
+    }
+  );
+}
+function SurferWaveformViewer({ relPath }) {
+  const iframeRef = (0, import_react19.useRef)(null);
+  const [status, setStatus] = (0, import_react19.useState)("loading");
+  const vcdUrl = `${location.origin}/api/artifacts/${relPath}`;
+  (0, import_react19.useEffect)(() => {
+    const iframe = iframeRef.current;
+    if (!iframe)
+      return;
+    const handleLoad = () => {
+      setTimeout(() => {
+        try {
+          iframe.contentWindow.postMessage({ command: "LoadUrl", url: vcdUrl }, "*");
+          setStatus("loaded");
+        } catch (e) {
+          setStatus("error: " + e.message);
+        }
+      }, 1500);
+    };
+    iframe.addEventListener("load", handleLoad);
+    return () => iframe.removeEventListener("load", handleLoad);
+  }, [vcdUrl]);
+  return /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-waveform", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-waveform-bar", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-waveform-engine", children: "Surfer" }),
+      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-waveform-status", children: status })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+      "iframe",
+      {
+        ref: iframeRef,
+        className: "collateral-waveform-frame",
+        src: "/waveform-demos/surfer-local/index.html",
+        title: "Surfer waveform viewer"
+      }
+    )
+  ] });
+}
+function FileViewer({ file }) {
+  const [content, setContent] = (0, import_react19.useState)(null);
+  const [error, setError] = (0, import_react19.useState)(null);
+  const [loading, setLoading] = (0, import_react19.useState)(false);
+  (0, import_react19.useEffect)(() => {
+    if (!file)
+      return;
+    const ext2 = _extOf(file.name);
+    if (ext2 === ".html" || ext2 === ".htm" || ext2 === ".vcd" || ext2 === ".fst" || ext2 === ".ghw" || ext2 === ".png" || ext2 === ".jpg" || ext2 === ".jpeg" || ext2 === ".gif" || ext2 === ".svg" || ext2 === ".webp") {
+      setContent(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+    if (!TEXT_EXTS.has(ext2)) {
+      setContent(null);
+      setError(null);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    fetch(`/api/artifacts/${file.rel_path}`).then(async (r) => {
+      if (!r.ok)
+        throw new Error(`HTTP ${r.status}`);
+      return r.text();
+    }).then((txt) => {
+      const MAX = 256 * 1024;
+      if (txt.length > MAX) {
+        setContent(txt.slice(0, MAX) + "\n\n... [truncated]");
+      } else {
+        setContent(txt);
+      }
+      setLoading(false);
+    }).catch((e) => {
+      setError(e.message || String(e));
+      setLoading(false);
+    });
+  }, [file?.rel_path]);
+  if (!file) {
+    return /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-empty", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-empty-icon", children: "\u{1F4C2}" }),
+      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { children: "Select a file on the left to view its content." })
+    ] });
+  }
+  const ext = _extOf(file.name);
+  const isText = TEXT_EXTS.has(ext);
+  const isWaveform = ext === ".vcd" || ext === ".fst" || ext === ".ghw";
+  const isHtmlPreview = ext === ".html" || ext === ".htm";
+  const isImage = ext === ".png" || ext === ".jpg" || ext === ".jpeg" || ext === ".gif" || ext === ".svg" || ext === ".webp";
+  let highlighted = null;
+  if (content && !isHtmlPreview) {
+    if (ext === ".v" || ext === ".sv")
+      highlighted = highlightVerilog(content);
+    else if (ext === ".json" || ext === ".map")
+      highlighted = highlightJson(content);
+    else if (ext === ".sdc" || ext === ".tcl" || ext === ".ys")
+      highlighted = highlightTcl(content);
+    else if (ext === ".md")
+      highlighted = highlightMarkdown(content);
+    else if (ext === ".html" || ext === ".htm")
+      highlighted = highlightHtml(content);
+    else
+      highlighted = content.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  return /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-content", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-content-header", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-file-name", children: file.name }),
+      /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-file-meta", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { children: file.rel_path }),
+        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { children: "\xB7" }),
+        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { children: _formatBytes(file.size) }),
+        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+          "a",
+          {
+            className: "collateral-download",
+            href: `/api/artifacts/${file.rel_path}`,
+            download: file.name,
+            children: "Open raw"
+          }
+        )
+      ] })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-content-body", children: [
+      isWaveform && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(SurferWaveformViewer, { relPath: file.rel_path }, file.rel_path),
+      isHtmlPreview && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+        "iframe",
+        {
+          className: "collateral-html-frame",
+          src: `/api/artifacts/${file.rel_path}`,
+          title: file.name,
+          sandbox: "allow-same-origin allow-popups allow-scripts"
+        },
+        file.rel_path
+      ),
+      isImage && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-image", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("img", { src: `/api/artifacts/${file.rel_path}`, alt: file.name }) }),
+      !isWaveform && !isHtmlPreview && !isImage && !isText && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-empty", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-empty-icon", children: "\u{1F4E6}" }),
+        /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { children: [
+          "Binary file (",
+          ext || "unknown",
+          ") \u2014 open via the link above."
+        ] })
+      ] }),
+      !isWaveform && !isHtmlPreview && !isImage && loading && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-loading", children: "Loading\u2026" }),
+      !isWaveform && !isHtmlPreview && !isImage && error && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-error", children: [
+        "Failed to load: ",
+        error
+      ] }),
+      !isWaveform && !isHtmlPreview && !isImage && isText && content != null && !error && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("pre", { className: "collateral-code", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("code", { dangerouslySetInnerHTML: { __html: highlighted } }) })
+    ] })
+  ] });
+}
+function _buildTree(files) {
+  const root3 = { name: "", children: /* @__PURE__ */ new Map(), files: [], isDir: true };
+  for (const f of files) {
+    const parts = f.rel_path.split("/").filter(Boolean);
+    let node = root3;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      if (!node.children.has(part)) {
+        node.children.set(part, {
+          name: part,
+          path: parts.slice(0, i + 1).join("/"),
+          children: /* @__PURE__ */ new Map(),
+          files: [],
+          isDir: true
+        });
+      }
+      node = node.children.get(part);
+    }
+    node.files.push({ ...f, displayName: parts[parts.length - 1] });
+  }
+  const sortNode = (n) => {
+    n.children = new Map([...n.children.entries()].sort((a, b) => a[0].localeCompare(b[0])));
+    n.files.sort((a, b) => a.displayName.localeCompare(b.displayName));
+    for (const child of n.children.values())
+      sortNode(child);
+  };
+  sortNode(root3);
+  return root3;
+}
+function TreeNode({ node, depth, selected, onSelect, defaultOpen, filterTokens }) {
+  const [open, setOpen] = (0, import_react19.useState)(defaultOpen);
+  if (!node)
+    return null;
+  const indent = { paddingLeft: 6 + depth * 12 };
+  const matchesFilter = (text) => {
+    if (!filterTokens || filterTokens.length === 0)
+      return true;
+    const t = text.toLowerCase();
+    return filterTokens.every((q) => t.includes(q));
+  };
+  const visibleFiles = node.files.filter((f) => matchesFilter(f.rel_path));
+  const visibleChildren = [...node.children.values()].filter((c) => _treeHasMatches(c, filterTokens));
+  if (filterTokens && filterTokens.length > 0 && visibleFiles.length === 0 && visibleChildren.length === 0) {
+    return null;
+  }
+  return /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-tree-node", children: [
+    node.path != null && node.name && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)(
+      "div",
+      {
+        className: "collateral-tree-folder",
+        style: indent,
+        onClick: () => setOpen((v) => !v),
+        children: [
+          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-tree-chev", children: open ? "\u25BE" : "\u25B8" }),
+          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-tree-folder-icon", children: "\u{1F4C1}" }),
+          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-tree-folder-name", children: node.name }),
+          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-tree-folder-count", children: visibleFiles.length + visibleChildren.reduce((s, c) => s + _treeFileCount(c, filterTokens), 0) })
+        ]
+      }
+    ),
+    (open || node.path == null) && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)(import_jsx_runtime13.Fragment, { children: [
+      visibleChildren.map((child) => /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+        TreeNode,
+        {
+          node: child,
+          depth: node.path != null ? depth + 1 : depth,
+          selected,
+          onSelect,
+          defaultOpen: depth < 1,
+          filterTokens
+        },
+        child.path
+      )),
+      visibleFiles.map((f) => /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)(
+        "div",
+        {
+          className: `collateral-tree-file ${selected?.rel_path === f.rel_path ? "collateral-tree-file-selected" : ""}`,
+          style: { paddingLeft: indent.paddingLeft + 14 },
+          onClick: () => onSelect(f),
+          title: f.rel_path,
+          children: [
+            /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-tree-file-icon", children: _fileIcon(f.displayName) }),
+            /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-tree-file-name", children: f.displayName }),
+            /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "collateral-tree-file-size", children: _formatBytes(f.size) })
+          ]
+        },
+        f.rel_path
+      ))
+    ] })
+  ] });
+}
+function _treeHasMatches(node, filterTokens) {
+  if (!filterTokens || filterTokens.length === 0)
+    return true;
+  for (const f of node.files) {
+    const t = f.rel_path.toLowerCase();
+    if (filterTokens.every((q) => t.includes(q)))
+      return true;
+  }
+  for (const child of node.children.values()) {
+    if (_treeHasMatches(child, filterTokens))
+      return true;
+  }
+  return false;
+}
+function _treeFileCount(node, filterTokens) {
+  let n = node.files.filter((f) => {
+    if (!filterTokens || filterTokens.length === 0)
+      return true;
+    const t = f.rel_path.toLowerCase();
+    return filterTokens.every((q) => t.includes(q));
+  }).length;
+  for (const child of node.children.values()) {
+    n += _treeFileCount(child, filterTokens);
+  }
+  return n;
+}
+function _fileIcon(name) {
+  const ext = _extOf(name);
+  if (ext === ".v" || ext === ".sv")
+    return "\u26A1";
+  if (ext === ".vcd" || ext === ".fst" || ext === ".ghw")
+    return "\u3030";
+  if (ext === ".html" || ext === ".htm")
+    return "\u{1F310}";
+  if (ext === ".json")
+    return "{ }";
+  if (ext === ".md")
+    return "\u{1F4C4}";
+  if (ext === ".rpt" || ext === ".log" || ext === ".txt")
+    return "\u{1F4CB}";
+  if (ext === ".sdc" || ext === ".tcl" || ext === ".ys")
+    return "\u2699";
+  if (ext === ".png" || ext === ".jpg" || ext === ".jpeg" || ext === ".svg" || ext === ".gif")
+    return "\u{1F5BC}";
+  return "\xB7";
+}
+function CollateralViewer() {
+  const [data, setData] = (0, import_react19.useState)(null);
+  const [selected, setSelected] = (0, import_react19.useState)(null);
+  const [filter2, setFilter] = (0, import_react19.useState)("");
+  const [error, setError] = (0, import_react19.useState)(null);
+  (0, import_react19.useEffect)(() => {
+    fetch("/api/collateral").then((r) => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`)).then(setData).catch((e) => setError(String(e)));
+  }, []);
+  const { tree, totalFiles } = (0, import_react19.useMemo)(() => {
+    if (!data)
+      return { tree: null, totalFiles: 0 };
+    const all = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const k of ["rtl", "tb", "syn", "pnr", "waveforms", "reports"]) {
+      for (const f of data[k] || []) {
+        if (seen.has(f.rel_path))
+          continue;
+        seen.add(f.rel_path);
+        all.push({ ...f, kind: k });
+      }
+    }
+    return { tree: _buildTree(all), totalFiles: all.length };
+  }, [data]);
+  const filterTokens = (0, import_react19.useMemo)(() => {
+    return filter2 ? filter2.toLowerCase().split(/\s+/).filter(Boolean) : [];
+  }, [filter2]);
+  if (error) {
+    return /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-shell", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-empty", children: [
+      "Failed to load collateral: ",
+      error
+    ] }) });
+  }
+  if (!data) {
+    return /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-shell", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-empty", children: "Loading collateral\u2026" }) });
+  }
+  return /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-shell", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-sidebar", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-toolbar", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+        "input",
+        {
+          className: "collateral-filter",
+          placeholder: `Filter ${totalFiles} files\u2026`,
+          value: filter2,
+          onChange: (e) => setFilter(e.target.value)
+        }
+      ) }),
+      /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "collateral-tree", children: [
+        tree && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+          TreeNode,
+          {
+            node: tree,
+            depth: 0,
+            selected,
+            onSelect: setSelected,
+            defaultOpen: true,
+            filterTokens
+          }
+        ),
+        totalFiles === 0 && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-empty-mini", children: "No collateral yet." })
+      ] })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "collateral-viewer", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(FileViewer, { file: selected }) })
+  ] });
+}
+
+// src/webview/components/NodePromptModal.jsx
+var import_react20 = __toESM(require_react());
+var import_jsx_runtime14 = __toESM(require_jsx_runtime());
 var TYPE_LABELS = {
   agent: "Agent",
   activity: "Activity",
@@ -127501,7 +129028,7 @@ var TYPE_LABELS = {
   human_review: "Human Review"
 };
 function NodePromptModal({ node, onClose }) {
-  const [activeTab, setActiveTab] = (0, import_react19.useState)("prompt");
+  const [activeTab, setActiveTab] = (0, import_react20.useState)("prompt");
   if (!node)
     return null;
   const typeLabel = TYPE_LABELS[node.type] || node.type;
@@ -127513,13 +129040,13 @@ function NodePromptModal({ node, onClose }) {
     { key: "config", label: "Config" },
     { key: "source", label: "Source" }
   ];
-  return /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "prompt-panel-mask", onClick: (e) => {
+  return /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "prompt-panel-mask", onClick: (e) => {
     if (e.target === e.currentTarget)
       onClose();
-  }, children: /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "prompt-panel", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "prompt-panel-header", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "modal-title", children: [
-        avatarUrl ? /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+  }, children: /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "prompt-panel", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "prompt-panel-header", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "modal-title", children: [
+        avatarUrl ? /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
           "img",
           {
             className: "modal-avatar",
@@ -127528,17 +129055,17 @@ function NodePromptModal({ node, onClose }) {
             width: 32,
             height: 32
           }
-        ) : /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "cogwheel-icon", children: "\u2699" }),
-        /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("span", { className: "modal-title-text", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "modal-title-name", children: node.label }),
-          persona && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "modal-persona-badge", children: persona }),
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: `modal-type-badge type-badge ${node.type}`, children: typeLabel })
+        ) : /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "cogwheel-icon", children: "\u2699" }),
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("span", { className: "modal-title-text", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "modal-title-name", children: node.label }),
+          persona && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "modal-persona-badge", children: persona }),
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: `modal-type-badge type-badge ${node.type}`, children: typeLabel })
         ] })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("button", { className: "modal-close", onClick: onClose, children: "\xD7" })
+      /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("button", { className: "modal-close", onClick: onClose, children: "\xD7" })
     ] }),
-    node.description && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "modal-description", children: node.description }),
-    /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "modal-tabs", children: tabs.map((tab) => /* @__PURE__ */ (0, import_jsx_runtime13.jsx)(
+    node.description && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "modal-description", children: node.description }),
+    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "modal-tabs", children: tabs.map((tab) => /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
       "button",
       {
         className: `modal-tab ${activeTab === tab.key ? "active" : ""}`,
@@ -127547,61 +129074,61 @@ function NodePromptModal({ node, onClose }) {
       },
       tab.key
     )) }),
-    /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "prompt-panel-body", children: [
-      activeTab === "prompt" && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "prompt-tab", children: node.prompt_file ? /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)(import_jsx_runtime13.Fragment, { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "prompt-file-path", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("code", { children: node.prompt_file }) }),
-        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "prompt-content", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("pre", { children: node.prompt_full || "No prompt content available." }) })
-      ] }) : /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "prompt-empty", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "prompt-panel-body", children: [
+      activeTab === "prompt" && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "prompt-tab", children: node.prompt_file ? /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)(import_jsx_runtime14.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "prompt-file-path", children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("code", { children: node.prompt_file }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "prompt-content", children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("pre", { children: node.prompt_full || "No prompt content available." }) })
+      ] }) : /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "prompt-empty", children: [
         "This node has no associated prompt file.",
         node.type === "internal" && " It is a deterministic internal node.",
         node.type === "terminal" && " It is a terminal state node.",
         node.type === "human_review" && " It pauses for human input via interrupt()."
       ] }) }),
-      activeTab === "config" && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "config-tab", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "config-row", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "config-label", children: "Node Type" }),
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: `config-value type-badge ${node.type}`, children: typeLabel })
+      activeTab === "config" && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "config-tab", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "config-row", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "config-label", children: "Node Type" }),
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: `config-value type-badge ${node.type}`, children: typeLabel })
         ] }),
-        persona && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "config-row", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "config-label", children: "Persona" }),
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "config-value", children: persona })
+        persona && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "config-row", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "config-label", children: "Persona" }),
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "config-value", children: persona })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "config-row", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "config-label", children: "Node ID" }),
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("code", { className: "config-value", children: node.id })
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "config-row", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "config-label", children: "Node ID" }),
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("code", { className: "config-value", children: node.id })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "config-row", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "config-label", children: "Function" }),
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("code", { className: "config-value", children: node.function })
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "config-row", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "config-label", children: "Function" }),
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("code", { className: "config-value", children: node.function })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "config-row", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "config-label", children: "Uses Interrupt" }),
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "config-value", children: node.uses_interrupt ? "Yes (Temporal dispatch)" : "No (in-process)" })
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "config-row", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "config-label", children: "Uses Interrupt" }),
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "config-value", children: node.uses_interrupt ? "Yes (Temporal dispatch)" : "No (in-process)" })
         ] }),
-        node.possible_outcomes && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "config-row", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "config-label", children: "Possible Outcomes" }),
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "config-value", children: node.possible_outcomes.map((o) => /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: `outcome-chip ${o}`, children: o }, o)) })
+        node.possible_outcomes && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "config-row", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "config-label", children: "Possible Outcomes" }),
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "config-value", children: node.possible_outcomes.map((o) => /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: `outcome-chip ${o}`, children: o }, o)) })
         ] })
       ] }),
-      activeTab === "source" && /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "source-tab", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "source-info", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "config-row", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "config-label", children: "Function" }),
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("code", { className: "config-value", children: node.function })
+      activeTab === "source" && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "source-tab", children: /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "source-info", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "config-row", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "config-label", children: "Function" }),
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("code", { className: "config-value", children: node.function })
         ] }),
-        node.prompt_file && /* @__PURE__ */ (0, import_jsx_runtime13.jsxs)("div", { className: "config-row", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("span", { className: "config-label", children: "Prompt File" }),
-          /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("code", { className: "config-value", children: node.prompt_file })
+        node.prompt_file && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "config-row", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "config-label", children: "Prompt File" }),
+          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("code", { className: "config-value", children: node.prompt_file })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("p", { className: "source-hint", children: "Use Cmd+P in VS Code and search for the function name to jump to source." })
+        /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("p", { className: "source-hint", children: "Use Cmd+P in VS Code and search for the function name to jump to source." })
       ] }) })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("div", { className: "modal-footer", children: /* @__PURE__ */ (0, import_jsx_runtime13.jsx)("button", { className: "btn btn-default", onClick: onClose, children: "Close" }) })
+    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "modal-footer", children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("button", { className: "btn btn-default", onClick: onClose, children: "Close" }) })
   ] }) });
 }
 
 // src/webview/components/SummaryPanel.jsx
-var import_react20 = __toESM(require_react());
-var import_jsx_runtime14 = __toESM(require_jsx_runtime());
+var import_react21 = __toESM(require_react());
+var import_jsx_runtime15 = __toESM(require_jsx_runtime());
 function markdownToHtml2(md) {
   if (!md)
     return "";
@@ -127717,25 +129244,25 @@ function formatTimestamp(epoch) {
   return `${hh}:${mm}:${ss}`;
 }
 function SummaryCard({ title, badge, defaultOpen = true, children: children2 }) {
-  const [open, setOpen] = (0, import_react20.useState)(defaultOpen);
-  const toggle = (0, import_react20.useCallback)(() => setOpen((v) => !v), []);
-  return /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: `summary-card ${open ? "summary-card-open" : ""}`, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("button", { className: "summary-card-header", onClick: toggle, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "summary-card-chevron", children: open ? "\u25BC" : "\u25B6" }),
-      /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "summary-card-title", children: title }),
-      badge && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "summary-card-badge", children: badge })
+  const [open, setOpen] = (0, import_react21.useState)(defaultOpen);
+  const toggle = (0, import_react21.useCallback)(() => setOpen((v) => !v), []);
+  return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: `summary-card ${open ? "summary-card-open" : ""}`, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("button", { className: "summary-card-header", onClick: toggle, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "summary-card-chevron", children: open ? "\u25BC" : "\u25B6" }),
+      /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "summary-card-title", children: title }),
+      badge && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "summary-card-badge", children: badge })
     ] }),
-    open && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "summary-card-body", children: children2 })
+    open && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-card-body", children: children2 })
   ] });
 }
 function MarkdownDocCard({ content, emptyMessage }) {
-  const html = (0, import_react20.useMemo)(() => markdownToHtml2(content), [content]);
+  const html = (0, import_react21.useMemo)(() => markdownToHtml2(content), [content]);
   if (!content) {
-    return /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "summary-empty", children: emptyMessage || "Not yet generated." });
+    return /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-empty", children: emptyMessage || "Not yet generated." });
   }
-  return /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "summary-markdown", dangerouslySetInnerHTML: { __html: html } });
+  return /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-markdown", dangerouslySetInnerHTML: { __html: html } });
 }
-function ArchitectureCards({ cardData, updated }) {
+function ArchitectureCards({ cardData, updated, hideSummaryCard }) {
   const {
     summary = "",
     prd_content = "",
@@ -127745,50 +129272,50 @@ function ArchitectureCards({ cardData, updated }) {
     clock_tree_content = "",
     memory_map_content = ""
   } = cardData || {};
-  return /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)(import_jsx_runtime14.Fragment, { children: [
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(SummaryCard, { title: "Summary", defaultOpen: true, children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+  return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(import_jsx_runtime15.Fragment, { children: [
+    !hideSummaryCard && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: "Summary", defaultOpen: true, children: /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
       MarkdownDocCard,
       {
         content: summary,
         emptyMessage: "No summary available yet. The observer will generate one as the architecture runs."
       }
     ) }),
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(SummaryCard, { title: "PRD", defaultOpen: true, children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: "PRD", defaultOpen: true, children: /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
       MarkdownDocCard,
       {
         content: prd_content,
         emptyMessage: "PRD not yet generated. Waiting for Gather Requirements to complete."
       }
     ) }),
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(SummaryCard, { title: "SAD", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: "SAD", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
       MarkdownDocCard,
       {
         content: sad_content,
         emptyMessage: "SAD not yet generated. Waiting for System Architecture phase."
       }
     ) }),
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(SummaryCard, { title: "FRD", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: "FRD", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
       MarkdownDocCard,
       {
         content: frd_content,
         emptyMessage: "FRD not yet generated. Waiting for Functional Requirements phase."
       }
     ) }),
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(SummaryCard, { title: "ERS", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: "ERS", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
       MarkdownDocCard,
       {
         content: ers_content,
         emptyMessage: "ERS not yet generated. Waiting for Create Documentation to complete."
       }
     ) }),
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(SummaryCard, { title: "Clock Tree", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: "Clock Tree", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
       MarkdownDocCard,
       {
         content: clock_tree_content,
         emptyMessage: "Clock tree not yet generated."
       }
     ) }),
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(SummaryCard, { title: "Memory Map", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: "Memory Map", defaultOpen: false, children: /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
       MarkdownDocCard,
       {
         content: memory_map_content,
@@ -127799,35 +129326,35 @@ function ArchitectureCards({ cardData, updated }) {
 }
 function UarchSpecCard({ blockName, spec }) {
   const { full_content = "" } = spec;
-  const specHtml = (0, import_react20.useMemo)(() => markdownToHtml2(full_content), [full_content]);
-  return /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(SummaryCard, { title: blockName, defaultOpen: true, children: full_content ? /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "summary-markdown", dangerouslySetInnerHTML: { __html: specHtml } }) : /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "summary-empty", children: "Spec content not available." }) });
+  const specHtml = (0, import_react21.useMemo)(() => markdownToHtml2(full_content), [full_content]);
+  return /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: blockName, defaultOpen: true, children: full_content ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-markdown", dangerouslySetInnerHTML: { __html: specHtml } }) : /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-empty", children: "Spec content not available." }) });
 }
-function FrontendCards({ summary, uarchSpecs, updated }) {
-  const summaryHtml = (0, import_react20.useMemo)(() => markdownToHtml2(summary), [summary]);
-  const specEntries = (0, import_react20.useMemo)(
+function FrontendCards({ summary, uarchSpecs, updated, hideSummaryCard }) {
+  const summaryHtml = (0, import_react21.useMemo)(() => markdownToHtml2(summary), [summary]);
+  const specEntries = (0, import_react21.useMemo)(
     () => Object.entries(uarchSpecs || {}).sort(([a], [b]) => a.localeCompare(b)),
     [uarchSpecs]
   );
-  return /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)(import_jsx_runtime14.Fragment, { children: [
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(SummaryCard, { title: "Summary", defaultOpen: true, children: summary ? /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "summary-markdown", dangerouslySetInnerHTML: { __html: summaryHtml } }) : /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "summary-empty", children: "No summary available yet. The observer will generate one as the pipeline runs." }) }),
-    specEntries.length > 0 ? specEntries.map(([blockName, spec]) => /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(UarchSpecCard, { blockName, spec }, blockName)) : /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(SummaryCard, { title: "Microarchitecture", defaultOpen: true, children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "summary-empty", children: "No uArch specs generated yet. They will appear here as blocks are processed." }) })
+  return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(import_jsx_runtime15.Fragment, { children: [
+    !hideSummaryCard && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: "Summary", defaultOpen: true, children: summary ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-markdown", dangerouslySetInnerHTML: { __html: summaryHtml } }) : /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-empty", children: "No summary available yet. The observer will generate one as the pipeline runs." }) }),
+    specEntries.length > 0 ? specEntries.map(([blockName, spec]) => /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(UarchSpecCard, { blockName, spec }, blockName)) : /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: "Microarchitecture", defaultOpen: true, children: /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-empty", children: "No uArch specs generated yet. They will appear here as blocks are processed." }) })
   ] });
 }
 function StatCard({ label, value, unit, status }) {
   const statusClass = status === "pass" ? "stat-pass" : status === "fail" ? "stat-fail" : "";
-  return /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: `backend-stat-card ${statusClass}`, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "backend-stat-label", children: label }),
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-stat-value", children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: `backend-stat-card ${statusClass}`, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "backend-stat-label", children: label }),
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-stat-value", children: [
       value,
-      unit && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "backend-stat-unit", children: unit })
+      unit && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "backend-stat-unit", children: unit })
     ] })
   ] });
 }
 function SignoffBadge({ label, passed, detail }) {
-  return /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: `signoff-badge ${passed ? "signoff-pass" : "signoff-fail"}`, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "signoff-icon", children: passed ? "\u2713" : "\u2717" }),
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "signoff-label", children: label }),
-    detail && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "signoff-detail", children: detail })
+  return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: `signoff-badge ${passed ? "signoff-pass" : "signoff-fail"}`, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "signoff-icon", children: passed ? "\u2713" : "\u2717" }),
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "signoff-label", children: label }),
+    detail && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "signoff-detail", children: detail })
   ] });
 }
 function BlockBackendCard({ block, targetClock }) {
@@ -127872,22 +129399,22 @@ function BlockBackendCard({ block, targetClock }) {
   };
   const timingStatus = timing_met === true ? "pass" : timing_met === false ? "fail" : void 0;
   const freq = max_freq_mhz || (targetClock > 0 ? targetClock : void 0);
-  return /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)(
+  return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(
     SummaryCard,
     {
       title: name,
       badge: success ? "PASSED" : `attempt ${attempts}`,
       defaultOpen: true,
       children: [
-        /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-stats-grid", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-stats-grid", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
             StatCard,
             {
               label: "Gates",
               value: fmtGates(gate_count)
             }
           ),
-          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+          /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
             StatCard,
             {
               label: "Area",
@@ -127895,7 +129422,7 @@ function BlockBackendCard({ block, targetClock }) {
               unit: "\xB5m\xB2"
             }
           ),
-          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+          /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
             StatCard,
             {
               label: "Utilization",
@@ -127903,7 +129430,7 @@ function BlockBackendCard({ block, targetClock }) {
               unit: "%"
             }
           ),
-          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+          /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
             StatCard,
             {
               label: "Max Freq",
@@ -127913,87 +129440,87 @@ function BlockBackendCard({ block, targetClock }) {
             }
           )
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-power-row", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "backend-power-header", children: "Power" }),
-          /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-power-grid", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-power-item", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "backend-power-label", children: "Total" }),
-              /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("span", { className: "backend-power-value", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-power-row", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "backend-power-header", children: "Power" }),
+          /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-power-grid", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-power-item", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "backend-power-label", children: "Total" }),
+              /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: "backend-power-value", children: [
                 formatNum(total_power_mw, 3),
                 " mW"
               ] })
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-power-item", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "backend-power-label", children: "Dynamic" }),
-              /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("span", { className: "backend-power-value", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-power-item", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "backend-power-label", children: "Dynamic" }),
+              /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: "backend-power-value", children: [
                 formatNum(dynamic_power_mw, 3),
                 " mW"
               ] })
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-power-item", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "backend-power-label", children: "Leakage" }),
-              /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("span", { className: "backend-power-value", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-power-item", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "backend-power-label", children: "Leakage" }),
+              /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: "backend-power-value", children: [
                 formatNum(leakage_power_mw, 4),
                 " mW"
               ] })
             ] })
           ] })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-timing-row", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "backend-timing-header", children: "Timing" }),
-          /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-timing-grid", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-timing-item", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "backend-timing-label", children: "WNS" }),
-              /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("span", { className: `backend-timing-value ${wns_ns >= 0 ? "timing-met" : "timing-violated"}`, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-timing-row", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "backend-timing-header", children: "Timing" }),
+          /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-timing-grid", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-timing-item", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "backend-timing-label", children: "WNS" }),
+              /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: `backend-timing-value ${wns_ns >= 0 ? "timing-met" : "timing-violated"}`, children: [
                 wns_ns >= 0 ? "+" : "",
                 formatNum(wns_ns, 2),
                 " ns"
               ] })
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-timing-item", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "backend-timing-label", children: "TNS" }),
-              /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("span", { className: `backend-timing-value ${tns_ns >= 0 ? "timing-met" : "timing-violated"}`, children: [
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-timing-item", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "backend-timing-label", children: "TNS" }),
+              /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: `backend-timing-value ${tns_ns >= 0 ? "timing-met" : "timing-violated"}`, children: [
                 tns_ns >= 0 ? "+" : "",
                 formatNum(tns_ns, 2),
                 " ns"
               ] })
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-timing-item", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "backend-timing-label", children: "Setup" }),
-              /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("span", { className: "backend-timing-value", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-timing-item", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "backend-timing-label", children: "Setup" }),
+              /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: "backend-timing-value", children: [
                 formatNum(setup_slack_ns, 2),
                 " ns"
               ] })
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-timing-item", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "backend-timing-label", children: "Hold" }),
-              /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("span", { className: "backend-timing-value", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-timing-item", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "backend-timing-label", children: "Hold" }),
+              /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: "backend-timing-value", children: [
                 formatNum(hold_slack_ns, 2),
                 " ns"
               ] })
             ] })
           ] })
         ] }),
-        (wire_length_um > 0 || via_count > 0) && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-routing-row", children: [
-          wire_length_um > 0 && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("span", { className: "backend-routing-item", children: [
+        (wire_length_um > 0 || via_count > 0) && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-routing-row", children: [
+          wire_length_um > 0 && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: "backend-routing-item", children: [
             "Wire: ",
             formatNum(wire_length_um, 0),
             " \\u00B5m"
           ] }),
-          via_count > 0 && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("span", { className: "backend-routing-item", children: [
+          via_count > 0 && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: "backend-routing-item", children: [
             "Vias: ",
             via_count.toLocaleString()
           ] })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-signoff-row", children: [
-          drc_clean !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(SignoffBadge, { label: "DRC", passed: drc_clean }),
-          lvs_match !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(SignoffBadge, { label: "LVS", passed: lvs_match }),
-          timing_met !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(SignoffBadge, { label: "Timing", passed: timing_met })
+        /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-signoff-row", children: [
+          drc_clean !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SignoffBadge, { label: "DRC", passed: drc_clean }),
+          lvs_match !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SignoffBadge, { label: "LVS", passed: lvs_match }),
+          timing_met !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SignoffBadge, { label: "Timing", passed: timing_met })
         ] }),
-        (floorplan_image || gds_image) && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-images", children: [
-          floorplan_image && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-image-card", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "backend-image-label", children: "Floorplan (post-PnR)" }),
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+        (floorplan_image || gds_image) && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-images", children: [
+          floorplan_image && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-image-card", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "backend-image-label", children: "Floorplan (post-PnR)" }),
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
               "img",
               {
                 src: `/api/artifacts/${floorplan_image}`,
@@ -128003,9 +129530,9 @@ function BlockBackendCard({ block, targetClock }) {
               }
             )
           ] }),
-          gds_image && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-image-card", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "backend-image-label", children: "GDS Layout" }),
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+          gds_image && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-image-card", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "backend-image-label", children: "GDS Layout" }),
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
               "img",
               {
                 src: `/api/artifacts/${gds_image}`,
@@ -128020,38 +129547,38 @@ function BlockBackendCard({ block, targetClock }) {
     }
   );
 }
-function BackendCards({ cardData, updated }) {
+function BackendCards({ cardData, updated, hideSummaryCard }) {
   const {
     summary = "",
     blocks = [],
     target_clock_mhz = 0
   } = cardData || {};
-  const summaryHtml = (0, import_react20.useMemo)(() => markdownToHtml2(summary), [summary]);
+  const summaryHtml = (0, import_react21.useMemo)(() => markdownToHtml2(summary), [summary]);
   const passed = blocks.filter((b) => b.success).length;
   const total = blocks.length;
-  return /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)(import_jsx_runtime14.Fragment, { children: [
-    total > 0 && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+  return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)(import_jsx_runtime15.Fragment, { children: [
+    total > 0 && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
       SummaryCard,
       {
         title: "Backend Results",
         badge: `${passed}/${total} passed`,
         defaultOpen: true,
-        children: /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-overview", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-overview-stat", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "backend-overview-label", children: "Blocks" }),
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "backend-overview-value", children: total })
+        children: /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-overview", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-overview-stat", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "backend-overview-label", children: "Blocks" }),
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "backend-overview-value", children: total })
           ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-overview-stat", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "backend-overview-label", children: "Passed" }),
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "backend-overview-value backend-overview-pass", children: passed })
+          /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-overview-stat", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "backend-overview-label", children: "Passed" }),
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "backend-overview-value backend-overview-pass", children: passed })
           ] }),
-          total - passed > 0 && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-overview-stat", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "backend-overview-label", children: "Failed" }),
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "backend-overview-value backend-overview-fail", children: total - passed })
+          total - passed > 0 && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-overview-stat", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "backend-overview-label", children: "Failed" }),
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "backend-overview-value backend-overview-fail", children: total - passed })
           ] }),
-          target_clock_mhz > 0 && /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "backend-overview-stat", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("span", { className: "backend-overview-label", children: "Target" }),
-            /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("span", { className: "backend-overview-value", children: [
+          target_clock_mhz > 0 && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "backend-overview-stat", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "backend-overview-label", children: "Target" }),
+            /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: "backend-overview-value", children: [
               target_clock_mhz,
               " MHz"
             ] })
@@ -128059,7 +129586,7 @@ function BackendCards({ cardData, updated }) {
         ] })
       }
     ),
-    blocks.map((block) => /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+    blocks.map((block) => /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
       BlockBackendCard,
       {
         block,
@@ -128067,20 +129594,21 @@ function BackendCards({ cardData, updated }) {
       },
       block.name
     )),
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(SummaryCard, { title: "Summary", defaultOpen: blocks.length === 0, children: summary ? /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "summary-markdown", dangerouslySetInnerHTML: { __html: summaryHtml } }) : /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "summary-empty", children: "No backend summary available yet. Results will appear as blocks complete PnR, DRC, and LVS." }) })
+    !hideSummaryCard && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(SummaryCard, { title: "Summary", defaultOpen: blocks.length === 0, children: summary ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-markdown", dangerouslySetInnerHTML: { __html: summaryHtml } }) : /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-empty", children: "No backend summary available yet. Results will appear as blocks complete PnR, DRC, and LVS." }) })
   ] });
 }
-var SummaryPanel = import_react20.default.memo(function SummaryPanel2({
+var SummaryPanel = import_react21.default.memo(function SummaryPanel2({
   stage,
   content,
   updated,
   width,
-  cardData
+  cardData,
+  observerEnabled
 }) {
-  const renderedHtml = (0, import_react20.useMemo)(() => markdownToHtml2(content), [content]);
-  const scrollRef = (0, import_react20.useRef)(null);
-  const savedScrollRef = (0, import_react20.useRef)(0);
-  (0, import_react20.useLayoutEffect)(() => {
+  const renderedHtml = (0, import_react21.useMemo)(() => markdownToHtml2(content), [content]);
+  const scrollRef = (0, import_react21.useRef)(null);
+  const savedScrollRef = (0, import_react21.useRef)(0);
+  (0, import_react21.useLayoutEffect)(() => {
     const el = scrollRef.current;
     if (!el)
       return;
@@ -128095,45 +129623,51 @@ var SummaryPanel = import_react20.default.memo(function SummaryPanel2({
     }
   };
   const renderCards = () => {
+    const hideSummaryCard = observerEnabled === false;
     if (stage === "architecture") {
-      return /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+      return /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
         ArchitectureCards,
         {
           cardData: cardData || { summary: content },
-          updated
+          updated,
+          hideSummaryCard
         }
       );
     }
     if (stage === "frontend") {
-      return /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+      return /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
         FrontendCards,
         {
           summary: cardData ? cardData.summary : content,
           uarchSpecs: cardData ? cardData.uarch_specs : null,
-          updated
+          updated,
+          hideSummaryCard
         }
       );
     }
     if (stage === "backend") {
-      return /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+      return /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
         BackendCards,
         {
           cardData: cardData || { summary: content },
-          updated
+          updated,
+          hideSummaryCard
         }
       );
     }
-    return content ? /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(
+    if (hideSummaryCard)
+      return null;
+    return content ? /* @__PURE__ */ (0, import_jsx_runtime15.jsx)(
       "div",
       {
         className: "summary-markdown",
         dangerouslySetInnerHTML: { __html: renderedHtml }
       }
-    ) : /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "summary-empty", children: "No summary available yet. The observer LLM will generate one as the pipeline runs." });
+    ) : /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-empty", children: "No summary available yet. The observer LLM will generate one as the pipeline runs." });
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("div", { className: "summary-sidebar", style: width ? { width, minWidth: width, maxWidth: width } : void 0, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "summary-content", ref: scrollRef, onScroll: handleScroll, children: renderCards() }),
-    updated && /* @__PURE__ */ (0, import_jsx_runtime14.jsx)("div", { className: "summary-footer", children: /* @__PURE__ */ (0, import_jsx_runtime14.jsxs)("span", { className: "summary-updated", children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "summary-sidebar", style: width ? { width, minWidth: width, maxWidth: width } : void 0, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-content", ref: scrollRef, onScroll: handleScroll, children: renderCards() }),
+    updated && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("div", { className: "summary-footer", children: /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: "summary-updated", children: [
       "Updated ",
       formatTimestamp(updated)
     ] }) })
@@ -128142,8 +129676,8 @@ var SummaryPanel = import_react20.default.memo(function SummaryPanel2({
 var SummaryPanel_default = SummaryPanel;
 
 // src/webview/components/StatusBar.jsx
-var import_react21 = __toESM(require_react());
-var import_jsx_runtime15 = __toESM(require_jsx_runtime());
+var import_react22 = __toESM(require_react());
+var import_jsx_runtime16 = __toESM(require_jsx_runtime());
 var STATUS_META = {
   running: { label: "Running", cls: "pill-running" },
   completed: { label: "Completed", cls: "pill-completed" },
@@ -128164,28 +129698,28 @@ function StatusBar({ info }) {
     total
   } = info;
   const { label, cls } = STATUS_META[pipelineStatus] || STATUS_META.idle;
-  return /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("div", { className: "status-bar", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: `status-pill ${cls}`, children: label }),
-    inFlight > 0 && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: "status-pill pill-active", children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "status-bar", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: `status-pill ${cls}`, children: label }),
+    inFlight > 0 && /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("span", { className: "status-pill pill-active", children: [
       inFlight,
       " active"
     ] }),
-    waitingForHuman > 0 && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: "status-pill pill-waiting", children: [
+    waitingForHuman > 0 && /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("span", { className: "status-pill pill-waiting", children: [
       waitingForHuman,
       " waiting"
     ] }),
-    total != null && /* @__PURE__ */ (0, import_jsx_runtime15.jsxs)("span", { className: "status-pill pill-progress", children: [
+    total != null && /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("span", { className: "status-pill pill-progress", children: [
       completedCount,
       "/",
       total
     ] }),
-    currentBlock && /* @__PURE__ */ (0, import_jsx_runtime15.jsx)("span", { className: "status-pill pill-block", children: currentBlock })
+    currentBlock && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "status-pill pill-block", children: currentBlock })
   ] });
 }
 
 // src/webview/App.jsx
-var import_jsx_runtime16 = __toESM(require_jsx_runtime());
-var ErrorBoundary = class extends import_react22.Component {
+var import_jsx_runtime17 = __toESM(require_jsx_runtime());
+var ErrorBoundary = class extends import_react23.Component {
   constructor(props) {
     super(props);
     this.state = { hasError: false, error: null };
@@ -128194,19 +129728,19 @@ var ErrorBoundary = class extends import_react22.Component {
     return { hasError: true, error };
   }
   componentDidCatch(error, errorInfo) {
-    console.error("SoCMate ErrorBoundary caught:", error, errorInfo);
+    console.error("Coresmith ErrorBoundary caught:", error, errorInfo);
   }
   render() {
     if (this.state.hasError) {
-      return /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { style: {
+      return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { style: {
         padding: "2rem",
         textAlign: "center",
         color: "#e0e0e0",
         fontFamily: "system-ui, sans-serif"
       }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("h2", { style: { color: "#ff6b6b" }, children: "Something went wrong" }),
-        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("p", { style: { color: "#aaa", maxWidth: 500, margin: "1rem auto" }, children: this.state.error?.message || "An unexpected error occurred." }),
-        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("h2", { style: { color: "#ff6b6b" }, children: "Something went wrong" }),
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("p", { style: { color: "#aaa", maxWidth: 500, margin: "1rem auto" }, children: this.state.error?.message || "An unexpected error occurred." }),
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
           "button",
           {
             onClick: () => this.setState({ hasError: false, error: null }),
@@ -128230,31 +129764,31 @@ var ErrorBoundary = class extends import_react22.Component {
 var vscode = typeof acquireVsCodeApi === "function" ? acquireVsCodeApi() : null;
 var isStandalone = !vscode;
 function useTheme() {
-  const [theme, setThemeState] = (0, import_react22.useState)(() => {
+  const [theme, setThemeState] = (0, import_react23.useState)(() => {
     try {
-      const stored = localStorage.getItem("socmate-theme");
+      const stored = localStorage.getItem("coresmith-theme");
       if (stored === "dark" || stored === "light")
         return stored;
     } catch {
     }
     return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   });
-  (0, import_react22.useEffect)(() => {
+  (0, import_react23.useEffect)(() => {
     document.documentElement.setAttribute("data-theme", theme);
     try {
-      localStorage.setItem("socmate-theme", theme);
+      localStorage.setItem("coresmith-theme", theme);
     } catch {
     }
   }, [theme]);
-  const toggle = (0, import_react22.useCallback)(() => {
+  const toggle = (0, import_react23.useCallback)(() => {
     setThemeState((prev) => prev === "dark" ? "light" : "dark");
   }, []);
   return [theme, toggle];
 }
 function useStableState(initial) {
-  const [value, setValue] = (0, import_react22.useState)(initial);
-  const jsonRef = (0, import_react22.useRef)(JSON.stringify(initial));
-  const setStable = (0, import_react22.useCallback)((newVal) => {
+  const [value, setValue] = (0, import_react23.useState)(initial);
+  const jsonRef = (0, import_react23.useRef)(JSON.stringify(initial));
+  const setStable = (0, import_react23.useCallback)((newVal) => {
     const j = JSON.stringify(newVal);
     if (j !== jsonRef.current) {
       jsonRef.current = j;
@@ -128311,6 +129845,26 @@ async function fetchLiveCallsHttp(nodeId) {
     return [];
   }
 }
+async function fetchNodeTrajectoryHttp(nodeId) {
+  try {
+    const res = await fetch(`/api/node_trajectory/${encodeURIComponent(nodeId)}`);
+    if (!res.ok)
+      return [];
+    return res.json();
+  } catch {
+    return [];
+  }
+}
+async function fetchNodeDescriptions() {
+  try {
+    const res = await fetch("/api/node_descriptions");
+    if (!res.ok)
+      return {};
+    return res.json();
+  } catch {
+    return {};
+  }
+}
 async function fetchSummaryHttp(stage) {
   try {
     const res = await fetch(`/api/summary/${stage}`);
@@ -128353,33 +129907,49 @@ function getSummaryStage(viewMode, graphName) {
 }
 function App() {
   const [theme, toggleTheme] = useTheme();
-  const [graphData, setGraphData] = (0, import_react22.useState)(null);
-  const [graphName, setGraphName] = (0, import_react22.useState)("frontend");
-  const [viewMode, setViewMode] = (0, import_react22.useState)("graph");
-  const [selectedNode, setSelectedNode] = (0, import_react22.useState)(null);
-  const [blockDiagramData, setBlockDiagramData] = (0, import_react22.useState)(null);
-  const [modalOpen, setModalOpen] = (0, import_react22.useState)(false);
+  const [graphData, setGraphData] = (0, import_react23.useState)(null);
+  const [graphName, setGraphName] = (0, import_react23.useState)("frontend");
+  const [viewMode, setViewMode] = (0, import_react23.useState)("graph");
+  const [selectedNode, setSelectedNode] = (0, import_react23.useState)(null);
+  const [blockDiagramData, setBlockDiagramData] = (0, import_react23.useState)(null);
+  const [modalOpen, setModalOpen] = (0, import_react23.useState)(false);
   const [executionStatus, setExecutionStatus] = useStableState({});
   const [timelineData, setTimelineData] = useStableState(null);
-  const [traceData, setTraceData] = (0, import_react22.useState)(null);
-  const [traceNodeId, setTraceNodeId] = (0, import_react22.useState)(null);
-  const viewModeRef = (0, import_react22.useRef)(viewMode);
-  const graphNameRef = (0, import_react22.useRef)(graphName);
-  const [showSummary, setShowSummary] = (0, import_react22.useState)(true);
-  const [summaryContent, setSummaryContent] = (0, import_react22.useState)("");
-  const [summaryStage, setSummaryStage] = (0, import_react22.useState)("frontend");
-  const [summaryUpdated, setSummaryUpdated] = (0, import_react22.useState)(null);
+  const [traceData, setTraceData] = (0, import_react23.useState)(null);
+  const [traceNodeId, setTraceNodeId] = (0, import_react23.useState)(null);
+  const viewModeRef = (0, import_react23.useRef)(viewMode);
+  const graphNameRef = (0, import_react23.useRef)(graphName);
+  const [showSummary, setShowSummary] = (0, import_react23.useState)(true);
+  const [summaryContent, setSummaryContent] = (0, import_react23.useState)("");
+  const [summaryStage, setSummaryStage] = (0, import_react23.useState)("frontend");
+  const [summaryUpdated, setSummaryUpdated] = (0, import_react23.useState)(null);
   const [summaryCardData, setSummaryCardData] = useStableState(null);
-  const [summaryWidth, setSummaryWidth] = (0, import_react22.useState)(360);
-  const [detailWidth, setDetailWidth] = (0, import_react22.useState)(420);
-  const draggingRef = (0, import_react22.useRef)(null);
-  (0, import_react22.useEffect)(() => {
+  const [summaryWidth, setSummaryWidth] = (0, import_react23.useState)(360);
+  const [detailWidth, setDetailWidth] = (0, import_react23.useState)(420);
+  const draggingRef = (0, import_react23.useRef)(null);
+  const [nodeDescriptions, setNodeDescriptions] = (0, import_react23.useState)({});
+  (0, import_react23.useEffect)(() => {
+    if (!isStandalone)
+      return;
+    fetchNodeDescriptions().then(setNodeDescriptions);
+  }, []);
+  const [serverConfig, setServerConfig] = (0, import_react23.useState)({ observer_enabled: false });
+  (0, import_react23.useEffect)(() => {
+    if (!isStandalone)
+      return;
+    fetch("/api/server_config").then((r) => r.ok ? r.json() : null).then((c) => {
+      if (c)
+        setServerConfig(c);
+    }).catch(() => {
+    });
+  }, []);
+  (0, import_react23.useEffect)(() => {
     viewModeRef.current = viewMode;
   }, [viewMode]);
-  (0, import_react22.useEffect)(() => {
+  (0, import_react23.useEffect)(() => {
     graphNameRef.current = graphName;
   }, [graphName]);
-  (0, import_react22.useEffect)(() => {
+  (0, import_react23.useEffect)(() => {
     const newStage = getSummaryStage(viewMode, graphName);
     setSummaryStage(newStage);
     if (isStandalone) {
@@ -128395,7 +129965,7 @@ function App() {
       vscode.postMessage({ type: "requestSummary", stage: newStage });
     }
   }, [viewMode, graphName]);
-  const loadGraph = (0, import_react22.useCallback)((name) => {
+  const loadGraph = (0, import_react23.useCallback)((name) => {
     if (isStandalone) {
       fetchGraph(name).then((data) => {
         setGraphData(data);
@@ -128405,7 +129975,7 @@ function App() {
       vscode.postMessage({ type: "requestGraph", graphName: name });
     }
   }, []);
-  (0, import_react22.useEffect)(() => {
+  (0, import_react23.useEffect)(() => {
     if (isStandalone) {
       loadGraph("frontend");
       const interval2 = setInterval(() => {
@@ -128471,7 +130041,7 @@ function App() {
       return () => window.removeEventListener("message", handler);
     }
   }, [loadGraph]);
-  const handleDragStart = (0, import_react22.useCallback)((panel) => (e) => {
+  const handleDragStart = (0, import_react23.useCallback)((panel) => (e) => {
     e.preventDefault();
     draggingRef.current = panel;
     document.body.style.cursor = "col-resize";
@@ -128495,7 +130065,7 @@ function App() {
     window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("mouseup", onMouseUp);
   }, []);
-  const statusBarInfo = (0, import_react22.useMemo)(() => {
+  const statusBarInfo = (0, import_react23.useMemo)(() => {
     const status = executionStatus || {};
     let pipelineStatus = status.status || status.pipeline_status || "idle";
     const currentBlock = status.current_block || status.block || null;
@@ -128512,8 +130082,8 @@ function App() {
     }
     return { pipelineStatus, currentBlock, completedCount, inFlight, waitingForHuman, remaining, total };
   }, [graphName, executionStatus, timelineData]);
-  const traceNodeIdRef = (0, import_react22.useRef)(null);
-  const handleRequestTraces = (0, import_react22.useCallback)((nodeId) => {
+  const traceNodeIdRef = (0, import_react23.useRef)(null);
+  const handleRequestTraces = (0, import_react23.useCallback)((nodeId) => {
     const isRefresh = nodeId === traceNodeIdRef.current;
     traceNodeIdRef.current = nodeId;
     setTraceNodeId(nodeId);
@@ -128522,12 +130092,24 @@ function App() {
     }
     if (isStandalone) {
       Promise.all([
+        fetchNodeTrajectoryHttp(nodeId),
         fetchTracesHttp(nodeId),
         fetchLiveCallsHttp(nodeId)
-      ]).then(([traces, live]) => {
-        const hasTraces = traces && traces.length > 0;
+      ]).then(([trajectory, traces, live]) => {
+        const hasTraj = trajectory && trajectory.length > 0;
         const hasLive = live && live.length > 0;
-        if (hasLive) {
+        const hasTraces = traces && traces.length > 0;
+        if (hasTraj) {
+          setTraceData(trajectory.map((a) => ({
+            attempt: a.attempt,
+            block: a.block,
+            duration_s: a.duration_s,
+            status: a.status,
+            exit_event: a.exit_event,
+            steps: a.steps,
+            trajectory: true
+          })));
+        } else if (hasLive) {
           setTraceData(live.map((g) => ({ ...g, live: true })));
         } else if (hasTraces) {
           setTraceData(traces);
@@ -128539,11 +130121,12 @@ function App() {
       vscode.postMessage({ type: "requestTraces", nodeId });
     }
   }, []);
-  const handleNodeCogwheel = (0, import_react22.useCallback)((node) => {
+  const handleNodeCogwheel = (0, import_react23.useCallback)((node) => {
     setSelectedNode(node);
     setModalOpen(true);
   }, []);
-  const handleTabSwitch = (0, import_react22.useCallback)((tab) => {
+  const handleTabSwitch = (0, import_react23.useCallback)((tab) => {
+    setModalOpen(false);
     if (tab === "timeline") {
       setViewMode("timeline");
       setGraphName("timeline");
@@ -128555,6 +130138,9 @@ function App() {
       } else {
         vscode.postMessage({ type: "requestTimeline" });
       }
+    } else if (tab === "collateral") {
+      setViewMode("collateral");
+      setGraphName("collateral");
     } else if (tab === "block_diagram") {
       setViewMode("block_diagram");
       setGraphName("block_diagram");
@@ -128569,11 +130155,11 @@ function App() {
       loadGraph(tab);
     }
   }, [loadGraph]);
-  return /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "app-shell", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "app-header", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "app-title", children: "SoCMate" }),
-      /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "graph-selector", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+  return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "app-shell", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "app-header", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "app-title", children: "Coresmith" }),
+      /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "graph-selector", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
           "button",
           {
             className: graphName === "architecture" ? "active" : "",
@@ -128581,7 +130167,7 @@ function App() {
             children: "Architecture"
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
           "button",
           {
             className: graphName === "frontend" ? "active" : "",
@@ -128589,7 +130175,7 @@ function App() {
             children: "Frontend"
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
           "button",
           {
             className: graphName === "backend" ? "active" : "",
@@ -128597,7 +130183,7 @@ function App() {
             children: "Backend"
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
           "button",
           {
             className: graphName === "block_diagram" ? "active" : "",
@@ -128605,7 +130191,7 @@ function App() {
             children: "Block Diagram"
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
           "button",
           {
             className: graphName === "timeline" ? "active" : "",
@@ -128613,8 +130199,16 @@ function App() {
             children: "Timeline"
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "selector-divider" }),
-        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
+          "button",
+          {
+            className: graphName === "collateral" ? "active" : "",
+            onClick: () => handleTabSwitch("collateral"),
+            children: "Collateral"
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "selector-divider" }),
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
           "button",
           {
             className: `summary-toggle-btn ${showSummary ? "active" : ""}`,
@@ -128624,8 +130218,8 @@ function App() {
           }
         )
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(StatusBar, { info: statusBarInfo }),
-      /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(StatusBar, { info: statusBarInfo }),
+      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
         "button",
         {
           className: "theme-toggle",
@@ -128635,19 +130229,20 @@ function App() {
         }
       )
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "app-body", children: [
-      showSummary && /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)(import_jsx_runtime16.Fragment, { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "app-body", children: [
+      showSummary && viewMode !== "collateral" && /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(import_jsx_runtime17.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
           SummaryPanel_default,
           {
             stage: summaryStage,
             content: summaryContent,
             updated: summaryUpdated,
             width: summaryWidth,
-            cardData: summaryCardData
+            cardData: summaryCardData,
+            observerEnabled: serverConfig.observer_enabled
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
           "div",
           {
             className: "resize-handle resize-handle-right",
@@ -128655,7 +130250,7 @@ function App() {
           }
         )
       ] }),
-      viewMode === "timeline" ? /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+      viewMode === "timeline" ? /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
         GanttTimeline,
         {
           timelineData,
@@ -128663,9 +130258,10 @@ function App() {
           onRequestTraces: handleRequestTraces,
           graphName,
           detailWidth,
-          onDetailResize: handleDragStart("detail")
+          onDetailResize: handleDragStart("detail"),
+          nodeDescriptions
         }
-      ) }) : viewMode === "block_diagram" ? /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ReactFlowProvider, { children: /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(BlockDiagramCanvas, { diagramData: blockDiagramData }) }) }) : /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ReactFlowProvider, { children: graphData ? /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+      ) }) : viewMode === "block_diagram" ? /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(ReactFlowProvider, { children: /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(BlockDiagramCanvas, { diagramData: blockDiagramData }) }) }) : viewMode === "collateral" ? /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(CollateralViewer, {}) }) : /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "canvas-container", children: /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(ReactFlowProvider, { children: graphData ? /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
         GraphCanvas,
         {
           graphData,
@@ -128677,9 +130273,9 @@ function App() {
           detailWidth,
           onDetailResize: handleDragStart("detail")
         }
-      ) : /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "loading", children: "Loading graph..." }) }) })
+      ) : /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "loading", children: "Loading graph..." }) }) })
     ] }),
-    modalOpen && selectedNode && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+    modalOpen && selectedNode && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
       NodePromptModal,
       {
         node: selectedNode,
@@ -128690,7 +130286,7 @@ function App() {
 }
 var root2 = (0, import_client.createRoot)(document.getElementById("root"));
 root2.render(
-  /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ErrorBoundary, { children: /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(App, {}) })
+  /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(ErrorBoundary, { children: /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(App, {}) })
 );
 /*! Bundled license information:
 

@@ -292,46 +292,135 @@ function extractBlockName(spans) {
  * share the same graph node. Returns an array of { key, label, attempt,
  * blockName, spans } groups for the tab bar.
  */
+/**
+ * Convert traceData (in either the OTel/live-calls shape with `spans[]`, or
+ * the unified-trajectory shape with `steps[]`) into a flat list of tab
+ * descriptors with a normalized `steps[]` field that always interleaves
+ * LLM calls and tool runs in chronological order.
+ */
 function regroupTraces(traceData) {
   if (!traceData || traceData.length === 0) return [];
+
+  const isTrajectory = traceData[0]?.trajectory === true ||
+                       Array.isArray(traceData[0]?.steps);
 
   // Extract block names from each attempt group
   const groups = traceData.map((group) => ({
     ...group,
-    blockName: extractBlockName(group.spans),
+    blockName: group.block || group.blockName || extractBlockName(group.spans),
   }));
 
-  // Check if there are multiple distinct block names
-  const blockNames = new Set(groups.map((g) => g.blockName).filter(Boolean));
-  const hasMultipleBlocks = blockNames.size > 1;
-
-  if (!hasMultipleBlocks) {
-    // Single block (or no block names found) -- use original attempt-only tabs
-    return groups.map((g) => ({
-      key: `a${g.attempt}`,
-      label: groups.length === 1 ? 'Run' : `#${g.attempt}`,
-      attempt: g.attempt,
-      blockName: g.blockName,
-      spans: g.spans,
+  // Build a `steps` list per group: trajectory data is already steps;
+  // span data is converted via extractLLMCalls (LLM-only).
+  for (const g of groups) {
+    if (Array.isArray(g.steps) && g.steps.length > 0) {
+      // already normalized
+      continue;
+    }
+    const calls = extractLLMCalls(g.spans);
+    g.steps = calls.map((c) => ({
+      type: c.streaming ? 'llm_call_streaming' : 'llm_call',
+      ts: c.ts || 0,
+      model: c.model,
+      duration_s: c.duration_ms ? c.duration_ms / 1000 : null,
+      duration_ms: c.duration_ms,
+      system_prompt: c.systemPrompt,
+      user_prompt: c.prompt,
+      response: c.response,
+      status: c.status,
+      streaming: c.streaming,
+      _span: c,
     }));
   }
 
-  // Multiple blocks -- create (block, attempt) tabs
+  const blockNames = new Set(groups.map((g) => g.blockName).filter(Boolean));
+  const hasMultipleBlocks = blockNames.size > 1;
+
+  // Pick a per-attempt duration: prefer trajectory's own duration_s field
+  function attemptDurMs(g) {
+    if (g.duration_s) return g.duration_s * 1000;
+    if (g.duration_ms) return g.duration_ms;
+    return getAttemptDuration(g.spans);
+  }
+
+  // Some pipelines re-enter the same node multiple times within a single
+  // "attempt" (Constraint Check fires once per architecture round). When
+  // a result_summary carries a round number, prefer it for the label so
+  // the user sees "Attempt 1 · Round 2" instead of an opaque "(#2)".
+  const seenKeys = new Map();
   return groups.map((g) => {
-    const name = (g.blockName || 'unknown').replace(/_/g, ' ');
+    const steps = g.steps || [];
+    const toolCount = steps.filter((s) => s.type === 'tool_run').length;
+    const llmCount = steps.filter((s) => s.type === 'llm_call' || s.type === 'llm_call_streaming' || !s.type).length;
+    // Probe step metrics for a useful round / iteration discriminator.
+    let roundNum = null;
+    for (const s of steps) {
+      if (s.type === 'result_summary' && s.metrics) {
+        const r = s.metrics.round ?? s.metrics.new_round;
+        if (r != null) { roundNum = r; break; }
+      }
+    }
+    const baseKey = hasMultipleBlocks
+      ? `${g.blockName || 'unknown'}:${g.attempt}`
+      : `a${g.attempt}`;
+    const count = (seenKeys.get(baseKey) || 0) + 1;
+    seenKeys.set(baseKey, count);
+    const repeatCount = groups.filter((og) => {
+      const k = hasMultipleBlocks
+        ? `${og.blockName || 'unknown'}:${og.attempt}`
+        : `a${og.attempt}`;
+      return k === baseKey;
+    }).length;
+    const isRepeat = repeatCount > 1;
+    let label = hasMultipleBlocks
+      ? `${(g.blockName || 'unknown').replace(/_/g, ' ')} · Attempt ${g.attempt}`
+      : (groups.length === 1 ? 'Run' : `Attempt ${g.attempt}`);
+    if (isRepeat) {
+      // Build a discriminator that includes round when known and
+      // always appends an iteration counter so two calls in the same
+      // round still get distinct labels (Block Diagram fires multiple
+      // times per architecture round during escalation feedback).
+      const parts = [];
+      if (roundNum != null) parts.push(`Round ${roundNum}`);
+      parts.push(`Iter ${count}`);
+      label += ` · ${parts.join(' · ')}`;
+    }
     return {
-      key: `${g.blockName || 'unknown'}:${g.attempt}`,
-      label: `${name} #${g.attempt}`,
+      key: `${baseKey}#${count}`,
+      label,
+      durMs: attemptDurMs(g),
       attempt: g.attempt,
       blockName: g.blockName,
+      round: roundNum,
+      iteration: count,
+      status: g.status,
+      exitEvent: g.exit_event,
       spans: g.spans,
+      steps,
+      llmCount,
+      toolCount,
+      isTrajectory: isTrajectory,
     };
   });
 }
 
 function getAttemptDuration(spans) {
   if (!spans || spans.length === 0) return null;
-  return spans.reduce((sum, s) => sum + (s.duration_ms || 0), 0);
+  // For OTel traces the parent span carries the duration; for live_calls the
+  // synthetic root span has duration_ms=null and the per-call children carry
+  // it. Fall back to summing children when the parent is missing a duration
+  // so tab labels still show a number in either case.
+  let total = 0;
+  for (const s of spans) {
+    if (s.duration_ms) {
+      total += s.duration_ms;
+    } else if (s.children && s.children.length) {
+      for (const c of s.children) {
+        if (c.duration_ms) total += c.duration_ms;
+      }
+    }
+  }
+  return total || null;
 }
 
 function getAttemptStatus(spans) {
@@ -380,11 +469,25 @@ function markdownToHtml(md) {
     }
 
     function inlineFmt(text) {
-      return escapeHtml(text)
-        .replace(/`([^`]+)`/g, '<code>$1</code>')
-        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-        .replace(/_([^_]+)_/g, '<em>$1</em>');
+      const escaped = escapeHtml(text);
+      // Split on inline-code spans first so bold/italic regex never runs
+      // inside `code` -- otherwise `dedicated_pins_` and similar snake_case
+      // identifiers get their underscores eaten by the italic rule and
+      // styling breaks mid-token.
+      const parts = escaped.split(/(`[^`\n]+`)/g);
+      return parts.map((part) => {
+        if (part.length >= 2 && part.startsWith('`') && part.endsWith('`')) {
+          return `<code>${part.slice(1, -1)}</code>`;
+        }
+        return part
+          .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+          .replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
+          // Underscore italic must sit at a word boundary (whitespace or
+          // punctuation) on both sides -- this leaves snake_case tokens
+          // and file paths like arch/uarch_specs/foo_bar.md alone.
+          .replace(/(^|[^A-Za-z0-9_])_([^_\n\s][^_\n]*?)_(?=[^A-Za-z0-9_]|$)/g,
+                   '$1<em>$2</em>');
+      }).join('');
     }
 
     for (const line of lines) {
@@ -446,12 +549,115 @@ function markdownToHtml(md) {
   }).join('');
 }
 
+/* ── JSON detection + syntax highlighting ─────────────────── */
+
+function _tryParseJson(text) {
+  if (!text || typeof text !== 'string') return null;
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  // Cheap shape check before paying parse cost
+  const first = trimmed[0];
+  const last = trimmed[trimmed.length - 1];
+  if (!((first === '{' && last === '}') || (first === '[' && last === ']'))) {
+    return null;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+// Minimal regex-based JSON syntax highlighter -- escapes HTML, then wraps
+// keys/strings/numbers/booleans/nulls in styled spans.
+function _highlightJsonHtml(jsonStr) {
+  const escaped = jsonStr
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return escaped.replace(
+    /("(\\.|[^"\\])*")\s*:|("(\\.|[^"\\])*")|\b(true|false|null)\b|\b(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/g,
+    (match, key, _k2, str, _s2, kw, num) => {
+      if (key) {
+        const k = key.replace(/:$/, '').trim();
+        return `<span class="json-key">${k}</span>:`;
+      }
+      if (str) return `<span class="json-string">${str}</span>`;
+      if (kw) return `<span class="json-${kw}">${kw}</span>`;
+      if (num) return `<span class="json-number">${num}</span>`;
+      return match;
+    },
+  );
+}
+
+const _REASONING_KEYS = [
+  'reasoning', 'thinking', 'diagnosis', 'analysis', 'rationale',
+  'explanation', 'summary',
+];
+const _ACTION_KEYS = ['action', 'decision', 'next_step', 'suggested_fix'];
+
 /* ── Formatted text renderer with markdown ───────────────── */
 
-function FormattedText({ text, maxCollapsed = 2000 }) {
+function FormattedText({ text, maxCollapsed = 2000, autoJson = true }) {
   const [expanded, setExpanded] = useState(false);
 
   if (!text) return <span className="llm-no-content">No content</span>;
+
+  // If the entire response is a JSON object, surface the reasoning/diagnosis
+  // field above the JSON body so the user sees the "thinking" without
+  // hunting through escaped JSON.
+  const parsed = autoJson ? _tryParseJson(text) : null;
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    let reasoningKey = null;
+    let actionKey = null;
+    for (const k of _REASONING_KEYS) {
+      if (typeof parsed[k] === 'string' && parsed[k].trim()) {
+        reasoningKey = k; break;
+      }
+    }
+    for (const k of _ACTION_KEYS) {
+      if (parsed[k] != null && (typeof parsed[k] === 'string' || typeof parsed[k] === 'number')) {
+        actionKey = k; break;
+      }
+    }
+    const pretty = JSON.stringify(parsed, null, 2);
+    const isLong = pretty.length > maxCollapsed;
+    const display = isLong && !expanded ? pretty.slice(0, maxCollapsed) : pretty;
+    return (
+      <div className="llm-formatted llm-json-response">
+        {(reasoningKey || actionKey) && (
+          <div className="llm-thinking">
+            {reasoningKey && (
+              <div className="llm-thinking-section">
+                <div className="llm-thinking-label">{reasoningKey === 'reasoning' ? 'Thinking' : reasoningKey.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase())}</div>
+                <div className="llm-thinking-body">{parsed[reasoningKey]}</div>
+              </div>
+            )}
+            {actionKey && (
+              <div className="llm-thinking-section llm-thinking-action">
+                <div className="llm-thinking-label">{actionKey.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase())}</div>
+                <div className="llm-thinking-body">{String(parsed[actionKey])}</div>
+              </div>
+            )}
+          </div>
+        )}
+        <pre className="llm-code-block json-code-block">
+          <span className="llm-code-lang">json</span>
+          <code dangerouslySetInnerHTML={{ __html: _highlightJsonHtml(display) }} />
+        </pre>
+        {isLong && (
+          <button
+            className="llm-expand-btn"
+            onClick={() => setExpanded(!expanded)}
+          >
+            {expanded
+              ? 'Show less'
+              : `Show more (${(pretty.length / 1000).toFixed(1)}k chars)`}
+          </button>
+        )}
+      </div>
+    );
+  }
 
   const isLong = text.length > maxCollapsed;
   const display = isLong && !expanded ? text.slice(0, maxCollapsed) : text;
@@ -495,15 +701,354 @@ function Collapsible({ label, icon, defaultOpen, children, className }) {
   );
 }
 
+/* ── Tool Run Card ───────────────────────────────────────── */
+
+function _classifyToolStep(step) {
+  // Step name → display label + icon
+  const map = {
+    lint: { label: 'Lint', icon: '🔍' },
+    simulate: { label: 'Simulate', icon: '▶' },
+    synthesize: { label: 'Synthesize', icon: '⚙' },
+    integration_lint: { label: 'Integration Lint', icon: '🔍' },
+    integration_sim: { label: 'Integration Sim', icon: '▶' },
+    flat_top_synth: { label: 'Flat Top Synth', icon: '⚙' },
+    place: { label: 'Place', icon: '◫' },
+    route: { label: 'Route', icon: '⫸' },
+    cts: { label: 'CTS', icon: '🕒' },
+    drc: { label: 'DRC', icon: '✓' },
+    lvs: { label: 'LVS', icon: '✓' },
+  };
+  return map[step] || { label: step.replace(/_/g, ' '), icon: '🔧' };
+}
+
+function ToolRunCard({ run, index, total }) {
+  const [open, setOpen] = useState(false);
+  const { label, icon } = _classifyToolStep(run.step || 'tool');
+  const rc = run.return_code;
+  const ok = rc === 0;
+  const statusIcon = ok ? '✓' : rc != null ? '✗' : '—';
+  const statusCls = ok ? 'ok' : rc != null ? 'error' : 'unset';
+
+  // Parse useful chunks from the log content -- our pipeline logs have
+  // === STDOUT === / === STDERR === markers we can split on.
+  const content = run.content || '';
+  const stdoutMatch = content.match(/=== STDOUT ===([\s\S]*?)(?:=== STDERR ===|$)/);
+  const stderrMatch = content.match(/=== STDERR ===([\s\S]*?)$/);
+  const stdout = (stdoutMatch?.[1] || '').trim();
+  const stderr = (stderrMatch?.[1] || '').trim();
+  const hasOnlyStdout = stdout && !stderr;
+  const hasOnlyStderr = !stdout && stderr;
+
+  return (
+    <div className={`llm-card tool-card tool-card-${statusCls}`}>
+      <div className="llm-card-header">
+        {total > 1 && (
+          <span className="llm-call-index" title={`Step ${index + 1} of ${total}`}>
+            {`${index + 1}/${total}`}
+          </span>
+        )}
+        <span className="tool-card-icon" aria-hidden="true">{icon}</span>
+        <span className="llm-model-name tool-card-label">{label}</span>
+        <span className="llm-card-meta">
+          {run.command && (
+            <span className="tool-card-cmd" title={run.command}>
+              {(() => {
+                const first = run.command.split(/\s+/)[0] || '';
+                const tool = first.split('/').pop() || first;
+                return tool;
+              })()}
+            </span>
+          )}
+          {rc != null && (
+            <span className={`tool-card-rc tool-card-rc-${statusCls}`}>
+              rc={rc}
+            </span>
+          )}
+          <span className={`llm-stat llm-stat-${statusCls}`}>{statusIcon}</span>
+        </span>
+      </div>
+
+      {run.command && (
+        <div className="tool-card-command">
+          <span className="tool-card-command-label">$</span>
+          <code className="tool-card-command-text">{run.command}</code>
+        </div>
+      )}
+
+      <button
+        className="tool-card-toggle"
+        onClick={() => setOpen((v) => !v)}
+      >
+        {open ? '▼ Hide output' : '▶ Show output'}
+        {run.size != null && (
+          <span className="tool-card-size">
+            {run.size > 1024 ? `${(run.size / 1024).toFixed(1)} KB` : `${run.size} B`}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="tool-card-output">
+          {stdout && (
+            <details open={hasOnlyStdout} className="tool-output-section">
+              <summary>stdout</summary>
+              <pre className="tool-output-pre">{stdout}</pre>
+            </details>
+          )}
+          {stderr && (
+            <details open={hasOnlyStderr || !ok} className="tool-output-section tool-output-stderr">
+              <summary>stderr</summary>
+              <pre className="tool-output-pre">{stderr}</pre>
+            </details>
+          )}
+          {!stdout && !stderr && content && (
+            <pre className="tool-output-pre">{content}</pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ResultSummaryCard({ metrics, index, total }) {
+  const entries = Object.entries(metrics || {}).filter(([, v]) => v != null);
+  if (!entries.length) return null;
+
+  function fmt(key, value) {
+    if (value == null) return '—';
+    if (typeof value === 'boolean') return value ? '✓ yes' : '✗ no';
+    if (Array.isArray(value)) {
+      if (value.length === 0) return '(none)';
+      if (value.length <= 4) return value.join(', ');
+      return `${value.slice(0, 3).join(', ')}, +${value.length - 3} more`;
+    }
+    if (key === 'dashboard_path' || key === 'path' || key === 'log_path'
+        || key === 'layout_2d_png_path' || key === 'viewer_path') {
+      const s = String(value);
+      return s.length > 80 ? '…' + s.slice(-80) : s;
+    }
+    if (key === 'html_size' || key === 'size' || key === 'stdout_bytes') {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return String(value);
+      return n > 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`;
+    }
+    if (key === 'utilization_pct') {
+      const n = Number(value);
+      if (Number.isFinite(n)) return `${n.toFixed(1)}%`;
+    }
+    if (key === 'confidence') {
+      const n = Number(value);
+      if (Number.isFinite(n)) {
+        const pct = n <= 1 ? n * 100 : n;
+        return `${pct.toFixed(0)}%`;
+      }
+    }
+    if (typeof value === 'number') {
+      if (Math.abs(value) >= 1000) return value.toLocaleString();
+      if (Number.isInteger(value)) return String(value);
+      return value.toFixed(3);
+    }
+    return String(value);
+  }
+
+  const LABEL = {
+    gate_count: 'Gate count',
+    chip_area_um2: 'Chip area (µm²)',
+    design_area_um2: 'Design area (µm²)',
+    utilization_pct: 'Utilization',
+    wns_ns: 'WNS (ns)',
+    tns_ns: 'TNS (ns)',
+    total_power_mw: 'Total power (mW)',
+    max_freq_mhz: 'Max freq (MHz)',
+    violations: 'Violations',
+    violation_count: 'Violations',
+    error_count: 'Errors',
+    sim_passed: 'Sim passed',
+    lint_passed: 'Lint passed',
+    lint_clean: 'Lint clean',
+    success: 'Success',
+    passed: 'Passed',
+    clean: 'Clean',
+    all_pass: 'All passed',
+    match: 'LVS match',
+    dashboard_path: 'Dashboard',
+    log_path: 'Log file',
+    path: 'Output path',
+    html_size: 'Dashboard size',
+    layout_2d_png_path: 'Layout image',
+    viewer_path: '3D viewer',
+    ers_generated: 'ERS generated',
+    node_count: 'Nodes',
+    edge_count: 'Edges',
+    block_count: 'Blocks',
+    blocks: 'Blocks',
+    tb_fixes_attempted: 'TB fixes',
+    local_fixes_attempted: 'Local fixes',
+    validation_errors: 'Validation errors',
+    tier: 'Tier',
+    round: 'Round',
+    new_round: 'New round',
+    max_rounds: 'Max rounds',
+    total_rounds: 'Total rounds',
+    design_name: 'Design',
+    integration_top: 'Integration top',
+    category: 'Category',
+    confidence: 'Confidence',
+    action: 'Action',
+    decision: 'Decision',
+    phase: 'Phase',
+    skipped: 'Skipped',
+    needs_human: 'Needs human',
+    diagnosis_preview: 'Diagnosis',
+    suggested_fix: 'Suggested fix',
+    last_error: 'Last error',
+    text_len: 'Text length',
+    has_structural: 'Structural violations',
+    has_feedback: 'Feedback',
+    feedback: 'Feedback',
+    issues_found: 'Issues',
+    device_delta: 'Device delta',
+    net_delta: 'Net delta',
+    analysis: 'Analysis',
+    answer_count: 'Answers',
+    answer_keys: 'Answered',
+    has_answers: 'Has answers',
+    attempt: 'Attempt',
+    new_tier_index: 'Next tier',
+    question_count: 'Questions',
+    total: 'Total',
+    expected: 'Expected',
+    completed_so_far: 'Completed',
+    passed_so_far: 'Passed',
+  };
+
+  return (
+    <div className="llm-card result-card">
+      <div className="llm-card-header">
+        {total > 1 && (
+          <span className="llm-call-index" title={`Step ${index + 1} of ${total}`}>
+            {`${index + 1}/${total}`}
+          </span>
+        )}
+        <span className="tool-card-icon" aria-hidden="true">📋</span>
+        <span className="llm-model-name tool-card-label">Outcome</span>
+      </div>
+      <div className="result-card-grid">
+        {entries.map(([k, v]) => {
+          // Wide strings / arrays / paths get a full-width row so they
+          // don't truncate to "32 Bit Adder Full Flow Sm...".
+          const isWide = k === 'dashboard_path' || k === 'path'
+                       || k === 'log_path' || k === 'design_name'
+                       || k === 'category' || k === 'analysis'
+                       || k === 'diagnosis_preview' || k === 'suggested_fix'
+                       || k === 'feedback' || k === 'last_error'
+                       || k === 'layout_2d_png_path' || k === 'viewer_path'
+                       || Array.isArray(v)
+                       || (typeof v === 'string' && v.length > 28);
+          const isBool = typeof v === 'boolean';
+          const isNumeric = typeof v === 'number';
+          return (
+            <div key={k} className={`result-card-row ${isWide ? 'full-width' : ''}`}>
+              <span className="result-card-key">{LABEL[k] || k.replace(/_/g, ' ')}</span>
+              <span className={`result-card-val ${isBool ? (v ? 'ok' : 'error') : ''} ${isNumeric ? 'numeric' : ''}`}>
+                {fmt(k, v)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TrajectorySteps({ steps }) {
+  // Count for the N/total badge; combine LLM + tool but show them as a
+  // single ordered list.
+  const total = steps.length;
+  return (
+    <div className="llm-call-list trajectory-steps">
+      {steps.map((step, i) => {
+        if (step.type === 'tool_run') {
+          return <ToolRunCard key={`tool-${i}`} run={step} index={i} total={total} />;
+        }
+        if (step.type === 'result_summary') {
+          return <ResultSummaryCard key={`res-${i}`} metrics={step.metrics} index={i} total={total} />;
+        }
+        // llm_call / llm_call_streaming
+        const call = {
+          id: step._span?.id || `step-${i}`,
+          model: step.model || 'LLM',
+          runName: step.run_name || '',
+          heartbeats: step.heartbeats || [],
+          codexTurns: step.codex_turns || [],
+          promptTokens: step.usage?.prompt_tokens || step.usage?.input_tokens,
+          completionTokens: step.usage?.completion_tokens || step.usage?.output_tokens,
+          totalTokens: step.usage?.total_tokens,
+          duration_ms: step.duration_ms || (step.duration_s ? step.duration_s * 1000 : null),
+          status: step.status || (step.error ? 'error' : 'ok'),
+          prompt: step.user_prompt || '',
+          systemPrompt: step.system_prompt || '',
+          response: step.response || '',
+          streaming: step.streaming,
+        };
+        return call.streaming
+          ? <StreamingLLMCard key={`stream-${i}`} call={call} />
+          : <LLMCallCard key={`llm-${i}`} call={call} index={i} total={total} />;
+      })}
+    </div>
+  );
+}
+
+/* ── Codex turn (reasoning / tool call / tool result / agent message) ── */
+const _TURN_META = {
+  reasoning:           { label: 'Reasoning',     icon: '🧠', cls: 'turn-reasoning' },
+  agent_message:       { label: 'Message',       icon: '💬', cls: 'turn-message' },
+  local_shell_call:    { label: 'Shell',         icon: '$',  cls: 'turn-shell' },
+  local_shell_output:  { label: 'Shell output',  icon: '⇥',  cls: 'turn-shell-out' },
+  tool_call:           { label: 'Tool',          icon: '🔧', cls: 'turn-tool' },
+  tool_result:         { label: 'Tool result',   icon: '⇥',  cls: 'turn-tool-out' },
+  turn_complete:       { label: 'Turn end',      icon: '·',  cls: 'turn-end' },
+};
+
+function CodexTurn({ turn, index }) {
+  const [open, setOpen] = useState(false);
+  const meta = _TURN_META[turn.kind] || { label: turn.kind || 'Turn', icon: '·', cls: 'turn-other' };
+  const fullJson = (() => {
+    try { return JSON.stringify(turn.full, null, 2); } catch { return String(turn.full); }
+  })();
+  return (
+    <div className={`codex-turn ${meta.cls}`}>
+      <button
+        className="codex-turn-header"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="codex-turn-index">{index + 1}</span>
+        <span className="codex-turn-icon" aria-hidden="true">{meta.icon}</span>
+        <span className="codex-turn-label">{meta.label}</span>
+        <span className="codex-turn-summary">{turn.summary || '(no preview)'}</span>
+        <span className="codex-turn-chev">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <pre className="codex-turn-full">{fullJson}</pre>
+      )}
+    </div>
+  );
+}
+
 /* ── LLM Call Card ───────────────────────────────────────── */
 
-function LLMCallCard({ call }) {
+function LLMCallCard({ call, index, total }) {
   const statusSymbol =
     call.status === 'ok' ? '\u2713' : call.status === 'error' ? '\u2717' : '\u2014';
   const statusCls =
     call.status === 'ok' ? 'ok' : call.status === 'error' ? 'error' : 'unset';
 
   const tokenLabel = formatTokens(call.totalTokens);
+  // Prefer the agent's own task label ("Generate Verilog [Adder32]") over
+  // the bare model name -- the model name is identical across all calls so
+  // it's useless as a card heading.
+  const heading = call.runName || call.model;
+  const sub = call.runName ? call.model : null;
+  const hbCount = (call.heartbeats || []).length;
 
   return (
     <div
@@ -511,7 +1056,13 @@ function LLMCallCard({ call }) {
     >
       {/* Header bar */}
       <div className="llm-card-header">
-        <span className="llm-model-name">{call.model}</span>
+        {total > 1 && (
+          <span className="llm-call-index" title={`Call ${index + 1} of ${total}`}>
+            {`${index + 1}/${total}`}
+          </span>
+        )}
+        <span className="llm-model-name" title={call.runName || ''}>{heading}</span>
+        {sub && <span className="llm-model-sub">{sub}</span>}
         <span className="llm-card-meta">
           <span className="llm-dur">{formatDuration(call.duration_ms)}</span>
           {tokenLabel && (
@@ -523,9 +1074,48 @@ function LLMCallCard({ call }) {
         </span>
       </div>
 
+      {/* Inline timeline of intra-call steps: system_prompt \u2192 user_prompt
+          \u2192 [heartbeats] \u2192 response. Gives the user "more spans between
+          prompt and response" the way they asked for -- even though the
+          codex_cli's internal tool calls aren't instrumented, we can at
+          least show the pulses we DO have. */}
+      <div className="llm-step-chain">
+        <span className="llm-step llm-step-sys" title="System prompt set">sys</span>
+        <span className="llm-step-line" />
+        <span className="llm-step llm-step-usr" title="User prompt">in</span>
+        {hbCount > 0 && (
+          <>
+            <span className="llm-step-line" />
+            {call.heartbeats.map((h, i) => (
+              <span
+                key={`hb-${i}`}
+                className="llm-step llm-step-hb"
+                title={`Heartbeat @${(h.elapsed_s || 0).toFixed(0)}s \u00b7 stdout ${h.stdout_bytes || 0}B`}
+              >&middot;</span>
+            ))}
+          </>
+        )}
+        <span className="llm-step-line" />
+        <span className={`llm-step llm-step-resp llm-step-${statusCls}`} title="Response">out</span>
+      </div>
+
+      {/* Codex turns (reasoning + tool calls + tool results) when the
+          engine captured them. For historical runs this is empty and we
+          fall back to the prompt \u2192 response collapsibles below. */}
+      {Array.isArray(call.codexTurns) && call.codexTurns.length > 0 && (
+        <div className="llm-codex-turns">
+          <div className="llm-codex-turns-label">
+            {call.codexTurns.length} agent turn{call.codexTurns.length !== 1 ? 's' : ''}
+          </div>
+          {call.codexTurns.map((turn, i) => (
+            <CodexTurn key={`turn-${i}`} turn={turn} index={i} />
+          ))}
+        </div>
+      )}
+
       {/* System prompt (collapsed) */}
       {call.systemPrompt && (
-        <Collapsible label="System Prompt" icon="\u2699" className="llm-sys">
+        <Collapsible label="System Prompt" icon={'\u2699'} className="llm-sys">
           <FormattedText text={call.systemPrompt} />
         </Collapsible>
       )}
@@ -625,11 +1215,41 @@ function StreamingLLMCard({ call }) {
 
 /* ── Attempt summary bar ─────────────────────────────────── */
 
-function AttemptSummary({ spans, llmCount, hasStreamingCalls }) {
-  const duration = getAttemptDuration(spans);
+function AttemptSummary({ spans, steps, llmCount, hasStreamingCalls }) {
+  // Prefer step-aware tallies when we have trajectory data
+  let llmN = llmCount || 0;
+  let toolN = 0;
+  let toolErr = 0;
+  let resultN = 0;
+  let resultErr = 0;
+  let stepDurMs = 0;
+  if (Array.isArray(steps) && steps.length) {
+    llmN = 0;
+    for (const s of steps) {
+      if (s.type === 'tool_run') {
+        toolN++;
+        if (s.return_code != null && s.return_code !== 0) toolErr++;
+      } else if (s.type === 'result_summary') {
+        resultN++;
+        const m = s.metrics || {};
+        if (m.success === false || m.passed === false || m.clean === false
+            || m.lint_passed === false || m.sim_passed === false
+            || m.match === false || m.all_pass === false) {
+          resultErr++;
+        }
+      } else {
+        // llm_call / llm_call_streaming / undefined (legacy span path)
+        llmN++;
+      }
+      const d = s.duration_ms || (s.duration_s ? s.duration_s * 1000 : 0);
+      if (d) stepDurMs += d;
+    }
+  }
+  const duration = stepDurMs || getAttemptDuration(spans);
   const status = getAttemptStatus(spans);
-  const isError = status === 'error';
+  const isError = status === 'error' || toolErr > 0 || resultErr > 0;
   const isStreaming = hasStreamingCalls;
+  const noActivity = llmN === 0 && toolN === 0 && resultN === 0;
 
   return (
     <div className={`llm-summary-bar ${isStreaming ? 'streaming' : isError ? 'error' : 'ok'}`}>
@@ -637,12 +1257,24 @@ function AttemptSummary({ spans, llmCount, hasStreamingCalls }) {
         {isStreaming ? '\u25CF Generating' : isError ? '\u2717 Failed' : '\u2713 Completed'}
       </span>
       <span className="llm-summary-detail">
-        {!isStreaming && formatDuration(duration)}
-        {llmCount > 0 && (
+        {!isStreaming && duration ? formatDuration(duration) : null}
+        {llmN > 0 && (
           <span className="llm-summary-count">
-            {llmCount} LLM call{llmCount !== 1 ? 's' : ''}
+            {llmN} LLM call{llmN !== 1 ? 's' : ''}
             {isStreaming ? ' (1 active)' : ''}
           </span>
+        )}
+        {toolN > 0 && (
+          <span className="llm-summary-count tool-summary-count">
+            {toolN} tool run{toolN !== 1 ? 's' : ''}
+            {toolErr > 0 ? ` (${toolErr} failed)` : ''}
+          </span>
+        )}
+        {llmN === 0 && toolN === 0 && resultN > 0 && (
+          <span className="llm-summary-count">result-only</span>
+        )}
+        {noActivity && (
+          <span className="llm-summary-count">no activity</span>
         )}
       </span>
     </div>
@@ -1066,24 +1698,28 @@ const DetailPanel = React.memo(function DetailPanel({
     if (activeTabKey && tabGroups.some((g) => g.key === activeTabKey)) {
       return;
     }
-    // Try to match the clicked segment's attempt number
+    // Try to match the clicked segment's attempt number, but prefer a
+    // sibling attempt that actually has tool runs -- otherwise the user
+    // sees only LLM cards and assumes the trajectory is incomplete.
     if (node?.attempt) {
-      const match = tabGroups.find((g) => g.attempt === node.attempt);
-      if (match) {
-        setActiveTabKey(match.key);
+      const sameAttempt = tabGroups.filter((g) => g.attempt === node.attempt);
+      const withTools = sameAttempt.find((g) => (g.toolCount || 0) > 0);
+      const exact = sameAttempt[0];
+      const pick = withTools || exact;
+      if (pick) {
+        setActiveTabKey(pick.key);
         return;
       }
     }
-    // Fall back to the latest non-streaming tab (avoid jumping to
-    // an active call when the user clicked a historical segment).
+
+    // No clicked attempt -- prefer the latest tab that has tool runs so
+    // tool data is visible by default; fall back to latest non-streaming.
     const nonStreaming = tabGroups.filter(
       (g) => !g.spans?.some((s) => s.children?.some((c) => c.status === 'streaming'))
     );
-    if (nonStreaming.length > 0) {
-      setActiveTabKey(nonStreaming[nonStreaming.length - 1].key);
-    } else {
-      setActiveTabKey(tabGroups[tabGroups.length - 1].key);
-    }
+    const candidates = nonStreaming.length ? nonStreaming : tabGroups;
+    const withTools = [...candidates].reverse().find((g) => (g.toolCount || 0) > 0);
+    setActiveTabKey((withTools || candidates[candidates.length - 1]).key);
   }, [tabGroups]);
 
   const handleRefresh = useCallback(() => {
@@ -1186,9 +1822,30 @@ const DetailPanel = React.memo(function DetailPanel({
             {/* Tab bar */}
             <div className="trace-tabs">
               {tabGroups.map((group) => {
-                const hasError = group.spans?.some(
+                // Detect failure across both legacy span data and the
+                // unified trajectory steps. Attempts that failed (e.g.
+                // Flat Top Synthesis on success=false) used to render as
+                // a normal tab, hiding the failure from a casual look.
+                const spanError = group.spans?.some(
                   (s) => s.status === 'error'
                 );
+                const stepError = group.steps?.some((s) => {
+                  if (s.type === 'tool_run') {
+                    return s.return_code != null && s.return_code !== 0;
+                  }
+                  if (s.type === 'result_summary') {
+                    const m = s.metrics || {};
+                    return m.success === false
+                        || m.passed === false
+                        || m.clean === false
+                        || m.lint_passed === false
+                        || m.sim_passed === false
+                        || m.match === false;
+                  }
+                  return s.status === 'error';
+                });
+                const groupStatusError = group.status === 'failed';
+                const hasError = spanError || stepError || groupStatusError;
                 return (
                   <button
                     key={group.key}
@@ -1200,7 +1857,26 @@ const DetailPanel = React.memo(function DetailPanel({
                     {hasError && (
                       <span className="trace-tab-icon">{'\u26A0'}</span>
                     )}
-                    {group.label}
+                    <span className="trace-tab-label">{group.label}</span>
+                    {group.durMs ? (
+                      <span className="trace-tab-dur">
+                        {formatDuration(group.durMs)}
+                      </span>
+                    ) : null}
+                    {(group.llmCount > 0 || group.toolCount > 0) && (
+                      <span className="trace-tab-counts">
+                        {group.llmCount > 0 && (
+                          <span className="trace-tab-count-llm" title={`${group.llmCount} LLM call${group.llmCount !== 1 ? 's' : ''}`}>
+                            ✦{group.llmCount}
+                          </span>
+                        )}
+                        {group.toolCount > 0 && (
+                          <span className="trace-tab-count-tool" title={`${group.toolCount} tool run${group.toolCount !== 1 ? 's' : ''}`}>
+                            🔧{group.toolCount}
+                          </span>
+                        )}
+                      </span>
+                    )}
                   </button>
                 );
               })}
@@ -1209,18 +1885,26 @@ const DetailPanel = React.memo(function DetailPanel({
             {/* Summary bar */}
             <AttemptSummary
               spans={activeGroup?.spans}
+              steps={activeGroup?.steps}
               llmCount={llmCalls.length}
               hasStreamingCalls={llmCalls.some((c) => c.streaming)}
             />
 
-            {/* LLM calls */}
+            {/* Steps (LLM calls + tool runs interleaved) */}
             <div className="trace-content" ref={scrollRef}>
-              {llmCalls.length > 0 ? (
+              {activeGroup?.steps && activeGroup.steps.length > 0 ? (
+                <TrajectorySteps steps={activeGroup.steps} />
+              ) : llmCalls.length > 0 ? (
                 <div className="llm-call-list">
                   {llmCalls.map((call, i) => (
                     call.streaming
                       ? <StreamingLLMCard key={call.id || `stream-${i}`} call={call} />
-                      : <LLMCallCard key={call.id || i} call={call} />
+                      : <LLMCallCard
+                          key={call.id || i}
+                          call={call}
+                          index={i}
+                          total={llmCalls.length}
+                        />
                   ))}
                 </div>
               ) : node.metadata && Object.keys(node.metadata).length > 0 ? (
@@ -1228,7 +1912,7 @@ const DetailPanel = React.memo(function DetailPanel({
               ) : (
                 <div className="trace-empty-tab">
                   <span className="trace-empty-icon">{'\u{1F4CB}'}</span>
-                  No LLM interactions in this run.
+                  No activity recorded in this run.
                 </div>
               )}
             </div>

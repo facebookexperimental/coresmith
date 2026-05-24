@@ -7,6 +7,8 @@ import ReactFlow, {
   BackgroundVariant,
   useNodesState,
   useEdgesState,
+  useReactFlow,
+  getRectOfNodes,
 } from 'reactflow';
 
 import DecideNode from './DecideNode';
@@ -68,15 +70,34 @@ const EDGE_STROKE = {
 
 const HIDDEN_NODES = new Set(['Abort']);
 
+// User asked for the same layout rules across all graphs -- use RIGHT
+// (landscape) everywhere. The DOWN default for Frontend/Backend made the
+// pipelines tall + narrow in a landscape viewport.
+function _defaultDirection(_name) {
+  return 'RIGHT';
+}
+
 export default function GraphCanvas({ graphData, graphName, executionStatus, onNodeCogwheel, traceData, onRequestTraces, detailWidth, onDetailResize }) {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [selectedNode, setSelectedNode] = useState(null);
   const [layoutDone, setLayoutDone] = useState(false);
-  const [direction, setDirection] = useState('RIGHT');
+  const [direction, setDirection] = useState(() => _defaultDirection(graphName));
+
+  // Reset direction when the active graph changes so each graph opens in
+  // its natural orientation (Architecture LR; Frontend/Backend TB).
+  useEffect(() => {
+    setDirection(_defaultDirection(graphName));
+  }, [graphName]);
 
   // Track whether we've already done initial layout for this graphData
   const layoutGraphRef = useRef(null);
+
+  // Imperative fitView so we can re-fit after switching graphs / after a
+  // re-layout. ReactFlow's `fitView` prop only fires on initial mount; when
+  // the user changes the active graph the new node positions live outside
+  // the prior viewport and the user has to scroll/zoom manually.
+  const reactFlow = useReactFlow();
 
   // Build RF nodes from graphData ONLY (no executionStatus in deps).
   // This prevents layout re-triggering when status polls arrive.
@@ -178,6 +199,50 @@ export default function GraphCanvas({ graphData, graphName, executionStatus, onN
     }
   }, [graphData, doLayout, direction]);
 
+  // After layout finishes, manually compute a zoom that keeps nodes legible.
+  // ReactFlow's built-in fitView ignores its `minZoom` option for shrinking
+  // (it only clamps growth), so a Frontend pipeline with an 8:1 aspect ratio
+  // ends up at scale 0.35 with 70px-wide nodes you can't read. We compute
+  // the fit zoom, floor it at MIN_ZOOM, center the graph, and call
+  // setViewport directly. If the graph then overflows, the user pans.
+  // Use a real timeout (not rAF) so ReactFlow's own auto-fit-on-mount has
+  // already settled before we override -- otherwise our viewport gets
+  // clobbered by the prop-level fitView a tick later.
+  useEffect(() => {
+    if (!layoutDone) return;
+    const tid = setTimeout(() => {
+      try {
+        const wrapper = document.querySelector('.graph-canvas-wrapper');
+        if (!wrapper) return;
+        const W = wrapper.clientWidth;
+        const H = wrapper.clientHeight;
+        const rfNodesNow = reactFlow.getNodes();
+        if (!rfNodesNow || rfNodesNow.length === 0) return;
+        const bounds = getRectOfNodes(rfNodesNow);
+        if (!bounds.width || !bounds.height) return;
+        const PADDING = 40;
+        const fitX = (W - PADDING * 2) / bounds.width;
+        const fitY = (H - PADDING * 2) / bounds.height;
+        const fit = Math.min(fitX, fitY);
+        // Clamp so nodes never render below ~120px wide. With our ~200px
+        // node width, that's a 0.6 zoom floor. The user can still zoom out
+        // manually via the Controls if they need a bird's-eye view.
+        const MIN_ZOOM = 0.6;
+        const MAX_ZOOM = 1.0;
+        const zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, fit));
+        const cx = bounds.x + bounds.width / 2;
+        const cy = bounds.y + bounds.height / 2;
+        reactFlow.setViewport(
+          { x: W / 2 - cx * zoom, y: H / 2 - cy * zoom, zoom },
+          { duration: 250 },
+        );
+      } catch (e) {
+        console.warn('graph fit error', e);
+      }
+    }, 80);
+    return () => clearTimeout(tid);
+  }, [layoutDone, graphName, reactFlow]);
+
   const onNodeClick = useCallback((_event, node) => {
     setSelectedNode(node.data);
     if (onRequestTraces) {
@@ -215,9 +280,7 @@ export default function GraphCanvas({ graphData, graphName, executionStatus, onN
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         onNodeClick={onNodeClick}
-        fitView
-        fitViewOptions={{ padding: 0.15 }}
-        minZoom={0.02}
+        minZoom={0.05}
         maxZoom={1.5}
         nodesDraggable={true}
         nodesConnectable={false}

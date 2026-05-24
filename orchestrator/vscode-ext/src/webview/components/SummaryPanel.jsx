@@ -184,7 +184,7 @@ function MarkdownDocCard({ content, emptyMessage }) {
   return <div className="summary-markdown" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
-function ArchitectureCards({ cardData, updated }) {
+function ArchitectureCards({ cardData, updated, hideSummaryCard }) {
   const {
     summary = '',
     prd_content = '',
@@ -197,12 +197,14 @@ function ArchitectureCards({ cardData, updated }) {
 
   return (
     <>
-      <SummaryCard title="Summary" defaultOpen={true}>
-        <MarkdownDocCard
-          content={summary}
-          emptyMessage="No summary available yet. The observer will generate one as the architecture runs."
-        />
-      </SummaryCard>
+      {!hideSummaryCard && (
+        <SummaryCard title="Summary" defaultOpen={true}>
+          <MarkdownDocCard
+            content={summary}
+            emptyMessage="No summary available yet. The observer will generate one as the architecture runs."
+          />
+        </SummaryCard>
+      )}
 
       <SummaryCard title="PRD" defaultOpen={true}>
         <MarkdownDocCard
@@ -266,7 +268,7 @@ function UarchSpecCard({ blockName, spec }) {
   );
 }
 
-function FrontendCards({ summary, uarchSpecs, updated }) {
+function FrontendCards({ summary, uarchSpecs, updated, hideSummaryCard }) {
   const summaryHtml = useMemo(() => markdownToHtml(summary), [summary]);
   const specEntries = useMemo(
     () => Object.entries(uarchSpecs || {}).sort(([a], [b]) => a.localeCompare(b)),
@@ -275,15 +277,17 @@ function FrontendCards({ summary, uarchSpecs, updated }) {
 
   return (
     <>
-      <SummaryCard title="Summary" defaultOpen={true}>
-        {summary ? (
-          <div className="summary-markdown" dangerouslySetInnerHTML={{ __html: summaryHtml }} />
-        ) : (
-          <div className="summary-empty">
-            No summary available yet. The observer will generate one as the pipeline runs.
-          </div>
-        )}
-      </SummaryCard>
+      {!hideSummaryCard && (
+        <SummaryCard title="Summary" defaultOpen={true}>
+          {summary ? (
+            <div className="summary-markdown" dangerouslySetInnerHTML={{ __html: summaryHtml }} />
+          ) : (
+            <div className="summary-empty">
+              No summary available yet. The observer will generate one as the pipeline runs.
+            </div>
+          )}
+        </SummaryCard>
+      )}
 
       {specEntries.length > 0 ? (
         specEntries.map(([blockName, spec]) => (
@@ -492,7 +496,7 @@ function BlockBackendCard({ block, targetClock }) {
   );
 }
 
-function BackendCards({ cardData, updated }) {
+function BackendCards({ cardData, updated, hideSummaryCard }) {
   const {
     summary = '',
     blocks = [],
@@ -544,15 +548,17 @@ function BackendCards({ cardData, updated }) {
         />
       ))}
 
-      <SummaryCard title="Summary" defaultOpen={blocks.length === 0}>
-        {summary ? (
-          <div className="summary-markdown" dangerouslySetInnerHTML={{ __html: summaryHtml }} />
-        ) : (
-          <div className="summary-empty">
-            No backend summary available yet. Results will appear as blocks complete PnR, DRC, and LVS.
-          </div>
-        )}
-      </SummaryCard>
+      {!hideSummaryCard && (
+        <SummaryCard title="Summary" defaultOpen={blocks.length === 0}>
+          {summary ? (
+            <div className="summary-markdown" dangerouslySetInnerHTML={{ __html: summaryHtml }} />
+          ) : (
+            <div className="summary-empty">
+              No backend summary available yet. Results will appear as blocks complete PnR, DRC, and LVS.
+            </div>
+          )}
+        </SummaryCard>
+      )}
     </>
   );
 }
@@ -560,7 +566,7 @@ function BackendCards({ cardData, updated }) {
 // ── Main Panel ──────────────────────────────────────────────────────────────
 
 const SummaryPanel = React.memo(function SummaryPanel({
-  stage, content, updated, width, cardData,
+  stage, content, updated, width, cardData, observerEnabled,
 }) {
   const renderedHtml = useMemo(() => markdownToHtml(content), [content]);
   const scrollRef = useRef(null);
@@ -583,11 +589,17 @@ const SummaryPanel = React.memo(function SummaryPanel({
   };
 
   const renderCards = () => {
+    // When the Observer is disabled, hide the (now empty) "Summary" card
+    // entirely instead of rendering an empty-state placeholder for it.
+    // Other doc cards (PRD, FRD, uArch specs, ...) still render -- only
+    // the observer-generated card is dropped.
+    const hideSummaryCard = observerEnabled === false;
     if (stage === 'architecture') {
       return (
         <ArchitectureCards
           cardData={cardData || { summary: content }}
           updated={updated}
+          hideSummaryCard={hideSummaryCard}
         />
       );
     }
@@ -598,6 +610,7 @@ const SummaryPanel = React.memo(function SummaryPanel({
           summary={cardData ? cardData.summary : content}
           uarchSpecs={cardData ? cardData.uarch_specs : null}
           updated={updated}
+          hideSummaryCard={hideSummaryCard}
         />
       );
     }
@@ -607,11 +620,13 @@ const SummaryPanel = React.memo(function SummaryPanel({
         <BackendCards
           cardData={cardData || { summary: content }}
           updated={updated}
+          hideSummaryCard={hideSummaryCard}
         />
       );
     }
 
-    // Fallback: plain markdown
+    // Fallback: plain markdown (no observer = no fallback summary either).
+    if (hideSummaryCard) return null;
     return content ? (
       <div
         className="summary-markdown"

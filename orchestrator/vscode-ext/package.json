@@ -1,6 +1,6 @@
 {
   "name": "coresmith-workflow-editor",
-  "displayName": "CoreSmith",
+  "displayName": "Coresmith",
   "description": "Visual LangGraph workflow editor for the coresmith ASIC pipeline",
   "version": "0.2.0",
   "publisher": "coresmith",
