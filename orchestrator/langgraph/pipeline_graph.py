@@ -2553,6 +2553,104 @@ async def integration_check_node(state: OrchestratorState) -> dict:
 
             return {"integration_result": integration_result}
 
+        if (
+            warnings
+            and not os.getenv("CORESMITH_NONBLOCKING_INTEGRATION_WARNINGS")
+        ):
+            log(
+                f"  [INTEGRATION] {len(warnings)} warning(s) -- triaging "
+                "for outer-agent review",
+                YELLOW,
+            )
+
+            warning_payload = {
+                "type": "integration_warning_review",
+                "design_name": design_name,
+                "top_rtl_path": top_rtl_path,
+                "block_count": len(modules),
+                "error_count": 0,
+                "warning_count": len(warnings),
+                "lint_clean": True,
+                "warnings": warnings,
+                "mismatches": mismatches,
+                "block_rtl_paths": rtl_paths,
+                "skipped_connections": agent_result.get(
+                    "skipped_connections", []
+                ),
+                "supported_actions": [
+                    "accept",
+                    "retry",
+                    "fix_rtl",
+                    "abort",
+                ],
+                "outer_agent_guidance": (
+                    "Integration Lead agent flagged warnings but no hard "
+                    "errors. Architecture warnings have caused DV deadlocks "
+                    "in practice (closed AXI-Stream feedback loops without "
+                    "a bootstrap policy, etc.), so triage before letting "
+                    "the run reach DV:\n"
+                    "1. Read each warning's `description` and "
+                    "`suggested_fix`.\n"
+                    "2. If the warning is benign or compensated elsewhere, "
+                    "resume_pipeline(action='accept').\n"
+                    "3. If a block needs patching, edit it on disk, then "
+                    "resume_pipeline(action='fix_rtl', "
+                    "rtl_fix_description='...'). The run will END so you "
+                    "can issue restart_node for the affected stage.\n"
+                    "4. If the integration top should be regenerated, "
+                    "resume_pipeline(action='retry'). The run will END so "
+                    "you can restart_node('integration_check').\n"
+                    "5. If a uArch-level revision is needed (e.g. add a "
+                    "request-driven bootstrap path), "
+                    "resume_pipeline(action='abort') and escalate.\n"
+                    "Set CORESMITH_NONBLOCKING_INTEGRATION_WARNINGS=1 to "
+                    "restore the old non-blocking behavior."
+                ),
+                "reference_files": {
+                    "top_rtl": top_rtl_path,
+                    "architecture": ".coresmith/architecture_state.json",
+                    "block_diagram": ".coresmith/block_diagram_viz.json",
+                },
+            }
+
+            response = interrupt(warning_payload)
+            action = (
+                response.get("action", "abort")
+                if isinstance(response, dict)
+                else "abort"
+            )
+            integration_result["warning_triage_action"] = action
+
+            write_graph_event(pr, "Integration Check", "graph_node_exit", {
+                "action": action,
+                "warning_count": len(warnings),
+                "via": "warning_triage",
+            })
+
+            if action == "accept":
+                integration_result["accepted_warnings"] = True
+                log(
+                    "  [INTEGRATION] Warnings accepted by outer agent",
+                    GREEN,
+                )
+            elif action in ("retry", "fix_rtl"):
+                fix_desc = response.get("rtl_fix_description", "")
+                integration_result["fix_applied"] = fix_desc
+                integration_result["aborted"] = True
+                log(
+                    f"  [INTEGRATION] {action} requested "
+                    f"(desc='{fix_desc}'); routing to END so outer agent "
+                    "can restart_node",
+                    YELLOW,
+                )
+            else:  # abort or unknown
+                integration_result["aborted"] = True
+                log(
+                    "  [INTEGRATION] Aborted on warning triage", RED
+                )
+
+            return {"integration_result": integration_result}
+
         log(f"\n{'='*60}", GREEN)
         log("  INTEGRATION CHECK PASSED", GREEN)
         log(f"  Top module: {module_name}", GREEN)

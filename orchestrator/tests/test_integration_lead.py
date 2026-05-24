@@ -993,6 +993,213 @@ class TestIntegrationCheckNode:
 
 
 # ---------------------------------------------------------------------------
+# integration_check_node: warning-only triage (matches arch constraint flow)
+# ---------------------------------------------------------------------------
+
+class TestIntegrationCheckWarningTriage:
+    """integration_check_node must triage warning-only mismatches via an
+    outer-agent interrupt before letting the run advance to DV. The
+    closed-feedback warning from the h264 v4 run predicted the exact DV
+    deadlock that followed, so warnings are no longer silently dropped."""
+
+    def _state(self):
+        return {
+            "project_root": "/tmp/test",
+            "completed_blocks": [
+                {"name": "a", "success": True, "rtl_path": "/tmp/a.v"},
+                {"name": "b", "success": True, "rtl_path": "/tmp/b.v"},
+            ],
+            "pipeline_done": False,
+        }
+
+    def _common_patches(self, mismatches, interrupt_response):
+        from orchestrator.langgraph.integration_helpers import (
+            VerilogModule, VerilogPort,
+        )
+        from contextlib import ExitStack
+
+        stack = ExitStack()
+        mod = VerilogModule(name="a", ports=[VerilogPort("clk", "input")])
+
+        patches = [
+            patch(
+                "orchestrator.langgraph.pipeline_graph.load_architecture_connections",
+                return_value=(SAMPLE_CONNECTIONS, "chip_top"),
+            ),
+            patch(
+                "orchestrator.langgraph.pipeline_graph.discover_block_rtl",
+                return_value={"a": "/tmp/a.v", "b": "/tmp/b.v"},
+            ),
+            patch(
+                "orchestrator.langgraph.pipeline_graph.parse_verilog_ports",
+                return_value=mod,
+            ),
+            patch(
+                "orchestrator.langchain.agents.integration_lead."
+                "IntegrationLeadAgent.integrate",
+                new_callable=AsyncMock,
+                return_value={
+                    "verilog": CHIP_TOP_AB,
+                    "mismatches": mismatches,
+                    "module_name": "chip_top",
+                    "wire_count": 0,
+                    "skipped_connections": [],
+                    "notes": "",
+                },
+            ),
+            patch(
+                "orchestrator.langgraph.pipeline_graph.lint_top_level",
+                return_value={"clean": True, "warnings": ""},
+            ),
+            patch(
+                "orchestrator.langgraph.pipeline_graph.interrupt",
+                return_value=interrupt_response,
+            ),
+            patch(
+                "orchestrator.langgraph.pipeline_graph.write_graph_event"
+            ),
+            patch("pathlib.Path.read_text", return_value=CHIP_TOP_AB),
+            patch("pathlib.Path.mkdir"),
+            patch("pathlib.Path.write_text"),
+        ]
+        for p in patches:
+            stack.enter_context(p)
+        return stack
+
+    _WARNING = {
+        "from_block": "a",
+        "to_block": "b",
+        "issue_type": "prd_violation",
+        "severity": "warning",
+        "description": "Closed AXI-Stream feedback loop without bootstrap",
+        "suggested_fix": "Add request-driven neighbor lookup",
+    }
+
+    @pytest.mark.asyncio
+    async def test_warning_only_fires_triage_interrupt(self, monkeypatch):
+        monkeypatch.delenv(
+            "CORESMITH_NONBLOCKING_INTEGRATION_WARNINGS", raising=False
+        )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
+
+        captured = {}
+
+        def fake_interrupt(payload):
+            captured.update(payload)
+            return {"action": "accept"}
+
+        with self._common_patches([self._WARNING], {"action": "accept"}), \
+                patch(
+                    "orchestrator.langgraph.pipeline_graph.interrupt",
+                    side_effect=fake_interrupt,
+                ):
+            await integration_check_node(self._state())
+
+        assert captured["type"] == "integration_warning_review"
+        assert captured["warning_count"] == 1
+        assert captured["error_count"] == 0
+        assert captured["lint_clean"] is True
+        assert "accept" in captured["supported_actions"]
+        assert "retry" in captured["supported_actions"]
+        assert "fix_rtl" in captured["supported_actions"]
+        assert "abort" in captured["supported_actions"]
+        # Outer agent guidance must explicitly mention the bootstrap class of
+        # failure so the reviewer understands what they're triaging.
+        assert "bootstrap" in captured["outer_agent_guidance"].lower()
+
+    @pytest.mark.asyncio
+    async def test_warning_triage_accept_proceeds(self, monkeypatch):
+        monkeypatch.delenv(
+            "CORESMITH_NONBLOCKING_INTEGRATION_WARNINGS", raising=False
+        )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
+
+        with self._common_patches([self._WARNING], {"action": "accept"}):
+            result = await integration_check_node(self._state())
+
+        ir = result["integration_result"]
+        assert ir["accepted_warnings"] is True
+        assert ir["warning_triage_action"] == "accept"
+        assert ir.get("aborted") is None
+        assert ir["lint_clean"] is True
+        # route_after_integration will see lint_clean=True, error_count=0,
+        # no aborted -> routes to integration_dv.
+        from orchestrator.langgraph.pipeline_graph import route_after_integration
+        assert route_after_integration(result) == "integration_dv"
+
+    @pytest.mark.asyncio
+    async def test_warning_triage_abort_ends_pipeline(self, monkeypatch):
+        monkeypatch.delenv(
+            "CORESMITH_NONBLOCKING_INTEGRATION_WARNINGS", raising=False
+        )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
+
+        with self._common_patches([self._WARNING], {"action": "abort"}):
+            result = await integration_check_node(self._state())
+
+        ir = result["integration_result"]
+        assert ir["aborted"] is True
+        assert ir["warning_triage_action"] == "abort"
+        assert ir.get("accepted_warnings") is None
+
+    @pytest.mark.asyncio
+    async def test_warning_triage_retry_ends_with_fix_recorded(
+        self, monkeypatch
+    ):
+        monkeypatch.delenv(
+            "CORESMITH_NONBLOCKING_INTEGRATION_WARNINGS", raising=False
+        )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
+
+        with self._common_patches(
+            [self._WARNING],
+            {
+                "action": "fix_rtl",
+                "rtl_fix_description": "added neighbor bootstrap port",
+            },
+        ):
+            result = await integration_check_node(self._state())
+
+        ir = result["integration_result"]
+        # retry / fix_rtl both route to END so the outer agent can issue
+        # restart_node via MCP for the right stage.
+        assert ir["aborted"] is True
+        assert ir["fix_applied"] == "added neighbor bootstrap port"
+        assert ir["warning_triage_action"] == "fix_rtl"
+
+    @pytest.mark.asyncio
+    async def test_nonblocking_env_var_restores_old_behaviour(self, monkeypatch):
+        """CORESMITH_NONBLOCKING_INTEGRATION_WARNINGS=1 restores the
+        pre-change behaviour where warning-only integration results
+        silently proceed to integration_dv with no interrupt."""
+        monkeypatch.setenv("CORESMITH_NONBLOCKING_INTEGRATION_WARNINGS", "1")
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
+
+        # If the env var really suppresses the triage, this fake_interrupt
+        # must NOT be called by the warning-only path. (The error/lint path
+        # would still call interrupt, but we have no errors and lint is clean
+        # in this fixture, so any call here is a regression.)
+        fake_interrupt = patch(
+            "orchestrator.langgraph.pipeline_graph.interrupt",
+            side_effect=AssertionError(
+                "interrupt() should not fire when "
+                "CORESMITH_NONBLOCKING_INTEGRATION_WARNINGS=1"
+            ),
+        )
+
+        with self._common_patches([self._WARNING], {"action": "accept"}), \
+                fake_interrupt:
+            result = await integration_check_node(self._state())
+
+        ir = result["integration_result"]
+        assert ir["warning_count"] == 1
+        assert ir["lint_clean"] is True
+        assert ir.get("accepted_warnings") is None
+        assert ir.get("warning_triage_action") is None
+        assert ir.get("aborted") is None
+
+
+# ---------------------------------------------------------------------------
 # Graph construction still works
 # ---------------------------------------------------------------------------
 
