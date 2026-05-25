@@ -177,6 +177,23 @@ def _daemon_start(args):
         env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
         env["VIRTUAL_ENV"] = str(repo_root / "venv")
 
+    # cocotb 2.x requires PYTHONHOME so the Verilator-embedded Python
+    # interpreter can find pygpi (a separate package introduced in
+    # cocotb 2.0). Without it, every sim invocation fails with
+    # ``ModuleNotFoundError: No module named 'pygpi'`` even though the
+    # module is on disk next to cocotb itself. We auto-detect the
+    # required value from the current interpreter's sysconfig prefix
+    # and inject it -- the operator may override by setting
+    # PYTHONHOME explicitly in the environment or in .coresmith/env.
+    if "PYTHONHOME" not in env:
+        try:
+            import sysconfig
+            prefix = sysconfig.get_config_var("prefix")
+            if prefix:
+                env["PYTHONHOME"] = prefix
+        except Exception:
+            pass
+
     with open(log_path, "ab") as logf:
         proc = subprocess.Popen(
             [str(python), "-m", "orchestrator.daemon.server", "--port", str(args.port or 0)],
