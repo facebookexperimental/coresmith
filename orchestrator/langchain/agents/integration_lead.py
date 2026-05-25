@@ -46,7 +46,7 @@ else:
 # Integration Lead has access to the same packing / bootstrap / sideband
 # conventions the uArch spec generator used. Missing skills degrade
 # silently.
-_SKILLS_TEXT = _load_skills("axi_stream", "srdy_drdy")
+_SKILLS_TEXT = _load_skills("axi_stream", "srdy_drdy", "arithmetic_precision")
 if _SKILLS_TEXT:
     SYSTEM_PROMPT = (
         SYSTEM_PROMPT
