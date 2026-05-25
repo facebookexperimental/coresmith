@@ -153,6 +153,51 @@ def format_block_contracts_prompt(block_name: str, view: dict[str, Any]) -> str:
             "MUST emit the request before waiting for a response."
         )
 
+    # Highlight flow_control_policy on every edge — this is the v8 codec
+    # deadlock fix. Without an explicit elasticity contract the producer
+    # and consumer arrive at incompatible assumptions about who stalls
+    # when. The notice surfaces the chosen semantics, the required
+    # buffer depth, and the implementation contract per role.
+    fc_edges = [e for e in edges if e.get("flow_control_policy")]
+    if fc_edges:
+        lines.append("")
+        lines.append("**Flow control policy notice (skid/elastic/credit/request):**")
+        for e in fc_edges:
+            fc = e.get("flow_control_policy") or {}
+            sem = fc.get("semantics", "unset")
+            depth = fc.get("min_buffer_depth_beats")
+            credit = fc.get("credit_words")
+            cycle = fc.get("feedback_cycle")
+            extras = []
+            if depth is not None:
+                extras.append(f"min_buffer_depth_beats={depth}")
+            if credit is not None:
+                extras.append(f"credit_words={credit}")
+            if cycle:
+                extras.append("feedback_cycle=true")
+            extras_str = (" [" + ", ".join(extras) + "]") if extras else ""
+            lines.append(
+                f"- Edge `{e.get('edge_id', '?')}` (role={e.get('role')}) "
+                f"uses `{sem}`{extras_str}. "
+                f"{(fc.get('rationale') or '').strip()}"
+            )
+        lines.append(
+            "Implementation rules per semantics:\n"
+            "  * `free_running`: producer must NEVER assert backpressure on "
+            "the upstream side; consumer must accept every beat.\n"
+            "  * `skid`: insert a 1-deep skid register; both sides may stall "
+            "for one cycle without losing the in-flight beat.\n"
+            "  * `elastic_fifo`: instantiate a FIFO of at least the declared "
+            "min_buffer_depth_beats between producer and consumer, with full "
+            "and empty backpressure plumbed to tready and tvalid.\n"
+            "  * `credit`: producer counts down credits on each beat sent; "
+            "consumer issues credit_returns on a reverse-channel sideband. "
+            "Producer must NOT send when credits == 0.\n"
+            "  * `request_response`: consumer issues a request packet on a "
+            "reverse channel; producer must respond with exactly one packet "
+            "per request. Producer MUST NOT push unsolicited."
+        )
+
     return "\n".join(lines)
 
 

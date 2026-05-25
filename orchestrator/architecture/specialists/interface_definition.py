@@ -211,6 +211,20 @@ def _validate_contracts(
     notes: list[str] = []
     contracts = list(result.get("contracts", []) or [])
 
+    # Build adjacency for cycle detection so we can validate
+    # flow_control_policy against the cycle membership of each edge.
+    adjacency: dict[str, list[str]] = {}
+    for edge in expected_edges:
+        src = str(
+            edge.get("from") or edge.get("from_block") or edge.get("source") or ""
+        )
+        dst = str(
+            edge.get("to") or edge.get("to_block") or edge.get("target") or ""
+        )
+        if src and dst:
+            adjacency.setdefault(src, []).append(dst)
+    cycle_edges = _edges_in_cycles(adjacency)
+
     # Per-contract structural checks
     for c in contracts:
         cid = c.get("edge_id") or f"{c.get('producer_block', '?')}->{c.get('consumer_block', '?')}"
@@ -251,6 +265,37 @@ def _validate_contracts(
                     f"{cur_name}[{cur_msb}:{cur_lsb}] overlap."
                 )
 
+        # Flow-control sanity: any edge on a closed cycle must NOT
+        # use free_running or skid semantics, because both assume the
+        # producer or the consumer can hold a transaction indefinitely.
+        # The v7/v8 h264 deadlock landed exactly in this gap.
+        producer = str(c.get("producer_block", ""))
+        consumer = str(c.get("consumer_block", ""))
+        fc = c.get("flow_control_policy") or {}
+        semantics = (fc.get("semantics") or "").strip()
+        on_cycle = (producer, consumer) in cycle_edges
+        if on_cycle and semantics in ("", "free_running", "skid"):
+            notes.append(
+                f"{cid}: edge participates in a feedback cycle but "
+                f"flow_control_policy.semantics={semantics or 'unset'} "
+                "— pick elastic_fifo, credit, or request_response."
+            )
+        if on_cycle and not fc.get("feedback_cycle"):
+            notes.append(
+                f"{cid}: edge is in a feedback cycle in the block diagram "
+                "but flow_control_policy.feedback_cycle is not true."
+            )
+        if semantics == "elastic_fifo":
+            try:
+                depth = int(fc.get("min_buffer_depth_beats") or 0)
+            except (TypeError, ValueError):
+                depth = 0
+            if depth < 2:
+                notes.append(
+                    f"{cid}: elastic_fifo requires min_buffer_depth_beats>=2; "
+                    f"got {depth}."
+                )
+
     # Cross-edge coverage check: every directed edge in the block diagram
     # should be represented by exactly one contract entry. Edge identity
     # is matched by (producer_block, consumer_block) pair OR by edge_id
@@ -273,3 +318,70 @@ def _validate_contracts(
             )
 
     return ({}, notes)
+
+
+def _edges_in_cycles(adjacency: dict[str, list[str]]) -> set[tuple[str, str]]:
+    """Return the set of (src, dst) edges that participate in any
+    directed cycle of the adjacency graph.
+
+    Uses Tarjan's SCC algorithm: any edge whose endpoints lie in the
+    same strongly-connected component (of size > 1 OR self-loop) is on
+    a cycle. The graph is tiny (block-diagram scale, dozens of nodes),
+    so the iterative-recursive simplification is fine.
+    """
+    if not adjacency:
+        return set()
+
+    nodes = set(adjacency.keys())
+    for dests in adjacency.values():
+        nodes.update(dests)
+
+    index_counter = [0]
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    indices: dict[str, int] = {}
+    lowlinks: dict[str, int] = {}
+    sccs: list[list[str]] = []
+
+    def _strongconnect(v: str) -> None:
+        indices[v] = index_counter[0]
+        lowlinks[v] = index_counter[0]
+        index_counter[0] += 1
+        stack.append(v)
+        on_stack.add(v)
+        for w in adjacency.get(v, []):
+            if w not in indices:
+                _strongconnect(w)
+                lowlinks[v] = min(lowlinks[v], lowlinks[w])
+            elif w in on_stack:
+                lowlinks[v] = min(lowlinks[v], indices[w])
+        if lowlinks[v] == indices[v]:
+            comp: list[str] = []
+            while True:
+                w = stack.pop()
+                on_stack.discard(w)
+                comp.append(w)
+                if w == v:
+                    break
+            sccs.append(comp)
+
+    for node in nodes:
+        if node not in indices:
+            _strongconnect(node)
+
+    edges_in_cycles: set[tuple[str, str]] = set()
+    node_to_scc: dict[str, int] = {}
+    for i, comp in enumerate(sccs):
+        for n in comp:
+            node_to_scc[n] = i
+
+    for src, dests in adjacency.items():
+        for dst in dests:
+            same_scc = (
+                node_to_scc.get(src) is not None
+                and node_to_scc.get(src) == node_to_scc.get(dst)
+                and (len(sccs[node_to_scc[src]]) > 1 or src == dst)
+            )
+            if same_scc:
+                edges_in_cycles.add((src, dst))
+    return edges_in_cycles

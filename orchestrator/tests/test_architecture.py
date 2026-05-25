@@ -957,6 +957,154 @@ class TestInterfaceDefinition:
             f"expected missing-contract note for b->c, got: {notes}"
         )
 
+    @pytest.mark.asyncio
+    async def test_validator_flags_freerunning_on_cycle_edge(self, tmp_project):
+        """An edge that is part of a directed cycle must NOT have
+        flow_control_policy.semantics == free_running (or skid)."""
+        from pathlib import Path
+        from unittest.mock import AsyncMock, patch
+        from orchestrator.architecture.specialists.interface_definition import (
+            analyze_interface_definition,
+        )
+
+        # a -> b -> a cycle: both edges are on a cycle.
+        payload = {
+            "design_summary": "tight feedback loop",
+            "default_packing_convention": "msb_first_by_field_list",
+            "contracts": [
+                {
+                    "edge_id": "a__m__to__b__s",
+                    "producer_block": "a",
+                    "consumer_block": "b",
+                    "data_width_bits": 8,
+                    "fields": [{"name": "x", "msb": 7, "lsb": 0, "width": 8}],
+                    "flow_control_policy": {
+                        "semantics": "free_running",
+                        "feedback_cycle": False,
+                        "rationale": "wrong: producer cannot stall on this loop",
+                    },
+                },
+                {
+                    "edge_id": "b__m__to__a__s",
+                    "producer_block": "b",
+                    "consumer_block": "a",
+                    "data_width_bits": 8,
+                    "fields": [{"name": "y", "msb": 7, "lsb": 0, "width": 8}],
+                    "flow_control_policy": {
+                        "semantics": "elastic_fifo",
+                        "min_buffer_depth_beats": 4,
+                        "feedback_cycle": True,
+                        "rationale": "absorbs backpressure",
+                    },
+                },
+            ],
+            "open_questions": [],
+        }
+        import json as _json
+        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+
+        async def _fake_call(*args, **kwargs):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(_json.dumps(payload))
+            return f"wrote {target}"
+
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
+            MockLLM.return_value.call = AsyncMock(side_effect=_fake_call)
+            result = await analyze_interface_definition(
+                block_diagram={
+                    "blocks": [{"name": "a"}, {"name": "b"}],
+                    "connections": [
+                        {"from": "a", "to": "b"},
+                        {"from": "b", "to": "a"},
+                    ],
+                },
+                project_root=tmp_project,
+            )
+
+        notes = result["result"].get("validation_notes", [])
+        # The a->b edge should be flagged for free_running on a cycle.
+        assert any("free_running" in n for n in notes), (
+            f"expected free_running-on-cycle violation, got: {notes}"
+        )
+        # And feedback_cycle should also be flagged (set to False on cycle).
+        assert any("feedback_cycle" in n for n in notes), (
+            f"expected feedback_cycle mismatch note, got: {notes}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_validator_flags_shallow_elastic_fifo(self, tmp_project):
+        """elastic_fifo with min_buffer_depth_beats < 2 should be flagged."""
+        from pathlib import Path
+        from unittest.mock import AsyncMock, patch
+        from orchestrator.architecture.specialists.interface_definition import (
+            analyze_interface_definition,
+        )
+
+        payload = {
+            "design_summary": "shallow elastic",
+            "default_packing_convention": "msb_first_by_field_list",
+            "contracts": [
+                {
+                    "edge_id": "a__m__to__b__s",
+                    "producer_block": "a",
+                    "consumer_block": "b",
+                    "data_width_bits": 8,
+                    "fields": [{"name": "x", "msb": 7, "lsb": 0, "width": 8}],
+                    "flow_control_policy": {
+                        "semantics": "elastic_fifo",
+                        "min_buffer_depth_beats": 1,  # too shallow
+                        "feedback_cycle": False,
+                        "rationale": "shallow",
+                    },
+                },
+            ],
+            "open_questions": [],
+        }
+        import json as _json
+        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+
+        async def _fake_call(*args, **kwargs):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(_json.dumps(payload))
+            return f"wrote {target}"
+
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
+            MockLLM.return_value.call = AsyncMock(side_effect=_fake_call)
+            result = await analyze_interface_definition(
+                block_diagram={
+                    "blocks": [{"name": "a"}, {"name": "b"}],
+                    "connections": [{"from": "a", "to": "b"}],
+                },
+                project_root=tmp_project,
+            )
+
+        notes = result["result"].get("validation_notes", [])
+        assert any("elastic_fifo" in n and "min_buffer_depth" in n for n in notes), (
+            f"expected shallow-elastic-fifo note, got: {notes}"
+        )
+
+    def test_edges_in_cycles_helper(self):
+        """The Tarjan-based cycle detector returns exactly the edges in
+        any directed cycle of the block diagram."""
+        from orchestrator.architecture.specialists.interface_definition import (
+            _edges_in_cycles,
+        )
+
+        # a -> b -> c -> a (3-cycle), plus d->e (tree edge), self-loop on f.
+        adj = {
+            "a": ["b"],
+            "b": ["c"],
+            "c": ["a"],
+            "d": ["e"],
+            "f": ["f"],
+        }
+        cycle_edges = _edges_in_cycles(adj)
+        assert ("a", "b") in cycle_edges
+        assert ("b", "c") in cycle_edges
+        assert ("c", "a") in cycle_edges
+        assert ("d", "e") not in cycle_edges
+        assert ("f", "f") in cycle_edges
+
 
 # ---------------------------------------------------------------------------
 # cross_spec_contract_adherence subagent (Stage C)

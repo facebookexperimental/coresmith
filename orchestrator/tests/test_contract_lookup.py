@@ -192,3 +192,96 @@ class TestFormatBlockContractsPrompt:
         out = format_block_contracts_prompt("alpha", view)
         # `alpha` is the producer on the reset_seed edge.
         assert "role=producer" in out
+
+
+@pytest.fixture
+def flow_control_contracts():
+    """Contracts featuring a feedback cycle with an elastic FIFO + a
+    request/response edge — exercises the full set of flow_control
+    semantics the v8 codec deadlock would have caught."""
+    return {
+        "design_summary": "feedback loop with elasticity",
+        "default_packing_convention": "msb_first_by_field_list",
+        "contracts": [
+            {
+                "edge_id": "sched__m_blk__to__resid__s_blk",
+                "producer_block": "sched",
+                "consumer_block": "resid",
+                "handshake_protocol": "axi_stream",
+                "data_width_bits": 8,
+                "fields": [{"name": "blk", "msb": 7, "lsb": 0, "width": 8}],
+                "flow_control_policy": {
+                    "semantics": "elastic_fifo",
+                    "min_buffer_depth_beats": 16,
+                    "feedback_cycle": True,
+                    "rationale": "absorbs prediction/history backpressure",
+                },
+            },
+            {
+                "edge_id": "resid__m_req__to__hist__s_req",
+                "producer_block": "resid",
+                "consumer_block": "hist",
+                "handshake_protocol": "srdy_drdy",
+                "data_width_bits": 16,
+                "fields": [{"name": "addr", "msb": 15, "lsb": 0, "width": 16}],
+                "flow_control_policy": {
+                    "semantics": "request_response",
+                    "feedback_cycle": True,
+                    "rationale": "history lookups are demand-driven",
+                },
+            },
+        ],
+    }
+
+
+@pytest.fixture
+def project_with_flow_control(tmp_path, flow_control_contracts):
+    coresmith_dir = tmp_path / ".coresmith"
+    coresmith_dir.mkdir()
+    (coresmith_dir / "interface_contracts.json").write_text(
+        json.dumps(flow_control_contracts), encoding="utf-8"
+    )
+    return str(tmp_path)
+
+
+class TestFormatFlowControl:
+    def test_flow_control_notice_present_when_policy_exists(
+        self, project_with_flow_control
+    ):
+        view = load_block_contracts(project_with_flow_control, "sched")
+        out = format_block_contracts_prompt("sched", view)
+        assert "Flow control policy notice" in out
+        assert "elastic_fifo" in out
+        assert "min_buffer_depth_beats=16" in out
+        assert "feedback_cycle=true" in out
+
+    def test_request_response_surfaces_for_consumer(
+        self, project_with_flow_control
+    ):
+        view = load_block_contracts(project_with_flow_control, "hist")
+        out = format_block_contracts_prompt("hist", view)
+        assert "request_response" in out
+        assert "role=consumer" in out
+
+    def test_implementation_rules_per_semantics_emitted(
+        self, project_with_flow_control
+    ):
+        view = load_block_contracts(project_with_flow_control, "resid")
+        out = format_block_contracts_prompt("resid", view)
+        # All five semantics need a one-line implementation rule that
+        # the generator can map directly to RTL.
+        for label in (
+            "free_running",
+            "skid",
+            "elastic_fifo",
+            "credit",
+            "request_response",
+        ):
+            assert f"`{label}`" in out, f"missing rule for {label}"
+
+    def test_no_flow_control_notice_when_absent(self, project_with_contracts):
+        # The bootstrap fixture has NO flow_control_policy keys, so the
+        # notice should not appear.
+        view = load_block_contracts(project_with_contracts, "alpha")
+        out = format_block_contracts_prompt("alpha", view)
+        assert "Flow control policy notice" not in out
