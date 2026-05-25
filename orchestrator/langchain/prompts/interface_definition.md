@@ -58,6 +58,15 @@ Produce JSON with a single top-level object:
         "seed_value_hex": "<hex literal if reset_seed>",
         "rationale": "<one sentence — why this is the right initial-cycle policy>"
       },
+      "flow_control_policy": {
+        "semantics": "free_running" | "skid" | "elastic_fifo" | "credit" | "request_response",
+        "min_buffer_depth_beats": <int>,
+        "credit_words": <int|null>,
+        "consumer_can_stall": <bool>,
+        "producer_can_stall": <bool>,
+        "feedback_cycle": <bool>,
+        "rationale": "<one sentence — why this elasticity is sufficient to avoid the producer/consumer deadlock>"
+      },
       "notes": "<any constraints that don't fit in the structured fields>"
     }
   ],
@@ -100,6 +109,37 @@ Produce JSON with a single top-level object:
    external interoperability are needed. The skill documents below
    describe the trade-off in detail — use them.
 
+5a. **flow_control_policy is mandatory for every edge that touches
+   a closed cycle**, AND for every edge whose producer cannot stall
+   (e.g., an active-frame pixel input where backpressure to the source
+   is not physically possible). Pick from:
+
+   * `free_running` — producer never stalls, consumer must always
+     accept. Use only for source/sink boundary edges with external
+     timing guarantees (DMA, sensor stream with fixed rate).
+   * `skid` — single-beat skid buffer to decouple a one-cycle
+     hand-off boundary; set `min_buffer_depth_beats = 1`.
+   * `elastic_fifo` — N-deep FIFO sized to absorb the worst-case
+     stall window the cycle introduces. **Required for any feedback
+     loop where one direction has read-before-commit semantics and
+     the other has no-stall input** (the v7/v8 h264 codec deadlock
+     class). Set `min_buffer_depth_beats` to the *concrete* worst-
+     case latency × beat-rate, never less.
+   * `credit` — explicit credit-return on a reverse channel; set
+     `credit_words` to the producer's burst quantum. Use when the
+     producer + consumer are both pipelined and you want explicit
+     ordering rather than gross over-provisioning.
+   * `request_response` — consumer drives a request on a reverse
+     channel before the producer is allowed to push. Use when the
+     consumer needs random-access semantics into a shared store
+     (e.g., neighbor-context lookup).
+
+   **For every edge that is part of a closed feedback cycle**
+   (`flow_control_policy.feedback_cycle = true`), `free_running` and
+   `skid` are forbidden — pick `elastic_fifo`, `credit`, or
+   `request_response`. The audit-default for prediction/history
+   neighbor feedback in macroblock codecs is `request_response`.
+
 6. **If the requirements imply a specific bit ordering** (e.g., a
    golden reference model uses MSB-first byte serialization, or the
    target ABI is little-endian), set `default_packing_convention`
@@ -123,6 +163,15 @@ Produce JSON with a single top-level object:
 - **Missing bootstrap**: do NOT skip the `bootstrap_policy` field on
   cycle edges — leaving it empty will cause downstream deadlocks
   and is the single most common DV failure observed in coresmith.
+- **Missing flow control**: the v7/v8 h264 codec_v3 autopilot run
+  failed because the scheduler's 256-entry block FIFO filled while
+  residual_prediction backpressured waiting for recon_history neighbor
+  context — and recon_history withheld non-boundary contexts until
+  reconstructed/deblocked feedback committed. Both arms had implicit
+  flow control assumptions that disagreed. **Explicit
+  `flow_control_policy` on every edge in the closed loop, with
+  `elastic_fifo` depths sized to the actual stall window, prevents
+  this entire class of deadlock.**
 
 # Output expectations
 
