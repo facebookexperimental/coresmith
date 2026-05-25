@@ -1,0 +1,164 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""Per-block lookup into the canonical `interface_contracts.json` produced
+by the Interface Definition architecture stage.
+
+Per-block generators (uArch spec + RTL) call `load_block_contracts(...)`
+to receive only the edge contracts where this block participates as the
+producer or consumer, plus the design-wide defaults. The result is
+formatted as a prompt fragment ready to drop into the user message.
+
+Why this exists: the v7 h264 autopilot run produced a correct
+`interface_contracts.json` (incl. `bootstrap_policy.reset_seed` for the
+neighbor edge), but the per-block RTL generator did not honor it because
+it never read the file. This helper bridges that gap by giving each
+generator the relevant slice of contracts directly in its prompt.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+
+def load_interface_contracts(project_root: str) -> dict[str, Any]:
+    """Load the full interface_contracts.json from disk.
+
+    Returns an empty dict if the file does not exist or fails to parse —
+    so callers can treat "no contracts" as a no-op rather than an error.
+    """
+    if not project_root:
+        return {}
+    path = Path(project_root) / ".coresmith" / "interface_contracts.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def filter_contracts_for_block(
+    contracts: list[dict] | None,
+    block_name: str,
+) -> list[dict]:
+    """Return the subset of contracts where `block_name` is the producer
+    or the consumer. Tolerant of missing fields."""
+    if not contracts:
+        return []
+    out: list[dict] = []
+    for c in contracts:
+        producer = str(c.get("producer_block", "")).strip()
+        consumer = str(c.get("consumer_block", "")).strip()
+        if block_name == producer or block_name == consumer:
+            out.append(c)
+    return out
+
+
+def load_block_contracts(project_root: str, block_name: str) -> dict[str, Any]:
+    """Compose a per-block contract view suitable for prompt injection.
+
+    Returns a dict with two keys:
+      - `defaults`: top-level design conventions (default packing,
+        endianness rationale) from the canonical file. Empty when the
+        file is missing.
+      - `edges`: list of contract entries where `block_name` participates,
+        each tagged with `role` ("producer" or "consumer") so the generator
+        knows which side it has to implement.
+    """
+    full = load_interface_contracts(project_root)
+    if not full:
+        return {"defaults": {}, "edges": []}
+
+    contracts = full.get("contracts") or []
+    edges: list[dict] = []
+    for c in filter_contracts_for_block(contracts, block_name):
+        # Annotate role so the generator knows which port to expose.
+        producer = str(c.get("producer_block", "")).strip()
+        role = "producer" if producer == block_name else "consumer"
+        edge = dict(c)
+        edge["role"] = role
+        edges.append(edge)
+
+    defaults = {
+        k: full.get(k)
+        for k in (
+            "default_packing_convention",
+            "default_endianness_rationale",
+            "design_summary",
+        )
+        if full.get(k)
+    }
+    return {"defaults": defaults, "edges": edges}
+
+
+def format_block_contracts_prompt(block_name: str, view: dict[str, Any]) -> str:
+    """Render a `load_block_contracts(...)` result as a prompt fragment.
+
+    Returns the empty string when there are no relevant edges, so the
+    caller can `if fragment: parts.append(fragment)` and skip injection
+    cleanly when contracts aren't available (e.g., older runs).
+    """
+    edges = view.get("edges") or []
+    if not edges:
+        return ""
+
+    defaults = view.get("defaults") or {}
+    lines = [
+        "",
+        "## CANONICAL INTERFACE CONTRACTS for this block",
+        f"({len(edges)} edge contract(s) where `{block_name}` participates. "
+        "These are AUTHORITATIVE — the bit layouts, field positions, handshake "
+        "protocol, sideband signals, and bootstrap policy below MUST match in "
+        "your output exactly. Do not invent new fields, change widths, or "
+        "skip the bootstrap policy.)",
+        "",
+    ]
+
+    pack = defaults.get("default_packing_convention")
+    if pack:
+        rationale = defaults.get("default_endianness_rationale") or ""
+        lines.append(
+            f"**Design-wide convention:** `{pack}`"
+            + (f" ({rationale})" if rationale else "")
+        )
+        lines.append("")
+
+    lines.append("```json")
+    lines.append(json.dumps(edges, indent=2))
+    lines.append("```")
+
+    # Highlight bootstrap_policy explicitly because it's silently easy to miss.
+    bootstrap_edges = [
+        e for e in edges
+        if (e.get("bootstrap_policy") or {}).get("required")
+    ]
+    if bootstrap_edges:
+        lines.append("")
+        lines.append("**Bootstrap policy notice:**")
+        for e in bootstrap_edges:
+            bp = e.get("bootstrap_policy") or {}
+            lines.append(
+                f"- Edge `{e.get('edge_id', '?')}` (role={e.get('role')}) "
+                f"requires `{bp.get('policy_type', 'unspecified')}` bootstrap. "
+                f"{(bp.get('rationale') or '').strip()}"
+            )
+        lines.append(
+            "If you are the producer on a `reset_seed` edge, your RTL MUST "
+            "drive a valid output with the specified seed value on cycle 1 "
+            "after reset, holding until the consumer's first ready handshake. "
+            "If you are the consumer on a `request_driven` edge, your RTL "
+            "MUST emit the request before waiting for a response."
+        )
+
+    return "\n".join(lines)
+
+
+__all__ = [
+    "load_interface_contracts",
+    "filter_contracts_for_block",
+    "load_block_contracts",
+    "format_block_contracts_prompt",
+]
