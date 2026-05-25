@@ -491,7 +491,7 @@ def get_node_descriptions() -> dict:
 
     try:
         from orchestrator.mcp_server import (
-            _GRAPH_MODULES, _ARCH_NODE_META, _PIPELINE_NODE_META,
+            _ARCH_NODE_META, _PIPELINE_NODE_META,
             _BACKEND_NODE_META,
         )
         # Architecture meta: keys are already Title Case display labels.
@@ -2021,13 +2021,13 @@ def main():
         sys.exit(1)
 
     httpd = HTTPServer((args.host, args.port), WebviewHandler)
-    print(f"╔══════════════════════════════════════════════╗")
-    print(f"║  Coresmith                                     ║")
+    print("╔══════════════════════════════════════════════╗")
+    print("║  Coresmith                                     ║")
     print(f"║  http://{args.host}:{args.port}                   ║")
-    print(f"╚══════════════════════════════════════════════╝")
+    print("╚══════════════════════════════════════════════╝")
     print(f"  Serving webview from {DIST_DIR}")
-    print(f"  Graph API at /api/graph/frontend")
-    print(f"  Press Ctrl+C to stop\n")
+    print("  Graph API at /api/graph/frontend")
+    print("  Press Ctrl+C to stop\n")
 
     try:
         httpd.serve_forever()
