@@ -197,6 +197,41 @@ def format_block_contracts_prompt(block_name: str, view: dict[str, Any]) -> str:
             "reverse channel; producer must respond with exactly one packet "
             "per request. Producer MUST NOT push unsolicited."
         )
+        # Hard requirement on FIFO depth -- the v9 codec deadlock was
+        # exactly this: contract said depth=N but the RTL author picked
+        # a smaller convenient value and the loop wedged. The
+        # cross_spec_fifo_depth_adherence audit will reject any FIFO
+        # whose declared DEPTH is below the contract minimum, so failing
+        # this rule guarantees a downstream pipeline failure.
+        elastic_edges = [
+            e for e in fc_edges
+            if (e.get("flow_control_policy") or {}).get("semantics") == "elastic_fifo"
+        ]
+        if elastic_edges:
+            lines.append("")
+            lines.append("**FIFO depth requirement (HARD, enforced by audit):**")
+            for e in elastic_edges:
+                fc = e.get("flow_control_policy") or {}
+                depth = fc.get("min_buffer_depth_beats")
+                if depth is None:
+                    continue
+                lines.append(
+                    f"- Edge `{e.get('edge_id', '?')}` (role={e.get('role')}) "
+                    f"requires FIFO DEPTH >= {depth} beats. Declare it as "
+                    f"`localparam DEPTH = {depth};` (or larger) and size all "
+                    "depth-dependent registers + pointer widths accordingly."
+                )
+            lines.append(
+                "Do NOT downsize the FIFO below the contract minimum even "
+                "if synthesis or area pressure pushes back. The "
+                "min_buffer_depth_beats values were derived from the "
+                "worst-case stall window of the feedback graph; choosing a "
+                "smaller depth WILL deadlock the design. The "
+                "`cross_spec_fifo_depth_adherence` constraint subagent reads "
+                "the synthesized RTL after generation and fails the run if "
+                "any `localparam DEPTH` (or equivalent) is below the value "
+                "above."
+            )
 
     return "\n".join(lines)
 
