@@ -24,6 +24,8 @@ from typing import Any
 
 from opentelemetry import trace
 
+from orchestrator.langchain.prompts.skills import load_skills as _load_skills
+
 from .coresmith_llm import ClaudeLLM
 
 _tracer = trace.get_tracer(__name__)
@@ -43,8 +45,6 @@ else:
 # coresmith conventions for AXI-Stream and sRdy/dRdy. Skills are loaded
 # at import time so a missing skill file is visible immediately rather
 # than at first agent call.
-from orchestrator.langchain.prompts.skills import load_skills as _load_skills
-
 _SKILLS_TEXT = _load_skills("axi_stream", "srdy_drdy")
 if _SKILLS_TEXT:
     SYSTEM_PROMPT = (

@@ -33,6 +33,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from orchestrator.langchain.prompts.skills import load_skills as _load_skills
+
 _PROMPT_FILE = (
     Path(__file__).resolve().parents[2]
     / "langchain"
@@ -44,8 +46,6 @@ SYSTEM_PROMPT = _PROMPT_FILE.read_text(encoding="utf-8")
 # Inject the handshake skills so the specialist has access to the same
 # AXI-Stream and sRdy/dRdy convention notes the uArch spec generator and
 # integration_lead use.
-from orchestrator.langchain.prompts.skills import load_skills as _load_skills
-
 _SKILLS_TEXT = _load_skills("axi_stream", "srdy_drdy")
 if _SKILLS_TEXT:
     SYSTEM_PROMPT = (

@@ -26,6 +26,8 @@ from typing import Any
 
 from opentelemetry import trace
 
+from orchestrator.langchain.prompts.skills import load_skills as _load_skills
+
 from .coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
 _tracer = trace.get_tracer(__name__)
@@ -44,8 +46,6 @@ else:
 # Integration Lead has access to the same packing / bootstrap / sideband
 # conventions the uArch spec generator used. Missing skills degrade
 # silently.
-from orchestrator.langchain.prompts.skills import load_skills as _load_skills
-
 _SKILLS_TEXT = _load_skills("axi_stream", "srdy_drdy")
 if _SKILLS_TEXT:
     SYSTEM_PROMPT = (
