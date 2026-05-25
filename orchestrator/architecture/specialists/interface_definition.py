@@ -46,7 +46,7 @@ SYSTEM_PROMPT = _PROMPT_FILE.read_text(encoding="utf-8")
 # Inject the handshake skills so the specialist has access to the same
 # AXI-Stream and sRdy/dRdy convention notes the uArch spec generator and
 # integration_lead use.
-_SKILLS_TEXT = _load_skills("axi_stream", "srdy_drdy")
+_SKILLS_TEXT = _load_skills("axi_stream", "srdy_drdy", "arithmetic_precision")
 if _SKILLS_TEXT:
     SYSTEM_PROMPT = (
         SYSTEM_PROMPT
