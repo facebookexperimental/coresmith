@@ -2504,12 +2504,17 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 "lint_log_path": lint_result.get("log_path", ""),
                 "block_rtl_paths": rtl_paths,
                 "skipped_connections": agent_result.get("skipped_connections", []),
-                "supported_actions": [
-                    "retry",
-                    "fix_rtl",
-                    "skip",
-                    "abort",
-                ],
+                "supported_actions": (
+                    # `accept` is only offered when the chip_top still
+                    # lint-passes despite the architectural mismatches --
+                    # the operator can then advance to DV without
+                    # regenerating, because the issues are naming /
+                    # design-intent drift rather than syntactic
+                    # violations.
+                    ["accept", "retry", "fix_rtl", "skip", "abort"]
+                    if lint_clean
+                    else ["retry", "fix_rtl", "skip", "abort"]
+                ),
                 "outer_agent_guidance": (
                     "Integration Lead agent found issues. As the outer-loop "
                     "diagnostic agent, diagnose and fix before escalating:\n"
@@ -2521,7 +2526,10 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                     "4. LINT_ERRORS: Read the lint log and edit "
                     f"{top_rtl_path} directly.\n"
                     "5. After fixing, resume_pipeline(action='fix_rtl').\n"
-                    "6. Only escalate for architectural issues."
+                    "6. Only escalate for architectural issues.\n"
+                    "7. ACCEPT: chip_top already lint-passes and the "
+                    "mismatches are acceptable for this run -- proceed "
+                    "to DV without further regeneration."
                 ),
                 "reference_files": {
                     "top_rtl": top_rtl_path,
@@ -2543,6 +2551,18 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             if action == "skip":
                 integration_result["skipped_by_user"] = True
                 log("  [INTEGRATION] Skipped by user/agent", YELLOW)
+            elif action == "accept":
+                # User/agent acknowledges the mismatch errors but the
+                # chip_top still lint-passes -- advance to DV with the
+                # existing top-level Verilog.  Mark the result so the
+                # router stops short-circuiting on error_count > 0.
+                integration_result["accepted_by_user"] = True
+                log(
+                    "  [INTEGRATION] Accepted despite "
+                    f"{len(errors)} error(s) (lint_clean=True); "
+                    "advancing to DV",
+                    YELLOW,
+                )
             elif action == "abort":
                 integration_result["aborted"] = True
                 log("  [INTEGRATION] Aborted", RED)
@@ -2680,6 +2700,11 @@ def route_after_integration(state: OrchestratorState) -> str:
         return END
     if result.get("lint_clean") is False:
         return END
+    # `accepted_by_user` overrides the error_count gate: the operator
+    # has acknowledged the architectural mismatches are acceptable for
+    # this run and chip_top still lint-passes, so DV is allowed to run.
+    if result.get("accepted_by_user"):
+        return "integration_dv"
     if int(result.get("error_count", 0) or 0) > 0:
         return END
     return "integration_dv"

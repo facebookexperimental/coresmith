@@ -780,6 +780,30 @@ class TestRouteAfterIntegration:
             "integration_result": {"lint_clean": True, "error_count": 1}
         }) == "__end__"
 
+    def test_accepted_by_user_overrides_error_count(self):
+        # When the operator/agent explicitly accepts the integration
+        # failure (chip_top still lint-passes, mismatches are
+        # acceptable for this run), routing must advance to DV
+        # regardless of error_count.
+        assert pipeline_graph.route_after_integration({
+            "integration_result": {
+                "lint_clean": True,
+                "error_count": 2,
+                "accepted_by_user": True,
+            }
+        }) == "integration_dv"
+
+    def test_accepted_by_user_does_not_override_lint_failure(self):
+        # accept is only meaningful when chip_top still lint-passes;
+        # if lint failed, route to END even if accepted_by_user is set.
+        assert pipeline_graph.route_after_integration({
+            "integration_result": {
+                "lint_clean": False,
+                "error_count": 0,
+                "accepted_by_user": True,
+            }
+        }) == "__end__"
+
     @pytest.mark.asyncio
     async def test_partial_block_set_refuses_integration(self, tmp_path):
         result = await pipeline_graph.integration_check_node({
