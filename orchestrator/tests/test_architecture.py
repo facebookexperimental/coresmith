@@ -766,3 +766,305 @@ class TestEndToEndStateFlow:
         final = load_state(tmp_project)
         assert final.requirements == "DVB-T transceiver"
         assert len(final.block_specs) == 3
+
+
+# ---------------------------------------------------------------------------
+# Interface Definition specialist (Stage B)
+# ---------------------------------------------------------------------------
+
+
+class TestInterfaceDefinition:
+    """The Interface Definition specialist freezes per-edge bit-level
+    contracts before per-block uArch specs are generated. These tests
+    mock the LLM and exercise the structural validation + I/O path."""
+
+    @pytest.mark.asyncio
+    async def test_no_op_when_no_connections(self, tmp_project):
+        from orchestrator.architecture.specialists.interface_definition import (
+            analyze_interface_definition,
+        )
+
+        result = await analyze_interface_definition(
+            block_diagram={"blocks": [{"name": "solo"}], "connections": []},
+            project_root=tmp_project,
+        )
+        assert result["result"]["contracts"] == []
+        assert "Single-block" in result["result"]["design_summary"]
+        # No file written for a no-op design.
+        from pathlib import Path
+        assert not (Path(tmp_project) / ".coresmith" / "interface_contracts.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_specialist_persists_contracts_to_disk(self, tmp_project):
+        """The specialist should write interface_contracts.json with the
+        canonical schema. We mock the LLM to return a known good response."""
+        from pathlib import Path
+        from unittest.mock import AsyncMock, patch
+        from orchestrator.architecture.specialists.interface_definition import (
+            analyze_interface_definition,
+        )
+
+        contracts_payload = {
+            "design_summary": "Two-block AXI-Stream pipeline.",
+            "default_packing_convention": "msb_first_by_field_list",
+            "default_endianness_rationale": "Matches H.264 byte serialization.",
+            "contracts": [
+                {
+                    "edge_id": "a__m_axis_data__to__b__s_axis_data",
+                    "producer_block": "a",
+                    "producer_port": "m_axis_data",
+                    "consumer_block": "b",
+                    "consumer_port": "s_axis_data",
+                    "handshake_protocol": "axi_stream",
+                    "data_width_bits": 16,
+                    "sideband_signals": [{"name": "tlast", "purpose": "end-of-frame"}],
+                    "fields": [
+                        {"name": "high", "msb": 15, "lsb": 8, "width": 8,
+                         "signed": False, "encoding": "binary"},
+                        {"name": "low", "msb": 7, "lsb": 0, "width": 8,
+                         "signed": False, "encoding": "binary"},
+                    ],
+                    "packing_convention": "msb_first_by_field_list",
+                    "bootstrap_policy": {"required": False, "policy_type": "none"},
+                },
+            ],
+            "open_questions": [],
+        }
+        import json as _json
+        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+
+        async def _fake_call(*args, **kwargs):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(_json.dumps(contracts_payload, indent=2))
+            return f"Wrote contracts to {target}"
+
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
+            MockLLM.return_value.call = AsyncMock(side_effect=_fake_call)
+            result = await analyze_interface_definition(
+                block_diagram={
+                    "blocks": [{"name": "a"}, {"name": "b"}],
+                    "connections": [{"from": "a", "to": "b"}],
+                },
+                project_root=tmp_project,
+            )
+
+        assert target.exists()
+        ir = result["result"]
+        assert len(ir["contracts"]) == 1
+        assert ir["contracts"][0]["data_width_bits"] == 16
+
+    @pytest.mark.asyncio
+    async def test_validator_flags_field_width_sum_mismatch(self, tmp_project):
+        """The structural validator should note when declared
+        data_width_bits doesn't equal the sum of field widths."""
+        from pathlib import Path
+        from unittest.mock import AsyncMock, patch
+        from orchestrator.architecture.specialists.interface_definition import (
+            analyze_interface_definition,
+        )
+
+        bad_payload = {
+            "design_summary": "drift demo",
+            "default_packing_convention": "msb_first_by_field_list",
+            "contracts": [
+                {
+                    "edge_id": "a__m__to__b__s",
+                    "producer_block": "a",
+                    "producer_port": "m_axis_x",
+                    "consumer_block": "b",
+                    "consumer_port": "s_axis_x",
+                    "handshake_protocol": "axi_stream",
+                    "data_width_bits": 32,  # declared
+                    "fields": [
+                        {"name": "f1", "msb": 15, "lsb": 0, "width": 16},
+                    ],  # actual sum = 16
+                    "packing_convention": "msb_first_by_field_list",
+                },
+            ],
+            "open_questions": [],
+        }
+        import json as _json
+        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+
+        async def _fake_call(*args, **kwargs):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(_json.dumps(bad_payload))
+            return f"wrote {target}"
+
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
+            MockLLM.return_value.call = AsyncMock(side_effect=_fake_call)
+            result = await analyze_interface_definition(
+                block_diagram={
+                    "blocks": [{"name": "a"}, {"name": "b"}],
+                    "connections": [{"from": "a", "to": "b"}],
+                },
+                project_root=tmp_project,
+            )
+
+        notes = result["result"].get("validation_notes", [])
+        assert any("declared data_width_bits=32" in n for n in notes), (
+            f"expected width-sum drift note, got: {notes}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_validator_flags_missing_contract_for_declared_edge(self, tmp_project):
+        """Every directed edge in block_diagram must be represented by
+        exactly one contract entry. Validator should flag missing ones."""
+        from pathlib import Path
+        from unittest.mock import AsyncMock, patch
+        from orchestrator.architecture.specialists.interface_definition import (
+            analyze_interface_definition,
+        )
+
+        payload = {
+            "design_summary": "partial coverage",
+            "default_packing_convention": "msb_first_by_field_list",
+            "contracts": [
+                {
+                    "edge_id": "a__m__to__b__s",
+                    "producer_block": "a",
+                    "consumer_block": "b",
+                    "data_width_bits": 8,
+                    "fields": [{"name": "byte", "msb": 7, "lsb": 0, "width": 8}],
+                },
+                # NOTE: missing the b->c contract
+            ],
+            "open_questions": [],
+        }
+        import json as _json
+        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+
+        async def _fake_call(*args, **kwargs):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(_json.dumps(payload))
+            return f"wrote {target}"
+
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
+            MockLLM.return_value.call = AsyncMock(side_effect=_fake_call)
+            result = await analyze_interface_definition(
+                block_diagram={
+                    "blocks": [{"name": "a"}, {"name": "b"}, {"name": "c"}],
+                    "connections": [
+                        {"from": "a", "to": "b"},
+                        {"from": "b", "to": "c"},
+                    ],
+                },
+                project_root=tmp_project,
+            )
+
+        notes = result["result"].get("validation_notes", [])
+        assert any("b -> c" in n for n in notes), (
+            f"expected missing-contract note for b->c, got: {notes}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# cross_spec_contract_adherence subagent (Stage C)
+# ---------------------------------------------------------------------------
+
+
+class TestCrossSpecContractAdherence:
+    """The new constraint subagent verifies per-block uArch specs match
+    the canonical interface_contracts. It only applies when both
+    interface_contracts and the per-block specs exist."""
+
+    def _stub_call(self, per_check_response):
+        """Same pattern as TestConstraintChecker._make_subagent_mock."""
+        from unittest.mock import AsyncMock
+        import json as _json
+
+        async def _fake_call(*args, **kwargs):
+            run_name = kwargs.get("run_name", "")
+            check_id = run_name.split(":", 1)[1] if ":" in run_name else ""
+            resp = per_check_response.get(
+                check_id, {"pass": True, "evidence": "n/a"}
+            )
+            return _json.dumps(resp)
+
+        return AsyncMock(side_effect=_fake_call)
+
+    def test_applies_predicate_requires_contracts(self):
+        from orchestrator.architecture.constraints import _CONSTRAINT_CATALOG
+        c = next(
+            x for x in _CONSTRAINT_CATALOG
+            if x["id"] == "cross_spec_contract_adherence"
+        )
+        # No contracts => skip.
+        assert c["applies"]({"interface_contracts": {}}) is False
+        assert c["applies"]({"interface_contracts": {"contracts": []}}) is False
+        # With contracts => apply (the subagent itself decides whether to
+        # check per-block specs or no-op).
+        assert c["applies"](
+            {"interface_contracts": {"contracts": [{"edge_id": "x"}]}}
+        ) is True
+
+    @pytest.mark.asyncio
+    async def test_subagent_fires_when_contracts_present(self, tmp_project):
+        """When interface_contracts.json exists with non-empty contracts,
+        the cross_spec_contract_adherence subagent must be invoked."""
+        from unittest.mock import patch
+        from orchestrator.architecture.constraints import check_constraints
+
+        contracts = {
+            "contracts": [
+                {"edge_id": "x__m__to__y__s", "producer_block": "x",
+                 "consumer_block": "y", "data_width_bits": 8,
+                 "fields": [{"name": "b", "msb": 7, "lsb": 0, "width": 8}]},
+            ],
+        }
+        mock_call = self._stub_call(per_check_response={
+            "cross_spec_contract_adherence": {
+                "pass": False,
+                "violation_text": "producer port y's tdata layout differs from contract",
+                "evidence": "arch/uarch_specs/x.md: m_axis_data[7:0]=b vs contract msb=7 lsb=0 OK; "
+                            "arch/uarch_specs/y.md: s_axis_data[3:0]=b mismatch",
+                "suggested_fix": "Edit arch/uarch_specs/y.md to specify tdata[7:0]=b",
+            },
+        })
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
+            MockLLM.return_value.call = mock_call
+            violations = await check_constraints(
+                block_diagram={
+                    "blocks": [{"name": "x"}, {"name": "y"}],
+                    "connections": [{"from": "x", "to": "y"}],
+                },
+                memory_map={},
+                clock_tree={},
+                register_spec={},
+                project_root=tmp_project,
+                interface_contracts=contracts,
+            )
+        cross_v = [v for v in violations if v["check"] == "cross_spec_contract_adherence"]
+        assert len(cross_v) == 1
+        assert "producer port y" in cross_v[0]["violation"]
+        assert cross_v[0]["severity"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_subagent_skipped_when_no_contracts(self, tmp_project):
+        from unittest.mock import patch
+        from orchestrator.architecture.constraints import check_constraints
+
+        called: list[str] = []
+
+        async def _spy(*args, **kwargs):
+            run_name = kwargs.get("run_name", "")
+            check_id = run_name.split(":", 1)[1] if ":" in run_name else ""
+            called.append(check_id)
+            import json as _json
+            return _json.dumps({"pass": True, "evidence": "ok"})
+
+        from unittest.mock import AsyncMock
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
+            MockLLM.return_value.call = AsyncMock(side_effect=_spy)
+            await check_constraints(
+                block_diagram={
+                    "blocks": [{"name": "a"}, {"name": "b"}],
+                    "connections": [{"from": "a", "to": "b"}],
+                },
+                memory_map={},
+                clock_tree={},
+                register_spec={},
+                project_root=tmp_project,
+                # No interface_contracts and no file on disk
+            )
+        assert "cross_spec_contract_adherence" not in called

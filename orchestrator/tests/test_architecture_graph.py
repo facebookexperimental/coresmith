@@ -276,9 +276,13 @@ class TestReviewDiagram:
         state = {"block_diagram": {"blocks": [{"name": "a"}], "questions": [{"q": "?"}]}}
         assert review_diagram(state) == "Escalate Diagram"
 
-    def test_clean_goes_to_memory_map(self):
+    def test_clean_goes_to_interface_definition(self):
+        # Interface Definition is the new stage between a clean block
+        # diagram and Memory Map (PR #45). Memory Map runs immediately
+        # after Interface Definition; the route here advances to the
+        # interface contract stage first.
         state = {"block_diagram": {"blocks": [{"name": "a"}], "questions": []}}
-        assert review_diagram(state) == "Memory Map"
+        assert review_diagram(state) == "Interface Definition"
 
     def test_no_blocks_goes_to_escalate(self):
         state = {"block_diagram": {"blocks": [], "questions": []}}
@@ -290,9 +294,11 @@ class TestReviewDiagram:
 
 
 class TestRouteAfterDiagramEscalation:
-    def test_continue_goes_to_memory_map(self):
+    def test_continue_goes_to_interface_definition(self):
+        # After the diagram escalation continues, route through the new
+        # Interface Definition stage before Memory Map (PR #45).
         state = {"human_response": {"action": "continue"}}
-        assert route_after_diagram_escalation(state) == "Memory Map"
+        assert route_after_diagram_escalation(state) == "Interface Definition"
 
     def test_feedback_goes_to_block_diagram(self):
         state = {"human_response": {"action": "feedback", "feedback": "fix it"}}

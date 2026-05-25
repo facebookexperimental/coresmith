@@ -461,6 +461,53 @@ _CONSTRAINT_CATALOG: list[dict] = [
         ),
         "applies": lambda ctx: bool(ctx["block_diagram"].get("connections")),
     },
+    {
+        "id": "cross_spec_contract_adherence",
+        "category": "structural",
+        "severity": "error",
+        "description": (
+            "The Interface Definition stage froze a canonical bit-level "
+            "specification for every block-diagram edge in "
+            "`interface_contracts.json`. Per-block uArch specs that come "
+            "later must implement those contracts exactly — same fields, "
+            "same `[MSB:LSB]` bit positions, same handshake protocol, same "
+            "bootstrap policy. This constraint catches per-spec drift from "
+            "the canonical contract.\n\n"
+            "For EACH contract entry in `interface_contracts.json`:\n\n"
+            "1. **Producer side.** Find the producer block's uArch spec in "
+            "the bundle (`arch/uarch_specs/<producer_block>.md`). Locate "
+            "the port matching `producer_port`. Verify its declared bit "
+            "layout matches the contract's `fields` list exactly — every "
+            "field name, every `[msb:lsb]` range, every signedness, every "
+            "encoding. Flag any drift.\n\n"
+            "2. **Consumer side.** Same check against "
+            "`arch/uarch_specs/<consumer_block>.md` for `consumer_port`.\n\n"
+            "3. **Handshake protocol agreement.** The contract names "
+            "`handshake_protocol` (axi_stream or srdy_drdy). Both the "
+            "producer and consumer specs must use the same protocol "
+            "family and the sidebands the contract declares (no extra, no "
+            "missing).\n\n"
+            "4. **Bootstrap policy.** If the contract has "
+            "`bootstrap_policy.required = true`, verify the producer's "
+            "spec describes how it generates the seeded packet on reset "
+            "(or how it answers an explicit request). If the spec does "
+            "not document the bootstrap mechanism the contract requires, "
+            "flag it — this is exactly the class of bug that caused the "
+            "v5 MB0 neighbor-bootstrap deadlock.\n\n"
+            "Pass if every contract has a matching producer-side and "
+            "consumer-side spec entry and no drift. Skip individual edges "
+            "where the per-block spec for either end has not yet been "
+            "generated (so this constraint is a no-op at the very first "
+            "architecture-phase constraint check, before per-block specs "
+            "exist; it activates once specs start appearing on disk).\n\n"
+            "If the bundle does not include any per-block uArch specs at "
+            "all, pass with a one-line note that the check did not run "
+            "yet."
+        ),
+        "applies": lambda ctx: bool(
+            (ctx.get("interface_contracts") or {}).get("contracts")
+        ),
+    },
 ]
 
 
@@ -492,6 +539,37 @@ def _build_artifact_bundle(
         parts.append(f"## PRD / ERS (structured)\n```json\n{json.dumps(ers_spec, indent=2)}\n```")
 
     parts.append(f"## block_diagram.json\n```json\n{json.dumps(block_diagram, indent=2)}\n```")
+
+    # Interface contracts come from the Interface Definition stage and are
+    # authoritative for cross_spec_contract_adherence. Read from disk so we
+    # always see the latest contract regardless of in-memory state.
+    contracts_path = Path(project_root) / ".coresmith" / "interface_contracts.json"
+    if contracts_path.exists():
+        try:
+            contracts_text = contracts_path.read_text(encoding="utf-8")
+            parts.append(f"## interface_contracts.json\n```json\n{contracts_text}\n```")
+        except OSError:
+            pass
+
+    # Per-block uArch specs (if any have been generated yet) are needed for
+    # cross_spec_contract_adherence. Include them all under a single section
+    # so the subagent can grep within them.
+    uarch_dir = Path(project_root) / "arch" / "uarch_specs"
+    if uarch_dir.is_dir():
+        spec_chunks: list[str] = []
+        for spec_path in sorted(uarch_dir.glob("*.md")):
+            try:
+                spec_chunks.append(
+                    f"### arch/uarch_specs/{spec_path.name}\n"
+                    f"{spec_path.read_text(encoding='utf-8')}"
+                )
+            except OSError:
+                continue
+        if spec_chunks:
+            parts.append(
+                "## per-block uArch specs (arch/uarch_specs/)\n\n"
+                + "\n\n".join(spec_chunks)
+            )
 
     if memory_map and (memory_map.get("peripherals") or memory_map.get("result")):
         parts.append(f"## memory_map.json\n```json\n{json.dumps(memory_map, indent=2)}\n```")
@@ -653,6 +731,7 @@ async def check_constraints(
     requirements: str = "",
     ers_spec: dict | None = None,
     project_root: str = ".",
+    interface_contracts: dict | None = None,
 ) -> list[dict]:
     """Validate cross-cutting architectural constraints.
 
@@ -691,12 +770,27 @@ async def check_constraints(
             project_root=project_root,
         )
 
+        # Load interface_contracts from disk if not supplied by caller —
+        # the Interface Definition stage writes it before per-block specs
+        # are generated, so a constraint check that runs later sees it.
+        loaded_contracts = interface_contracts
+        if loaded_contracts is None:
+            contracts_path = Path(project_root) / ".coresmith" / "interface_contracts.json"
+            if contracts_path.exists():
+                try:
+                    loaded_contracts = json.loads(contracts_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    loaded_contracts = {}
+            else:
+                loaded_contracts = {}
+
         applicability_ctx = {
             "block_diagram": block_diagram or {},
             "memory_map": memory_map or {},
             "clock_tree": clock_tree or {},
             "register_spec": register_spec or {},
             "ers_spec": ers_spec or {},
+            "interface_contracts": loaded_contracts or {},
         }
         applicable = []
         for constraint in _CONSTRAINT_CATALOG:

@@ -112,6 +112,7 @@ class ArchitectureState:
 
     # --- Architecture decisions (populated by specialists) ---
     block_diagram: dict = field(default_factory=dict)
+    interface_contracts: dict = field(default_factory=dict)
     memory_map: dict = field(default_factory=dict)
     clock_tree: dict = field(default_factory=dict)
     register_spec: dict = field(default_factory=dict)

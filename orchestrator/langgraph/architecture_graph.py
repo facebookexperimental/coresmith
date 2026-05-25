@@ -996,6 +996,68 @@ async def block_diagram_node(state: ArchGraphState) -> dict:
         return update
 
 
+async def interface_definition_node(state: ArchGraphState) -> dict:
+    """Freeze canonical bit-level edge contracts.
+
+    Runs after the block diagram is finalized and before Memory Map.
+    The specialist expands every block-diagram edge into a frozen
+    contract with handshake protocol, total data width, field list with
+    [MSB:LSB] positions, signedness, encoding, and bootstrap policy for
+    cycle-edges. Per-block uArch spec generators downstream read the
+    output as authoritative; cross_spec_contract_adherence validates
+    that per-block specs match the contract field-for-field.
+    """
+    from orchestrator.architecture.specialists.interface_definition import (
+        analyze_interface_definition,
+    )
+
+    _event(state, "Interface Definition", "graph_node_enter", {
+        "round": state["round"],
+    })
+    round_label = f" - Iteration #{state['round']}" if state["round"] > 1 else ""
+    with _tracer.start_as_current_span(
+        f"Interface Definition{round_label}"
+    ) as span:
+        span.set_attribute("round", state["round"])
+        try:
+            ifd = await analyze_interface_definition(
+                block_diagram=state["block_diagram"],
+                requirements=state.get("requirements", ""),
+                sad_spec=state.get("sad_spec"),
+                frd_spec=state.get("frd_spec"),
+                project_root=state["project_root"],
+            )
+        except Exception as exc:  # pragma: no cover -- defensive
+            span.set_attribute("error", str(exc))
+            ifd = {
+                "result": {
+                    "design_summary": (
+                        f"Interface Definition stage failed: {exc}. "
+                        "Per-block specs will proceed without a frozen "
+                        "contract; downstream constraint check may still "
+                        "catch drift via cross_spec_contract_adherence."
+                    ),
+                    "contracts": [],
+                    "open_questions": [],
+                },
+                "questions": [],
+            }
+
+        result = ifd.get("result", {}) or {}
+        contract_count = len(result.get("contracts", []) or [])
+        span.set_attribute("contract_count", contract_count)
+
+        _event(state, "Interface Definition", "graph_node_exit", {
+            "round": state["round"],
+            "contract_count": contract_count,
+            "open_questions": len(result.get("open_questions", []) or []),
+        })
+
+        update = {"interface_contracts": result, "phase": "interface_definition"}
+        _persist_intermediate_state(state, update)
+        return update
+
+
 async def memory_map_node(state: ArchGraphState) -> dict:
     """Generate memory map via LLM specialist.
 
@@ -1951,7 +2013,7 @@ def review_diagram(state: ArchGraphState) -> str:
     if has_questions or has_no_blocks:
         target = "Escalate Diagram"
     else:
-        target = "Memory Map"
+        target = "Interface Definition"
 
     span = trace.get_current_span()
     if span.is_recording():
@@ -1972,7 +2034,7 @@ def review_diagram(state: ArchGraphState) -> str:
 
 review_diagram.__edge_labels__ = {
     "Escalate Diagram": "QUESTIONS",
-    "Memory Map": "CLEAN",
+    "Interface Definition": "CLEAN",
 }
 
 
@@ -1986,7 +2048,7 @@ def route_after_diagram_escalation(state: ArchGraphState) -> str:
     elif action == "feedback":
         target = "Block Diagram"
     else:
-        target = "Memory Map"
+        target = "Interface Definition"
 
     span = trace.get_current_span()
     if span.is_recording():
@@ -1995,7 +2057,7 @@ def route_after_diagram_escalation(state: ArchGraphState) -> str:
     return target
 
 route_after_diagram_escalation.__edge_labels__ = {
-    "Memory Map": "CONTINUE",
+    "Interface Definition": "CONTINUE",
     "Block Diagram": "FEEDBACK",
     "Abort": "ABORT",
 }
@@ -2213,6 +2275,7 @@ def build_architecture_graph(checkpointer=None):
 
     # Specialist nodes
     graph.add_node("Block Diagram", block_diagram_node)
+    graph.add_node("Interface Definition", interface_definition_node)
     graph.add_node("Memory Map", memory_map_node)
     graph.add_node("Clock Tree", clock_tree_node)
     graph.add_node("Register Spec", register_spec_node)
@@ -2252,6 +2315,7 @@ def build_architecture_graph(checkpointer=None):
     graph.add_conditional_edges("Escalate Diagram", route_after_diagram_escalation)
 
     # Memory Map -> Clock Tree -> Register Spec -> Constraint Check
+    graph.add_edge("Interface Definition", "Memory Map")
     graph.add_edge("Memory Map", "Clock Tree")
     graph.add_edge("Clock Tree", "Register Spec")
     graph.add_edge("Register Spec", "Constraint Check")

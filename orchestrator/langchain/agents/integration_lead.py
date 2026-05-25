@@ -26,6 +26,8 @@ from typing import Any
 
 from opentelemetry import trace
 
+from orchestrator.langchain.prompts.skills import load_skills as _load_skills
+
 from .coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
 _tracer = trace.get_tracer(__name__)
@@ -38,6 +40,18 @@ else:
         "You are an Integration Lead engineer. Analyze block RTL ports for "
         "compatibility and generate a top-level Verilog module wiring all "
         "blocks together. Respond with JSON only."
+    )
+
+# Pull the handshake-protocol skills into the system prompt so the
+# Integration Lead has access to the same packing / bootstrap / sideband
+# conventions the uArch spec generator used. Missing skills degrade
+# silently.
+_SKILLS_TEXT = _load_skills("axi_stream", "srdy_drdy")
+if _SKILLS_TEXT:
+    SYSTEM_PROMPT = (
+        SYSTEM_PROMPT
+        + "\n\n# Reference Skills (use when wiring chip_top)\n\n"
+        + _SKILLS_TEXT
     )
 
 
