@@ -18,13 +18,13 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-# Resolve project root: honour SOCMATE_PROJECT_ROOT env var (same as MCP server),
+# Resolve project root: honour CORESMITH_PROJECT_ROOT env var (same as MCP server),
 # then try .cursor/mcp.json, then fall back to relative path from this file.
 import os as _os
 
 def _resolve_project_root() -> Path:
     # 1. Env var (matches MCP server)
-    env_root = _os.environ.get("SOCMATE_PROJECT_ROOT")
+    env_root = _os.environ.get("CORESMITH_PROJECT_ROOT")
     if env_root:
         return Path(env_root)
     # 2. Read from .cursor/mcp.json in this workspace
@@ -35,7 +35,7 @@ def _resolve_project_root() -> Path:
             import json as _json
             cfg = _json.loads(mcp_cfg.read_text())
             for srv in cfg.get("mcpServers", {}).values():
-                root = (srv.get("env") or {}).get("SOCMATE_PROJECT_ROOT")
+                root = (srv.get("env") or {}).get("CORESMITH_PROJECT_ROOT")
                 if root:
                     return Path(root)
         except Exception:
