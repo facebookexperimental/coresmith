@@ -54,7 +54,18 @@
 
     "containerEnv": {
         "CORESMITH_PROJECT_ROOT": "/workspaces/coresmith",
-        "PYTHONUNBUFFERED": "1"
+        "PYTHONUNBUFFERED": "1",
+        // cocotb 2.x requires PYTHONHOME so the Verilator-embedded Python
+        // interpreter can find pygpi (a separate package introduced in
+        // cocotb 2.0). Without it, every cocotb sim invocation fails with
+        // `ModuleNotFoundError: No module named 'pygpi'` even though the
+        // module is on disk at the same site-packages dir cocotb itself
+        // lives in. Setting it here means every process in the container
+        // -- daemon, IDE-launched sims, SSH non-login shells -- inherits
+        // the right value automatically, instead of relying on a
+        // /etc/profile.d hook that non-login shells don't source.
+        "PYTHONHOME": "/usr/local/python/3.11.15",
+        "PYTHONPATH": "/workspaces/coresmith:/usr/local/python/3.11.15/lib/python3.11/site-packages"
     },
 
     "remoteEnv": {
