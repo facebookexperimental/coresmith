@@ -1216,3 +1216,81 @@ class TestCrossSpecContractAdherence:
                 # No interface_contracts and no file on disk
             )
         assert "cross_spec_contract_adherence" not in called
+
+
+# ---------------------------------------------------------------------------
+# cross_spec_fifo_depth_adherence subagent (PR #52)
+# ---------------------------------------------------------------------------
+
+
+class TestCrossSpecFifoDepthAdherence:
+    """Catches per-block RTL whose FIFO `localparam DEPTH` is below the
+    contract's `flow_control_policy.min_buffer_depth_beats`. The v9 codec
+    deadlock at 3.3% of frame input was exactly this class of bug."""
+
+    def test_constraint_registered(self):
+        from orchestrator.architecture.constraints import _CONSTRAINT_CATALOG
+        match = [
+            c for c in _CONSTRAINT_CATALOG
+            if c["id"] == "cross_spec_fifo_depth_adherence"
+        ]
+        assert len(match) == 1
+        assert match[0]["severity"] == "error"
+
+    def test_applies_only_when_elastic_fifo_edges_exist(self):
+        from orchestrator.architecture.constraints import _CONSTRAINT_CATALOG
+        c = next(
+            x for x in _CONSTRAINT_CATALOG
+            if x["id"] == "cross_spec_fifo_depth_adherence"
+        )
+        # No contracts at all -> skip
+        assert c["applies"]({"interface_contracts": {}}) is False
+        # Contracts but no elastic_fifo semantics -> skip
+        assert c["applies"]({
+            "interface_contracts": {
+                "contracts": [
+                    {"edge_id": "a", "flow_control_policy": {"semantics": "skid"}},
+                    {"edge_id": "b", "flow_control_policy": {"semantics": "free_running"}},
+                ],
+            }
+        }) is False
+        # At least one elastic_fifo -> apply
+        assert c["applies"]({
+            "interface_contracts": {
+                "contracts": [
+                    {"edge_id": "a", "flow_control_policy": {"semantics": "skid"}},
+                    {"edge_id": "b", "flow_control_policy": {"semantics": "elastic_fifo"}},
+                ],
+            }
+        }) is True
+
+    def test_artifact_bundle_includes_rtl_heads(self, tmp_project):
+        """The audit must see the per-block RTL heads in the bundle so it
+        can grep for `localparam DEPTH = N` declarations."""
+        from orchestrator.architecture.constraints import _build_artifact_bundle
+        from pathlib import Path
+
+        rtl_dir = Path(tmp_project) / "rtl" / "design"
+        rtl_dir.mkdir(parents=True)
+        sample = (
+            "/* Block alpha */\n"
+            "module alpha (input clk, input rst_n);\n"
+            "    localparam [8:0] FIFO_DEPTH = 9'd256;\n"
+            "    reg [31:0] block_fifo_mem [0:255];\n"
+            "endmodule\n"
+        )
+        (rtl_dir / "alpha.v").write_text(sample)
+
+        bundle = _build_artifact_bundle(
+            block_diagram={"blocks": [{"name": "alpha"}]},
+            memory_map={},
+            clock_tree={},
+            register_spec={},
+            benchmark_results=None,
+            pdk_config=None,
+            requirements="",
+            ers_spec=None,
+            project_root=tmp_project,
+        )
+        assert "rtl/design/alpha.v" in bundle
+        assert "FIFO_DEPTH = 9'd256" in bundle

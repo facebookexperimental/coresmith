@@ -527,6 +527,55 @@ _CONSTRAINT_CATALOG: list[dict] = [
             (ctx.get("interface_contracts") or {}).get("contracts")
         ),
     },
+    {
+        "id": "cross_spec_fifo_depth_adherence",
+        "category": "structural",
+        "severity": "error",
+        "description": (
+            "The Interface Definition stage's `flow_control_policy` "
+            "declares `min_buffer_depth_beats` for every edge with "
+            "`semantics == \"elastic_fifo\"`. Those depths were chosen "
+            "from the worst-case stall window of the feedback graph; "
+            "the RTL author MUST size the FIFO to at least the declared "
+            "depth. The v9 h264 codec_v3 chip_top deadlocked at 3.3% of "
+            "frame input because the frame_block_scheduler FIFO was "
+            "sized 256 against a contract that needed deeper buffering; "
+            "this constraint catches that class of bug before DV.\n\n"
+            "For EACH contract entry where "
+            "`flow_control_policy.semantics == \"elastic_fifo\"`:\n\n"
+            "1. **Locate the producer block's RTL.** Grep its `*.v` for "
+            "the FIFO that backs this edge. The depth is usually a "
+            "`localparam DEPTH = <N>;` or `localparam [W:0] FIFO_DEPTH "
+            "= <N>;` or a `parameter DEPTH = <N>;` near the top of the "
+            "module. The reg array (`reg [...] fifo_mem [0:N-1];`) "
+            "should match.\n"
+            "2. **Compare against the contract.** If the actual depth "
+            "`< min_buffer_depth_beats`, flag a violation citing the "
+            "specific filename:line of the localparam.\n"
+            "3. **Skip cleanly.** If RTL has not been generated yet "
+            "(no `rtl/*/*.v` files in the bundle), pass with a "
+            "one-line note that the check did not run yet. Same for "
+            "any block whose RTL is missing.\n"
+            "4. **Tolerate inline FIFOs.** Some blocks implement the "
+            "FIFO as inline ring buffer (no localparam, just a sized "
+            "reg array with hard-coded index). In that case the audit "
+            "should look at the `reg [...] <name>_mem [0:<size>-1]` "
+            "declaration and compare `<size>` to the contract depth.\n\n"
+            "Pass if every elastic_fifo contract has an RTL FIFO whose "
+            "depth meets or exceeds `min_buffer_depth_beats`. Fail with "
+            "specific file:line citations otherwise."
+        ),
+        "applies": lambda ctx: bool(
+            (ctx.get("interface_contracts") or {}).get("contracts")
+            and any(
+                (c.get("flow_control_policy") or {}).get("semantics")
+                == "elastic_fifo"
+                for c in (
+                    (ctx.get("interface_contracts") or {}).get("contracts") or []
+                )
+            )
+        ),
+    },
 ]
 
 
@@ -588,6 +637,37 @@ def _build_artifact_bundle(
             parts.append(
                 "## per-block uArch specs (arch/uarch_specs/)\n\n"
                 + "\n\n".join(spec_chunks)
+            )
+
+    # Per-block generated RTL (if any has been written yet). Needed by
+    # cross_spec_fifo_depth_adherence so the audit can grep for
+    # FIFO depth params. Constrain size per-file to keep the bundle
+    # below the LLM context limit -- the FIFO depth declaration always
+    # lives in the first ~50 lines of a Verilog module, so a shallow
+    # head is enough.
+    rtl_root = Path(project_root) / "rtl"
+    if rtl_root.is_dir():
+        rtl_chunks: list[str] = []
+        for verilog_path in sorted(rtl_root.glob("**/*.v")):
+            if "integration" in verilog_path.parts:
+                # chip_top is generated separately by Integration Lead;
+                # the per-block FIFOs are what we care about here.
+                continue
+            try:
+                head = "\n".join(
+                    verilog_path.read_text(encoding="utf-8").splitlines()[:120]
+                )
+                rel = verilog_path.relative_to(Path(project_root))
+                rtl_chunks.append(
+                    f"### {rel.as_posix()} (first 120 lines)\n"
+                    f"```verilog\n{head}\n```"
+                )
+            except OSError:
+                continue
+        if rtl_chunks:
+            parts.append(
+                "## per-block generated RTL (heads only)\n\n"
+                + "\n\n".join(rtl_chunks)
             )
 
     if memory_map and (memory_map.get("peripherals") or memory_map.get("result")):

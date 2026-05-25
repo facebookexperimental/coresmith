@@ -285,3 +285,30 @@ class TestFormatFlowControl:
         view = load_block_contracts(project_with_contracts, "alpha")
         out = format_block_contracts_prompt("alpha", view)
         assert "Flow control policy notice" not in out
+
+    def test_fifo_depth_requirement_emitted_for_elastic_edges(
+        self, project_with_flow_control
+    ):
+        # PR #52: elastic_fifo edges must surface a hard FIFO depth
+        # requirement in the per-block prompt, citing the contract's
+        # min_buffer_depth_beats value so the RTL author can't silently
+        # downsize. The audit subagent will reject it otherwise.
+        view = load_block_contracts(project_with_flow_control, "sched")
+        out = format_block_contracts_prompt("sched", view)
+        assert "FIFO depth requirement (HARD" in out
+        # The fixture sets min_buffer_depth_beats=16 on sched's edge.
+        assert "FIFO DEPTH >= 16 beats" in out
+        assert "localparam DEPTH = 16" in out
+        # The audit name must be referenced so the LLM knows what
+        # enforces it.
+        assert "cross_spec_fifo_depth_adherence" in out
+
+    def test_no_fifo_depth_section_when_no_elastic_edges(
+        self, project_with_contracts
+    ):
+        # The bootstrap fixture has no elastic_fifo semantics, so the
+        # FIFO depth requirement section must NOT appear (we don't want
+        # to confuse the LLM about request_response or skid edges).
+        view = load_block_contracts(project_with_contracts, "alpha")
+        out = format_block_contracts_prompt("alpha", view)
+        assert "FIFO depth requirement" not in out
