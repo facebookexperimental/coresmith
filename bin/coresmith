@@ -418,7 +418,10 @@ def main():
     _add_project_root(rs)
     rs.add_argument(
         "--action", required=True,
-        help="approve | retry | skip | abort | feedback | fix_rtl | fix_tb | revise",
+        help=(
+            "approve | accept | retry | skip | abort | feedback | "
+            "fix_rtl | fix_tb | revise"
+        ),
     )
     rs.add_argument("--feedback", help="text feedback for the agent")
     rs.add_argument("--rtl-fix-description", help="describe the on-disk RTL/TB edit")
