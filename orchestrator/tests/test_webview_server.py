@@ -440,7 +440,11 @@ class TestTimelineEventAccuracy:
 
     def test_waiting_for_human_and_active_counts(self, tmp_path, serve_module):
         """Open segments at HITL nodes count as waiting, others as active."""
-        t0 = 1700000000.0
+        # Use a recent timestamp; serve.py treats runs older than 60s as
+        # historical and zeroes out the waiting/active counters since the
+        # process is no longer live.
+        import time as _t
+        t0 = _t.time()
         events = [
             {"ts": t0, "event": "graph_node_enter", "node": "Review Uarch Spec",
              "block": "scrambler", "graph": "frontend"},

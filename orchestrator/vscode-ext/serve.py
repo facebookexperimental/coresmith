@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Standalone webview server for CoreSmith.
+Standalone webview server for Coresmith.
 
 Serves the same ReactFlow webview that the VS Code extension provides,
 but as a regular web page in any browser. Calls the same graph
@@ -138,6 +138,14 @@ def get_live_calls(node_name: str) -> list[dict]:
             continue
         block_key = block or "__default__"
         if "enter" in event_type:
+            # If a previous enter for this (node, block) never got its exit
+            # event, treat it as stale rather than leaving it open: an
+            # always-open window otherwise matches *every* later LLM call in
+            # llm_calls.jsonl, badly over-attributing calls to this node.
+            prev_key = open_stack.get(block_key)
+            if (prev_key and prev_key in block_windows
+                    and block_windows[prev_key].get("exit_ts") is None):
+                block_windows.pop(prev_key, None)
             window_counter += 1
             key = f"{block_key}_{window_counter}"
             attempt = (e.get("attempt") or e.get("round")
@@ -316,6 +324,671 @@ def get_live_calls(node_name: str) -> list[dict]:
         })
 
     return result
+
+
+def _get_server_config() -> dict:
+    """Surface server-side feature flags to the webview so it can hide
+    UI for disabled features (e.g. the Observer-summary card)."""
+    cfg = {
+        "observer_enabled": False,
+        "observer_cooldown_s": None,
+    }
+    # Env-var override takes precedence (matches the engine's behaviour).
+    import os as _os
+    env = _os.environ.get("CORESMITH_OBSERVER", "").strip().lower()
+    if env in {"1", "true", "yes", "on"}:
+        cfg["observer_enabled"] = True
+    elif env in {"0", "false", "no", "off"}:
+        cfg["observer_enabled"] = False
+    else:
+        try:
+            import yaml
+            # Prefer the engine repo's config.yaml when reachable; fall back
+            # to a per-project override if a copy exists in PROJECT_ROOT.
+            candidates = [
+                _CODE_ROOT / "orchestrator" / "config.yaml",
+                PROJECT_ROOT / "orchestrator" / "config.yaml",
+                PROJECT_ROOT / ".coresmith" / "config.yaml",
+            ]
+            for p in candidates:
+                if not p.exists():
+                    continue
+                with open(p) as f:
+                    raw = yaml.safe_load(f) or {}
+                obs = raw.get("observer", {}) or {}
+                if "enabled" in obs:
+                    cfg["observer_enabled"] = bool(obs.get("enabled"))
+                if "cooldown_s" in obs:
+                    cfg["observer_cooldown_s"] = float(obs.get("cooldown_s"))
+                break
+        except Exception:
+            pass
+    return cfg
+
+
+def _list_collateral() -> dict:
+    """List generated chip-design artefacts grouped by kind so the
+    Collateral tab can browse RTL, testbenches, synthesis outputs, and
+    waveforms without the user having to dig through the run directory."""
+    out: dict = {"rtl": [], "tb": [], "syn": [], "pnr": [], "waveforms": [], "reports": []}
+    if not PROJECT_ROOT.exists():
+        return out
+
+    def _entry(p: Path, kind: str) -> dict:
+        try:
+            rel = str(p.relative_to(PROJECT_ROOT))
+        except ValueError:
+            rel = str(p)
+        try:
+            st = p.stat()
+            size = st.st_size
+            mtime = st.st_mtime
+        except OSError:
+            size = 0
+            mtime = 0
+        return {
+            "name": p.name,
+            "rel_path": rel,
+            "size": size,
+            "mtime": mtime,
+            "kind": kind,
+        }
+
+    # RTL: rtl/<category>/*.v (and *.sv)
+    rtl_root = PROJECT_ROOT / "rtl"
+    if rtl_root.is_dir():
+        for p in sorted(rtl_root.rglob("*.v")):
+            out["rtl"].append(_entry(p, "rtl"))
+        for p in sorted(rtl_root.rglob("*.sv")):
+            out["rtl"].append(_entry(p, "rtl"))
+
+    # Testbench: tb/*
+    tb_root = PROJECT_ROOT / "tb"
+    if tb_root.is_dir():
+        for p in sorted(tb_root.rglob("*")):
+            if p.is_file() and p.suffix in {".v", ".sv", ".py"}:
+                out["tb"].append(_entry(p, "tb"))
+
+    # Synthesis: syn/output/<block>/*
+    syn_root = PROJECT_ROOT / "syn" / "output"
+    if syn_root.is_dir():
+        for p in sorted(syn_root.rglob("*")):
+            if p.is_file() and p.suffix in {".v", ".sdc", ".ys", ".txt", ".json"}:
+                out["syn"].append(_entry(p, "syn"))
+
+    # PnR: chip_finish/ or syn/output/<block>/pnr/
+    chip_root = PROJECT_ROOT / "chip_finish"
+    if chip_root.is_dir():
+        for p in sorted(chip_root.rglob("*")):
+            if p.is_file() and p.suffix in {".v", ".def", ".sdc", ".rpt", ".gds", ".html", ".json"}:
+                out["pnr"].append(_entry(p, "pnr"))
+
+    # Waveforms: sim_build/<block>/dump.vcd
+    sim_root = PROJECT_ROOT / "sim_build"
+    if sim_root.is_dir():
+        for p in sorted(sim_root.rglob("*.vcd")):
+            out["waveforms"].append(_entry(p, "waveform"))
+        for p in sorted(sim_root.rglob("*.fst")):
+            out["waveforms"].append(_entry(p, "waveform"))
+
+    # Reports: any *.rpt, *.log, *.md inside arch/ or syn/
+    for root_name in ("arch", ".coresmith"):
+        root = PROJECT_ROOT / root_name
+        if not root.is_dir():
+            continue
+        for p in sorted(root.rglob("*.md")):
+            out["reports"].append(_entry(p, "report"))
+
+    return out
+
+
+def get_node_descriptions() -> dict:
+    """Build a {display_label: description} lookup from every known graph so
+    the detail panel can show a one-liner about what a node does even when
+    the user clicked it from the timeline (which has no description metadata).
+
+    Architecture meta uses Title Case keys; Pipeline/Backend meta uses
+    snake_case keys -- the pipeline_events stream emits Title Case display
+    labels for everything, so we Title Case the snake_case keys to match
+    what the timeline / detail panel actually receives."""
+    out: dict = {}
+
+    def _title_from_snake(s: str) -> str:
+        # init_block -> "Init Block"; run_pnr -> "Run Pnr" (acceptable, but
+        # also alias special-cases below).
+        return " ".join(p.capitalize() for p in s.split("_"))
+
+    SPECIAL_ALIASES = {
+        "run_pnr": "Run PnR",
+        "drc": "DRC",
+        "lvs": "LVS",
+        "mpw_precheck": "MPW Precheck",
+        "timing_signoff": "Timing Signoff",
+        "validation_dv": "Validation DV",
+        "integration_dv": "Integration DV",
+        "generate_3d_view": "Generate 3D View",
+        "flat_top_synthesis": "Flat Top Synthesis",
+        "generate_uarch_spec": "Generate uArch Spec",
+        "review_uarch_spec": "Review Uarch Spec",
+        "generate_rtl": "Generate RTL",
+        "diagnose": "Diagnose Failure",  # frontend-side; backend alias added below
+    }
+
+    # Backwards-alias common labels emitted at runtime to the canonical
+    # display key so e.g. clicking "Diagnose Backend" on the timeline picks
+    # up the underlying "diagnose" description.
+    EXTRA_ALIASES = {
+        "Diagnose Backend": "diagnose",
+        "Diagnose Failure": "diagnose",
+        "Generate RTL": "generate_rtl",
+        "Generate uArch Spec": "generate_uarch_spec",
+        "Generate Uarch Spec": "generate_uarch_spec",
+        "Review Uarch Spec": "review_uarch_spec",
+        "Initialize Block": "init_block",
+        "Initialize Tier": "init_tier",
+        "Initialize Design": "init_design",
+    }
+
+    try:
+        from orchestrator.mcp_server import (
+            _ARCH_NODE_META, _PIPELINE_NODE_META,
+            _BACKEND_NODE_META,
+        )
+        # Architecture meta: keys are already Title Case display labels.
+        for label, attrs in (_ARCH_NODE_META or {}).items():
+            desc = (attrs or {}).get("description")
+            if desc and label not in out:
+                out[label] = desc
+        # Pipeline + Backend meta: snake_case keys -> Title Case displays.
+        for meta in (_PIPELINE_NODE_META, _BACKEND_NODE_META):
+            for raw_key, attrs in (meta or {}).items():
+                desc = (attrs or {}).get("description")
+                if not desc:
+                    continue
+                display = SPECIAL_ALIASES.get(raw_key, _title_from_snake(raw_key))
+                if display not in out:
+                    out[display] = desc
+                # Also keep the original snake_case key as an alias so graph
+                # API consumers that pass the raw key still resolve.
+                if raw_key not in out:
+                    out[raw_key] = desc
+        # Apply extra aliases so multiple runtime labels resolve to the
+        # same description (e.g. "Diagnose Backend" -> "diagnose").
+        for alias, source_key in EXTRA_ALIASES.items():
+            if alias in out:
+                continue
+            if source_key in out:
+                out[alias] = out[source_key]
+    except Exception:
+        pass
+    return out
+
+
+def get_node_trajectory(node_name: str, max_log_chars: int = 16000) -> list:
+    """Return a per-attempt trajectory for a node: enter/exit events,
+    LLM calls within the window, and step_log file content.
+
+    This is what the detail panel actually wants to render -- it interleaves
+    LLM calls (from llm_calls.jsonl) with tool runs (from step_logs/) so the
+    user can see "the steps it took" rather than just a list of identical
+    LLM cards.
+    """
+    events_file = PROJECT_ROOT / ".coresmith" / "pipeline_events.jsonl"
+    llm_log = PROJECT_ROOT / ".coresmith" / "llm_calls.jsonl"
+    step_logs_root = PROJECT_ROOT / ".coresmith" / "step_logs"
+
+    if not events_file.exists():
+        return []
+
+    # Walk pipeline events and build per-(block, attempt-number) windows
+    # using sequential enter/exit pairs. Drop stale "open" windows where a
+    # new enter for the same block arrives before the previous exit -- this
+    # matches the fix applied to get_live_calls.
+    attempts: list[dict] = []
+    open_idx: dict[str, int] = {}     # block_key -> index into attempts
+    counter = 0
+    for line in events_file.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if e.get("node") != node_name:
+            continue
+        ev = e.get("event", "")
+        ts = e.get("ts")
+        block = e.get("block") or e.get("graph", "")
+        block_key = block or "__default__"
+        if ts is None:
+            continue
+        if "enter" in ev:
+            prev = open_idx.get(block_key)
+            if prev is not None and attempts[prev].get("exit_ts") is None:
+                # Stale open window: drop in place by clearing its data
+                attempts[prev]["stale"] = True
+            counter += 1
+            attempts.append({
+                "block": block,
+                "attempt": (e.get("attempt") or e.get("round") or counter),
+                "enter_ts": ts,
+                "enter_iso": e.get("iso"),
+                "exit_ts": None,
+                "exit_iso": None,
+                "exit_event": None,
+                "stale": False,
+            })
+            open_idx[block_key] = len(attempts) - 1
+        elif "exit" in ev and block_key in open_idx:
+            idx = open_idx.pop(block_key)
+            attempts[idx]["exit_ts"] = ts
+            attempts[idx]["exit_iso"] = e.get("iso")
+            attempts[idx]["exit_event"] = {
+                k: v for k, v in e.items()
+                if k not in {"ts", "iso", "event", "node", "block", "graph"}
+            }
+
+    attempts = [a for a in attempts if not a.get("stale")]
+    if not attempts:
+        return []
+
+    # Walk events again to collect llm_start / llm_end / llm_call_heartbeat
+    # so we can attach the codex_cli `run_name` (e.g. "Generate Verilog
+    # [Adder32]") and heartbeat progress to each LLM call. Without this the
+    # detail panel just shows "gpt-5.5" N times and the user can't tell what
+    # each call was for.
+    llm_starts: list[dict] = []  # {ts, end_ts, run_name, prompt_chars, ...}
+    llm_heartbeats: list[dict] = []
+    OBSERVER_NAMES = {"Observer [frontend]", "Observer [backend]",
+                      "Observer [architecture]"}
+    try:
+        open_starts: list[dict] = []
+        for line in events_file.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ev = e.get("event", "")
+            t = e.get("ts")
+            if t is None:
+                continue
+            if ev == "llm_start":
+                rn = e.get("run_name", "")
+                # Skip observer/summarizer calls -- they overlap user-node
+                # windows but aren't part of the agent's "thinking" steps.
+                if rn in OBSERVER_NAMES:
+                    continue
+                open_starts.append({
+                    "ts": t,
+                    "end_ts": None,
+                    "run_name": rn,
+                    "prompt_chars": e.get("prompt_chars"),
+                    "system_chars": e.get("system_chars"),
+                    "model": e.get("model", ""),
+                    "provider": e.get("provider", ""),
+                    "heartbeats": [],
+                })
+            elif ev == "llm_end":
+                rn = e.get("run_name", "")
+                if rn in OBSERVER_NAMES:
+                    continue
+                # Pair to the earliest still-open llm_start with the same run_name.
+                for s in open_starts:
+                    if s["end_ts"] is None and s["run_name"] == rn:
+                        s["end_ts"] = t
+                        s["output_chars"] = e.get("output_chars")
+                        llm_starts.append(s)
+                        break
+            elif ev == "llm_call_heartbeat":
+                llm_heartbeats.append({
+                    "ts": t,
+                    "elapsed_s": e.get("elapsed_s"),
+                    "stdout_bytes": e.get("stdout_bytes"),
+                    "stderr_bytes": e.get("stderr_bytes"),
+                    "pid": e.get("pid"),
+                })
+        # Anything still open at file end goes in with end_ts=None
+        for s in open_starts:
+            if s["end_ts"] is None:
+                llm_starts.append(s)
+    except OSError:
+        pass
+
+    # For each llm_calls.jsonl record, find the llm_start whose
+    # [ts, end_ts] interval contains the call's timestamp. One engine-level
+    # llm_start (e.g. "Generate Verilog [Adder32]") wraps many inner
+    # llm_calls because codex_cli takes multiple turns per invocation; we
+    # want them all to share the outer run_name.
+    def _match_start(call_ts: float, _dur_s: float | None):
+        if not llm_starts:
+            return None
+        # First try: call_ts strictly inside [start, end]. Fall back to
+        # nearest start within 5s on either side for open / un-paired calls.
+        for s in llm_starts:
+            end = s.get("end_ts")
+            if call_ts >= s["ts"] - 1.0 and (end is None or call_ts <= end + 1.0):
+                return s
+        best = None
+        best_d = 5.0
+        for s in llm_starts:
+            d = abs(s["ts"] - call_ts)
+            if d <= best_d:
+                best_d = d
+                best = s
+        return best
+
+    def _heartbeats_in(call_ts: float, end_ts: float | None):
+        out_hb = []
+        for h in llm_heartbeats:
+            if h["ts"] < call_ts:
+                continue
+            if end_ts is not None and h["ts"] > end_ts:
+                continue
+            out_hb.append(h)
+        return out_hb
+
+    # Engine-side codex turn log: each codex_cli invocation appends every
+    # turn (reasoning, tool_call, tool_result, agent_message) to
+    # .coresmith/codex_turns.jsonl with its pid + ts. We correlate to each
+    # LLM call by [start, end] time window so the trajectory can show what
+    # the agent actually did, not just the final answer. Historical runs
+    # (pre-engine-change) won't have this file; we degrade gracefully.
+    codex_turns_log = PROJECT_ROOT / ".coresmith" / "codex_turns.jsonl"
+    if not codex_turns_log.exists():
+        # Fall back to the legacy .socmate/ path used by pre-rebrand runs.
+        codex_turns_log = PROJECT_ROOT / ".socmate" / "codex_turns.jsonl"
+    codex_records: list[dict] = []
+    if codex_turns_log.exists():
+        try:
+            for line in codex_turns_log.read_text().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    codex_records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        except OSError:
+            pass
+
+    def _codex_turns_in(call_ts: float, end_ts: float | None):
+        """Return concise turn summaries inside the call's window.
+
+        We project each codex event down to a compact card-friendly shape:
+        {kind, summary, full} where `kind` is one of reasoning / tool_call
+        / tool_result / agent_message / other, `summary` is a one-line
+        preview, and `full` is the original payload for the on-demand
+        expander.
+        """
+        out_turns = []
+        for rec in codex_records:
+            t = rec.get("ts")
+            if t is None or t < call_ts:
+                continue
+            if end_ts is not None and t > end_ts + 1.0:
+                continue
+            ev = rec.get("event") or {}
+            ev_type = ev.get("type", "")
+            if ev_type != "item.completed" and ev_type != "turn.completed":
+                continue
+            item = (ev.get("item") or {}) if ev_type == "item.completed" else {}
+            kind = item.get("type") or ev_type
+            summary = ""
+            if kind == "reasoning":
+                summary = (item.get("text") or item.get("summary") or "")[:240]
+            elif kind == "agent_message":
+                summary = (item.get("text") or "")[:240]
+            elif kind in ("local_shell_call", "tool_call"):
+                cmd = (item.get("input") or {}).get("command") or item.get("name") or ""
+                if isinstance(cmd, list):
+                    cmd = " ".join(map(str, cmd))
+                summary = str(cmd)[:240]
+            elif kind in ("local_shell_output", "tool_result"):
+                summary = (item.get("output") or item.get("text") or "")[:240]
+            elif ev_type == "turn.completed":
+                kind = "turn_complete"
+                u = ev.get("usage") or {}
+                summary = (
+                    f"in={u.get('input_tokens','?')} out={u.get('output_tokens','?')}"
+                )
+            else:
+                summary = json.dumps(item, default=str)[:240]
+            out_turns.append({
+                "type": "codex_turn",
+                "ts": t,
+                "kind": kind,
+                "summary": summary,
+                "full": item or ev,
+            })
+        return out_turns
+
+    # Load LLM calls once, keep just the small subset we need
+    llm_records: list[dict] = []
+    if llm_log.exists():
+        for line in llm_log.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            llm_records.append(r)
+
+    # For each attempt, gather LLM calls + step_log files inside the window
+    def _read_log(path: Path) -> dict:
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return {"path": str(path), "missing": True}
+        truncated = False
+        if len(content) > max_log_chars:
+            head = content[: max_log_chars // 2]
+            tail = content[-max_log_chars // 2 :]
+            content = head + "\n\n... [truncated " + str(len(content) - max_log_chars) + " chars] ...\n\n" + tail
+            truncated = True
+        # Parse the header lines our pipeline writes (Command:, Return code:)
+        meta = {}
+        for line in content.splitlines()[:8]:
+            if line.startswith("Command:"):
+                meta["command"] = line[len("Command:") :].strip()
+            elif line.startswith("Return code:"):
+                try:
+                    meta["return_code"] = int(line[len("Return code:") :].strip())
+                except ValueError:
+                    pass
+            elif line.startswith("Block:"):
+                meta["block"] = line[len("Block:") :].strip()
+        return {
+            "path": str(path),
+            "name": path.name,
+            "mtime": path.stat().st_mtime,
+            "size": path.stat().st_size,
+            "content": content,
+            "truncated": truncated,
+            **meta,
+        }
+
+    out = []
+    for a in attempts:
+        enter_ts = a["enter_ts"]
+        exit_ts = a.get("exit_ts")
+        block = a.get("block") or ""
+
+        # LLM calls in window
+        calls = []
+        for rec in llm_records:
+            t = rec.get("ts")
+            if t is None or t < enter_ts:
+                continue
+            if exit_ts is not None and t > exit_ts:
+                continue
+            dur = rec.get("duration_s")
+            end_t = (t + dur) if dur else None
+            start_match = _match_start(t, dur)
+            run_name = (start_match or {}).get("run_name", "")
+            heartbeats = _heartbeats_in(t, end_t)
+            codex_turns = _codex_turns_in(t, end_t)
+            calls.append({
+                "type": "llm_call",
+                "ts": t,
+                "iso": rec.get("iso"),
+                "model": rec.get("model", ""),
+                "provider": rec.get("provider", ""),
+                "duration_s": dur,
+                "timed_out": rec.get("timed_out", False),
+                # The agent's own label for this call (e.g. "Generate Verilog
+                # [Adder32]"), much more useful than just the model name.
+                "run_name": run_name,
+                # 30s heartbeat pulses with stdout/stderr byte counts -- a
+                # rough indicator the codex_cli was producing output during
+                # the call.
+                "heartbeats": heartbeats,
+                # Codex CLI's per-turn record: reasoning blocks, tool
+                # calls + outputs, agent messages. Empty for runs that
+                # predate the engine-side logging change.
+                "codex_turns": codex_turns,
+                "system_prompt": rec.get("system_prompt", ""),
+                "user_prompt": rec.get("user_prompt", ""),
+                "response": rec.get("response", ""),
+                "usage": rec.get("usage"),
+                "error": rec.get("error"),
+                "status": "error" if rec.get("error") else "ok",
+            })
+
+        # Step logs in the window for this block (mtime falls inside window)
+        tool_runs = []
+        if block and step_logs_root.is_dir():
+            block_dir = step_logs_root / block
+            if block_dir.is_dir():
+                for log_path in sorted(block_dir.iterdir()):
+                    if not log_path.is_file():
+                        continue
+                    try:
+                        mt = log_path.stat().st_mtime
+                    except OSError:
+                        continue
+                    if mt < enter_ts:
+                        continue
+                    if exit_ts is not None and mt > exit_ts + 30:
+                        # Allow a small grace window past exit
+                        continue
+                    log = _read_log(log_path)
+                    log["type"] = "tool_run"
+                    log["ts"] = mt
+                    # Derive a step label from the filename
+                    stem = log_path.stem  # e.g. lint_attempt1
+                    log["step"] = stem.rsplit("_attempt", 1)[0]
+                    log["attempt_in_step"] = (
+                        int(stem.rsplit("_attempt", 1)[1])
+                        if "_attempt" in stem
+                        else None
+                    )
+                    tool_runs.append(log)
+
+        # Pull useful state out of the exit event. Two cases:
+        #   1. exit ships actual tool output (command + stdout/stderr) -- emit
+        #      a real tool_run step, like a step_log file would. Synthesize,
+        #      Run PnR, lint nodes often do this.
+        #   2. exit only ships metrics / paths / success flags (Final Report
+        #      writes dashboard_path; Flat Top Synthesis writes gate_count
+        #      and success). The actual work happened inside an LLM call
+        #      already in `calls`, so a separate tool_run card would be
+        #      empty and misleading. Emit a `result_summary` step instead.
+        ev = a.get("exit_event") or {}
+        REAL_TOOL_KEYS = {"command", "tool_stdout", "tool_stderr", "return_code"}
+        METRIC_KEYS = (
+            # Synthesis / PnR metrics
+            "gate_count", "chip_area_um2", "design_area_um2",
+            "utilization_pct", "wns_ns", "tns_ns", "total_power_mw",
+            "max_freq_mhz",
+            # Pass/fail flags
+            "success", "passed", "clean", "all_pass",
+            "sim_passed", "lint_passed", "lint_clean", "match",
+            # Counts / violations
+            "violations", "violation_count", "error_count",
+            "has_structural", "issues_found", "device_delta", "net_delta",
+            # Paths / artefacts
+            "dashboard_path", "html_size", "log_path", "path",
+            "layout_2d_png_path", "viewer_path", "ers_generated",
+            "diagnosis_preview", "suggested_fix", "needs_human",
+            # Structural counts
+            "node_count", "edge_count", "block_count", "blocks",
+            "question_count", "tb_fixes_attempted",
+            "local_fixes_attempted", "total", "expected",
+            "completed_so_far", "passed_so_far",
+            "validation_errors",
+            # Round-tracking / identifiers
+            "tier", "round", "new_round", "max_rounds", "total_rounds",
+            "design_name", "integration_top", "category", "confidence",
+            "action", "decision", "phase", "skipped", "last_error",
+            "text_len", "analysis", "has_feedback", "answer_count",
+            "answer_keys", "has_answers", "attempt", "new_tier_index",
+            "feedback",
+        )
+
+        has_real_tool = any(k in ev for k in REAL_TOOL_KEYS)
+        step_label = node_name.lower().replace(" ", "_")
+
+        if has_real_tool:
+            stdout = ev.get("tool_stdout") or ""
+            stderr = ev.get("tool_stderr") or ""
+            content_parts = []
+            if stdout:
+                content_parts.append("=== STDOUT ===\n" + stdout)
+            if stderr:
+                content_parts.append("=== STDERR ===\n" + stderr)
+            inline_tool = {
+                "type": "tool_run",
+                "ts": exit_ts or enter_ts,
+                "step": step_label,
+                "inline": True,
+                "command": ev.get("command", ""),
+                "return_code": ev.get("return_code"),
+                "content": "\n\n".join(content_parts) if content_parts else "",
+                "metrics": {
+                    k: ev[k] for k in METRIC_KEYS if k in ev
+                },
+                "size": sum(len(p) for p in content_parts),
+            }
+            if not any(t.get("step") == step_label for t in tool_runs):
+                tool_runs.append(inline_tool)
+
+        metrics = {k: ev[k] for k in METRIC_KEYS if k in ev}
+        result_summary = None
+        if metrics and not has_real_tool:
+            # No real tool run -- give the user a compact card showing what
+            # the node actually accomplished (file written, gates produced,
+            # dashboard published, ...).
+            result_summary = {
+                "type": "result_summary",
+                "ts": exit_ts or enter_ts,
+                "step": step_label,
+                "metrics": metrics,
+            }
+
+        # Merge + sort all steps chronologically
+        extras = []
+        if result_summary:
+            extras.append(result_summary)
+        steps = sorted([*calls, *tool_runs, *extras], key=lambda s: s.get("ts") or 0)
+
+        out.append({
+            "attempt": a["attempt"],
+            "block": block,
+            "enter_ts": enter_ts,
+            "exit_ts": exit_ts,
+            "duration_s": (exit_ts - enter_ts) if exit_ts else None,
+            "status": (
+                "failed" if (a.get("exit_event") or {}).get("error") or
+                            (a.get("exit_event") or {}).get("success") is False
+                else ("running" if exit_ts is None else "done")
+            ),
+            "exit_event": a.get("exit_event"),
+            "steps": steps,
+        })
+
+    return out
 
 
 def get_timeline_data(graph_filter: str = "") -> dict:
@@ -536,6 +1209,25 @@ def get_timeline_data(graph_filter: str = "") -> dict:
             else:
                 active_blocks += 1
 
+    # If the last event is old, the run is historical -- per-block status
+    # defaults to "running" because explicit completion nodes (Pipeline
+    # Complete, Backend Complete, Architecture Complete) only fire in some
+    # paths. Without this fixup the UI thinks blocks are still active and
+    # ticks the elapsed counter from the start_ts to "now", which for a
+    # week-old run produces nonsense like "9457m 24s elapsed".
+    import time as _time
+    HISTORICAL_CUTOFF_S = 60.0
+    is_historical = (pipeline_end is not None
+                     and _time.time() - pipeline_end > HISTORICAL_CUTOFF_S)
+    if is_historical:
+        for blk in blocks.values():
+            if blk.get("status") == "running":
+                # No explicit failure signal -> assume done; failed blocks
+                # already got their status set inside the exit handler.
+                blk["status"] = "done"
+        waiting_for_human = 0
+        active_blocks = 0
+
     block_list = sorted(blocks.values(), key=lambda b: b["start_ts"])
     return {
         "blocks": block_list,
@@ -544,6 +1236,7 @@ def get_timeline_data(graph_filter: str = "") -> dict:
         "graph": graph_filter or "all",
         "waiting_for_human": waiting_for_human,
         "active_blocks": active_blocks,
+        "is_historical": is_historical,
     }
 
 
@@ -992,7 +1685,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CoreSmith</title>
+  <title>Coresmith</title>
   <link rel="stylesheet" href="/dist/webview.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1035,16 +1728,60 @@ INDEX_HTML = """<!DOCTYPE html>
 class WebviewHandler(SimpleHTTPRequestHandler):
     """HTTP handler that serves the webview + API endpoints."""
 
+    def do_HEAD(self):
+        # Route HEAD through do_GET, suppressing the body. SimpleHTTPRequestHandler's
+        # default do_HEAD would otherwise hit send_head() and try to serve from the
+        # working directory, which bypasses our routing and leaks a directory listing.
+        real_wfile = self.wfile
+
+        class _NoBody:
+            __slots__ = ("_w", "_suppress")
+            def __init__(self, w):
+                self._w = w
+                self._suppress = False
+            def write(self, data):
+                if self._suppress:
+                    try:
+                        return len(data)
+                    except TypeError:
+                        return 0
+                return self._w.write(data)
+            def flush(self):
+                return self._w.flush()
+
+        wrapper = _NoBody(real_wfile)
+        self.wfile = wrapper
+        real_end_headers = self.end_headers
+
+        def _end_headers():
+            real_end_headers()
+            wrapper._suppress = True
+
+        self.end_headers = _end_headers
+        try:
+            self.do_GET()
+        finally:
+            self.wfile = real_wfile
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
 
         # API: graph introspection
         if path.startswith("/api/graph/"):
-            graph_name = path.split("/api/graph/", 1)[1].strip("/")
+            graph_name = path.split("/api/graph/", 1)[1].strip("/") or "frontend"
             try:
-                data = get_graph_data(graph_name or "frontend")
+                data = get_graph_data(graph_name)
                 self._json_response(data)
+            except KeyError:
+                from orchestrator.mcp_server import _GRAPH_MODULES
+                self._json_response(
+                    {
+                        "error": f"Unknown graph: {graph_name!r}",
+                        "available": sorted(_GRAPH_MODULES.keys()),
+                    },
+                    status=404,
+                )
             except Exception as exc:
                 self._json_response({"error": str(exc)}, status=500)
             return
@@ -1096,6 +1833,43 @@ class WebviewHandler(SimpleHTTPRequestHandler):
             self._json_response(get_summary_cards(stage))
             return
 
+        # API: server-side feature flags (observer enabled, etc.) so the
+        # webview can hide UI for disabled features.
+        if path == "/api/server_config":
+            try:
+                self._json_response(_get_server_config())
+            except Exception as exc:
+                self._json_response({"error": str(exc)}, status=500)
+            return
+
+        # API: collateral listing (RTL / testbench / synthesis / waveforms)
+        if path == "/api/collateral":
+            try:
+                self._json_response(_list_collateral())
+            except Exception as exc:
+                self._json_response({"error": str(exc)}, status=500)
+            return
+
+        # API: dictionary of node descriptions across all graphs.
+        if path == "/api/node_descriptions":
+            try:
+                self._json_response(get_node_descriptions())
+            except Exception as exc:
+                self._json_response({"error": str(exc)}, status=500)
+            return
+
+        # API: per-attempt trajectory for a node -- LLM calls + tool runs
+        if path.startswith("/api/node_trajectory/"):
+            node_name = unquote(path.split("/api/node_trajectory/", 1)[1].strip("/"))
+            if not node_name:
+                self._json_response({"error": "node_name required"}, status=400)
+                return
+            try:
+                self._json_response(get_node_trajectory(node_name))
+            except Exception as exc:
+                self._json_response({"error": str(exc)}, status=500)
+            return
+
         # API: live LLM calls for a running node (falls back when OTel traces
         # are not yet available because the parent span hasn't ended)
         if path.startswith("/api/live_calls/"):
@@ -1135,6 +1909,25 @@ class WebviewHandler(SimpleHTTPRequestHandler):
             if not file_path.is_relative_to(PROJECT_ROOT.resolve()):
                 self.send_error(403)
                 return
+            if file_path.exists() and file_path.is_file():
+                self._serve_file(file_path)
+                return
+            self.send_error(404)
+            return
+
+        # Serve waveform-viewer eval demos from wave-demos/. Includes the
+        # mirrored Surfer / vcdrom static bundles so they can be served
+        # same-origin (avoids CORS headaches when the viewer fetches VCDs
+        # from /api/artifacts/).
+        if path == "/waveform-demos" or path.startswith("/waveform-demos/"):
+            rel = path[len("/waveform-demos/"):].lstrip("/") if path != "/waveform-demos" else ""
+            base = Path(__file__).resolve().parent / "wave-demos"
+            file_path = (base / (rel or "index.html")).resolve()
+            if not file_path.is_relative_to(base.resolve()):
+                self.send_error(403)
+                return
+            if file_path.is_dir():
+                file_path = file_path / "index.html"
             if file_path.exists() and file_path.is_file():
                 self._serve_file(file_path)
                 return
@@ -1187,12 +1980,24 @@ class WebviewHandler(SimpleHTTPRequestHandler):
             ".svg": "image/svg+xml",
             ".gif": "image/gif",
             ".webp": "image/webp",
+            ".wasm": "application/wasm",
+            ".woff2": "font/woff2",
+            ".woff": "font/woff",
+            ".ico": "image/x-icon",
+            ".vcd": "text/plain; charset=utf-8",
+            ".v": "text/plain; charset=utf-8",
+            ".sv": "text/plain; charset=utf-8",
+            ".txt": "text/plain; charset=utf-8",
+            ".md": "text/markdown; charset=utf-8",
         }.get(ext, "application/octet-stream")
 
         data = file_path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
+        # Allow cross-origin fetches (Surfer / fliplot iframes need this to
+        # pull VCDs from /api/artifacts/).
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(data)
 
@@ -1204,7 +2009,7 @@ class WebviewHandler(SimpleHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CoreSmith — standalone server")
+    parser = argparse.ArgumentParser(description="Coresmith — standalone server")
     parser.add_argument("--port", "-p", type=int, default=3000, help="Port (default: 3000)")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host (default: 127.0.0.1)")
     args = parser.parse_args()
@@ -1217,7 +2022,7 @@ def main():
 
     httpd = HTTPServer((args.host, args.port), WebviewHandler)
     print("╔══════════════════════════════════════════════╗")
-    print("║  CoreSmith                                     ║")
+    print("║  Coresmith                                     ║")
     print(f"║  http://{args.host}:{args.port}                   ║")
     print("╚══════════════════════════════════════════════╝")
     print(f"  Serving webview from {DIST_DIR}")

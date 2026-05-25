@@ -10,15 +10,15 @@ export function activate(context: vscode.ExtensionContext) {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('socmate.openWorkflowEditor', () => {
+    vscode.commands.registerCommand('coresmith.openWorkflowEditor', () => {
       if (panel) {
         panel.reveal();
         return;
       }
 
       panel = vscode.window.createWebviewPanel(
-        'socmateWorkflow',
-        'SoCMate',
+        'coresmithWorkflow',
+        'Coresmith',
         vscode.ViewColumn.One,
         {
           enableScripts: true,
@@ -110,7 +110,7 @@ function getWebviewContent(webviewJs: vscode.Uri, webviewCss: vscode.Uri): strin
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SoCMate</title>
+  <title>Coresmith</title>
   <link rel="stylesheet" href="${webviewCss}">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -162,7 +162,7 @@ import sys, json
 sys.path.insert(0, '${escapedRoot}')
 from orchestrator.telemetry.reader import get_node_traces
 import os
-db_path = os.path.join('${escapedRoot}', '.socmate', 'traces.db')
+db_path = os.path.join('${escapedRoot}', '.coresmith', 'traces.db')
 print(json.dumps(get_node_traces(db_path, '${escapedNode}')))
 `.trim();
 
@@ -221,11 +221,11 @@ print(json.dumps(status))
 }
 
 // ---------------------------------------------------------------------------
-// Summary file polling (reads .socmate/summary_{stage}.md directly from disk)
+// Summary file polling (reads .coresmith/summary_{stage}.md directly from disk)
 // ---------------------------------------------------------------------------
 
 function fetchSummary(root: string, stage: string) {
-  const summaryPath = path.join(root, '.socmate', `summary_${stage}.md`);
+  const summaryPath = path.join(root, '.coresmith', `summary_${stage}.md`);
   try {
     if (fs.existsSync(summaryPath)) {
       const content = fs.readFileSync(summaryPath, 'utf-8');

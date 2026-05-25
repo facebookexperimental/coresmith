@@ -60,11 +60,27 @@ _SIGNIFICANT_NODES: dict[str, set[str]] = {
 
 
 def _is_observer_enabled() -> bool:
-    """Check whether the observer is enabled (from config.yaml)."""
+    """Check whether the observer is enabled (from config.yaml).
+
+    Default is now ``False`` -- the observer was responsible for ~22% of
+    the run's LLM call budget for a feature most users don't actively
+    consume, so it's opt-in. Set ``observer.enabled: true`` in
+    ``orchestrator/config.yaml`` or the env var ``CORESMITH_OBSERVER=1``
+    to re-enable.
+    """
+    import os as _os
     global _observer_enabled
     if _observer_enabled is not None:
         return _observer_enabled
-    # Load from config
+    # Env-var override takes precedence over config.yaml so power users
+    # can flip it on without editing the file.
+    env = _os.environ.get("CORESMITH_OBSERVER", "").strip().lower()
+    if env in {"1", "true", "yes", "on"}:
+        _observer_enabled = True
+        return True
+    if env in {"0", "false", "no", "off"}:
+        _observer_enabled = False
+        return False
     try:
         import yaml
         cfg_path = Path(__file__).resolve().parents[1] / "config.yaml"
@@ -72,15 +88,14 @@ def _is_observer_enabled() -> bool:
             with open(cfg_path) as f:
                 cfg = yaml.safe_load(f) or {}
             obs_cfg = cfg.get("observer", {})
-            _observer_enabled = obs_cfg.get("enabled", True)
-            # Also override cooldown if set
+            _observer_enabled = bool(obs_cfg.get("enabled", False))
             global _COOLDOWN_S
             if "cooldown_s" in obs_cfg:
                 _COOLDOWN_S = float(obs_cfg["cooldown_s"])
         else:
-            _observer_enabled = True
+            _observer_enabled = False
     except Exception:
-        _observer_enabled = True
+        _observer_enabled = False
     return _observer_enabled
 
 

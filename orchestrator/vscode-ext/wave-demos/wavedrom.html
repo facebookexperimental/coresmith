@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vcdrom / WaveDrom · waveform eval</title>
+<link rel="stylesheet" href="./_demo_common.css">
+</head>
+<body>
+  <div class="demo-header">
+    <a href="./">← back</a>
+    <span class="demo-title">vcdrom + WaveDrom</span>
+    <span class="demo-tag">pure JS</span>
+    <span>./vcdrom/ · standalone PWA · drag VCD on canvas to load</span>
+    <span id="status" class="demo-status">loading…</span>
+  </div>
+  <iframe
+    id="vcdrom"
+    class="demo-frame"
+    src="./vcdrom/index.html"
+  ></iframe>
+  <script>
+    // vcdrom is a drag/drop PWA. We can't auto-load via URL (it has no
+    // postMessage API), but we can hand the user a one-click link to
+    // download the VCD and drop it into the viewer.
+    const VCD = "/api/artifacts/sim_build/adder32/dump.vcd";
+    const status = document.getElementById("status");
+    status.innerHTML = `Drag <a href="${VCD}" download="adder32_dump.vcd">adder32_dump.vcd</a> onto the canvas`;
+    status.classList.add("ok");
+  </script>
+</body>
+</html>
