@@ -406,3 +406,29 @@ class TestHappyPath:
         assert len(result["completed_blocks"]) == 1
         assert result["completed_blocks"][0]["name"] == "test_chip_top"
         assert result["completed_blocks"][0]["skipped"] is True
+
+
+class TestEdaTimeout:
+    """`_eda_timeout` gates per-stage EDA-step ceilings on env vars so
+    large-design PnR/signoff runs don't get the OpenROAD child killed
+    mid-route, while small designs keep the snappy default."""
+
+    def test_default_when_unset(self, monkeypatch):
+        from orchestrator.langgraph.backend_graph import _eda_timeout
+        monkeypatch.delenv("CORESMITH_PNR_TIMEOUT", raising=False)
+        assert _eda_timeout("CORESMITH_PNR_TIMEOUT", 1800) == 1800
+
+    def test_override_when_set(self, monkeypatch):
+        from orchestrator.langgraph.backend_graph import _eda_timeout
+        monkeypatch.setenv("CORESMITH_PNR_TIMEOUT", "5400")
+        assert _eda_timeout("CORESMITH_PNR_TIMEOUT", 1800) == 5400
+
+    def test_garbage_falls_back_to_default(self, monkeypatch):
+        from orchestrator.langgraph.backend_graph import _eda_timeout
+        monkeypatch.setenv("CORESMITH_PNR_TIMEOUT", "not-an-int")
+        assert _eda_timeout("CORESMITH_PNR_TIMEOUT", 1800) == 1800
+
+    def test_nonpositive_falls_back_to_default(self, monkeypatch):
+        from orchestrator.langgraph.backend_graph import _eda_timeout
+        monkeypatch.setenv("CORESMITH_PNR_TIMEOUT", "0")
+        assert _eda_timeout("CORESMITH_PNR_TIMEOUT", 1800) == 1800
