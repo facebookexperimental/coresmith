@@ -717,6 +717,13 @@ async def generate_testbench_node(state: BlockState) -> dict:
     block = state["current_block"]
     block_name = block["name"]
     attempt = state["attempt"]
+    # A blocks.yaml entry that omits `testbench` must not crash the whole
+    # run -- it previously raised KeyError here and aborted every other
+    # in-flight block in the tier. Default to the conventional cocotb path
+    # and write it back so all downstream consumers (generate_testbench,
+    # the "reuse existing" log, etc.) see a value.
+    if not block.get("testbench"):
+        block["testbench"] = f"tb/cocotb/test_{block_name}.py"
     tb_path_obj = Path(state["project_root"]) / block["testbench"]
     rtl_path = state.get("rtl_path", "")
 
