@@ -276,6 +276,40 @@ The daemon does **not** auto-approve interrupts. An outer agent (Claude on
 cron, a human, or another script) drives every decision via `coresmith
 resume`. See [CLAUDE.md](CLAUDE.md) for the full decision contract.
 
+### Web UI (live dashboard)
+
+`orchestrator/vscode-ext/serve.py` serves the same ReactFlow dashboard the
+VS Code extension provides, but as a plain web page in any browser — the
+graph view, a Gantt timeline of every block/node, per-node LLM
+trajectories (prompts, tool runs, reasoning), and a browser for generated
+collateral (RTL, testbenches, waveforms, GDS reports). It's **read-only**:
+it visualizes a daemon run by reading that run's `.coresmith/` event logs,
+so it never drives the pipeline.
+
+Because it reads the run's event logs, the webview must point at the **same
+project root as the daemon** — it keys off the same `CORESMITH_PROJECT_ROOT`
+the daemon uses.
+
+```bash
+# 1. Build the webview bundle once (produces dist/webview.js).
+#    serve.py exits with an error until this exists.
+cd orchestrator/vscode-ext && npm install && npm run build && cd -
+
+# 2. With the daemon already running against $RUN_DIR (see above),
+#    start the webview against the SAME project root:
+CORESMITH_PROJECT_ROOT=$RUN_DIR python orchestrator/vscode-ext/serve.py --port 3000
+```
+
+Then open <http://127.0.0.1:3000>. The page polls the run's logs, so it
+updates live as the daemon advances.
+
+**Remote / headless box** (e.g. a cloud runner): `serve.py` binds
+`127.0.0.1` by default. Either forward the port with
+`ssh -L 3000:localhost:3000 <host>`, or expose it directly with
+`--host 0.0.0.0` (or a `cloudflared tunnel --url http://127.0.0.1:3000`).
+The daemon and the webview can run in separate shells as long as both
+export the same `CORESMITH_PROJECT_ROOT`.
+
 ## Testing
 
 ```bash
