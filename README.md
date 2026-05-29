@@ -2,13 +2,13 @@
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/facebookexperimental/coresmith)
 
-An AI-orchestrated ASIC design pipeline. coresmith uses LangGraph to drive the full RTL-to-GDSII flow: architecture specification, RTL generation, verification, synthesis, and physical design -- all orchestrated by Claude as the LLM backbone.
+Coresmith converts prompts to silicon. It uses LangGraph to drive the full RTL-to-GDS flow: architecture specification, RTL generation, verification, synthesis, and physical design. You start Coresmith through your agent (Claude or Codex), and it works as a daemon that spawns subagents for you until the GDS is created or your input is required. 
 
-> **Try it instantly:** click the Codespaces badge above for a pre-built sandbox with the full EDA toolchain (Yosys, OpenROAD, Magic, Sky130 PDK) and Claude CLI ready to go. No local install, no PDK download. Set `CLAUDE_CODE_OAUTH_TOKEN` as a Codespaces secret first — see [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md).
+> **Try it:** click the Codespaces badge above for a pre-built sandbox with the full EDA toolchain (Yosys, OpenROAD, Magic, Sky130 PDK) and Claude CLI ready to go. You will need to log in to your Claude or Codex account within the codespace.
 
 ## What It Does
 
-Given a set of requirements, coresmith:
+Coresmith will ask questions about your requirements, then run these phases:
 
 1. **Architecture** -- Generates a Product Requirements Document (PRD), block diagram, memory map, clock tree, and register specification via a multi-step LangGraph state machine
 2. **RTL Generation** -- An LLM agent converts specifications into synthesizable Verilog-2005
@@ -17,7 +17,7 @@ Given a set of requirements, coresmith:
 5. **Backend** -- OpenROAD/Magic/netgen handle place-and-route, DRC, and LVS
 6. **Diagnosis** -- On failure at any step, a debug agent analyzes the root cause and retries with corrective constraints
 
-The pipeline is interactive via an MCP server that integrates with Claude Code, or can run headlessly in CI mode.
+The pipeline is interactive via a daemon that exposes endpoints to control the LangGraph pipeline.
 
 ### Architecture Phase
 
@@ -37,31 +37,15 @@ Post-synthesis, LLM agents drive place-and-route, DRC, GDS export, and LVS — e
 
 ![Backend pipeline](docs/images/backend-pnr.gif)
 
-## Prerequisites
+## LLM Cost
+You must have a Claude Code Max or OpenAI Codex Pro subscription. Codex is recommended and GPT 5.5 is superior at silicon design.
 
-| Tool | Version | Purpose | Install |
-|------|---------|---------|---------|
-| Python | >= 3.11 | Runtime | `brew install python@3.11` |
-| Claude Code CLI | latest | LLM backend | `npm install -g @anthropic-ai/claude-code` |
-| Yosys | >= 0.40 | Synthesis | `brew install yosys` |
-| Verilator | >= 5.0 | Lint / simulation | `brew install verilator` |
+| Design  | Opus 4.7 | GPT 5.5 | 
+|------|---------|---------|
+| MCU | OK | OK |
+| JPEG | Exceeds 5hr limit on Max 5x | OK |
 
-Optional (gracefully skipped if missing):
-
-| Tool | Purpose |
-|------|---------|
-| OpenSTA | Static timing analysis |
-| OpenROAD | Place & route |
-| Magic | DRC |
-| netgen | LVS |
-| KLayout | GDS viewer |
-
-### SkyWater Sky130 PDK
-
-```bash
-pip install volare
-volare enable --pdk sky130 --pdk-root .pdk
-```
+You can use an API key, but it will be expensive.
 
 ## Quick Start
 
@@ -70,7 +54,7 @@ volare enable --pdk sky130 --pdk-root .pdk
 > and prints exactly what's missing. Don't burn a real run on a broken
 > toolchain.
 
-### Option A -- Docker / RunPod (recommended for first-time users)
+### Option A -- Docker / RunPod / Codespace (recommended for first-time users)
 
 The repo ships a `Dockerfile` that bundles the full EDA toolchain
 (Yosys, OpenROAD, Magic, netgen, KLayout, Sky130 PDK, Verilator,
@@ -277,15 +261,9 @@ coresmith/
 
 ## Usage
 
-### Interactive (Claude Code + MCP)
+### Interactive (Claude Code or Codex CLI)
 
-The MCP server exposes tools for interactive pipeline control:
-
-- `start_architecture(requirements, target_clock_mhz)` -- Begin architecture phase
-- `start_pipeline(max_attempts, target_clock_mhz)` -- Begin RTL pipeline
-- `get_pipeline_state()` -- Monitor progress
-- `resume_pipeline(action, ...)` -- Handle interrupts
-- `start_backend()` -- Begin physical design
+The best way to use Coresmith is through Claude Code or Codex CLI. The CLAUDE.md has all the instructions your agent needs to get started. The coresmith daemon will build your ASIC and escalate any blocking questions up to you.
 
 ### Daemon mode (outer agent or human drives)
 
