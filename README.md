@@ -10,7 +10,7 @@ Coresmith converts prompts to silicon. It uses LangGraph to drive the full RTL-t
 
 Coresmith will ask questions about your requirements, then run these phases:
 
-1. **Architecture** -- Generates a Product Requirements Document (PRD), block diagram, memory map, clock tree, and register specification via a multi-step LangGraph state machine
+1. **Architecture** -- Generates a Product Requirements Document (PRD) and block diagram via a multi-step LangGraph state machine. (Memory-map, clock-tree, and register-spec stages also exist but are **off by default** — enable with `CORESMITH_ENABLE_MEMORY_MAP=1` / `_CLOCK_TREE=1` / `_REGISTER_SPEC=1`.)
 2. **RTL Generation** -- An LLM agent converts specifications into synthesizable Verilog-2005
 3. **Verification** -- Another LLM agent generates cocotb testbenches; Verilator lints and simulates
 4. **Synthesis** -- Yosys synthesizes each block to a gate-level netlist targeting the SkyWater Sky130 130nm PDK
@@ -105,16 +105,12 @@ bin/coresmith run start --project-root $(pwd)
 # or wire up the cron-Claude autochecker described in CLAUDE.md.
 ```
 
-The local path uses `nix shell "nixpkgs#openroad"` etc. for the backend
-EDA tools (see `scripts/*-nix.sh`), so Nix with flakes enabled must be
-on `$PATH` for any post-synthesis step. The container image avoids
-this entirely.
-
-If you have Nix with flakes already enabled, the cleanest local setup
-is `nix develop` -- the repo's `flake.nix` pins every EDA tool plus
-Verilator and Node/Claude CLI to a single nixpkgs commit, drops them
-on `$PATH`, and bypasses the per-call `nix shell` re-entry through the
-`CORESMITH_BACKEND_*` env vars:
+Backend (post-synthesis) steps need Nix with flakes on `$PATH`. The
+cleanest setup is `nix develop` — the repo's `flake.nix` pins every EDA
+tool plus Verilator and Node/Claude CLI to one nixpkgs commit and drops
+them on `$PATH`, replacing the per-call `nix shell "nixpkgs#openroad"`
+re-entry in `scripts/*-nix.sh`. (Option A's container image avoids Nix
+entirely.)
 
 ```bash
 nix develop
@@ -235,7 +231,9 @@ PRD (sizing questions)         Testbench + Sim              LVS
 Block Diagram
   |
   v
-Memory Map -> Clock Tree -> Register Spec -> Constraint Check -> OK2DEV Gate
+Constraint Check -> OK2DEV Gate
+  (off by default:
+   Memory Map -> Clock Tree -> Register Spec)
 ```
 
 ## Project Structure
