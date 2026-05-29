@@ -39,3 +39,9 @@ mapbox-earcut>=1.0.0
 cocotb>=2.0
 cocotb-bus>=0.3.0
 wavekit>=0.5.6
+
+# Security floors for transitive deps (GitHub Dependabot 2026-05)
+# Pulled in transitively (langsmith via langgraph; idna via httpx/requests);
+# pin minimum patched versions so the vulnerable ranges can't be resolved.
+idna>=3.15        # DoS in idna (< 3.15)
+langsmith>=0.8.0  # advisory: < 0.8.0
