@@ -45,22 +45,6 @@ import re
 from pathlib import Path
 from typing import Annotated, Optional, TypedDict
 
-
-def _eda_timeout(env: str, default: int) -> int:
-    """Per-stage EDA-step timeout (seconds), overridable by env var.
-
-    Large designs (≳300K cells) routinely need longer than the historic
-    defaults for PnR and signoff: detailed routing alone can run well past
-    30 min. Gate the ceiling on an env var so big-design runs don't get
-    their OpenROAD child killed mid-route while small designs keep the
-    snappy default.
-    """
-    try:
-        v = int(os.environ.get(env, "").strip())
-        return v if v > 0 else default
-    except (ValueError, AttributeError):
-        return default
-
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 from opentelemetry import trace
@@ -76,6 +60,22 @@ from orchestrator.langgraph.pipeline_helpers import (
 )
 
 _tracer = trace.get_tracer("coresmith.langgraph.backend_graph")
+
+
+def _eda_timeout(env: str, default: int) -> int:
+    """Per-stage EDA-step timeout (seconds), overridable by env var.
+
+    Large designs (≳300K cells) routinely need longer than the historic
+    defaults for PnR and signoff: detailed routing alone can run well past
+    30 min. Gate the ceiling on an env var so big-design runs don't get
+    their OpenROAD child killed mid-route while small designs keep the
+    snappy default.
+    """
+    try:
+        v = int(os.environ.get(env, "").strip())
+        return v if v > 0 else default
+    except (ValueError, AttributeError):
+        return default
 
 
 def _last(a, b):
