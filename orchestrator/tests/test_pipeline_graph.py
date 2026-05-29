@@ -1961,3 +1961,39 @@ class TestIntegrationReviewFiltering:
             {"name": "b", "tier": 1},
         ]
         assert filtered["connections"] == [{"from": "a.out", "to": "b.in"}]
+
+
+class TestTestbenchDefaultPath:
+    """A blocks.yaml entry without `testbench` must not KeyError and crash
+    the whole run; generate_testbench_node defaults to the cocotb path and
+    writes it back into the block dict for downstream consumers."""
+
+    async def test_missing_testbench_defaults_and_skips_cleanly(self, tmp_path):
+        from orchestrator.langgraph import pipeline_graph
+        block = {"name": "widget", "tier": 2, "rtl_target": "rtl/widget/widget.v"}
+        state = {
+            "current_block": block,
+            "attempt": 1,
+            "project_root": str(tmp_path),
+            "rtl_path": "",  # no RTL -> node returns early, before any LLM call
+            "step_log_paths": {},
+        }
+        # Must not raise KeyError('testbench'); returns sim_passed False (no RTL).
+        result = await pipeline_graph.generate_testbench_node(state)
+        assert result["sim_passed"] is False
+        assert block["testbench"] == "tb/cocotb/test_widget.py"
+        assert result["tb_path"].endswith("tb/cocotb/test_widget.py")
+
+    async def test_explicit_testbench_preserved(self, tmp_path):
+        from orchestrator.langgraph import pipeline_graph
+        block = {"name": "widget", "tier": 2, "testbench": "tb/custom/tb_widget.py"}
+        state = {
+            "current_block": block,
+            "attempt": 1,
+            "project_root": str(tmp_path),
+            "rtl_path": "",
+            "step_log_paths": {},
+        }
+        result = await pipeline_graph.generate_testbench_node(state)
+        assert block["testbench"] == "tb/custom/tb_widget.py"
+        assert result["tb_path"].endswith("tb/custom/tb_widget.py")

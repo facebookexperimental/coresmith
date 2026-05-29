@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import json
 import operator
+import os
 import re
 from pathlib import Path
 from typing import Annotated, Optional, TypedDict
@@ -59,6 +60,22 @@ from orchestrator.langgraph.pipeline_helpers import (
 )
 
 _tracer = trace.get_tracer("coresmith.langgraph.backend_graph")
+
+
+def _eda_timeout(env: str, default: int) -> int:
+    """Per-stage EDA-step timeout (seconds), overridable by env var.
+
+    Large designs (≳300K cells) routinely need longer than the historic
+    defaults for PnR and signoff: detailed routing alone can run well past
+    30 min. Gate the ceiling on an env var so big-design runs don't get
+    their OpenROAD child killed mid-route while small designs keep the
+    snappy default.
+    """
+    try:
+        v = int(os.environ.get(env, "").strip())
+        return v if v > 0 else default
+    except (ValueError, AttributeError):
+        return default
 
 
 def _last(a, b):
@@ -622,7 +639,7 @@ async def run_pnr_node(state: BackendState) -> dict:
                 "tcl_path": tcl_path,
             },
             result_json_path=result_json_path,
-            timeout=1800,
+            timeout=_eda_timeout("CORESMITH_PNR_TIMEOUT", 1800),
         )
 
         pnr_ok = result.get("success", False)
@@ -1013,7 +1030,7 @@ async def generate_wrapper_node(state: BackendState) -> dict:
                 "result_json_path": result_json_path,
             },
             result_json_path=result_json_path,
-            timeout=600,
+            timeout=_eda_timeout("CORESMITH_WRAPPER_TIMEOUT", 600),
         )
 
         wrapper_ok = result.get("success", False)
