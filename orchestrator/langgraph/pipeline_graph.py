@@ -2698,14 +2698,46 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         return {"integration_result": integration_result}
 
 
+def _require_dv() -> bool:
+    """CORESMITH_REQUIRE_DV makes integration DV mandatory: the review-gate
+    bail-outs (skip / unaccepted errors) then route into DV instead of END."""
+    return (os.getenv("CORESMITH_REQUIRE_DV") or "").strip().lower() not in (
+        "", "0", "false", "no", "off",
+    )
+
+
 def route_after_integration(state: OrchestratorState) -> str:
-    """Route after integration check: proceed to DV or END."""
+    """Route after integration check: proceed to DV or END.
+
+    A clean integration check proceeds to integration DV. The review-gate
+    "bail" outcomes (operator skipping the review, or unresolved/unaccepted
+    integration errors) route to END by default -- but ending there means the
+    assembled chip is **never verified by DV**, so a non-functional design can
+    still report a clean ``done``. That silent bypass is the bug.
+
+    Behaviour:
+      - ``aborted`` (deliberate abort, or fix_rtl/retry that ENDs so the outer
+        agent can ``restart_node``) and a hard lint failure always END -- those
+        are genuine stops, not "skip verification".
+      - ``skipped`` / unaccepted ``error_count > 0`` END by default, but are
+        logged loudly as "ENDing WITHOUT DV -- chip UNVERIFIED" rather than
+        finishing silently. Set ``CORESMITH_REQUIRE_DV=1`` to make DV mandatory:
+        those cases then run integration DV instead of finishing unverified.
+    """
     result = state.get("integration_result") or {}
+    require_dv = _require_dv()
+
     if result.get("aborted"):
         return END
-    if result.get("skipped") or result.get("skipped_by_user"):
-        return END
     if result.get("lint_clean") is False:
+        return END
+    if result.get("skipped") or result.get("skipped_by_user"):
+        if require_dv:
+            log("  [INTEGRATION] review skipped, but CORESMITH_REQUIRE_DV set "
+                "-> running integration DV anyway", YELLOW)
+            return "integration_dv"
+        log("  [INTEGRATION] review skipped -> ENDing WITHOUT DV; chip is "
+            "UNVERIFIED (set CORESMITH_REQUIRE_DV=1 to force DV)", YELLOW)
         return END
     # `accepted_by_user` overrides the error_count gate: the operator
     # has acknowledged the architectural mismatches are acceptable for
@@ -2713,6 +2745,14 @@ def route_after_integration(state: OrchestratorState) -> str:
     if result.get("accepted_by_user"):
         return "integration_dv"
     if int(result.get("error_count", 0) or 0) > 0:
+        if require_dv:
+            log("  [INTEGRATION] unresolved integration errors, but "
+                "CORESMITH_REQUIRE_DV set -> running integration DV anyway",
+                YELLOW)
+            return "integration_dv"
+        log("  [INTEGRATION] ENDing WITHOUT DV due to unresolved integration "
+            "errors; chip is UNVERIFIED (set CORESMITH_REQUIRE_DV=1 to force "
+            "DV)", YELLOW)
         return END
     return "integration_dv"
 

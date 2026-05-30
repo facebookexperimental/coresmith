@@ -804,6 +804,45 @@ class TestRouteAfterIntegration:
             }
         }) == "__end__"
 
+    # --- CORESMITH_REQUIRE_DV: DV must not be silently skippable ---
+
+    def test_skipped_review_ends_without_dv_by_default(self, monkeypatch):
+        monkeypatch.delenv("CORESMITH_REQUIRE_DV", raising=False)
+        assert pipeline_graph.route_after_integration({
+            "integration_result": {
+                "lint_clean": True, "error_count": 0, "skipped_by_user": True,
+            }
+        }) == "__end__"
+
+    def test_skipped_review_runs_dv_when_require_dv(self, monkeypatch):
+        monkeypatch.setenv("CORESMITH_REQUIRE_DV", "1")
+        assert pipeline_graph.route_after_integration({
+            "integration_result": {
+                "lint_clean": True, "error_count": 0, "skipped_by_user": True,
+            }
+        }) == "integration_dv"
+
+    def test_unaccepted_errors_run_dv_when_require_dv(self, monkeypatch):
+        monkeypatch.setenv("CORESMITH_REQUIRE_DV", "1")
+        assert pipeline_graph.route_after_integration({
+            "integration_result": {"lint_clean": True, "error_count": 3}
+        }) == "integration_dv"
+
+    def test_require_dv_does_not_override_abort(self, monkeypatch):
+        # A deliberate abort (or fix_rtl/retry that ENDs for restart_node)
+        # must still END even when DV is required.
+        monkeypatch.setenv("CORESMITH_REQUIRE_DV", "1")
+        assert pipeline_graph.route_after_integration({
+            "integration_result": {"aborted": True, "lint_clean": True}
+        }) == "__end__"
+
+    def test_require_dv_does_not_override_lint_failure(self, monkeypatch):
+        # A hard lint failure can't be DV'd (chip_top won't build), so END.
+        monkeypatch.setenv("CORESMITH_REQUIRE_DV", "1")
+        assert pipeline_graph.route_after_integration({
+            "integration_result": {"lint_clean": False, "error_count": 0}
+        }) == "__end__"
+
     @pytest.mark.asyncio
     async def test_partial_block_set_refuses_integration(self, tmp_path):
         result = await pipeline_graph.integration_check_node({
