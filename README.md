@@ -1,4 +1,4 @@
-# coresmith
+# CoreSmith
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/facebookexperimental/coresmith)
 
