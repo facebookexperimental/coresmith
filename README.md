@@ -6,6 +6,10 @@ Coresmith converts prompts to silicon. It uses LangGraph to drive the full RTL-t
 
 > **Try it:** click the Codespaces badge above for a pre-built sandbox with the full EDA toolchain (Yosys, OpenROAD, Magic, Sky130 PDK) and Claude CLI ready to go. Note that it takes up to ten minutes to boot. Once it boots, launch Claude or Codex in the terminal. You will need to log in to your Claude or Codex account within the codespace.  For your first time, keep it simple: ask for a 32 bit adder.
 
+> \[!NOTE]
+> Agentic silicon design is expensive. Every agent needs to reference the chip specification to accurately architect their block. The practical complexity ceiling is a MJPEG-class IP in the OpenFrame/Caravel chassis (MPW). Codex Pro (100$/month) is the recommended minimum viable inference provider. Claude Max (100$) is usable until June 15th, after which you will have to pay API rates. Codex is superior at prompt caching and a prerequisite for designs exceeding in-order MCU complexity.
+
+
 ## What It Does
 
 Coresmith will ask questions about your requirements, then run these phases:
