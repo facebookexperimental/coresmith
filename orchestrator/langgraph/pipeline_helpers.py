@@ -718,11 +718,21 @@ with VcdReader(str(vcd_path)) as reader:
             timeout=scaled(180),
         )
     except subprocess.CalledProcessError as exc:
+        # WaveKit could not be SET UP (no prebuilt wheel for this arch + missing
+        # native build deps like python3-dev/cmake, etc.). The WaveKit VCD audit
+        # is a *supplementary* analysis layered on top of the cocotb regression
+        # result -- a missing optional tool must NOT masquerade as a DV failure
+        # (that produced a spurious DV_PROCESS_ERROR on arm64 workers lacking
+        # build deps). Skip gracefully so DV is decided by the cocotb pass/fail.
         result = {
-            "ok": False,
-            "error": (
-                f"WaveKit setup failed: {(exc.stderr or exc.stdout or str(exc))[-2000:]}"
+            "ok": True,
+            "skipped": True,
+            "reason": (
+                "WaveKit unavailable; VCD audit skipped -- DV relies on cocotb "
+                "results. Install WaveKit (needs python3-dev + cmake to build "
+                "pylibfst from sdist on platforms without a prebuilt wheel)."
             ),
+            "detail": (exc.stderr or exc.stdout or str(exc))[-1000:],
             "vcd_path": str(vcd_path),
         }
         audit_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
