@@ -115,6 +115,15 @@ When `coresmith state` shows `pending_interrupt_count > 0`:
 
 `fix_rtl` / `fix_tb` mean **you already edited the file on disk** — the pipeline re-runs the failing stage trusting your edit, it does *not* call an LLM.
 
+### Do NOT "autopilot" — the outer agent must actually decide
+
+The autochecker is a **reasoning agent**, not a blanket auto-approver. **Do not** write a script/loop that resumes every interrupt with a fixed action (e.g. always `approve`, or `retry`→`skip`). That defeats the entire point of the parking model and produces silent false positives. Two failure modes seen in practice:
+
+- **Wrong verb per gate.** Each interrupt's *valid* actions are in `payload.supported_actions`; they differ by type. The pre-DV integration gates (`integration_failure`, `integration_warning_review`) take **`accept`** — sending `approve` is unknown there and is treated as **abort** (`aborted=True` → END), which **skips DV entirely** and reports a hollow `done`. The DV-failure gates (`integration_dv_failure`, `validation_dv`) take **`approve`/`revise`/`fix_rtl`/`abort`**. Always read `supported_actions` and pick from it; never assume `approve` is universal.
+- **Rubber-stamping failures.** `approve`/`accept` on a *failing* `integration_dv`/`validation_dv` accepts a broken chip and finishes `done`. A real decision reads `.coresmith/contract_audit/*.json` (`first_divergence`, `local_fix_possible`, `recommended_action`) and chooses: `fix_rtl` (apply the suggested fix), `revise` (re-debug), or escalate to the human — not blind accept. `CORESMITH_REQUIRE_DV=1` forces DV to *run*, but it cannot make a dumb autochecker *judge* the result.
+
+If you can't make a genuine per-interrupt decision, **escalate to the human** rather than auto-approving. (Unattended overnight runs should be driven by a Claude subagent that inspects each payload, not a bash/python auto-resumer.)
+
 ## Common pitfalls & how to handle them
 
 - **Don't `rm -rf .coresmith/`** — rename it: `.coresmith.cleared-<reason>-<ts>/`, `.coresmith.failed-<reason>-<ts>/`, `.coresmith.aborted-<reason>-<ts>/`. The repo root is littered with archives because they're valuable for forensics.
