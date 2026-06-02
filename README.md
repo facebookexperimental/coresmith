@@ -339,6 +339,19 @@ pytest orchestrator/tests/ -v -m "not requires_nix and not e2e"
 
 **Tim Balbekov** — balbekov@alum.mit.edu
 
+## Citation
+
+If CoreSmith is useful to you, please cite it:
+
+```bibtex
+@software{coresmith2026,
+  author  = {Balbekov, Tim},
+  title   = {{CoreSmith}: A Prompt to GDS Agentic Flow},
+  year    = {2026},
+  url      = {https://github.com/facebookexperimental/coresmith}
+}
+```
+
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
