@@ -946,9 +946,9 @@ class TestBlockDiagramVizIntermediateSync:
 
     Previously, block_diagram_viz.json was only written by
     create_documentation_node at the end of the pipeline. This caused the
-    block diagram canvas to show stale block names (e.g. "cavlc_encoder")
+    block diagram canvas to show stale block names (e.g. "stage_a_block")
     while the memory map sidebar (sourced from architecture_state.json)
-    already showed the updated name (e.g. "expgolomb_encoder").
+    already showed the updated name (e.g. "stage_b_block").
     """
 
     def test_viz_written_on_block_diagram_update(self, isolated_project):
@@ -983,7 +983,7 @@ class TestBlockDiagramVizIntermediateSync:
         assert "fft_controller" in node_names
 
     def test_viz_updated_when_block_renamed(self, isolated_project):
-        """Simulates the cavlc_encoder -> expgolomb_encoder rename bug.
+        """Simulates the stage_a_block -> stage_b_block rename bug.
 
         After the first persist with "old_block", a second persist with
         "new_block" must update block_diagram_viz.json to contain only
@@ -1000,31 +1000,31 @@ class TestBlockDiagramVizIntermediateSync:
 
         old_diagram = {
             "blocks": [
-                {"name": "cavlc_encoder", "description": "CAVLC entropy encoder", "tier": 1},
+                {"name": "stage_a_block", "description": "First-stage entropy encoder", "tier": 1},
                 {"name": "pixel_buffer", "description": "Pixel line buffer", "tier": 1},
             ],
             "connections": [
-                {"from": "pixel_buffer", "to": "cavlc_encoder", "interface": "data", "data_width": 16},
+                {"from": "pixel_buffer", "to": "stage_a_block", "interface": "data", "data_width": 16},
             ],
             "questions": [],
         }
 
-        # First persist: write initial viz with cavlc_encoder
+        # First persist: write initial viz with stage_a_block
         _persist_intermediate_state(state, {"block_diagram": old_diagram, "phase": "block_diagram"})
 
         viz_path = Path(isolated_project) / ".coresmith" / "block_diagram_viz.json"
         viz_v1 = json.loads(viz_path.read_text())
         v1_names = [n["data"]["device_name"] for n in viz_v1["architecture"]["systemNodes"]]
-        assert "cavlc_encoder" in v1_names
+        assert "stage_a_block" in v1_names
 
-        # Second persist: rename cavlc_encoder -> expgolomb_encoder
+        # Second persist: rename stage_a_block -> stage_b_block
         new_diagram = {
             "blocks": [
-                {"name": "expgolomb_encoder", "description": "Exp-Golomb entropy encoder", "tier": 1},
+                {"name": "stage_b_block", "description": "Second-stage entropy encoder", "tier": 1},
                 {"name": "pixel_buffer", "description": "Pixel line buffer", "tier": 1},
             ],
             "connections": [
-                {"from": "pixel_buffer", "to": "expgolomb_encoder", "interface": "data", "data_width": 16},
+                {"from": "pixel_buffer", "to": "stage_b_block", "interface": "data", "data_width": 16},
             ],
             "questions": [],
         }
@@ -1033,11 +1033,11 @@ class TestBlockDiagramVizIntermediateSync:
 
         viz_v2 = json.loads(viz_path.read_text())
         v2_names = [n["data"]["device_name"] for n in viz_v2["architecture"]["systemNodes"]]
-        assert "expgolomb_encoder" in v2_names, (
+        assert "stage_b_block" in v2_names, (
             f"block_diagram_viz.json still has old block names: {v2_names}"
         )
-        assert "cavlc_encoder" not in v2_names, (
-            "cavlc_encoder should no longer appear after rename"
+        assert "stage_a_block" not in v2_names, (
+            "stage_a_block should no longer appear after rename"
         )
 
     def test_viz_includes_memory_map_annotations(self, isolated_project):

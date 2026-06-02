@@ -428,7 +428,7 @@ def generate_pnr_tcl(
     abs_sdc = str(Path(sdc_path).resolve()) if not os.path.isabs(sdc_path) else sdc_path
 
     # Extract actual top-level module name from the netlist to avoid mangled
-    # PRD title slugs (e.g. prd___h_264_..._top vs h264_encode_pipeline_top).
+    # PRD title slugs (e.g. prd___video_..._top vs video_encode_pipeline_top).
     actual_module = block_name
     try:
         with open(netlist_path, encoding="utf-8", errors="replace") as _nf:

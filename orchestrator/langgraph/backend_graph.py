@@ -99,7 +99,7 @@ class BackendState(TypedDict):
     # Backend Lead fields (set by init_design, consumed downstream) ────────
     frontend_blocks: list[dict]           # completed blocks from pipeline
     architecture_connections: list[dict]  # block diagram connections
-    design_name: str                      # e.g. "h264_encoder_top"
+    design_name: str                      # e.g. "video_encoder_top"
     block_rtl_paths: dict                 # {block_name: rtl_path}
     glue_blocks: list[dict]              # detected glue block needs
     integration_top_path: str            # rtl/integration/<design>_top.v

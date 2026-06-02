@@ -489,7 +489,7 @@ def generate_top_level_rtl(
     Block-to-block connections use internal wires.
 
     Args:
-        design_name: Name for the top-level module (e.g. "h264_encoder_top").
+        design_name: Name for the top-level module (e.g. "video_encoder_top").
         connections: Architecture connection list.
         modules: Parsed block modules.
         mismatches: Known mismatches (used to skip broken connections).

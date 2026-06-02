@@ -807,7 +807,7 @@ class TestInterfaceDefinition:
         contracts_payload = {
             "design_summary": "Two-block AXI-Stream pipeline.",
             "default_packing_convention": "msb_first_by_field_list",
-            "default_endianness_rationale": "Matches H.264 byte serialization.",
+            "default_endianness_rationale": "Matches big-endian (network) byte serialization.",
             "contracts": [
                 {
                     "edge_id": "a__m_axis_data__to__b__s_axis_data",

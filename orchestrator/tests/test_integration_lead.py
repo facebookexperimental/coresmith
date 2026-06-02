@@ -999,7 +999,7 @@ class TestIntegrationCheckNode:
 class TestIntegrationCheckWarningTriage:
     """integration_check_node must triage warning-only mismatches via an
     outer-agent interrupt before letting the run advance to DV. The
-    closed-feedback warning from the h264 v4 run predicted the exact DV
+    closed-feedback warning from the v4 run predicted the exact DV
     deadlock that followed, so warnings are no longer silently dropped."""
 
     def _state(self):
@@ -1277,7 +1277,7 @@ class TestAssertBlocksInstantiated:
     """Postcondition for Integration Lead's chip_top output.
 
     Catches the silent-block-drop / glue-stub-substitution failure mode
-    that produced the codec stub (cavlc_enc -> rle_to_packer_token_bridge).
+    that produced the codec stub (core_block -> rle_to_packer_token_bridge).
     """
 
     def test_all_blocks_present_passes(self):
@@ -1305,16 +1305,16 @@ endmodule
     def test_codec_stub_substitution_caught(self):
         chip_top = """\
 module chip_top (input clk);
-    // cavlc_enc replaced with a glue stub
+    // core_block replaced with a glue stub
     rle_to_packer_token_bridge u_bridge (.clk(clk));
     other_block u_other (.clk(clk));
 endmodule
 """
         err = assert_blocks_instantiated(
-            chip_top, {"cavlc_enc", "other_block"}
+            chip_top, {"core_block", "other_block"}
         )
         assert err is not None
-        assert "cavlc_enc" in err
+        assert "core_block" in err
 
     def test_parameterized_instantiation_recognized(self):
         chip_top = """\

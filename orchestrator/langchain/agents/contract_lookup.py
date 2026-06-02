@@ -10,7 +10,7 @@ to receive only the edge contracts where this block participates as the
 producer or consumer, plus the design-wide defaults. The result is
 formatted as a prompt fragment ready to drop into the user message.
 
-Why this exists: the v7 h264 autopilot run produced a correct
+Why this exists: the v7 autopilot run produced a correct
 `interface_contracts.json` (incl. `bootstrap_policy.reset_seed` for the
 neighbor edge), but the per-block RTL generator did not honor it because
 it never read the file. This helper bridges that gap by giving each

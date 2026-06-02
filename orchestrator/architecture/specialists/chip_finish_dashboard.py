@@ -1077,8 +1077,8 @@ _TYPE_KEYWORDS: list[tuple[str, list[str], str]] = [
     (
         "codec",
         [
-            "codec", "h264", "h265", "hevc", "avc", "jpeg",
-            "encoder", "decoder", "video", "image",
+            "codec", "jpeg", "encoder",
+            "decoder", "video", "image",
         ],
         "Create a before/after visualization with two side-by-side 8x8 pixel "
         "grids using CSS grid cells. Left grid: 'Input Block' with a smooth "

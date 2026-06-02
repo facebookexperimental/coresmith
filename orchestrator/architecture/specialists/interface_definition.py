@@ -19,7 +19,7 @@ Downstream:
   * the `cross_spec_contract_adherence` constraint subagent validates
     that per-block specs match the contract field-for-field.
 
-Origin: surfaced by the v5 h264 codec_v3 autopilot run, where the
+Origin: surfaced by the v5 codec_v3 autopilot run, where the
 architecture-LLM produced N+1 locally-consistent documents (block
 diagram + N per-block specs) that disagreed at the edges — endianness
 mismatches, port-partition shape drift, missing bootstrap policy. The
@@ -268,7 +268,7 @@ def _validate_contracts(
         # Flow-control sanity: any edge on a closed cycle must NOT
         # use free_running or skid semantics, because both assume the
         # producer or the consumer can hold a transaction indefinitely.
-        # The v7/v8 h264 deadlock landed exactly in this gap.
+        # The v7/v8 codec deadlock landed exactly in this gap.
         producer = str(c.get("producer_block", ""))
         consumer = str(c.get("consumer_block", ""))
         fc = c.get("flow_control_policy") or {}

@@ -122,7 +122,7 @@ Produce JSON with a single top-level object:
    * `elastic_fifo` — N-deep FIFO sized to absorb the worst-case
      stall window the cycle introduces. **Required for any feedback
      loop where one direction has read-before-commit semantics and
-     the other has no-stall input** (the v7/v8 h264 codec deadlock
+     the other has no-stall input** (the v7/v8 codec deadlock
      class). Set `min_buffer_depth_beats` to the *concrete* worst-
      case latency × beat-rate, never less.
    * `credit` — explicit credit-return on a reverse channel; set
@@ -163,7 +163,7 @@ Produce JSON with a single top-level object:
 - **Missing bootstrap**: do NOT skip the `bootstrap_policy` field on
   cycle edges — leaving it empty will cause downstream deadlocks
   and is the single most common DV failure observed in coresmith.
-- **Missing flow control**: the v7/v8 h264 codec_v3 autopilot run
+- **Missing flow control**: the v7/v8 codec_v3 autopilot run
   failed because the scheduler's 256-entry block FIFO filled while
   residual_prediction backpressured waiting for recon_history neighbor
   context — and recon_history withheld non-boundary contexts until

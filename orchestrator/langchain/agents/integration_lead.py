@@ -300,7 +300,7 @@ def assert_blocks_instantiated(
 
     The Integration Lead has historically been observed to silently drop
     blocks from block_diagram.json and substitute glue stubs (e.g.,
-    cavlc_enc -> rle_to_packer_token_bridge). Lint passes because the
+    core_block -> rle_to_packer_token_bridge). Lint passes because the
     substitute compiles, but the chip is structurally wrong.
     """
     if not chip_top_verilog or not expected_block_names:
@@ -331,7 +331,7 @@ def assert_blocks_instantiated(
             f"Integration Lead postcondition failed: chip_top RTL does NOT "
             f"instantiate {len(missing)} expected block(s): "
             f"{sorted(missing)}. The Integration Lead may have silently "
-            f"dropped blocks or substituted glue stubs (the cavlc_enc -> "
+            f"dropped blocks or substituted glue stubs (the core_block -> "
             f"rle_to_packer_token_bridge failure mode). Refusing to proceed."
         )
     return None

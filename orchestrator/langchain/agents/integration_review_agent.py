@@ -138,7 +138,7 @@ class IntegrationReviewAgent:
             # rewrites the originals AFTER RTL has been committed against
             # them -- bytes that the block-level cocotb tests already
             # validated get replaced by 30-40 KB the RTL was never built
-            # for.  Discovered live during the H.264 codec run.
+            # for.  Discovered live during the codec run.
             #
             # Behaviour: callers can opt out by setting
             # CORESMITH_INTEGRATION_REVIEW_INPLACE=1 (e.g. for legacy flows).

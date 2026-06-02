@@ -51,7 +51,7 @@ it's a record with multiple fields, declare:
 
 Default coresmith convention (MSB-first by field-list order, no
 padding, two's-complement for signed) applies — see
-`skills/axi_stream.md` for the rationale and the worked H.264-style
+`skills/axi_stream.md` for the rationale and the worked codec-style
 example. The convention is the same; what differs between the two
 protocols is only the sideband surface area.
 

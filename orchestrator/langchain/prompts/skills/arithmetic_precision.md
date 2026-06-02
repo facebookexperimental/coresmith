@@ -73,7 +73,7 @@ Document this calculation IN the uArch spec, in a block headed
 - if instead you wrote 8-bit, every negative residual wraps and the
   encode is garbage
 
-**4×4 integer forward DCT (H.264-style) on 9-bit signed residuals:**
+**4×4 integer forward DCT on 9-bit signed residuals:**
 - core formula multiplies by ±1, ±2 then sums 4 terms then transposes
   and does it again
 - worst-case absolute output ≈ 4 × 2 × 4 × 2 × 255 ≈ 16320 → 15 bits
