@@ -25,6 +25,13 @@ puts "========== 1. Reading design =========="
 read_lef $tech_lef
 read_lef $cell_lef
 read_liberty $liberty
+# --- SRAM macro LEF/liberty (5th fix; no-op when no macros instantiated) ---
+if {[info exists macro_lefs]} {
+    foreach _ml $macro_lefs { read_lef $_ml }
+}
+if {[info exists macro_libs]} {
+    foreach _mlib $macro_libs { read_liberty $_mlib }
+}
 read_verilog $netlist
 link_design $design_name
 read_sdc $sdc_file
@@ -45,11 +52,18 @@ puts "Design linked. Cell count: [llength [get_cells *]]"
 # =====================================================================
 puts "\n========== 2. Floorplan =========="
 
-initialize_floorplan \
-    -utilization $utilization \
-    -aspect_ratio 1.0 \
-    -core_space 2 \
-    -site unithd
+# With SRAM macros, size the die explicitly (computed to fit macro + std
+# area); otherwise use utilization-based auto-sizing.
+if {[info exists macro_die_area]} {
+    initialize_floorplan -die_area $macro_die_area \
+        -core_area $macro_core_area -site unithd
+} else {
+    initialize_floorplan \
+        -utilization $utilization \
+        -aspect_ratio 1.0 \
+        -core_space 2 \
+        -site unithd
+}
 
 make_tracks li1  -x_offset 0.23 -x_pitch 0.46 -y_offset 0.17 -y_pitch 0.34
 make_tracks met1 -x_offset 0.17 -x_pitch 0.34 -y_offset 0.17 -y_pitch 0.34
@@ -57,6 +71,27 @@ make_tracks met2 -x_offset 0.23 -x_pitch 0.46 -y_offset 0.23 -y_pitch 0.46
 make_tracks met3 -x_offset 0.34 -x_pitch 0.68 -y_offset 0.34 -y_pitch 0.68
 make_tracks met4 -x_offset 0.46 -x_pitch 0.92 -y_offset 0.46 -y_pitch 0.92
 make_tracks met5 -x_offset 1.70 -x_pitch 3.40 -y_offset 1.70 -y_pitch 3.40
+
+# --- place SRAM macros (5th fix; no-op when no macros) ---
+# Resolve real instance names by master (robust to hierarchical flattening),
+# then place the i-th instance at the i-th planned position.
+if {[info exists macro_place]} {
+    set _macro_insts {}
+    foreach _mn $macro_names {
+        foreach _c [get_cells -filter "ref_name == $_mn"] {
+            lappend _macro_insts [get_full_name $_c]
+        }
+    }
+    set _i 0
+    foreach _mp $macro_place {
+        if {$_i >= [llength $_macro_insts]} { break }
+        lassign $_mp _x _y _orient
+        set _real [lindex $_macro_insts $_i]
+        place_macro -macro_name $_real -location "$_x $_y" -orientation $_orient
+        incr _i
+    }
+    puts "Placed $_i SRAM macro(s)."
+}
 
 place_pins -hor_layers met3 -ver_layers met2
 
@@ -105,8 +140,32 @@ define_pdn_grid -name stdcell_grid \
     -pins met4
 
 add_pdn_stripe -grid stdcell_grid -layer met1 -width 0.48 -followpins -starts_with POWER
-add_pdn_stripe -grid stdcell_grid -layer met4 -width 1.6 -pitch 27.14 -offset 13.57 -starts_with POWER
+# Macro designs: sparser met4 PDN so met4 tracks are freed for signal routing
+# around the macro (the dense 27.14 pitch starves routing -> GRT congestion).
+set _met4_pitch 27.14
+set _met4_offset 13.57
+if {[info exists macro_names]} {
+    set _met4_pitch 54.28
+    set _met4_offset 27.14
+}
+add_pdn_stripe -grid stdcell_grid -layer met4 -width 1.6 -pitch $_met4_pitch -offset $_met4_offset -starts_with POWER
 add_pdn_connect -grid stdcell_grid -layers {met1 met4}
+
+# --- SRAM macro power + dedicated macro PDN grid (5th fix; no-op if none) ---
+if {[info exists macro_pg]} {
+    foreach _pg $macro_pg {
+        lassign $_pg _ppin _gpin
+        add_global_connection -net VPWR -inst_pattern {.*} -pin_pattern $_ppin -power
+        add_global_connection -net VGND -inst_pattern {.*} -pin_pattern $_gpin -ground
+    }
+    global_connect
+    # met5 stripes give the macros' met4 power pins something to strap up to
+    add_pdn_stripe -grid stdcell_grid -layer met5 -width 1.6 -pitch 40.0 -offset 15.0 -starts_with POWER
+    add_pdn_connect -grid stdcell_grid -layers {met4 met5}
+    define_pdn_grid -macro -name macro_grid -voltage_domain CORE \
+        -halo {4.0 4.0} -cells $macro_names
+    add_pdn_connect -grid macro_grid -layers {met4 met5}
+}
 
 pdngen
 
@@ -140,6 +199,25 @@ set_wire_rc -signal -layer met2
 set_wire_rc -clock  -layer met3
 
 puts "Wire RC set: signal=met2, clock=met3"
+
+# =====================================================================
+# 6b. PRE-CTS DESIGN REPAIR (buffer high-fanout nets, resize weak drivers)
+# =====================================================================
+# A ~200-fanout net left on a single min-size driver measures ~12 ns of pure
+# cell delay pre-repair (live run: reset net, WNS -1.92 ns); repair_design
+# with a fanout cap moved it to WNS 0.00 at 50 MHz. Also exclude the sky130
+# probe/lpflow cells: the resizer otherwise picks them and they break LVS
+# and skew timing.
+puts "\n========== 6b. Pre-CTS repair_design =========="
+
+set_dont_use {sky130_fd_sc_hd__probe_p_* sky130_fd_sc_hd__probec_p_* sky130_fd_sc_hd__lpflow_*}
+estimate_parasitics -placement
+set_max_fanout 16 [current_design]
+repair_design
+detailed_placement
+check_placement -verbose
+
+puts "Pre-CTS repair_design done."
 
 # =====================================================================
 # 7. CLOCK TREE SYNTHESIS
@@ -183,7 +261,14 @@ puts "Post-CTS repair done."
 # =====================================================================
 puts "\n========== 9. Global Routing =========="
 
-set_routing_layers -signal met1-met4 -clock met3-met4
+# Macro designs need an over-the-macro routing layer (the macro blocks
+# met1-met4 over its footprint); open met5 to signal so the router can go over
+# it instead of congesting the channels around it.
+if {[info exists macro_names]} {
+    set_routing_layers -signal met1-met5 -clock met3-met5
+} else {
+    set_routing_layers -signal met1-met4 -clock met3-met4
+}
 
 global_route -guide_file "$out_dir/route_guide.guide" \
     -congestion_iterations 50
@@ -248,7 +333,11 @@ report_power
 # =====================================================================
 puts "\n========== 13. Metal Density Fill =========="
 
-density_fill -rules $tech_lef
+# density_fill needs a fill-rules JSON, not the tech LEF; it is a shuttle
+# metal-density nicety and must never block DEF/GDS output. Best-effort.
+if {[catch {density_fill -rules $tech_lef} _df_err]} {
+    puts "WARNING: density_fill skipped ($_df_err)"
+}
 
 puts "Density fill done."
 
@@ -258,6 +347,19 @@ puts "Density fill done."
 puts "\n========== 14. Writing outputs =========="
 
 write_def "$out_dir/${design_name}_routed.def"
+
+# [backend B10] Re-run global_connect right before the netlist write. CTS +
+# repair inserted buffers/inverters AFTER the last global_connect (PDN stage),
+# and write_verilog -include_pwr_gnd omits VPWR/VGND on any cell whose power
+# pins were never connected -> those cells then LVS-mismatch as
+# power-disconnected (armD backend). Re-connecting here attaches them before
+# the netlist is exported. Idempotent for already-connected cells.
+add_global_connection -net VPWR -inst_pattern {.*} -pin_pattern {VPWR} -power
+add_global_connection -net VGND -inst_pattern {.*} -pin_pattern {VGND} -ground
+add_global_connection -net VPWR -inst_pattern {.*} -pin_pattern {VPB} -power
+add_global_connection -net VGND -inst_pattern {.*} -pin_pattern {VNB} -ground
+global_connect
+
 write_verilog "$out_dir/${design_name}_pnr.v"
 write_verilog -include_pwr_gnd "$out_dir/${design_name}_pwr.v"
 

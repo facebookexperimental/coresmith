@@ -73,6 +73,16 @@ Produce a JSON object with the following structure:
       "dma_required": <boolean>,
       "notes": "<text>"
     }},
+    "parameters": [
+      {{
+        "name": "<design parameter name -- e.g. frame_width, fifo_depth, burst_len, addr_range, max_message_blocks, key_modes>",
+        "role": "dimension | mode | range",
+        "min": <number, default 0>,
+        "max": <number -- the DECLARED MAXIMUM extent (required for dimension/range)>,
+        "unit": "<pixels | entries | beats | bytes | bits | blocks | '' >",
+        "boundary_values": [<optional: specific test points; omit to auto-fill [max] + every 2^n crossing <= max>]
+      }}
+    ],
     "functional_requirements": [
       "<derived from FRD with engineering detail>"
     ],
@@ -123,6 +133,32 @@ Produce a JSON object with the following structure:
 ```
 
 GUIDELINES:
+- MANDATORY `parameters` block (the typed dimensional-parameter schema). This
+  is the machine-readable declaration of the design's PARAMETER SPACE -- the
+  axes whose extents drive RTL index/address/counter widths and mode selects.
+  It is consumed deterministically by the max-geometry DV gate, the seeded
+  chip-equivalence sizing, and the memory-manifest gate, so it must be exact:
+  - Emit ONE object per distinct design parameter you can derive from the
+    PRD/FRD/constraints/block diagram/golden model. Use `role: "dimension"`
+    for a geometry/count extent (frame width/height, block count, FIFO depth,
+    sample count), `role: "range"` for an address/index range, `role: "mode"`
+    for an enumerated control select (mode word, key size, channel count).
+  - Every `dimension`/`range` MUST carry a numeric `max` (its declared maximum).
+    Leave `boundary_values` out unless you have specific extra test points --
+    the engine auto-fills `[max]` plus every 2^n crossing below it. For a
+    `mode`, list the enumerated values in `boundary_values`.
+  - The parameter NAME is the design's own vocabulary -- do NOT force a video
+    naming scheme; a codec has frame_width, an AES core has max_message_blocks
+    and key_modes, a DMA has burst_len and addr_range.
+  - SCOPE (define the boundary crisply): declare only DESIGN-PARAMETER axes --
+    things the RTL datapath is parameterized by and must remain correct at
+    their maximum. Do NOT include packaging/shuttle/PDK facts (pad counts, die
+    area budget, process node, clock frequency, power budget) -- those live in
+    their own ERS fields, not `parameters`.
+  - You MAY emit an empty `parameters: []` ONLY for a design with genuinely no
+    dimensional parameters (e.g. a fixed-width combinational block), and ONLY
+    when you also state "no dimensional parameters" in the summary or an open
+    item. Otherwise the block must enumerate the axes.
 - Synthesize, don't just concatenate -- the ERS should add engineering
   depth that the upstream documents don't have
 - Every functional requirement from the FRD should map to specific

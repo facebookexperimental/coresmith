@@ -1586,3 +1586,59 @@ class TestBuildPipelineAskQuestion:
         result = _build_pipeline_ask_question(payload)
 
         assert "ask_question" not in result
+
+
+@pytest.mark.mcp
+class TestMergeBlockIntoPipelineCheckpoint:
+    """_merge_block_into_pipeline_checkpoint must APPEND the authoritative block
+    result (the channel uses operator.add and the gate dedups keeping the LAST
+    entry), so a restart_block PASS becomes the gate-visible entry -- not replace
+    the first name-match (which, under the append reducer, left a stale later
+    entry winning and re-parked the run at pipeline_incomplete)."""
+
+    @pytest.mark.asyncio
+    async def test_appends_single_authoritative_result(self, reset_mcp_state):
+        import orchestrator.mcp_server as mcp
+
+        mcp._pipeline.thread_id = "test-merge"
+        snapshot = MagicMock()
+        # Stale history: an early entropy pass then a LATER entropy fail (the bug
+        # scenario). First-match-replace would update the early one, leaving the
+        # later fail to win under last-wins dedup.
+        snapshot.values = {"completed_blocks": [
+            {"name": "entropy_enc", "success": True, "attempts": 1},
+            {"name": "block_packer", "success": True, "attempts": 1},
+            {"name": "entropy_enc", "success": False, "attempts": 2},
+        ]}
+        mcp._pipeline.graph = MagicMock()
+        mcp._pipeline.graph.aget_state = AsyncMock(return_value=snapshot)
+        captured = {}
+
+        async def _aupdate(config, values, **kw):
+            captured["values"] = values
+            captured["kw"] = kw
+        mcp._pipeline.graph.aupdate_state = AsyncMock(side_effect=_aupdate)
+
+        new_result = {"name": "entropy_enc", "success": True, "attempts": 1,
+                      "sim_passed": True}
+        ok = await mcp._merge_block_into_pipeline_checkpoint(new_result)
+
+        assert ok is True
+        # The update appends EXACTLY the one authoritative result (last-wins),
+        # not a rebuilt full list.
+        cbs = captured["values"]["completed_blocks"]
+        assert cbs == [new_result], cbs
+        assert len(cbs) == 1
+
+    @pytest.mark.asyncio
+    async def test_no_name_returns_false(self, reset_mcp_state):
+        import orchestrator.mcp_server as mcp
+        mcp._pipeline.thread_id = "test-merge2"
+        snapshot = MagicMock()
+        snapshot.values = {"completed_blocks": []}
+        mcp._pipeline.graph = MagicMock()
+        mcp._pipeline.graph.aget_state = AsyncMock(return_value=snapshot)
+        mcp._pipeline.graph.aupdate_state = AsyncMock()
+        ok = await mcp._merge_block_into_pipeline_checkpoint({"success": True})
+        assert ok is False
+        mcp._pipeline.graph.aupdate_state.assert_not_called()

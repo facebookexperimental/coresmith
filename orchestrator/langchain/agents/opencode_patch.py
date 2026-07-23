@@ -23,6 +23,7 @@ _OPENCODE_PATH = shutil.which("opencode") or "/usr/local/bin/opencode"
 # Examples assume a "local" provider pointing at a vLLM endpoint with
 # Qwen/Qwen3.6-27B registered.
 _MODEL_MAP = {
+    "claude-opus-4-8":            "local/Qwen/Qwen3.6-27B",
     "claude-opus-4-7":            "local/Qwen/Qwen3.6-27B",
     "claude-sonnet-4-6":          "local/Qwen/Qwen3.6-27B",
     "claude-haiku-4-5-20251001":  "local/Qwen/Qwen3.6-27B",

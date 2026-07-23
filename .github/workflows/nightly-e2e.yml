@@ -47,6 +47,39 @@ jobs:
         run: |
           docker run --rm coresmith:nightly bash -lc 'cd /coresmith && make preflight'
 
+  stage-fixtures:
+    name: Stage fixtures (strict)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Package C, C6: re-run the T1 stage-fixture gate in STRICT mode so a
+    # checkpoint that has drifted out of schema sync (topology/state/langgraph
+    # change) hard-fails the nightly instead of silently skipping like it does
+    # on PRs. No Docker / EDA / live LLM needed -- pure Python.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Node + Claude CLI
+        run: |
+          curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -
+          sudo apt-get install -y nodejs
+          sudo npm install -g @anthropic-ai/claude-code
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e "orchestrator[dev]"
+
+      - name: Stage-fixture gate (strict -- fail on schema drift)
+        env:
+          CORESMITH_STAGE_STRICT: "1"
+        run: pytest orchestrator/tests/ -v -m stage_fixture
+
   e2e-demo:
     name: Run make demo on adder8
     runs-on: ubuntu-latest
@@ -79,7 +112,12 @@ jobs:
             echo "present=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run make demo
+      - name: Run adder8 canary (headless auto-approver)
+        # Package C, C6: drive the smallest real design end-to-end with NO human
+        # in the loop -- nightly_canary.py polls `coresmith state` and resumes
+        # every interrupt with a safe default action, then snapshots a post-rtl
+        # stage fixture. This is the refresh source for the in-repo stage/replay
+        # fixtures (the uploaded llm_calls.jsonl + stage snapshot below).
         if: steps.have_token.outputs.present == 'true'
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -87,8 +125,13 @@ jobs:
           docker run --rm \
               -e CLAUDE_CODE_OAUTH_TOKEN \
               -e CORESMITH_MODEL=sonnet-4.6 \
+              -e CORESMITH_PROFILE=strict \
               -v "${{ github.workspace }}/.coresmith:/coresmith/.coresmith" \
-              coresmith:nightly bash -lc 'cd /coresmith && make demo'
+              coresmith:nightly bash -lc 'cd /coresmith && \
+                python3 scripts/nightly_canary.py \
+                  --project-root /coresmith \
+                  --blocks-file examples/adder8/blocks.yaml \
+                  --timeout-s 1500'
 
       - name: Skip note (no token)
         if: steps.have_token.outputs.present != 'true'
@@ -104,7 +147,9 @@ jobs:
           path: |
             .coresmith/pipeline_results.json
             .coresmith/pipeline_events.jsonl
+            .coresmith/llm_calls.jsonl
             .coresmith/traces.db
+            .coresmith/stage_snapshot_post_rtl/
             rtl/adder8/
             syn/output/adder8/
           if-no-files-found: ignore

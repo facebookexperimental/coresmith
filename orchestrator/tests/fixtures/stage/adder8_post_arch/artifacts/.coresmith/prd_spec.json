@@ -1,0 +1,8 @@
+{
+  "design_name": "adder8",
+  "summary": "8-bit unsigned adder smoke design",
+  "requirements": [
+    "{cout,sum} = a + b + cin"
+  ],
+  "target_clock_mhz": 50
+}

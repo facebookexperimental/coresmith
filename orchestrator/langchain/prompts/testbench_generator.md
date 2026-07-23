@@ -25,6 +25,47 @@ Examples:
 Do NOT use ``import importlib`` or ``sys.path`` hacks.  The wrapper is
 guaranteed to exist at runtime.
 
+ORACLE FIDELITY -- THE BLOCK MODEL IS THE SOLE ORACLE (MANDATORY):
+The imported ``<block_name>_model`` is the authoritative reference. Your
+expected values MUST be derived by CALLING the model's own functions/class on
+the SAME stimulus you drive into the RTL -- never by re-deriving, hardcoding, or
+re-implementing the block's algorithm inside the testbench. A testbench that
+reimplements the reference logic (its own copy of the transform/coding/decision
+math, or hand-written expected vectors) silently goes STALE when the model is
+revised and can PASS while the RTL no longer matches the current model -- the
+exact failure this rule prevents. So:
+  - Compute every expected output from the model object (call it on the test
+    inputs), not from constants or a TB-local copy of the algorithm.
+  - Compare the RTL's COMPLETE output stream to the model's complete output for
+    the same input: every output beat's value AND ordering AND count AND tlast
+    framing -- not just spot-checks of the first few beats.
+  - Do NOT capture a "golden" snapshot once and assert against it; recompute
+    from the model each run so a model change is always reflected.
+
+NO-SHADOW-DATAPATH RULE (HARD; rootcause-to-skill 2026-06-21):
+The deadliest form of the staleness above is a "shadow datapath": the TB
+defines its OWN helper functions that recompute the block's transform / coding
+/ mode-decision / quantization math (e.g. a local ``level_fn``,
+``coeff_levels_word``, ``rtl_selected_payload``, a hand-coded DCT/quant/entropy coding,
+hardcoded mode words like ``int("2"*16,16)``, or a fixed mb_type), and asserts
+the RTL against THAT. When the RTL is also a stub, the stub and the shadow
+match and DV passes GREEN while the design is byte-wrong at integration. This
+actually happened (intra_rd_encode_core) and let dishonest RTL ship. Therefore:
+  - The ONLY source of expected datapath values is a call into the imported
+    ``<block_name>_model`` (its top-level reference function / class method that
+    transforms input records to output records). For a stateful block, thread
+    the model's documented state across the input sequence EXACTLY as the
+    model's own Amaranth/reference block does (e.g. per-frame state cleared on
+    frame_start), then emit one expected output beat per model output beat.
+  - You MUST NOT define any TB-local function whose body re-derives the block's
+    arithmetic/coding/decision result. The TB may pack/unpack the WIRE record
+    layout (bit fields of the AXIS word) and build STIMULUS, but the field
+    VALUES it expects must come out of the model, not out of TB math.
+  - Self-check before emitting: if I deleted the RTL and replaced it with a
+    trivially-wrong stub, would my TB still FAIL? If any expected value is
+    computed by TB-local algorithm code instead of the model, the answer is
+    "it might pass" -- that is forbidden. Rewrite to call the model.
+
 AXI-STREAM HANDSHAKING -- CRITICAL:
 When the DUT has AXI-Stream input (s_tvalid/s_tready) and output
 (m_tvalid/m_tready), you MUST avoid deadlocks:
@@ -192,6 +233,23 @@ RULES:
    a. Reset test: verify outputs are zero/idle after reset
    b. Known-vector test: specific inputs with known correct outputs
    c. Random stress test: 100+ random inputs compared to golden model
+   d. Flow-control / sustained-streaming test (MANDATORY for any block with
+      AXI-Stream / valid-ready handshakes): drive a LONG continuous stimulus
+      (many beats -- enough to fill and drain any internal FIFO/buffer several
+      times over, e.g. >= a few hundred beats or several frames' worth) while
+      RANDOMLY applying backpressure on EVERY handshake -- gap the upstream
+      ``s_*_tvalid`` with random idle cycles AND randomly deassert the
+      downstream ``m_*_tready`` for random spans (use cocotb.start_soon for
+      concurrent sender/receiver). Collect the COMPLETE output stream and assert
+      it equals the model's expected output stream byte-for-byte (values, order,
+      count, and tlast framing). This is what catches RTL whose FLOW CONTROL
+      diverges from the model -- e.g. a FIFO that overflows/back-pressures or
+      stalls where the model uses a 1-deep handshake (or vice versa). Such a
+      block produces correct per-beat values on a thin stimulus but DROPS,
+      STALLS, or REORDERS under sustained load; only this test exposes it before
+      integration. A block must NOT be considered passing if it cannot stream a
+      full representative workload under randomized backpressure with output ==
+      model.
    Reset tests must not assert transaction-completion semantics by default.
    If a status bit or sideband field is named `done`, `drained`,
    `frame_complete`, `packet_complete`, terminal `tlast`, or otherwise
@@ -210,10 +268,15 @@ RULES:
     if it contains anything other than valid Python, the simulation will fail
     at import time. The file MUST start with import statements (e.g.,
     `import cocotb`), not markdown headers or commentary.
-14. SELF-CONTAINED TESTS: If the golden model wrapper is unavailable or
-    broken, implement the reference algorithm directly in the test file.
-    For example, a forward DCT reference can be written in ~15 lines of
-    numpy. This is preferable to a test that crashes at import time.
+14. SELF-CONTAINED TESTS -- LAST RESORT ONLY: Prefer calling the imported
+    block model (see ORACLE FIDELITY). ONLY if the ``<block_name>_model``
+    wrapper genuinely cannot be imported (and you have confirmed it raises at
+    import) may you implement the reference algorithm directly in the test file
+    so the test runs rather than crashing -- and when you do, add a comment
+    ``# WARNING: model wrapper unavailable; TB-local reference may drift from the
+    block model`` at the top so the divergence risk is visible. Do NOT
+    reimplement the reference merely because it seems easier than calling the
+    model; a TB-local copy is the staleness vector this prompt forbids.
 15. VCD/WAVEKIT AUDIT -- MANDATORY:
     The pipeline runs cocotb under Verilator with tracing enabled, expects
     `sim_build/<block>/dump.vcd`, and inspects that VCD with WaveKit. Your
@@ -221,6 +284,76 @@ RULES:
     activity, sideband metadata, and terminal outputs so the waveform audit
     has meaningful transitions. Do not disable tracing, skip clocks, or
     create tests that pass without advancing simulated time.
+
+16. ANTI-MEMORIZATION DV SEED -- MANDATORY for data-transforming blocks
+    (encoders, transforms, quantizers, codecs, filters, any block whose
+    output is a non-trivial FUNCTION of its input samples):
+    The engine injects a fresh, high-entropy seed into the environment on
+    EVERY simulation run as ``os.environ["CORESMITH_DV_SEED"]``. Your
+    randomized tests MUST derive ALL stimulus entropy from this seed so the
+    DV scenario is UNKNOWABLE when the RTL was generated. Concretely:
+      a. Read it once near the top of the file, e.g.::
+
+             import os, random
+             _DV_SEED = int(os.environ.get("CORESMITH_DV_SEED", "0"))
+
+      b. Seed every stimulus RNG from ``_DV_SEED`` (mix in a per-test salt
+         so different tests differ): ``rng = random.Random(_DV_SEED ^ 0xA53)``.
+         Do NOT hardcode literal seeds (``random.Random(1)``,
+         ``seed=0x31415``, etc.) for the random-stress / sustained-streaming
+         / model-equivalence tests -- a hardcoded seed makes the stimulus
+         reproducible and therefore MEMORIZABLE by a cheating RTL.
+      c. Randomize the DATA content (every input sample / pixel / coefficient)
+         from the seeded RNG -- not a fixed pattern.
+      d. Also randomize the SCENARIO from the seed: for blocks parameterized
+         by geometry/size/mode/quantizer (e.g. width, height, QP), pick those
+         from the seed across a WIDE space (multiple distinct frames covering
+         several geometries and several QP/parameter values in one run), not a
+         single fixed (W,H,QP). A finite LUT cannot cover a seed-driven space.
+      e. Compute every expected output by calling the imported golden model on
+         the SAME seeded stimulus at runtime (never pre-baked constants).
+    A correct implementation passes for ANY seed; a memorized/stimulus-keyed
+    implementation passes only for the seeds it was tuned to and FAILS the
+    fresh per-run seed. You may keep ONE small fixed known-vector test for
+    readability, but it must be in ADDITION to the seed-driven randomized
+    tests, never a replacement.
+
+17. THROUGHPUT MEASUREMENT -- MANDATORY `test_throughput_measure` CASE:
+    In ADDITION to the functional tests above, emit exactly one cocotb test
+    named ``test_throughput_measure`` that MEASURES the block's steady-state
+    cycles-per-op and writes it to an artifact the engine's measured-throughput
+    gate reads. The engine rejects a block whose measured cyc/op exceeds its
+    uArch-declared §6.1 cyc/op x 1.1, so this measurement must be faithful.
+      a. Drive N >= 8 back-to-back REPRESENTATIVE ops through the block's
+         declared primary interface -- the SAME interface a real op uses (an
+         AXI-Stream frame, a START/…/DONE register-mapped operation, an
+         sRdy/dRdy item). Use realistic data (reuse your seeded stimulus); this
+         is a rate measurement, not a correctness one, but do keep the DUT fed
+         so it runs at its natural cadence (no artificial idle between ops
+         beyond what the handshake requires).
+      b. Maintain a free-running cycle counter (increment once per
+         ``RisingEdge(dut.clk)``). Record the counter value at the RETIREMENT of
+         each op (output beat accepted / DONE observed / last item retired).
+      c. Compute STEADY-STATE cyc/op EXCLUDING the first-op pipeline fill:
+             cyc_per_op = (cyc_at_op[N-1] - cyc_at_op[0]) / (N - 1)
+         i.e. the average spacing between consecutive op retirements over ops
+         1..N-1 -- this cancels the one-time fill/drain of op 0.
+      d. Write the result as JSON to ``throughput_measured.json`` in the current
+         working directory (the sim run dir), e.g.::
+
+             import json
+             with open("throughput_measured.json", "w") as _f:
+                 json.dump({"measured_cyc_per_op": float(cyc_per_op),
+                            "n_ops": int(N)}, _f)
+
+         Write the file even if a soft assert would fail -- the artifact is how
+         the engine measures; do not gate its creation on a value check.
+      e. This test should PASS (it is a measurement, not a correctness check);
+         only skip writing the artifact if the block genuinely has no op cadence
+         (a purely combinational block with no clocked op boundary) -- in that
+         case the gate records the block as not-applicable. If the uArch spec's
+         Section 6.1 `perf` block declares an `op_unit`, that is the unit of one
+         "op" for this measurement.
 
 TESTBENCH REUSE -- IMPORTANT:
 Before generating a new testbench, check if the output file already exists

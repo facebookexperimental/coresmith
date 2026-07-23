@@ -79,6 +79,101 @@ def _build_answers_context(
 # Public API
 # ---------------------------------------------------------------------------
 
+_NO_GOLDEN_FLAG = "NO_GOLDEN_REFERENCE_MODEL"
+_NO_GOLDEN_CAUTION = (
+    "No independent golden reference model was provided for this design "
+    "(no golden_model_dirs configured and no reference model found in the "
+    "project inputs). Per-block design verification will therefore compare the "
+    "RTL against a testbench oracle that the TB agent SELF-AUTHORS from the "
+    "same spec the RTL was written from -- so a shared semantic misreading "
+    "(e.g. a codec run-length / EOB rule) is NOT caught at block sim or "
+    "integration DV, and only surfaces at validation DV, where it is typically "
+    "classified as a uArch-spec error that is expensive to fix late. STRONGLY "
+    "RECOMMENDED: supply a trusted Python golden model (set golden_model_dirs "
+    "or place a reference model in inputs/) for any datapath/codec/arithmetic "
+    "block. Without it, functional correctness is not independently verified."
+)
+
+
+def _golden_available(project_root: str, requirements: str) -> tuple[bool, list[str]]:
+    """Best-effort detection of an independent golden reference model.
+
+    A golden is 'available' if config.yaml's ``golden_model_dirs`` points at a
+    dir containing Python files, or a non-testbench ``.py`` reference sits in
+    the project inputs/. Returns (available, found_paths). Never raises.
+    """
+    import os
+    found: list[str] = []
+    root = Path(project_root)
+    # search roots for resolving relative references (mirror _scan_golden_models)
+    src_roots = [root]
+    env_root = os.environ.get("CORESMITH_SOURCE_ROOT", "")
+    if env_root:
+        src_roots.append(Path(env_root))
+    src_roots.append(Path(__file__).resolve().parents[3])  # coresmith repo root
+
+    def _ok(p: Path) -> bool:
+        n = p.name.lower()
+        return p.is_file() and not (n.startswith("test_") or n.endswith("_tb.py"))
+
+    # 1. config-declared golden dirs
+    try:
+        from orchestrator.langgraph.pipeline_helpers import load_config
+        for d in (load_config().get("golden_model_dirs") or []):
+            dp = Path(d if isinstance(d, str) else d.get("path", ""))
+            for sr in src_roots:
+                cand = dp if dp.is_absolute() else sr / dp
+                if cand.is_dir():
+                    found += [str(p) for p in cand.glob("*.py") if _ok(p)]
+    except Exception:
+        pass
+    # 2. reference models dropped alongside the requirements
+    for sub in ("inputs", "model", "."):
+        d = root / sub
+        if d.is_dir():
+            found += [str(p) for p in d.glob("*.py") if _ok(p)]
+    # 3. .py paths REFERENCED in the requirements text -- resolved AND verified to
+    #    exist (a dangling reference like 'model/<name>_golden.py' that was never
+    #    created must NOT count as an available golden).
+    import re as _re
+    for ref in _re.findall(r"[\w./-]+\.py", requirements or ""):
+        rp = Path(ref)
+        for sr in src_roots:
+            cand = rp if rp.is_absolute() else sr / rp
+            if _ok(cand):
+                found.append(str(cand.resolve()))
+                break
+    return (len(found) > 0, sorted(set(found)))
+
+
+def _annotate_golden_risk(
+    prd: dict[str, Any], project_root: str, requirements: str, target_path: Path
+) -> None:
+    """Stamp golden-model availability + a verification-risk flag onto the PRD,
+    and persist it back to prd_spec.json so it shows at PRD review."""
+    available, paths = _golden_available(project_root, requirements)
+    prd["golden_model_available"] = available
+    if available:
+        prd["golden_model_paths"] = paths
+        return
+    flags = prd.setdefault("risk_flags", [])
+    if not any(
+        isinstance(f, dict) and f.get("id") == _NO_GOLDEN_FLAG for f in flags
+    ):
+        flags.append({
+            "id": _NO_GOLDEN_FLAG,
+            "severity": "high",
+            "caution": _NO_GOLDEN_CAUTION,
+        })
+    try:
+        import json as _json
+        target_path.write_text(
+            _json.dumps({"prd": prd}, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
 async def gather_prd(
     requirements: str,
     pdk_summary: str,
@@ -146,9 +241,13 @@ async def gather_prd(
                 f"area, power, dataflow."
             )
 
-        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
+        from orchestrator.langchain.agents.coresmith_llm import (
+            DEFAULT_MODEL, ClaudeLLM, arch_reasoning_effort)
 
-        llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
+        # PRD is a frozen artifact every downstream stage inherits -> spend
+        # the higher reasoning tier here (codex-only; no-op on other providers).
+        llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200,
+                        reasoning_effort=arch_reasoning_effort())
 
         try:
             content = await llm.call(
@@ -168,8 +267,23 @@ async def gather_prd(
                 result = _parse_response(content)
 
             if user_answers:
+                # Deterministic post-step: flag the verification risk when no
+                # independent golden reference model is available. Without a
+                # golden, the per-block DV oracle is self-authored by the TB
+                # agent from the same spec as the RTL, so a shared semantic
+                # error is not caught until validation DV (where it surfaces as
+                # an expensive uArch-level failure). Make that visible at PRD
+                # review.
+                if isinstance(result.get("prd"), dict):
+                    _annotate_golden_risk(
+                        result["prd"], project_root, requirements, target_path
+                    )
                 span.set_attribute("phase", "prd_complete")
                 span.set_attribute("has_prd", "prd" in result)
+                span.set_attribute(
+                    "golden_model_available",
+                    bool(result.get("prd", {}).get("golden_model_available")),
+                )
             else:
                 span.set_attribute("phase", "questions")
                 span.set_attribute("question_count",

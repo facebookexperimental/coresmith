@@ -27,8 +27,25 @@ INTEGRATION TEST STRATEGY:
    output within a bounded number of cycles).
 3. **Throughput test**: Send a burst of inputs and verify the pipeline
    sustains the expected throughput (one output per N clocks, per PRD).
-4. **Backpressure test** (if AXI-Stream): Deassert output tready and
-   verify the pipeline stalls gracefully without data loss.
+4. **Backpressure data-integrity test** (MANDATORY if AXI-Stream): Re-run a
+   FULL correctness comparison -- the RTL output must match the reference
+   beat-for-beat -- while RANDOMLY deasserting the output `tready` (~30% of
+   cycles) AND inserting input `tvalid` gaps (~15% of cycles, holding the
+   current word). Assert NO beat is lost, duplicated, or reordered vs. the
+   reference. This is not optional and it is not a separate "does it stall"
+   check: a design that clears `tvalid` on its own transfer edge, or skews
+   `tready` per beat, is byte-correct with `tready` wired high and only FAILS
+   under backpressure -- so the correctness check itself must run under
+   backpressure. Seed the randomness deterministically (e.g. `random.Random(0)`)
+   so the test is reproducible. Example receiver pattern:
+
+       rng = random.Random(0)
+       while got < expected_n:
+           dut.m_axis_tready.value = 0 if rng.random() < 0.30 else 1
+           await RisingEdge(dut.clk)
+           if int(dut.m_axis_tvalid.value) and int(dut.m_axis_tready.value):
+               assert int(dut.m_axis_tdata.value) == ref[got]  # no drop/dup
+               got += 1
 5. **Boundary contract test**: For each connection with a semantic contract,
    exercise at least one transaction that crosses that boundary and check the
    observable parts of the contract: payload ordering, sideband metadata,
@@ -116,6 +133,40 @@ PERFORMANCE TEST RULES:
 - Do NOT hardcode PRD numbers as magic constants. Define them as named
   variables at the top of the test with a comment citing the PRD field.
 
+MAX-GEOMETRY STIMULUS -- MANDATORY WHEN THE DESIGN DECLARES DIMENSIONS:
+Many designs declare dimensional maxima -- a maximum frame width/height, a
+maximum burst length, an address range, a table/FIFO depth, a maximum packet or
+transaction count, etc. These maxima set the WIDTH of internal index, address,
+and counter registers. A fixed tiny-geometry test (e.g. a 16x16 block, an
+8-beat burst) exercises only the low-order bits of those indices, so a
+truncated index/address width sails through: the wrap happens at a 2^n boundary
+BELOW the maximum (e.g. a 7-bit column index wraps at 512 on a 640-wide frame),
+NOT at the maximum itself.
+- The declared dimensional maxima come from the ERS `parameters` block. When it
+  is present it is provided VERBATIM above as `DIMENSIONAL PARAMETERS` -- use it
+  directly (each `dimension`/`range` entry's `max` is a maximum you must drive;
+  each `mode` entry's `boundary_values` are the modes to exercise). When no such
+  table is provided, fall back to reading the maxima from the PRD/ERS/constraints
+  context. The dimension NAMES are whatever the design uses -- do NOT assume
+  video: a FIFO depth, a max burst length, and an address range are dimensions
+  exactly like a frame width.
+- Include AT LEAST ONE test case that drives every declared dimension at its
+  DECLARED MAXIMUM. Running at the maximum inherently crosses every 2^n index
+  boundary below it, which is where a truncated width wraps.
+- If a full workload at the maximum dimensions is prohibitively slow, drive
+  SPARSE or SHORT content at the MAXIMUM dimensions instead (e.g. a single
+  active row/beat at maximum width, a short burst that still ADDRESSES the
+  maximum index) -- the goal is to exercise the index/address/counter widths at
+  their maximum extent, not to process a full-size payload.
+- Advertise the case with a marker comment on its own line, ONE entry per
+  declared dimension:
+      `# MAXGEO: <dim_name>=<max_value> <dim_name>=<max_value> ...`
+  e.g. `# MAXGEO: frame_width=640 frame_height=352`, or for a non-video design
+  `# MAXGEO: cmd_fifo_depth=512 max_burst_len=256`. Use the design's OWN
+  dimension names and their declared maximum values.
+- If the design declares NO dimensional maxima, no max-geometry case or marker
+  is needed.
+
 VCD/WAVEKIT AUDIT -- MANDATORY:
 - The integration DV node runs Verilator with tracing enabled, expects
   `sim_build/integration/dump.vcd`, and audits it with WaveKit before the
@@ -157,7 +208,10 @@ COCOTB RULES (same as per-block):
       async def start_clock(dut):
           cocotb.start_soon(Clock(dut.clk, CLOCK_PERIOD_NS, units="ns").start())
           await RisingEdge(dut.clk)
-- ALWAYS drive `m_tready = 1` BEFORE sending data on any input interface.
+- In the smoke/throughput tests, drive `m_tready = 1` BEFORE sending data on
+  any input interface (keep those tests simple). The mandatory backpressure
+  data-integrity test (above) is the ONE place you randomize `m_tready` /
+  input gaps -- do it there, not in the basic tests.
 - Use `cocotb.start_soon()` for concurrent sender/receiver coroutines.
   NEVER use `cocotb.start_fork()` (removed in cocotb 2.0).
 - Add cycle-count watchdog to every handshake wait loop (max 10000 cycles).
@@ -212,8 +266,9 @@ IMPORTANT CONSTRAINTS:
 - Keep tests pragmatic. If the pipeline is complex (5+ blocks), a
   "data-in, data-out" smoke test with a cycle-count watchdog is sufficient.
 - Log which block boundary each check targets for debuggability.
-- Include at least 5 tests total: reset, smoke, throughput/backpressure,
-  and 1-2 performance tests (latency + sustained throughput).
+- Include at least 5 tests total: reset, smoke, throughput, the MANDATORY
+  backpressure data-integrity test (randomized tready + input gaps, exact
+  match), and 1-2 performance tests (latency + sustained throughput).
 
 OUTPUT FORMAT GUARD:
 Your response MUST be a single, complete Python file containing valid cocotb

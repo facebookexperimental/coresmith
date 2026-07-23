@@ -148,6 +148,29 @@ class ArchGraphState(TypedDict):
     constraint_result: Optional[dict]
     human_feedback: str
 
+    # Doc-fix repair path: how many times the Doc Fix node has regenerated a
+    # source document (SAD/FRD) to clear a doc-sourced auto_fixable violation.
+    # Bounded by _DOC_FIX_MAX_ATTEMPTS; on exhaustion the auto-fix loop falls
+    # back to the Block Diagram iteration + its existing exhaustion escalation.
+    doc_fix_attempts: int
+    # rung3r2 defect 3 (Fix 2): the feedback-reset key of the LAST operator
+    # escalation that re-armed the doc-fix budget. The budget is reset at most
+    # once per DISTINCT operator feedback (keyed on a hash of the feedback text)
+    # so REPEATED identical feedback on an unchanging doc-violation set can no
+    # longer re-arm Doc Fix forever -- it exhausts to the Block Diagram /
+    # escalation path.
+    doc_fix_reset_key: str
+
+    # Output-contract ownership gate (catches a decomposition orphaning a
+    # global output responsibility before interfaces are frozen)
+    output_contract_verdict: Optional[dict]
+    output_contract_retries: int
+
+    # Block-complexity gate (catches a monolith block that fused too many
+    # distinct golden algorithms for a byte-exact model to ever reproduce)
+    block_complexity_verdict: Optional[dict]
+    block_complexity_retries: int
+
     # Block diagram visualization document
     block_diagram_doc: Optional[dict]
     block_diagram_doc_validation_errors: list[str]
@@ -791,6 +814,27 @@ async def gather_requirements_node(state: ArchGraphState) -> dict:
         "has_answers_key": "answers" in human_response if has_hr else False,
     })
 
+    # --- PDK Characterization stage (PRD-time) -------------------------------
+    # Warm the shared, PDK-dependent models ONCE so every block's µArch can
+    # consult them: the arithmetic op-delay model (pipeline scheduler input) and
+    # the memory PPA model (memory-impl choice). Both are characterized once and
+    # cached by PDK fingerprint. Gated (CORESMITH_PDK_CHAR, default off), runs
+    # off the event loop, fails open -- a characterization error never blocks
+    # the architecture run (the downstream synth/PPA gates remain the backstop).
+    try:
+        from orchestrator.langgraph import pdk_characterize as _pdkc
+        if _pdkc.stage_enabled() and not _pdkc.is_characterized():
+            import asyncio as _aio
+            _summary = await _aio.to_thread(_pdkc.ensure_pdk_characterized)
+            _event(state, "PDK Characterization", "stage_complete", {
+                "pdk_hash": _summary.get("pdk_hash"),
+                "arith_ops": (_summary.get("arith") or {}).get("ops"),
+                "mem_rows": (_summary.get("memory") or {}).get("rows"),
+                "errors": _summary.get("errors"),
+            })
+    except Exception as _e:  # noqa: BLE001
+        _event(state, "PDK Characterization", "stage_error", {"error": str(_e)[:200]})
+
     with _tracer.start_as_current_span("Gather Requirements (PRD)") as span:
         user_answers = None
         previous_questions = state.get("prd_questions")
@@ -967,6 +1011,31 @@ async def block_diagram_node(state: ArchGraphState) -> dict:
             ers_spec=state.get("prd_spec"),
         )
 
+        # Reliability fallback: the block-diagram node depends on a single
+        # large LLM call writing valid JSON to disk; on a flaky tool-use
+        # failure (timeout mid-write, or prose-only response) it returns
+        # 0 blocks and strands the run. If CORESMITH_BLOCK_DIAGRAM_SEED
+        # points at a valid block_diagram.json, load it instead of failing.
+        # The seed is a partition only (blocks + budgets + connections);
+        # all downstream uArch/RTL generation remains LLM-driven.
+        if (result.get("_parse_failed") or not result.get("blocks")):
+            import os as _os
+            _seed = _os.environ.get("CORESMITH_BLOCK_DIAGRAM_SEED", "")
+            if _seed and Path(_seed).is_file():
+                try:
+                    _sd = json.loads(Path(_seed).read_text())
+                    if _sd.get("blocks"):
+                        result = _sd
+                        _event(state, "Block Diagram", "seed_loaded", {
+                            "round": state["round"],
+                            "seed": _seed,
+                            "blocks": len(_sd.get("blocks", [])),
+                        })
+                except Exception as _e:  # noqa: BLE001
+                    _event(state, "Block Diagram", "seed_load_failed", {
+                        "round": state["round"], "error": str(_e)[:200],
+                    })
+
         if result.get("_parse_failed"):
             _event(state, "Block Diagram", "parse_failure", {
                 "round": state["round"],
@@ -994,6 +1063,15 @@ async def block_diagram_node(state: ArchGraphState) -> dict:
         _persist_intermediate_state(state, update)
         _persist_block_diagram(state["project_root"], result)
         return update
+
+
+def _interface_contract_gate_enabled() -> bool:
+    """A-Fix 3(c): opt-in (default ON) gate that turns interface-contract
+    structural violations into a blocking route to Escalate Constraints. Set
+    ``CORESMITH_INTERFACE_CONTRACT_GATE=0`` to restore the old advisory-only
+    behavior (the hard Interface Definition -> Memory Map edge)."""
+    import os as _os
+    return (_os.environ.get("CORESMITH_INTERFACE_CONTRACT_GATE", "1") or "1") != "0"
 
 
 async def interface_definition_node(state: ArchGraphState) -> dict:
@@ -1047,13 +1125,58 @@ async def interface_definition_node(state: ArchGraphState) -> dict:
         contract_count = len(result.get("contracts", []) or [])
         span.set_attribute("contract_count", contract_count)
 
+        # A-Fix 3(c): structural contract violations (missing edge, width !=
+        # field-sum, overlap, feedback-cycle semantics, under-depth FIFO,
+        # over-wide bus) BLOCK. Surface them as a structural constraint_result
+        # so route_after_interface_definition sends the run to the existing
+        # Escalate Constraints node instead of freezing broken interfaces.
+        contract_violations = (
+            result.get("contract_violations", []) or []
+            if _interface_contract_gate_enabled()
+            else []
+        )
+        span.set_attribute("contract_violations", len(contract_violations))
+
         _event(state, "Interface Definition", "graph_node_exit", {
             "round": state["round"],
             "contract_count": contract_count,
             "open_questions": len(result.get("open_questions", []) or []),
+            "contract_violations": len(contract_violations),
         })
 
-        update = {"interface_contracts": result, "phase": "interface_definition"}
+        update: dict = {
+            "interface_contracts": result,
+            "phase": "interface_definition",
+        }
+        if contract_violations:
+            update["constraint_result"] = {
+                "all_pass": False,
+                "has_structural": True,
+                "violations": list(contract_violations),
+                "source": "interface_definition",
+            }
+        elif _interface_contract_gate_enabled():
+            # Clean re-emit. The node must ALWAYS record an explicit
+            # interface-definition verdict here: writing ONLY on the violation
+            # path leaves a STALE structural constraint_result
+            # (source=interface_definition) from a prior round in state, and
+            # route_after_interface_definition then re-diverts to Escalate
+            # Constraints FOREVER on violations that no longer exist (the run
+            # sits idle in a stale park). A constraint_result owned by ANOTHER
+            # source (e.g. Constraint Check) is PRESERVED untouched -- the
+            # interface router filters on source=="interface_definition", so
+            # clearing only our own source keeps this fix consistent with that
+            # staleness guard (Constraint Check refreshes its own result
+            # downstream). Gated so CORESMITH_INTERFACE_CONTRACT_GATE=0 stays a
+            # complete no-op (old advisory-only behavior).
+            prior_source = (state.get("constraint_result") or {}).get("source")
+            if prior_source in (None, "", "interface_definition"):
+                update["constraint_result"] = {
+                    "all_pass": True,
+                    "has_structural": False,
+                    "violations": [],
+                    "source": "interface_definition",
+                }
         _persist_intermediate_state(state, update)
         return update
 
@@ -1194,6 +1317,229 @@ async def register_spec_node(state: ArchGraphState) -> dict:
         _persist_intermediate_state(state, update)
         _persist_register_spec(state["project_root"], result)
         return update
+
+
+# ---------------------------------------------------------------------------
+# Doc-fix repair path (constraint-repair routing)
+# ---------------------------------------------------------------------------
+#
+# Constraint violations that are `auto_fixable` but whose wrong claim lives in
+# a generated *document* (the SAD/FRD prose) cannot be fixed by re-running the
+# Block Diagram node -- that node regenerates the diagram JSON, never the SAD/
+# FRD text, so a one-sentence doc bug (e.g. a wrong pinout arithmetic summary)
+# is flagged every constraint round and eventually parks max_rounds_exhausted.
+# The Doc Fix node re-generates the offending document with the violation +
+# suggested_fix as feedback, then re-runs the constraint check. Bounded so a
+# persistently-flagged doc still falls through to the diagram loop.
+
+# Which source documents the Doc Fix node can regenerate. PRD is structured +
+# interrupt-driven (gather_prd asks the human) and ERS is generated AFTER
+# constraints (Create Documentation), so at constraint-check time SAD and FRD
+# are the in-scope regenerable prose docs; any other source_doc routes to the
+# existing Block Diagram path unchanged.
+_DOC_FIX_SOURCES = frozenset({"sad", "frd"})
+_DOC_FIX_MAX_ATTEMPTS = 2
+
+# Source documents whose violated claim the Doc Fix node CANNOT clear, and that
+# the Block Diagram regen loop cannot clear either. The PRD is interrupt-driven
+# (gather_prd asks the human) and is the ROOT the SAD/FRD generators re-derive
+# from -- regenerating SAD/FRD just re-emits the stale value, so a PRD-rooted
+# violation loops forever on the doc-fix path (rung3r2 defect 3). The ERS is
+# generated AFTER constraints (Create Documentation), and ``requirements`` is
+# the immutable user input. An ``auto_fixable`` violation rooted in one of these
+# is ESCALATION-ONLY: it needs an operator PRD amendment / documented
+# supersession / accept, never an auto-repair loop.
+_ESCALATION_ONLY_SOURCES = frozenset({"prd", "requirements", "ers"})
+
+
+def _classify_constraint_violations(
+    violations: list[dict] | None,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Three-way split of constraint violations for repair routing.
+
+    Returns ``(doc_fixable, escalation_only, other)``:
+
+    - ``doc_fixable``    -- ``auto_fixable`` + a regenerable-document source
+      (SAD/FRD): the Doc Fix node can clear these by re-generating the doc.
+    - ``escalation_only``-- ``auto_fixable`` + a non-regenerable-ROOT source
+      (PRD/requirements/ERS, ``_ESCALATION_ONLY_SOURCES``): neither Doc Fix (it
+      re-derives from the PRD) nor the Block Diagram loop can clear these; they
+      require operator amendment / supersession / accept.
+    - ``other``          -- everything else: structural violations, auto_fixable
+      diagram/memory/clock violations, and auto_fixable violations with an
+      unknown source -- handled by the Block Diagram / Constraint Iteration loop.
+    """
+    doc_fixable: list[dict] = []
+    escalation_only: list[dict] = []
+    other: list[dict] = []
+    for v in violations or []:
+        if v.get("category") == "auto_fixable":
+            src = str(v.get("source_doc", "")).strip().lower()
+            if src in _DOC_FIX_SOURCES:
+                doc_fixable.append(v)
+                continue
+            if src in _ESCALATION_ONLY_SOURCES:
+                escalation_only.append(v)
+                continue
+        other.append(v)
+    return doc_fixable, escalation_only, other
+
+
+def _partition_constraint_violations(
+    violations: list[dict] | None,
+) -> tuple[list[dict], list[dict]]:
+    """Split violations into (doc_sourced_auto_fixable, other).
+
+    A violation is doc-sourced when it is ``auto_fixable`` AND its
+    ``source_doc`` names a regenerable document (SAD/FRD). Everything else --
+    structural violations, auto_fixable diagram/memory/clock violations,
+    escalation-only (PRD-rooted) auto_fixable violations, and auto_fixable
+    violations with an unknown source -- goes in ``other`` and is handled by the
+    existing Block Diagram iteration path. Kept as the back-compat two-way view
+    over ``_classify_constraint_violations`` (``doc_fix_node`` only needs the
+    doc-sourced set; routers that need the finer PRD-rooted split call the
+    three-way classifier directly).
+    """
+    doc_fixable, escalation_only, other = _classify_constraint_violations(
+        violations
+    )
+    return doc_fixable, escalation_only + other
+
+
+def _feedback_reset_key(feedback_text: str) -> str:
+    """Stable key identifying a distinct operator feedback for budget-reset
+    de-duplication. A ``retry`` with no free-text feedback hashes to the empty
+    string's digest (so the FIRST retry still re-arms once, but a second
+    identical retry does not)."""
+    import hashlib
+
+    return hashlib.sha256((feedback_text or "").encode("utf-8")).hexdigest()
+
+
+def _reset_doc_fix_budget_on_distinct_feedback(
+    state: ArchGraphState, updated: dict, feedback_text: str
+) -> None:
+    """rung3r2 defect 3 (Fix 2): re-arm the doc-fix budget on an operator
+    retry/feedback, but ONLY once per DISTINCT feedback.
+
+    The rung2 defect-3 reset was UNCONDITIONAL -- every escalation round set
+    ``doc_fix_attempts=0``, so an operator sending the SAME feedback on an
+    unchanging doc-violation set re-armed Doc Fix every round and the run
+    livelocked feedback -> Doc Fix -> Constraint Check -> escalate -> ... The
+    reset now keys on a hash of the feedback text: repeated identical feedback
+    leaves the budget where it is, so it eventually exhausts to the Block
+    Diagram / escalation path instead of looping. Distinct (new-guidance)
+    feedback still gets a fresh budget, preserving the rung2 behavior.
+    """
+    key = _feedback_reset_key(feedback_text)
+    if key != state.get("doc_fix_reset_key"):
+        updated["doc_fix_attempts"] = 0
+        updated["doc_fix_reset_key"] = key
+
+
+def _format_doc_fix_feedback(violations: list[dict]) -> str:
+    """Render doc-sourced violations as a repair instruction for the doc
+    generator: one bullet per violation with its text + concrete suggested
+    fix so the regenerated document lands the correction verbatim."""
+    lines: list[str] = []
+    for v in violations:
+        text = str(v.get("violation", "")).strip() or "(no description)"
+        fix = str(v.get("suggested_fix", "")).strip()
+        ev = str(v.get("evidence", "")).strip()
+        bullet = f"- {text}"
+        if ev:
+            bullet += f"\n  evidence: {ev}"
+        if fix:
+            bullet += f"\n  fix: {fix}"
+        lines.append(bullet)
+    return "\n".join(lines)
+
+
+async def doc_fix_node(state: ArchGraphState) -> dict:
+    """Re-generate the SAD/FRD to clear doc-sourced auto_fixable violations.
+
+    Partitions the latest constraint violations, groups the doc-sourced ones
+    by source document, and re-invokes the corresponding generator with the
+    violation + suggested_fix as feedback. Increments ``doc_fix_attempts`` and
+    routes (via the unconditional edge) back to Constraint Check for re-check.
+    """
+    from orchestrator.architecture.specialists.frd_spec import generate_frd
+    from orchestrator.architecture.specialists.sad_spec import generate_sad
+
+    cr = state.get("constraint_result", {}) or {}
+    violations = cr.get("violations", [])
+    doc_sourced, _other = _partition_constraint_violations(violations)
+
+    attempts = state.get("doc_fix_attempts", 0) + 1
+    by_doc: dict[str, list[dict]] = {}
+    for v in doc_sourced:
+        by_doc.setdefault(
+            str(v.get("source_doc", "")).strip().lower(), []
+        ).append(v)
+
+    _event(state, "Doc Fix", "graph_node_enter", {
+        "round": state["round"],
+        "attempt": attempts,
+        "docs": sorted(by_doc.keys()),
+        "violation_count": len(doc_sourced),
+    })
+
+    update: dict = {"doc_fix_attempts": attempts, "phase": "doc_fix"}
+    project_root = state["project_root"]
+
+    # rung2 defect 3: when Doc Fix is reached from an operator-initiated
+    # escalation retry, thread the operator's free-text feedback into the doc
+    # regen so their guidance actually reaches the SAD/FRD generator (not just
+    # the auto-derived violation bullets).
+    _op_feedback = str(state.get("human_feedback", "") or "").strip()
+
+    def _feedback_for(doc_violations: list[dict]) -> str:
+        body = _format_doc_fix_feedback(doc_violations)
+        if _op_feedback:
+            return (
+                "OPERATOR FEEDBACK (from constraint escalation retry):\n"
+                f"{_op_feedback}\n\n"
+                "Outstanding constraint violation(s) to clear:\n"
+                f"{body}"
+            )
+        return body
+
+    with _tracer.start_as_current_span(
+        f"Doc Fix (attempt {attempts}/{_DOC_FIX_MAX_ATTEMPTS})"
+    ) as span:
+        span.set_attribute("attempt", attempts)
+        span.set_attribute("docs", ",".join(sorted(by_doc.keys())))
+
+        if "sad" in by_doc:
+            feedback = _feedback_for(by_doc["sad"])
+            result = await generate_sad(
+                prd_spec=state.get("prd_spec", {}) or {},
+                requirements=state["requirements"],
+                pdk_summary=state.get("pdk_summary", ""),
+                project_root=project_root,
+                constraint_feedback=feedback,
+            )
+            _persist_sad(project_root, result)
+            update["sad_spec"] = result
+
+        if "frd" in by_doc:
+            feedback = _feedback_for(by_doc["frd"])
+            result = await generate_frd(
+                prd_spec=state.get("prd_spec", {}) or {},
+                sad_spec=state.get("sad_spec", {}) or {},
+                requirements=state["requirements"],
+                project_root=project_root,
+                constraint_feedback=feedback,
+            )
+            _persist_frd(project_root, result)
+            update["frd_spec"] = result
+
+    _event(state, "Doc Fix", "graph_node_exit", {
+        "attempt": attempts,
+        "docs_regenerated": sorted(by_doc.keys()),
+    })
+    _persist_intermediate_state(state, update)
+    return update
 
 
 async def constraint_check_node(state: ArchGraphState) -> dict:
@@ -1757,7 +2103,12 @@ async def escalate_prd_node(state: ArchGraphState) -> dict:
 
 def _block_diagram_summary(state: ArchGraphState) -> dict:
     """Build a compact summary of the current block diagram for interrupt payloads."""
-    bd = state.get("block_diagram", {})
+    # ``block_diagram`` is an Optional[dict] state field: absent -> {} via the
+    # default, but the daemon SEEDS it as an explicit None, and a run that
+    # diverts to an escalation before Block Diagram populates it would carry
+    # that None. ``dict.get(key, default)`` does NOT apply the default for a
+    # present-but-None key, so guard with ``or {}`` before dereferencing.
+    bd = state.get("block_diagram") or {}
     blocks = bd.get("blocks", [])
     return {
         "block_count": len(blocks),
@@ -1832,12 +2183,24 @@ async def escalate_constraints_node(state: ArchGraphState) -> dict:
     Fires when violations involve peripheral count vs block diagram
     disagreement, memory overlaps, connectivity, or SRAM overflow.
     """
-    violations = state.get("constraint_result", {}).get("violations", [])
+    # ``constraint_result`` / ``memory_map`` are Optional[dict] fields the daemon
+    # seeds as explicit None (memory-map stage disabled by default). ``.get(key,
+    # {})`` returns None for a present-but-None key, so use ``or {}`` before every
+    # dereference or this node AttributeErrors on the escalation payload.
+    violations = (state.get("constraint_result") or {}).get("violations", [])
     structural = [v for v in violations if v.get("category") == "structural"]
+    # rung3r2 defect 3 (Fix 3): PRD/requirements/ERS-rooted auto_fixable
+    # violations that neither Doc Fix nor the Block Diagram loop can clear --
+    # surface them explicitly so the operator amends/supersedes rather than
+    # spinning an auto-repair loop that can never converge.
+    _doc_fixable, escalation_only, _other = _classify_constraint_violations(
+        violations
+    )
 
     _event(state, "Escalate Constraints", "graph_node_enter", {
         "round": state["round"],
         "structural_count": len(structural),
+        "escalation_only_count": len(escalation_only),
         "total_violations": len(violations),
         "violations": [
             {"violation": v.get("violation", str(v))[:300],
@@ -1860,10 +2223,15 @@ async def escalate_constraints_node(state: ArchGraphState) -> dict:
         "structural_violations": structural,
         "block_diagram_summary": _block_diagram_summary(state),
         "memory_map_summary": {
-            "peripheral_count": state.get("memory_map", {}).get(
-                "result", {}
+            # ``_optional_stage_payload`` returns {} for a present-but-None or a
+            # skipped memory_map (the default when CORESMITH_ENABLE_MEMORY_MAP=0);
+            # the trailing ``or {}`` also guards a present-but-None inner result.
+            "peripheral_count": (
+                _optional_stage_payload(state.get("memory_map")).get("result")
+                or {}
             ).get("peripheral_count", 0),
         },
+        "escalation_only_violations": escalation_only,
         "supported_actions": [
             "retry",      # re-run block diagram with violations as feedback
             "accept",     # accept despite violations, finalize
@@ -1871,6 +2239,16 @@ async def escalate_constraints_node(state: ArchGraphState) -> dict:
             "abort",      # stop architecture
         ],
     }
+    if escalation_only:
+        payload["escalation_note"] = (
+            f"{len(escalation_only)} violation(s) are rooted in the PRD / "
+            "requirements / ERS (source_doc in {prd, requirements, ers}). "
+            "These cannot be cleared by Doc Fix (the SAD/FRD generators "
+            "re-derive from the PRD) or by the Block Diagram regen loop -- they "
+            "require a PRD amendment or a documented supersession. Resolve by "
+            "editing the upstream requirement and sending 'feedback', or "
+            "'accept' to proceed with a documented supersession."
+        )
 
     response = interrupt(payload)
 
@@ -1890,6 +2268,12 @@ async def escalate_constraints_node(state: ArchGraphState) -> dict:
     }]
     if action == "feedback" and isinstance(response, dict):
         updated["human_feedback"] = response.get("feedback", "")
+    if action in ("retry", "feedback"):
+        # rung2 defect 3 + rung3r2 defect 3 (Fix 2): re-arm the doc-fix budget on
+        # an operator retry ONLY when this is DISTINCT feedback -- repeated
+        # identical feedback on an unchanging doc-violation set must not re-arm
+        # Doc Fix forever (see _reset_doc_fix_budget_on_distinct_feedback).
+        _reset_doc_fix_budget_on_distinct_feedback(state, updated, feedback_text)
 
     return updated
 
@@ -1899,13 +2283,20 @@ async def escalate_exhausted_node(state: ArchGraphState) -> dict:
 
     Always fires instead of silently ending the graph.
     """
-    violations = state.get("constraint_result", {}).get("violations", [])
+    # constraint_result may be a present-but-None seeded field -- ``or {}`` guard.
+    violations = (state.get("constraint_result") or {}).get("violations", [])
     history = state.get("violations_history", [])
+    # rung3r2 defect 3 (Fix 3): PRD/requirements/ERS-rooted auto_fixable
+    # violations neither Doc Fix nor the diagram loop can clear -- surface them.
+    _doc_fixable, escalation_only, _other = _classify_constraint_violations(
+        violations
+    )
 
     _event(state, "Escalate Exhausted", "graph_node_enter", {
         "round": state["round"],
         "max_rounds": state["max_rounds"],
         "remaining_violations": len(violations),
+        "escalation_only_count": len(escalation_only),
         "violations": [
             {"violation": v.get("violation", str(v))[:300],
              "category": v.get("category", "")}
@@ -1921,6 +2312,7 @@ async def escalate_exhausted_node(state: ArchGraphState) -> dict:
         "violations": violations,
         "violations_history": history[-3:],  # last 3 rounds of history
         "block_diagram_summary": _block_diagram_summary(state),
+        "escalation_only_violations": escalation_only,
         "supported_actions": [
             "retry",      # reset round counter, try again with feedback
             "accept",     # accept despite violations, finalize
@@ -1928,6 +2320,14 @@ async def escalate_exhausted_node(state: ArchGraphState) -> dict:
             "abort",      # stop architecture
         ],
     }
+    if escalation_only:
+        payload["escalation_note"] = (
+            f"{len(escalation_only)} violation(s) are rooted in the PRD / "
+            "requirements / ERS (source_doc in {prd, requirements, ers}) and "
+            "cannot be cleared by Doc Fix or the Block Diagram loop -- they "
+            "require a PRD amendment or a documented supersession. Send "
+            "'feedback' after editing the upstream requirement, or 'accept'."
+        )
 
     response = interrupt(payload)
 
@@ -1948,6 +2348,10 @@ async def escalate_exhausted_node(state: ArchGraphState) -> dict:
     if action in ("retry", "feedback"):
         # Reset round counter on retry/feedback (but NOT total_rounds)
         updated["round"] = 1
+        # rung2 defect 3 + rung3r2 defect 3 (Fix 2): re-arm the doc-fix budget
+        # ONLY on DISTINCT feedback so repeated identical feedback on an
+        # unchanging doc-violation set can no longer re-arm Doc Fix forever.
+        _reset_doc_fix_budget_on_distinct_feedback(state, updated, feedback_text)
     if action == "feedback" and isinstance(response, dict):
         updated["human_feedback"] = response.get("feedback", "")
 
@@ -2002,6 +2406,22 @@ route_after_prd_escalation.__edge_labels__ = {
 }
 
 
+def _post_diagram_gate_target() -> str:
+    """The next node once a block diagram is accepted: the complexity gate, then
+    the output-contract gate, then interface freeze -- whichever is enabled
+    first. C17: BOTH acceptance paths must use this -- the clean-first-try route
+    (``review_diagram``) AND the post-question route
+    (``route_after_diagram_escalation`` 'continue'). Previously the latter hard-
+    wired 'Interface Definition', so ANY design whose block diagram asked a
+    clarifying question (the common case) SKIPPED the complexity/decomposition
+    gate entirely -- the residual_recon_engine fusion was never checked."""
+    if _complexity_gate_enabled():
+        return "Complexity Review"
+    if _output_contract_gate_enabled():
+        return "Output Contract Review"
+    return "Interface Definition"
+
+
 def review_diagram(state: ArchGraphState) -> str:
     """Route after block diagram: check if LLM returned questions or empty blocks."""
     bd = state.get("block_diagram", {})
@@ -2013,7 +2433,8 @@ def review_diagram(state: ArchGraphState) -> str:
     if has_questions or has_no_blocks:
         target = "Escalate Diagram"
     else:
-        target = "Interface Definition"
+        # Clean diagram -> run the decomposition gates before interface freeze.
+        target = _post_diagram_gate_target()
 
     span = trace.get_current_span()
     if span.is_recording():
@@ -2034,7 +2455,364 @@ def review_diagram(state: ArchGraphState) -> str:
 
 review_diagram.__edge_labels__ = {
     "Escalate Diagram": "QUESTIONS",
+    "Complexity Review": "CLEAN",
+    "Output Contract Review": "CLEAN",
     "Interface Definition": "CLEAN",
+}
+
+
+def _output_contract_gate_enabled() -> bool:
+    """Opt-in (default ON) gate for the output-contract ownership review.
+
+    Set CORESMITH_OUTPUT_CONTRACT_GATE=0 to disable (restores the direct
+    Block Diagram -> Interface Definition edge)."""
+    import os as _os
+    return (_os.environ.get("CORESMITH_OUTPUT_CONTRACT_GATE", "1") or "1") != "0"
+
+
+def _output_contract_max_redecompose() -> int:
+    import os as _os
+    try:
+        return max(0, int(_os.environ.get("CORESMITH_OUTPUT_CONTRACT_MAX_REDECOMPOSE", "2")))
+    except ValueError:
+        return 2
+
+
+async def output_contract_review_node(state: ArchGraphState) -> dict:
+    """Gate: fail the decomposition back if it orphaned a global output
+    responsibility (no single block owns the container/ordering/termination/
+    layout/reduction the golden requires). Mirrors the contract-audit pattern.
+
+    Fails OPEN: on any error or inconclusive evidence the run proceeds (the
+    downstream composition gate is the backstop). Bounded re-decompositions
+    (CORESMITH_OUTPUT_CONTRACT_MAX_REDECOMPOSE, default 2) then proceed."""
+    from orchestrator.langchain.agents.output_contract_review_agent import (
+        OutputContractReviewAgent,
+    )
+
+    bd = state.get("block_diagram", {}) or {}
+    tries = int(state.get("output_contract_retries", 0) or 0)
+    _event(state, "Output Contract Review", "graph_node_enter", {
+        "round": state["round"], "retry": tries,
+        "blocks": len(bd.get("blocks", [])),
+        "has_ownership_table": bd.get("global_output_contract") is not None,
+    })
+
+    with _tracer.start_as_current_span("Output Contract Review") as span:
+        try:
+            golden_summary = ""
+            try:
+                from orchestrator.architecture.specialists.block_diagram import (
+                    _scan_golden_models,
+                )
+                golden_summary = _scan_golden_models(
+                    project_root=state["project_root"],
+                    requirements=state.get("requirements", ""),
+                )
+            except Exception:  # noqa: BLE001
+                golden_summary = ""
+
+            agent = OutputContractReviewAgent()
+            verdict = await agent.review(
+                project_root=state["project_root"],
+                block_diagram=bd,
+                requirements=state.get("requirements", ""),
+                golden_summary=golden_summary,
+            )
+        except Exception as exc:  # noqa: BLE001
+            span.set_attribute("error", str(exc)[:200])
+            # A-Fix 2d: a review that ERRORED is NOT a clean pass -- fail-closed
+            # into the existing bounded do_redecompose loop (so an errored gate
+            # re-tries the decomposition a bounded number of times, then proceeds
+            # with the error recorded rather than looping forever). The global
+            # CORESMITH_GATE_FAIL_OPEN escape restores the old proceed-on-error.
+            from orchestrator.langgraph.gate_guard import gate_fail_open_enabled
+            if gate_fail_open_enabled():
+                verdict = {"passed": True, "orphaned_properties": [],
+                           "summary": f"review errored, proceeding (FAIL-OPEN): {exc}",
+                           "feedback_for_redecomposition": ""}
+            else:
+                verdict = {
+                    "passed": False, "orphaned_properties": [], "gate_error": True,
+                    "summary": f"output-contract review ERRORED (fail-closed): {exc}",
+                    "feedback_for_redecomposition": (
+                        "The output-contract review gate itself ERRORED "
+                        f"({exc}). Re-examine the decomposition for orphaned "
+                        "global output responsibilities; if this is a "
+                        "harness/environment error, fix it and retry."
+                    ),
+                }
+
+        passed = bool(verdict.get("passed", True))
+        orphaned = verdict.get("orphaned_properties", []) or []
+        span.set_attribute("passed", passed)
+        span.set_attribute("orphaned_count", len(orphaned))
+
+        do_redecompose = (not passed) and tries < _output_contract_max_redecompose()
+        verdict["_redecompose"] = do_redecompose  # router reads this (avoids loops)
+        update: dict = {"output_contract_verdict": verdict}
+        if do_redecompose:
+            # Re-decompose: hand the orphan findings back as block-diagram feedback.
+            fb = verdict.get("feedback_for_redecomposition", "") or ""
+            props = "; ".join(
+                f"{o.get('property','?')} -> owner: {o.get('suggested_owner','?')} "
+                f"(needs {o.get('suggested_interface','metadata interface')})"
+                for o in orphaned
+            )
+            feedback = (
+                "OUTPUT-CONTRACT OWNERSHIP: the decomposition orphans a global "
+                "output responsibility (no single block owns it). Re-decompose so "
+                "exactly one terminal block owns each, with the metadata interface "
+                f"it needs.\nOrphaned: {props}\n{fb}"
+            )
+            update["output_contract_retries"] = tries + 1
+            update["human_feedback"] = feedback
+        _event(state, "Output Contract Review", "graph_node_exit", {
+            "round": state["round"], "passed": passed,
+            "orphaned": len(orphaned), "retry": tries,
+            "will_redecompose": (not passed and tries < _output_contract_max_redecompose()),
+        })
+        return update
+
+
+def route_after_output_contract_review(state: ArchGraphState) -> str:
+    """Pass / exhausted -> Interface Definition; orphaned (retries left) ->
+    re-decompose. Reads the node's explicit `_redecompose` decision so retry
+    exhaustion can't loop."""
+    verdict = state.get("output_contract_verdict", {}) or {}
+    redecompose = bool(verdict.get("_redecompose", False))
+    passed = bool(verdict.get("passed", True))
+    tries = int(state.get("output_contract_retries", 0) or 0)
+
+    target = "Block Diagram" if redecompose else "Interface Definition"
+
+    span = trace.get_current_span()
+    if span.is_recording():
+        label = "RE-DECOMPOSE" if redecompose else ("PASS" if passed else "EXHAUSTED->PROCEED")
+        span.update_name(f"Route: Output Contract Review - {label}")
+        span.add_event("route", {"from": "Output Contract Review", "to": target,
+                                 "passed": passed, "retries": tries})
+    return target
+
+route_after_output_contract_review.__edge_labels__ = {
+    "Block Diagram": "ORPHANED -> RE-DECOMPOSE",
+    "Interface Definition": "OWNED",
+}
+
+
+# ---------------------------------------------------------------------------
+# Block-complexity gate (A-Fix 3b)
+# ---------------------------------------------------------------------------
+
+def _complexity_gate_enabled() -> bool:
+    """Opt-in (default ON) gate for the per-block complexity/tractability
+    review. Set CORESMITH_COMPLEXITY_GATE=0 to disable (restores the direct
+    clean-diagram route to the output-contract / interface stages)."""
+    import os as _os
+    return (_os.environ.get("CORESMITH_COMPLEXITY_GATE", "1") or "1") != "0"
+
+
+def _complexity_max_redecompose() -> int:
+    import os as _os
+    try:
+        return max(0, int(_os.environ.get("CORESMITH_COMPLEXITY_MAX_REDECOMPOSE", "2")))
+    except ValueError:
+        return 2
+
+
+def _clean_diagram_target() -> str:
+    """The CLEAN-diagram target AFTER the complexity gate: the output-contract
+    ownership gate if enabled, else Interface Definition. Mirrors the tail of
+    ``review_diagram`` so the complexity gate slots cleanly in front of it."""
+    return (
+        "Output Contract Review"
+        if _output_contract_gate_enabled()
+        else "Interface Definition"
+    )
+
+
+def _resolve_complexity_golden(project_root: str) -> Optional[str]:
+    """Resolve the run's golden reference for AST-based complexity scoring.
+    Returns None when no golden is discoverable -- non-golden designs (e.g.
+    a hand-written blocks.yaml run) then pass the gate through as a no-op."""
+    try:
+        from orchestrator.langgraph.microarch_rd import resolve_golden_path
+        return resolve_golden_path(project_root)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def block_complexity_review_node(state: ArchGraphState) -> dict:
+    """Gate: flag any block whose golden slice is too complex to reproduce
+    byte-exactly (fused many distinct algorithms / very high LOC or cyclomatic).
+    Mirrors the output-contract gate: over-budget -> re-decompose feedback back
+    to Block Diagram (bounded by CORESMITH_COMPLEXITY_MAX_REDECOMPOSE, default
+    2), then proceed with the breach recorded.
+
+    Deterministic + no-LLM. C16: scores each block's OWN ``python_source``
+    slice (the architecture-assigned golden mapping), so it generalises to any
+    design -- the legacy legacy-hint resolver returned an empty slice (score 0,
+    never flagged) for every other codec. Passes through as a no-op only when
+    no golden is resolvable or a block carries no ``python_source`` slice, so it
+    never blocks a design it cannot reason about."""
+    from orchestrator.langgraph import block_complexity as _bc
+
+    bd = state.get("block_diagram", {}) or {}
+    blocks = bd.get("blocks", []) or []
+    tries = int(state.get("block_complexity_retries", 0) or 0)
+    _event(state, "Complexity Review", "graph_node_enter", {
+        "round": state["round"], "retry": tries, "blocks": len(blocks),
+    })
+
+    with _tracer.start_as_current_span("Complexity Review") as span:
+        golden_path = _resolve_complexity_golden(state["project_root"])
+        over_budget: list[dict] = []
+        proposals: dict[str, list] = {}
+        stats: dict = {}
+
+        if golden_path:
+            try:
+                src = _bc._read_golden_source(golden_path)
+                stats = _bc._parse_functions(src)
+            except Exception:  # noqa: BLE001
+                stats = {}
+            for blk in blocks:
+                name = str(blk.get("name") or "").strip()
+                if not name:
+                    continue
+                spec_text = json.dumps(blk)[:4000]
+                # C16: score the block's OWN python_source slice (the
+                # architecture-assigned golden mapping) -- the legacy
+                # legacy-hint resolver returned an empty slice for every
+                # non-the video codec design, so the gate scored 0 and never flagged a
+                # fat block (residual_recon_engine: 6 algos / 582 LOC /
+                # cyclomatic 158, all silently passed). None -> the estimator
+                # falls back to the hint resolver (older designs unchanged).
+                _sl = None
+                if stats:
+                    _sl = _bc.python_source_slice_fns(
+                        blk.get("python_source", ""), stats) or None
+                try:
+                    est = _bc.estimate_block_complexity(
+                        name, golden_path, spec_text, stats=stats or None,
+                        slice_fns=_sl)
+                except Exception:  # noqa: BLE001
+                    continue
+                # A no-match slice yields empty golden_functions and no breach.
+                if est.get("over_budget"):
+                    over_budget.append(est)
+                    try:
+                        proposals[name] = _bc.propose_decomposition(
+                            name, golden_path, spec_text, stats=stats or None,
+                            slice_fns=_sl)
+                    except Exception:  # noqa: BLE001
+                        proposals[name] = []
+
+        passed = not over_budget
+        span.set_attribute("passed", passed)
+        span.set_attribute("over_budget_blocks", len(over_budget))
+        span.set_attribute("golden_found", bool(golden_path))
+
+        do_redecompose = (not passed) and tries < _complexity_max_redecompose()
+        verdict: dict = {
+            "passed": passed,
+            "golden_path": golden_path or "",
+            "over_budget_blocks": over_budget,
+            "_redecompose": do_redecompose,
+        }
+        update: dict = {"block_complexity_verdict": verdict}
+        if do_redecompose:
+            lines = [
+                "BLOCK COMPLEXITY: one or more blocks fused too many distinct "
+                "golden algorithms to be reproducible byte-exactly. Re-decompose "
+                "each flagged block into tractable sub-blocks (the golden already "
+                "exposes clean cut-points).",
+            ]
+            for est in over_budget:
+                bn = est.get("block_name", "?")
+                breaches = "; ".join(est.get("axis_breaches", []) or [])
+                lines.append(f"\n- Block '{bn}': {breaches}")
+                subs = proposals.get(bn) or []
+                sub_names = [
+                    s.get("sub_block", "?") for s in subs
+                    if s.get("sub_block") and s.get("sub_block") != bn
+                ]
+                if sub_names:
+                    lines.append(
+                        f"  Suggested sub-blocks (advisory): {', '.join(sub_names)}"
+                    )
+            update["block_complexity_retries"] = tries + 1
+            update["human_feedback"] = "\n".join(lines)
+
+        _event(state, "Complexity Review", "graph_node_exit", {
+            "round": state["round"], "passed": passed,
+            "over_budget_blocks": len(over_budget), "retry": tries,
+            "will_redecompose": do_redecompose,
+        })
+        return update
+
+
+def route_after_block_complexity_review(state: ArchGraphState) -> str:
+    """Over-budget (retries left) -> re-decompose at Block Diagram; pass /
+    exhausted -> the clean-diagram target (output-contract gate or Interface
+    Definition). Reads the node's explicit `_redecompose` so exhaustion can't
+    loop."""
+    verdict = state.get("block_complexity_verdict", {}) or {}
+    redecompose = bool(verdict.get("_redecompose", False))
+    passed = bool(verdict.get("passed", True))
+    target = "Block Diagram" if redecompose else _clean_diagram_target()
+
+    span = trace.get_current_span()
+    if span.is_recording():
+        label = (
+            "OVER-BUDGET -> RE-DECOMPOSE" if redecompose
+            else ("PASS" if passed else "EXHAUSTED->PROCEED")
+        )
+        span.update_name(f"Route: Complexity Review - {label}")
+        span.add_event("route", {"from": "Complexity Review", "to": target,
+                                 "passed": passed})
+    return target
+
+route_after_block_complexity_review.__edge_labels__ = {
+    "Block Diagram": "OVER-BUDGET -> RE-DECOMPOSE",
+    "Output Contract Review": "TRACTABLE",
+    "Interface Definition": "TRACTABLE",
+}
+
+
+def route_after_interface_definition(state: ArchGraphState) -> str:
+    """A-Fix 3(c): after freezing interface contracts, route structural
+    contract violations to Escalate Constraints; otherwise continue to
+    Memory Map. Only the interface-definition-sourced constraint_result
+    diverts the flow (a stale constraint_result from a prior round is
+    ignored)."""
+    if not _interface_contract_gate_enabled():
+        return "Memory Map"
+    cr = state.get("constraint_result", {}) or {}
+    violations = cr.get("violations", []) or []
+    interface_blocked = (
+        cr.get("source") == "interface_definition"
+        and cr.get("has_structural")
+        and len(violations) > 0
+    )
+    target = "Escalate Constraints" if interface_blocked else "Memory Map"
+
+    span = trace.get_current_span()
+    if span.is_recording():
+        label = (
+            f"{len(violations)} CONTRACT VIOLATIONS -> ESCALATE"
+            if interface_blocked else "OK"
+        )
+        span.update_name(f"Route: After Interface Definition - {label}")
+        span.add_event("route", {
+            "from": "Interface Definition", "to": target,
+            "contract_violations": len(violations) if interface_blocked else 0,
+        })
+    return target
+
+route_after_interface_definition.__edge_labels__ = {
+    "Memory Map": "OK",
+    "Escalate Constraints": "CONTRACT VIOLATIONS",
 }
 
 
@@ -2048,7 +2826,11 @@ def route_after_diagram_escalation(state: ArchGraphState) -> str:
     elif action == "feedback":
         target = "Block Diagram"
     else:
-        target = "Interface Definition"
+        # C17: 'continue' accepts the (questioned) diagram -- it must still run
+        # the complexity/decomposition gate before interface freeze, EXACTLY
+        # like the clean-first-try path. Hard-wiring 'Interface Definition' here
+        # meant every design whose diagram asked a question skipped the gate.
+        target = _post_diagram_gate_target()
 
     span = trace.get_current_span()
     if span.is_recording():
@@ -2057,38 +2839,90 @@ def route_after_diagram_escalation(state: ArchGraphState) -> str:
     return target
 
 route_after_diagram_escalation.__edge_labels__ = {
+    "Complexity Review": "CONTINUE",
+    "Output Contract Review": "CONTINUE",
     "Interface Definition": "CONTINUE",
     "Block Diagram": "FEEDBACK",
     "Abort": "ABORT",
 }
 
 
+def _constraint_repair_route(
+    state: ArchGraphState, *, loop_target: str, escalation_target: str
+) -> str:
+    """Shared non-structural constraint-repair routing decision.
+
+    Used by ``route_after_constraints`` (``loop_target="Constraint Iteration"``)
+    and by ``_escalation_retry_target`` (``loop_target="Block Diagram"``). The
+    routing rules (rung3r2 defect 3):
+
+    - Fix 1 (mixed-set livelock): route to **Doc Fix** ONLY when the violation
+      set is doc-sourced ONLY (no structural/diagram/PRD-rooted violation in the
+      set). A MIXED set must go through the diagram regen loop first -- Doc Fix's
+      unconditional edge re-checks constraints without ever regenerating the
+      diagram, so a diagram-sourced violation (and the operator's
+      diagram-directed feedback) would loop byte-identically forever.
+    - Any ``other`` (structural / diagram / unknown-source auto_fixable) present
+      -> the regen loop can address it.
+    - Fix 3: only PRD/requirements/ERS-rooted (escalation-only) violations
+      remain -> a regen loop can NEVER clear them -> ``escalation_target``.
+    - Budget-exhausted doc-fixable-only (or empty) -> the regen loop fallback.
+    """
+    cr = state.get("constraint_result") or {}
+    doc_fixable, escalation_only, other = _classify_constraint_violations(
+        cr.get("violations", [])
+    )
+    budget_ok = state.get("doc_fix_attempts", 0) < _DOC_FIX_MAX_ATTEMPTS
+    if doc_fixable and not escalation_only and not other and budget_ok:
+        return "Doc Fix"
+    if other:
+        return loop_target
+    if escalation_only:
+        return escalation_target
+    return loop_target
+
+
 def route_after_constraints(state: ArchGraphState) -> str:
-    """Three-way route based on constraint check results.
+    """Four-way route based on constraint check results.
 
     - PASS: all constraints satisfied -> finalize
     - STRUCTURAL: violations require human input -> escalate
-    - AUTO_FIX: violations are auto-fixable by LLM -> iterate
+    - DOC_FIX: auto-fixable violation(s) whose source is a regenerable
+      document (SAD/FRD) *and nothing else* -> Doc Fix (bounded by
+      _DOC_FIX_MAX_ATTEMPTS)
+    - ESCALATE: only PRD/requirements/ERS-rooted auto-fixable violations remain
+      (no regen loop can clear them) -> Escalate Constraints
+    - AUTO_FIX: any other auto-fixable violation -> Block Diagram iterate
     """
-    cr = state.get("constraint_result", {})
+    cr = state.get("constraint_result") or {}
     all_pass = cr.get("all_pass", False)
     has_structural = cr.get("has_structural", False)
 
+    outcome = "Auto-fixable Violations"
     if all_pass:
         target = "Finalize Architecture"
+        outcome = "All Passed"
     elif has_structural:
         target = "Escalate Constraints"
+        outcome = "Structural Violations"
     else:
-        target = "Constraint Iteration"
+        # Auto-fixable. Prefer a targeted doc-prose repair, but ONLY for a
+        # doc-sourced-ONLY set (Fix 1) -- a mixed set spins the diagram loop
+        # first; a PRD-rooted-only set escalates (Fix 3); a persistently-flagged
+        # doc past its budget falls through to the diagram-iteration loop (which
+        # owns the exhaustion escalation).
+        target = _constraint_repair_route(
+            state,
+            loop_target="Constraint Iteration",
+            escalation_target="Escalate Constraints",
+        )
+        outcome = {
+            "Doc Fix": "Doc-sourced Auto-fixable Violations",
+            "Escalate Constraints": "PRD-rooted Escalation-only Violations",
+        }.get(target, "Auto-fixable Violations")
 
     span = trace.get_current_span()
     if span.is_recording():
-        if all_pass:
-            outcome = "All Passed"
-        elif has_structural:
-            outcome = "Structural Violations"
-        else:
-            outcome = "Auto-fixable Violations"
         span.update_name(f"Route: After Constraints - {outcome}")
         span.add_event("route", {
             "from": "Constraint Check",
@@ -2102,8 +2936,59 @@ def route_after_constraints(state: ArchGraphState) -> str:
 route_after_constraints.__edge_labels__ = {
     "Finalize Architecture": "PASS",
     "Escalate Constraints": "STRUCTURAL",
+    "Doc Fix": "DOC_FIX",
     "Constraint Iteration": "AUTO_FIX",
 }
+
+
+def _interface_retry_to_definition_enabled() -> bool:
+    """Default-ON gate: an interface-contract-sourced escalation retries by
+    regenerating the CONTRACTS (Interface Definition), not the block diagram.
+    Set ``CORESMITH_INTERFACE_RETRY_ROUTING=0`` to restore the pre-fix behavior
+    (every escalation retry re-runs the Block Diagram, churning a sound
+    topology when only the frozen contract family is wrong)."""
+    import os as _os
+    return (_os.environ.get("CORESMITH_INTERFACE_RETRY_ROUTING", "1") or "1") != "0"
+
+
+def _escalation_retry_target(state: ArchGraphState) -> str:
+    """Pick the retry target for an operator-initiated escalation retry.
+
+    Interface-family-propagation fix: when the escalation was raised by the
+    Interface Definition stage (``constraint_result.source == "interface_definition"``)
+    the block-diagram topology/ledger is already SOUND -- it passed the diagram
+    complexity/decomposition/output-contract gates before Interface Definition
+    ever ran. Only the frozen contract family/layout is wrong, so the retry must
+    regenerate the CONTRACTS (route back to Interface Definition), NOT the
+    diagram. Routing to Block Diagram here just performs diagram surgery on a
+    sound topology and loops. Block-diagram regeneration is reserved for actual
+    diagram/topology defects (a constraint_check-sourced structural violation).
+
+    rung2 defect 3: a doc-sourced auto_fixable violation (SAD/FRD prose) must go
+    to Doc Fix -- Block Diagram only regenerates the diagram JSON and never
+    touches SAD/FRD text. rung3r2 defect 3 (Fix 1): route to Doc Fix ONLY when
+    the set is doc-sourced ONLY. On a MIXED set (a diagram/structural violation
+    coexists), Doc Fix's unconditional edge re-checks constraints WITHOUT ever
+    regenerating the diagram, so the diagram-sourced violation -- and the
+    operator's diagram-directed feedback -- loops byte-identically forever and
+    Block Diagram is never reached. A mixed set (and a PRD-rooted-only set,
+    which no loop clears) therefore goes to Block Diagram, which threads BOTH
+    the violation strings and the operator's human_feedback and whose chain ends
+    in Constraint Check anyway; a doc-only next round then routes to Doc Fix
+    (two-round convergence, no livelock). The escalation node re-arms
+    ``doc_fix_attempts`` on DISTINCT operator feedback (rung3r2 Fix 2).
+    """
+    cr = state.get("constraint_result") or {}
+    if (
+        _interface_retry_to_definition_enabled()
+        and cr.get("source") == "interface_definition"
+        and cr.get("has_structural")
+        and (cr.get("violations") or [])
+    ):
+        return "Interface Definition"
+    return _constraint_repair_route(
+        state, loop_target="Block Diagram", escalation_target="Block Diagram"
+    )
 
 
 def route_after_constraint_escalation(state: ArchGraphState) -> str:
@@ -2115,10 +3000,8 @@ def route_after_constraint_escalation(state: ArchGraphState) -> str:
         target = "Abort"
     elif action == "accept":
         target = "Finalize Architecture"
-    elif action == "feedback":
-        target = "Block Diagram"
-    else:  # retry
-        target = "Block Diagram"
+    else:  # retry or feedback -- doc-sourced violations go to Doc Fix
+        target = _escalation_retry_target(state)
 
     span = trace.get_current_span()
     if span.is_recording():
@@ -2130,6 +3013,8 @@ def route_after_constraint_escalation(state: ArchGraphState) -> str:
 
 route_after_constraint_escalation.__edge_labels__ = {
     "Block Diagram": "RETRY",
+    "Interface Definition": "RETRY_CONTRACTS",
+    "Doc Fix": "DOC_FIX",
     "Finalize Architecture": "ACCEPT",
     "Abort": "ABORT",
 }
@@ -2216,8 +3101,8 @@ def route_after_exhausted_escalation(state: ArchGraphState) -> str:
         target = "Abort"
     elif action == "accept":
         target = "Finalize Architecture"
-    else:  # retry or feedback
-        target = "Block Diagram"
+    else:  # retry or feedback -- doc-sourced violations go to Doc Fix (defect 3)
+        target = _escalation_retry_target(state)
 
     span = trace.get_current_span()
     if span.is_recording():
@@ -2229,6 +3114,7 @@ def route_after_exhausted_escalation(state: ArchGraphState) -> str:
 
 route_after_exhausted_escalation.__edge_labels__ = {
     "Block Diagram": "RETRY",
+    "Doc Fix": "DOC_FIX",
     "Finalize Architecture": "ACCEPT",
     "Abort": "ABORT",
 }
@@ -2275,6 +3161,8 @@ def build_architecture_graph(checkpointer=None):
 
     # Specialist nodes
     graph.add_node("Block Diagram", block_diagram_node)
+    graph.add_node("Complexity Review", block_complexity_review_node)
+    graph.add_node("Output Contract Review", output_contract_review_node)
     graph.add_node("Interface Definition", interface_definition_node)
     graph.add_node("Memory Map", memory_map_node)
     graph.add_node("Clock Tree", clock_tree_node)
@@ -2286,6 +3174,7 @@ def build_architecture_graph(checkpointer=None):
     # Internal nodes
     graph.add_node("Architecture Complete", mark_success_node)
     graph.add_node("Constraint Iteration", increment_round_node)
+    graph.add_node("Doc Fix", doc_fix_node)
     graph.add_node("Abort", abort_node)
 
     # Escalation nodes (interrupt-based)
@@ -2308,20 +3197,40 @@ def build_architecture_graph(checkpointer=None):
     graph.add_edge("System Architecture", "Functional Requirements")
     graph.add_edge("Functional Requirements", "Block Diagram")
 
-    # Block Diagram -> review (conditional)
+    # Block Diagram -> review (conditional). Clean diagrams route to the
+    # output-contract ownership gate (when enabled) before interfaces freeze.
     graph.add_conditional_edges("Block Diagram", review_diagram)
+
+    # Complexity Review -> tractable (output-contract / interface) or
+    # re-decompose (Block Diagram) when a block is too complex to reproduce.
+    graph.add_conditional_edges(
+        "Complexity Review", route_after_block_complexity_review,
+    )
+
+    # Output Contract Review -> pass (Interface Definition) or re-decompose (Block Diagram)
+    graph.add_conditional_edges(
+        "Output Contract Review", route_after_output_contract_review,
+    )
 
     # Escalate Diagram -> route after escalation
     graph.add_conditional_edges("Escalate Diagram", route_after_diagram_escalation)
 
+    # Interface Definition -> Memory Map (clean) OR Escalate Constraints
+    # (structural contract violations). A-Fix 3(c) replaced the hard edge.
+    graph.add_conditional_edges(
+        "Interface Definition", route_after_interface_definition,
+    )
+
     # Memory Map -> Clock Tree -> Register Spec -> Constraint Check
-    graph.add_edge("Interface Definition", "Memory Map")
     graph.add_edge("Memory Map", "Clock Tree")
     graph.add_edge("Clock Tree", "Register Spec")
     graph.add_edge("Register Spec", "Constraint Check")
 
-    # After constraints: 3-way route
+    # After constraints: 4-way route (pass / structural / doc-fix / auto-fix)
     graph.add_conditional_edges("Constraint Check", route_after_constraints)
+
+    # Doc Fix regenerates the offending SAD/FRD, then re-checks constraints.
+    graph.add_edge("Doc Fix", "Constraint Check")
 
     # Escalate Constraints -> route after escalation
     graph.add_conditional_edges(

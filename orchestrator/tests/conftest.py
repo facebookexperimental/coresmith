@@ -20,9 +20,20 @@ FFT16 reference design constants live in fft16_fixtures.py (importable module).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
+
+# ═══════════════════════════════════════════════════════════════════════════
+# A-Fix 1: pin the LEGACY profile for the whole test session
+# ═══════════════════════════════════════════════════════════════════════════
+# Hundreds of existing assertions pin default-OFF gate behavior. The STRICT
+# profile (the production default) would seed those gates ON. Hard-set legacy
+# at conftest import -- before any module applies the profile -- so the suite's
+# historical defaults hold. Tests that exercise strict (test_profile.py) use
+# monkeypatch to switch temporarily; it reverts to this value afterwards.
+os.environ["CORESMITH_PROFILE"] = "legacy"
 
 from orchestrator.tests.fft16_fixtures import (
     FFT16_BLOCK_DIAGRAM,
@@ -54,6 +65,75 @@ def _ensure_constraint_prompt():
         target.write_text(src.read_text())
 
 _ensure_constraint_prompt()
+
+
+@pytest.fixture(autouse=True)
+def _reset_profile_state():
+    """Clear profile apply-state around every test.
+
+    ``apply()`` is idempotent per-process; resetting before/after each test means
+    a test that switches to strict (and thus seeds gate env vars) cannot leak
+    those seeded vars into the next test. Legacy (the conftest pin) seeds
+    nothing, so the common case is a no-op.
+    """
+    from orchestrator import profile as _profile
+    _profile.reset()
+    yield
+    _profile.reset()
+
+
+@pytest.fixture
+def replay_llm(monkeypatch):
+    """Route ``ClaudeLLM`` through the record/replay backend (Package C, C4).
+
+    Yields a loader ``load(name, *, strict=True, project_root=None) -> ReplayBackend``
+    that selects ``CORESMITH_LLM_PROVIDER=replay`` and loads the named fixture from
+    ``orchestrator/tests/fixtures/replay/<name>``. The backend is a module
+    singleton, so it is reset before load and after the test.
+    """
+    from orchestrator.testing import replay_provider as rp
+
+    monkeypatch.setenv("CORESMITH_LLM_PROVIDER", "replay")
+    monkeypatch.delenv("CORESMITH_LLM_LOG_ROOT", raising=False)
+    fixtures_dir = Path(__file__).parent / "fixtures" / "replay"
+
+    def _load(name, *, strict=True, project_root=None):
+        rp.reset_backend()
+        path = Path(name) if os.path.isabs(str(name)) else fixtures_dir / name
+        backend = rp.set_fixture(path, strict=strict)
+        if project_root is not None:
+            monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(project_root))
+        return backend
+
+    yield _load
+    rp.reset_backend()
+
+
+@pytest.fixture
+async def from_stage(tmp_path, monkeypatch):
+    """Materialize a stage fixture into a throwaway project root (Package C, C4/C5).
+
+    Yields an async loader ``load(name, *, project_root=None, strict=None) ->
+    StageContext``. The AsyncSqliteSaver each StageContext opens is closed in
+    teardown (pytest hangs at exit otherwise -- plan C7). Fingerprint drift skips
+    (or raises under CORESMITH_STAGE_STRICT).
+    """
+    from orchestrator.testing import stage_fixtures as sf
+
+    fixtures_dir = Path(__file__).parent / "fixtures" / "stage"
+    created = []
+
+    async def _load(name, *, project_root=None, strict=None):
+        pr = Path(project_root) if project_root else (tmp_path / "stage_root")
+        pr.mkdir(parents=True, exist_ok=True)
+        path = Path(name) if os.path.isabs(str(name)) else fixtures_dir / name
+        ctx = await sf.materialize_stage(path, str(pr), monkeypatch, strict=strict)
+        created.append(ctx)
+        return ctx
+
+    yield _load
+    for ctx in created:
+        await ctx.aclose()
 
 
 @pytest.fixture

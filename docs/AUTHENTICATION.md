@@ -86,11 +86,11 @@ If `claude -p` hangs or returns an auth error, neither token nor key are being s
 
 ## What model gets used
 
-coresmith defaults to `opus-4.7` (the most capable model). Override with `CORESMITH_MODEL`:
+coresmith defaults to `opus-4.8` (the most capable model). Override with `CORESMITH_MODEL`:
 
 ```bash
 export CORESMITH_MODEL=sonnet-4.6   # ~5x cheaper, slightly less reliable on hard blocks
 export CORESMITH_MODEL=haiku-4.5    # cheapest; fine for trivial blocks
 ```
 
-The mapping from short names (`opus-4.7`, `sonnet-4.6`, `haiku-4.5`, …) to full CLI model IDs lives in `orchestrator/langchain/agents/coresmith_llm.py`. Unknown short names pass through verbatim, so any model the CLI accepts works.
+The mapping from short names (`opus-4.8`, `sonnet-4.6`, `haiku-4.5`, …) to full CLI model IDs lives in `orchestrator/langchain/agents/coresmith_llm.py`. Unknown short names pass through verbatim, so any model the CLI accepts works.

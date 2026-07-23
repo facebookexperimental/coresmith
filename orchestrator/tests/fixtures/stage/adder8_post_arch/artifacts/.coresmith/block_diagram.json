@@ -1,0 +1,11 @@
+{
+  "design_name": "adder8",
+  "blocks": [
+    {
+      "name": "adder8",
+      "tier": 1,
+      "description": "8-bit adder"
+    }
+  ],
+  "connections": []
+}

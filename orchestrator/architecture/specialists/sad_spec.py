@@ -71,6 +71,7 @@ async def generate_sad(
     requirements: str,
     pdk_summary: str,
     project_root: str = ".",
+    constraint_feedback: str | None = None,
 ) -> dict[str, Any]:
     """Generate the System Architecture Document from the PRD.
 
@@ -79,6 +80,11 @@ async def generate_sad(
         requirements: Original high-level requirements text.
         pdk_summary: Available PDK technologies summary.
         project_root: Directory where SAD collateral should be written.
+        constraint_feedback: Optional constraint-repair feedback. When set,
+            the SAD is REGENERATED to fix the cited violation(s) -- used by the
+            architecture graph's Doc Fix path for ``auto_fixable`` violations
+            whose ``source_doc`` is the SAD (e.g. a wrong arithmetic summary
+            sentence). The feedback is appended to the generation request.
 
     Returns:
         {"sad_text": "<markdown>", "phase": "sad_complete"}
@@ -110,9 +116,22 @@ async def generate_sad(
             f"After writing, respond with only the file path confirmation."
         )
 
-        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
+        if constraint_feedback:
+            user_message += (
+                "\n\nCONSTRAINT REPAIR FEEDBACK (a prior SAD failed a "
+                "constraint check -- REGENERATE the document with these "
+                "corrections applied; keep everything else consistent with "
+                "the PRD and the block diagram's port table):\n"
+                f"{constraint_feedback}"
+            )
 
-        llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
+        from orchestrator.langchain.agents.coresmith_llm import (
+            DEFAULT_MODEL, ClaudeLLM, arch_reasoning_effort)
+
+        # SAD decomposition mistakes (e.g. a shared store frozen inside a
+        # functional block) cost whole triage rounds -> higher reasoning tier.
+        llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200,
+                        reasoning_effort=arch_reasoning_effort())
 
         try:
             content = await llm.call(

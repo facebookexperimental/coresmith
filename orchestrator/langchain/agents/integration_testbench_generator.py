@@ -54,6 +54,8 @@ class IntegrationTestbenchGenerator:
         block_rtl_paths: dict[str, str] | None = None,
         output_path: str = "",
         prior_failure: str = "",
+        chip_model_path: str = "",
+        parameter_table: str = "",
     ) -> dict[str, Any]:
         """Generate a cocotb integration testbench.
 
@@ -65,6 +67,11 @@ class IntegrationTestbenchGenerator:
             prd_summary: PRD summary text for requirements context.
             block_rtl_paths: Map of block_name -> RTL file path.
             output_path: File path to write the generated testbench to.
+            chip_model_path: Path to the integrated Amaranth chip model
+                (``arch/block_models/_chip_model.py``). When non-empty, the
+                prompt instructs the TB to drive RTL and chip model with the
+                SAME stimulus and assert RTL output == chip-model output. Empty
+                (the default, flag-off) leaves prompt + output byte-identical.
 
         Returns:
             Dict with keys: tb_path (str), test_count (int).
@@ -111,6 +118,13 @@ class IntegrationTestbenchGenerator:
             if prd_summary:
                 parts.append(f"\n--- PRD SUMMARY ---\n{prd_summary}")
 
+            # param-schema-1: the typed ERS `parameters` block, verbatim. When
+            # present it is the AUTHORITATIVE source of dimensional maxima for
+            # the mandatory MAX-GEOMETRY test case + `# MAXGEO` marker -- do not
+            # re-derive from prose. Empty (design declares none) -> byte-identical.
+            if parameter_table:
+                parts.append(f"\n{parameter_table}")
+
             if block_rtl_paths:
                 verilog_sources = " ".join(block_rtl_paths.values())
                 parts.append(
@@ -126,6 +140,25 @@ class IntegrationTestbenchGenerator:
                 "backpressure, sideband metadata, and final outputs so the "
                 "waveform audit contains meaningful evidence."
             )
+
+            if chip_model_path:
+                parts.append(
+                    "\n--- MODEL-EQUIVALENCE REQUIREMENT ---\n"
+                    "An integrated Amaranth chip model is the functional oracle at:\n"
+                    f"  {chip_model_path}\n"
+                    "It exposes a module-level ``simulate(stimulus) -> (output, "
+                    "cycles)``. Your testbench MUST drive the RTL top-level and "
+                    "this chip model with the SAME stimulus and assert the RTL's "
+                    "primary output equals the chip model's ``output`` (the "
+                    "first element of simulate()'s 2-tuple). Import it by adding "
+                    "its parent directory to sys.path, e.g.:\n"
+                    "  import sys; sys.path.insert(0, "
+                    f"'{Path(chip_model_path).parent}')\n"
+                    "  from _chip_model import simulate as _chip_simulate\n"
+                    "  expected_output, _cycles = _chip_simulate(stimulus)\n"
+                    "Assert RTL output == expected_output (bit-exact); this is a "
+                    "non-deferrable functional check."
+                )
 
             if prior_failure:
                 parts.append(
@@ -155,11 +188,11 @@ class IntegrationTestbenchGenerator:
                 if disk_path.exists():
                     disk_content = disk_path.read_text(encoding="utf-8")
                     disk_test_count = len(
-                        re.findall(r"@cocotb\.test\(\)", disk_content)
+                        re.findall(r"@cocotb\.test\s*\(", disk_content)
                     )
                     if disk_test_count > 0:
                         testbench = disk_content
-            test_count = len(re.findall(r"@cocotb\.test\(\)", testbench))
+            test_count = len(re.findall(r"@cocotb\.test\s*\(", testbench))
 
             if not testbench or test_count == 0:
                 raise RuntimeError(

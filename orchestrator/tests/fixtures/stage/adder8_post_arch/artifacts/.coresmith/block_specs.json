@@ -1,0 +1,10 @@
+[
+  {
+    "name": "adder8",
+    "tier": 1,
+    "rtl_target": "rtl/adder8/adder8.v",
+    "testbench": "tb/cocotb/test_adder8.py",
+    "python_source": "golden/adder8.py",
+    "description": "8-bit unsigned ripple-carry adder. Combinational, no clock. Ports: input [7:0] a, input [7:0] b, input cin, output [7:0] sum, output cout. {cout,sum} = a + b + cin. Verilog-2005, Sky130."
+  }
+]

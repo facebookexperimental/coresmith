@@ -45,3 +45,9 @@ wavekit>=0.5.6
 # pin minimum patched versions so the vulnerable ranges can't be resolved.
 idna>=3.15        # DoS in idna (< 3.15)
 langsmith>=0.8.0  # advisory: < 0.8.0
+
+# Amaranth -- block-model + composition methodology (CORESMITH_BLOCK_GOLDENS).
+# Per-block reference models and the integrated chip model are Elaboratables;
+# pysim carries their real clock/handshake/latency semantics and the gate
+# compares the composed output bit-exactly with the software reference.
+amaranth>=0.5,<0.6

@@ -432,3 +432,186 @@ class TestEdaTimeout:
         from orchestrator.langgraph.backend_graph import _eda_timeout
         monkeypatch.setenv("CORESMITH_PNR_TIMEOUT", "0")
         assert _eda_timeout("CORESMITH_PNR_TIMEOUT", 1800) == 1800
+
+
+def _routed_def(tmp_path, n_components):
+    """A routed DEF with `n_components` placed cells (`COMPONENTS <N> ;`)."""
+    p = tmp_path / "routed.def"
+    comps = "\n".join(
+        f"- u{i} sky130_fd_sc_hd__inv_2 + PLACED ( {i} {i} ) N ;"
+        for i in range(n_components))
+    p.write_text(
+        f"DESIGN d ;\nCOMPONENTS {n_components} ;\n{comps}\n"
+        "END COMPONENTS\nEND DESIGN\n")
+    return str(p)
+
+
+class TestPnrLinkedCellCount:
+    """`pnr_linked_cell_count` reads the placed-instance count from a DEF."""
+
+    def test_reads_components_count(self, tmp_path):
+        from orchestrator.langgraph.backend_graph import pnr_linked_cell_count
+        assert pnr_linked_cell_count(_routed_def(tmp_path, 42)) == 42
+
+    def test_missing_def_returns_none(self):
+        from orchestrator.langgraph.backend_graph import pnr_linked_cell_count
+        assert pnr_linked_cell_count("/no/such/routed.def") is None
+
+
+class TestCellCountShortfall:
+    """`pnr_cell_count_shortfall_error` (Fix 2): a fragment linked as the top
+    (linked cells far below synth gate_count) hard-fails PnR."""
+
+    def test_fragment_far_below_synth_fails(self, tmp_path):
+        from orchestrator.langgraph.backend_graph import (
+            pnr_cell_count_shortfall_error,
+        )
+        # gross-deficit shape: 154 linked vs 4,682 synth (~0.03) -> fail.
+        err = pnr_cell_count_shortfall_error(4682, _routed_def(tmp_path, 154))
+        assert err is not None
+        assert "Cell-count shortfall" in err and "154" in err and "4682" in err
+
+    def test_matching_counts_pass(self, tmp_path):
+        from orchestrator.langgraph.backend_graph import (
+            pnr_cell_count_shortfall_error,
+        )
+        # PnR ADDS physical cells, so linked >= synth is normal -> no fail.
+        assert pnr_cell_count_shortfall_error(
+            200, _routed_def(tmp_path, 240)) is None
+
+    def test_unknown_gate_count_never_false_fails(self, tmp_path):
+        from orchestrator.langgraph.backend_graph import (
+            pnr_cell_count_shortfall_error,
+        )
+        assert pnr_cell_count_shortfall_error(0, _routed_def(tmp_path, 3)) is None
+
+    def test_unreadable_def_never_false_fails(self):
+        from orchestrator.langgraph.backend_graph import (
+            pnr_cell_count_shortfall_error,
+        )
+        assert pnr_cell_count_shortfall_error(4682, "/no/such.def") is None
+
+    def test_ratio_boundary(self, tmp_path):
+        from orchestrator.langgraph.backend_graph import (
+            pnr_cell_count_shortfall_error,
+        )
+        # exactly at the ratio floor -> not below -> pass; just under -> fail.
+        assert pnr_cell_count_shortfall_error(
+            100, _routed_def(tmp_path, 50), min_ratio=0.5) is None
+        assert pnr_cell_count_shortfall_error(
+            100, _routed_def(tmp_path, 49), min_ratio=0.5) is not None
+
+
+class TestCellCountGuardGate:
+    """Env gate for the cell-count guard, both branches (default ON)."""
+
+    def test_flag_both_branches(self, monkeypatch):
+        from orchestrator.langgraph.sram_wrapper import (
+            pnr_cellcount_guard_enabled,
+        )
+        monkeypatch.delenv("CORESMITH_PNR_CELLCOUNT_GUARD", raising=False)
+        assert pnr_cellcount_guard_enabled() is True            # default ON
+        monkeypatch.setenv("CORESMITH_PNR_CELLCOUNT_GUARD", "0")
+        assert pnr_cellcount_guard_enabled() is False           # pre-fix restored
+
+    def test_min_ratio_default_and_override(self, monkeypatch):
+        from orchestrator.langgraph.sram_wrapper import pnr_cellcount_min_ratio
+        monkeypatch.delenv("CORESMITH_PNR_CELLCOUNT_MIN_RATIO", raising=False)
+        assert pnr_cellcount_min_ratio() == 0.5
+        monkeypatch.setenv("CORESMITH_PNR_CELLCOUNT_MIN_RATIO", "0.7")
+        assert pnr_cellcount_min_ratio() == 0.7
+        # out-of-band overrides are clamped to (0, 1].
+        monkeypatch.setenv("CORESMITH_PNR_CELLCOUNT_MIN_RATIO", "9")
+        assert pnr_cellcount_min_ratio() == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Brace-safe prompt templating (_safe_format)
+# ---------------------------------------------------------------------------
+
+from pathlib import Path as _Path  # noqa: E402
+
+from orchestrator.langgraph.backend_graph import (  # noqa: E402
+    _safe_format,
+    _PROMPT_DIR,
+)
+
+# Prompts loaded by `_run_llm_eda_step` through the brace-safe formatter.
+_EDA_PROMPTS = [
+    "backend_synth_llm.md",
+    "backend_pnr_llm.md",
+    "backend_drc_llm.md",
+    "backend_lvs_llm.md",
+    "backend_wrapper_llm.md",
+]
+
+
+class TestSafeFormat:
+    """Brace-safe prompt templating: a prompt may embed Verilog/tcl braces AND
+    `{placeholder}` fields; only recognized placeholders are substituted, all
+    other braces stay literal, and no `str.format`-style crash occurs."""
+
+    def test_verilog_braces_preserved_with_placeholder(self):
+        # This is the exact regression: an unescaped Verilog concat/replication
+        # in the prompt made str.format raise KeyError and crash the EDA node.
+        tmpl = (
+            "Design: {design_name}\n"
+            "assign io_out = {31'b0, done, qspi_o, 2'b0};\n"
+            "assign io_oeb = {31'b1, {4{oe}}, 2'b1};\n"
+            "tcl braces {a b c} stay literal\n"
+        )
+        # str.format is the thing that breaks:
+        with pytest.raises((KeyError, ValueError)):
+            tmpl.format(design_name="widget_top")
+        out = _safe_format(tmpl, {"design_name": "widget_top"})
+        assert "Design: widget_top" in out                 # placeholder filled
+        assert "{31'b0, done, qspi_o, 2'b0}" in out         # concat literal
+        assert "{31'b1, {4{oe}}, 2'b1}" in out              # replication literal
+        assert "{a b c}" in out                             # tcl braces literal
+
+    def test_unknown_placeholder_left_literal_not_crash(self):
+        # A `{name}` whose name is not a context key is passed through unchanged
+        # (missing-key safe -- never raises).
+        out = _safe_format("keep {unknown} here, fill {known}", {"known": "X"})
+        assert out == "keep {unknown} here, fill X"
+
+    def test_double_brace_unescaped_like_str_format(self):
+        # `{{`/`}}` unescape to single braces exactly like str.format, and an
+        # escaped `{{name}}` is NOT substituted.
+        tmpl = 'json {{"k": "{v}"}} and {{name}}'
+        assert _safe_format(tmpl, {"v": "1", "name": "N"}) == tmpl.format(v="1", name="N")
+        assert _safe_format(tmpl, {"v": "1", "name": "N"}) == 'json {"k": "1"} and {name}'
+
+    def test_format_spec_and_conversion_applied(self):
+        assert _safe_format("{p:.2f}", {"p": 12.3456}) == "12.35"
+        assert _safe_format("{x!r}", {"x": "hi"}) == "'hi'"
+
+    def test_all_backend_prompts_render_identically_to_str_format(self):
+        # AUDIT guard: every backend prompt must render byte-identically under
+        # _safe_format and str.format for its real (word-name) placeholder set.
+        # Guarantees the swap changed no rendering, incl. the `{{ }}` JSON blocks.
+        import re
+        field_re = re.compile(r"\{(\w+)(?:![rsa])?(?::[^{}]*)?\}")
+        for name in _EDA_PROMPTS:
+            text = (_Path(_PROMPT_DIR) / name).read_text()
+            ctx = {}
+            for f in set(field_re.findall(text)):
+                # numeric fields may carry :.Nf specs -> give them a float
+                ctx[f] = 12.3456 if f.endswith(("_ns", "_mhz")) else f"<{f}>"
+            assert _safe_format(text, ctx) == text.format(**ctx), name
+
+    def test_lvs_prompt_no_longer_crashes_str_format(self):
+        # Belt-and-suspenders: the LVS example braces are escaped, so even a
+        # plain str.format renders (and matches _safe_format).
+        text = (_Path(_PROMPT_DIR) / "backend_lvs_llm.md").read_text()
+        ctx = {
+            "design_name": "d", "netgen_setup": "s", "netgen_bin": "b",
+            "spice_path": "sp", "pwr_verilog_path": "pv", "output_dir": "od",
+            "attempt": 1, "prior_failure": "None", "constraints": "c",
+            "result_json_path": "rj",
+        }
+        rendered = _safe_format(text, ctx)
+        assert rendered == text.format(**ctx)
+        # ... and the rendered example is natural single-brace Verilog.
+        assert "assign io_out = {31'b0, done, qspi_o, 2'b0};" in rendered
+        assert "{4{oe}}, 2'b1};" in rendered

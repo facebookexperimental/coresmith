@@ -64,6 +64,11 @@ _PROJECT_ROOT = os.environ.get(
 os.environ["CORESMITH_PROJECT_ROOT"] = _PROJECT_ROOT
 _TELEMETRY_ROOT = os.environ.get("CORESMITH_TELEMETRY_ROOT", _PROJECT_ROOT)
 
+# A-Fix 1: seed profile flag defaults before importing graph code.
+from orchestrator.profile import apply as _apply_profile  # noqa: E402
+
+_apply_profile()
+
 from orchestrator.architecture.state import ARCH_DOC_DIR  # noqa: E402
 from orchestrator.telemetry import init_telemetry  # noqa: E402
 
@@ -703,6 +708,57 @@ def _build_pipeline_ask_question(payload: dict) -> dict:
         out["interrupt_summary"] = (
             f"Chip-level uArch review: {issues_found} issue(s) found, "
             f"{issues_fixed} fixed. Blocks: {', '.join(block_names)}."
+        )
+
+    # ---- uarch_feasibility ----
+    elif payload_type == "uarch_feasibility":
+        block_name = payload.get("block_name", payload.get("block", ""))
+        issues = payload.get("blocking_issues", []) or []
+        guidance = payload.get("outer_agent_guidance", "")
+        issues_txt = "\n".join(f"  - {i}" for i in issues)
+
+        q_text = (
+            f"Block '{block_name}' is INFEASIBLE as budgeted.\n\n"
+            f"The microarchitecture step reports it cannot be built byte-exactly "
+            f"against the golden. Feasibility spans four dimensions and each "
+            f"blocker below LEADS WITH ITS CATEGORY: [interface] a port can't "
+            f"carry data the golden reads, [area] it won't fit the area budget, "
+            f"[timing] it can't hit the clock/throughput budget, or [capability] "
+            f"it's fundamentally not realizable from this golden slice (e.g. needs "
+            f"runtime-built tables like 80 Huffman trees). [area] and [timing] "
+            f"have later dedicated gates; [capability] has NO backstop, so take it "
+            f"seriously here. This is the engine's OWN diagnosis; do NOT have it "
+            f"emit a stub.\n\n"
+            f"Blocking issues:\n{issues_txt}\n\n"
+            f"uArch spec: {payload.get('uarch_spec_path', '')}"
+        )
+        if guidance:
+            q_text += f"\n\n{guidance}"
+
+        out["ask_question"] = {
+            "title": f"uArch Feasibility Block: {block_name}",
+            "questions": [
+                {
+                    "id": "uarch_feasibility_decision",
+                    "question": q_text,
+                    "header": "Feasibility",
+                    "options": [
+                        {"label": "Fix & re-spec", "description": "Fix the root cause per the blocker's category -- widen the interface, repartition/shrink storage (area), pipeline it (timing), or decompose the block (capability) -- then re-spec against the corrected design"},
+                        {"label": "Override", "description": "Proceed to RTL anyway -- ONLY for a verified false alarm; never override a [capability] blocker"},
+                        {"label": "Abort", "description": "End this block without emitting RTL"},
+                    ],
+                    "multiSelect": False,
+                }
+            ],
+        }
+        out["resume_mapping"] = {
+            "Fix & re-spec": {"action": "revise_interface"},
+            "Override": {"action": "override"},
+            "Abort": {"action": "abort"},
+        }
+        out["interrupt_summary"] = (
+            f"Block '{block_name}' reports {len(issues)} feasibility blocker(s) "
+            f"(interface/area/timing/capability); fix the root cause before RTL."
         )
 
     # ---- integration_failure ----
@@ -2580,23 +2636,23 @@ async def _merge_block_into_pipeline_checkpoint(block_result: dict) -> bool:
         if not snap or not snap.values:
             return False
 
-        completed = list(snap.values.get("completed_blocks", []))
         block_name = block_result.get("name", "")
         if not block_name:
             return False
 
-        replaced = False
-        for i, b in enumerate(completed):
-            if b.get("name") == block_name:
-                completed[i] = block_result
-                replaced = True
-                break
-        if not replaced:
-            completed.append(block_result)
-
+        # ``completed_blocks`` uses an ``operator.add`` (append) reducer, and the
+        # downstream gates (pipeline_complete / _current_phase_completed) dedup by
+        # name keeping the LAST entry. So the authoritative way to record a
+        # restart_block result is to APPEND it -- it then becomes the last entry
+        # for that name and last-wins dedup surfaces it. The previous
+        # implementation read the list, replaced the FIRST name-match, and wrote
+        # the whole list back; because the reducer APPENDS, that both duplicated
+        # the list AND left the genuine result at a non-last slot (a later stale
+        # entry for the same block could still win), so a restart_block PASS was
+        # invisible to the gate and the run re-parked at pipeline_incomplete.
         await _pipeline.graph.aupdate_state(
             config,
-            {"completed_blocks": completed},
+            {"completed_blocks": [block_result]},
             as_node="process_block",
         )
         return True
@@ -3375,8 +3431,20 @@ async def run_backend_step(
                 sdc_dir.mkdir(parents=True, exist_ok=True)
                 sdc_path = str(sdc_dir / f"{block_name}.sdc")
                 period_ns = 1000.0 / target_clock_mhz
+                # Discover the netlist's ACTUAL clock port (a hardcoded `clk`
+                # never binds on wb_clk_i-style tops -> CTS finds zero clock
+                # nets and STA is meaningless).
+                _clk_port = "clk"
+                try:
+                    from orchestrator.langgraph.pipeline_helpers import (
+                        _detect_clock_port,
+                    )
+                    _clk_port = (_detect_clock_port(
+                        Path(netlist_path).read_text(errors="ignore")) or "clk")
+                except Exception:
+                    _clk_port = "clk"
                 Path(sdc_path).write_text(
-                    f"create_clock -name clk -period {period_ns} [get_ports clk]\n"
+                    f"create_clock -name clk -period {period_ns} [get_ports {_clk_port}]\n"
                     f"set_input_delay {period_ns * 0.2:.1f} -clock clk [all_inputs]\n"
                     f"set_output_delay {period_ns * 0.2:.1f} -clock clk [all_outputs]\n"
                 )

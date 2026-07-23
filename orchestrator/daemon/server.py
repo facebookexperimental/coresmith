@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -44,6 +45,13 @@ _PROJECT_ROOT = os.environ.get(
 )
 os.environ["CORESMITH_PROJECT_ROOT"] = _PROJECT_ROOT
 
+# A-Fix 1: seed profile flag defaults BEFORE importing graph code -- the
+# pipeline builder reads gate-enable helpers (e.g. block_goldens_enabled) at
+# build time, so the profile must be applied first.
+from orchestrator.profile import apply as _apply_profile  # noqa: E402
+
+_apply_profile()
+
 from orchestrator.telemetry import init_telemetry  # noqa: E402
 
 init_telemetry(_PROJECT_ROOT)
@@ -56,6 +64,69 @@ from orchestrator.graph_lifecycle import GraphLifecycle  # noqa: E402
 
 log = logging.getLogger("coresmithd")
 log.setLevel(logging.INFO)
+
+
+# ---------------------------------------------------------------------------
+# Driver-liveness watch (Section 7b): a run parked at an interrupt with no
+# outer-agent /run/resume for too long is stalled -- WARN (repeating) + drop a
+# STALLED_INTERRUPT marker so a human notices, without any paging infra.
+# ---------------------------------------------------------------------------
+
+_last_resume_ts: float = time.time()   # bumped on every /run/start + /run/resume
+_STALL_THRESHOLD_S = float(os.environ.get("CORESMITH_INTERRUPT_STALL_S", "1800"))
+_STALL_POLL_S = float(os.environ.get("CORESMITH_INTERRUPT_STALL_POLL_S", "300"))
+
+
+async def _count_pending_interrupts() -> int:
+    """Best-effort count of parked interrupts on the pipeline (0 on any error)."""
+    try:
+        await _pipeline.ensure_graph()
+        snap = await _pipeline.graph.aget_state(
+            {"configurable": {"thread_id": _pipeline.thread_id}}
+        )
+        n = 0
+        if snap and snap.tasks:
+            for t in snap.tasks:
+                n += len(t.interrupts)
+        return n
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+async def _driver_liveness_watch() -> None:
+    """Poll for a stalled interrupt (pending > 0 with no resume for >30 min)."""
+    marker = Path(_PROJECT_ROOT) / "STALLED_INTERRUPT"
+    while True:
+        try:
+            await asyncio.sleep(_STALL_POLL_S)
+            pending = await _count_pending_interrupts()
+            if pending > 0:
+                idle = time.time() - _last_resume_ts
+                if idle >= _STALL_THRESHOLD_S:
+                    log.warning(
+                        "STALLED_INTERRUPT: %d pending interrupt(s) with no "
+                        "/run/resume for %.0f min (project_root=%s). The outer "
+                        "driver may be dead -- resume or restart it.",
+                        pending, idle / 60.0, _PROJECT_ROOT,
+                    )
+                    try:
+                        marker.write_text(json.dumps({
+                            "pending_interrupt_count": pending,
+                            "idle_seconds": round(idle),
+                            "last_resume_ts": _last_resume_ts,
+                            "noted_at": time.time(),
+                        }, indent=2))
+                    except OSError:
+                        pass
+            else:
+                # cleared -> remove any stale marker
+                with contextlib.suppress(OSError):
+                    if marker.exists():
+                        marker.unlink()
+        except asyncio.CancelledError:
+            break
+        except Exception:  # noqa: BLE001 - liveness watch must never crash
+            continue
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +158,7 @@ class StartRequest(BaseModel):
     max_attempts: int = 5
     target_clock_mhz: float = 50.0
     blocks_file: str = ""
+    force: bool = False
 
 
 class ResumeRequest(BaseModel):
@@ -95,6 +167,11 @@ class ResumeRequest(BaseModel):
     rtl_fix_description: str = ""
     block_actions: Optional[dict] = None
     rationale: str = ""
+
+
+class RestartNodeRequest(BaseModel):
+    node: str
+    refresh_sidecars: bool = False
 
 
 class ArchStartRequest(BaseModel):
@@ -115,7 +192,37 @@ class ArchResumeRequest(BaseModel):
 # FastAPI app
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="coresmithd", version="0.1")
+@contextlib.asynccontextmanager
+async def _lifespan(_app: "FastAPI"):
+    # Defect 3 (rung1): the import-time _apply_profile() above logs its
+    # profile-seed line BEFORE uvicorn configures logging, so it goes nowhere.
+    # Re-emit it now (startup runs after uvicorn's logging is up) through the
+    # uvicorn logger so it lands in daemon.log, plus a cheap pipeline_events
+    # breadcrumb -- making profile seeding observable without new plumbing.
+    try:
+        from orchestrator import profile as _profile
+        _profile.log_status(logging.getLogger("uvicorn.error"))
+        try:
+            from orchestrator.langgraph.event_stream import write_graph_event
+            write_graph_event(
+                _PROJECT_ROOT, "daemon", "profile_seeded",
+                {"summary": _profile.status_line()},
+            )
+        except Exception:  # noqa: BLE001 -- observability must never fail startup
+            pass
+    except Exception:  # noqa: BLE001
+        pass
+    # Section 7b: start the driver-liveness watch (cheap, cancelled on shutdown).
+    _watch_task = asyncio.create_task(_driver_liveness_watch())
+    try:
+        yield
+    finally:
+        _watch_task.cancel()
+        with contextlib.suppress(Exception):
+            await _watch_task
+
+
+app = FastAPI(title="coresmithd", version="0.1", lifespan=_lifespan)
 
 
 @app.get("/healthz")
@@ -139,8 +246,36 @@ async def run_state():
 
 @app.post("/run/start")
 async def run_start(req: StartRequest):
+    global _last_resume_ts
+    _last_resume_ts = time.time()  # Section 7b: run start resets the stall clock
     if _pipeline.task is not None and not _pipeline.task.done():
         raise HTTPException(409, "pipeline already running; call /run/pause first")
+
+    # Guard: a `run start` on an EXISTING run (paused / parked at an interrupt /
+    # completed) would SILENTLY discard it via reset_for_new_run() -- wiping all
+    # block/RTL progress back to completed_count=0. Refuse unless force=true so
+    # the operator must explicitly clear. To continue an in-flight run, `resume`
+    # it instead.
+    if not req.force:
+        try:
+            await _pipeline.ensure_graph()
+            snap = await _pipeline.graph.aget_state(
+                {"configurable": {"thread_id": _pipeline.thread_id}}
+            )
+            vals = (snap.values if snap else {}) or {}
+        except Exception:  # noqa: BLE001 - no prior state -> first run, proceed
+            vals = {}
+        completed = vals.get("completed_blocks") or []
+        if completed or vals.get("pipeline_run_start") or vals.get("pipeline_done"):
+            raise HTTPException(
+                409,
+                "a run already exists in this project root "
+                f"(completed_blocks={len(completed)}, "
+                f"pipeline_done={bool(vals.get('pipeline_done'))}). "
+                "`run start` would DISCARD it and restart from scratch. To "
+                "continue it, use `resume`. To intentionally start fresh, pass "
+                "force=true (CLI: `run start --force`).",
+            )
 
     block_queue = _load_block_queue(req.blocks_file)
     if not block_queue:
@@ -152,6 +287,27 @@ async def run_start(req: StartRequest):
 
     _preflight_or_400()
     arch_warnings = _check_architecture_artifacts(_PROJECT_ROOT)
+
+    # B3: persist the resolved block queue + initialize the scoreboard schema +
+    # snapshot the oracle manifest so the harness (`coresmith verify ...`) can
+    # resolve blocks and detect oracle tampering after the daemon parks. All
+    # best-effort -- must never block starting a run.
+    try:
+        from orchestrator.harness.blocks import persist_block_queue
+        persist_block_queue(_PROJECT_ROOT, block_queue)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from orchestrator.state_store.store import Scoreboard
+        Scoreboard(_PROJECT_ROOT).ensure_schema()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from orchestrator.state_store.trust import write_oracle_manifest
+        write_oracle_manifest(_PROJECT_ROOT)
+    except Exception:  # noqa: BLE001
+        pass
+
     await _pipeline.reset_for_new_run()
 
     events_path = Path(_PROJECT_ROOT) / ".coresmith" / "pipeline_events.jsonl"
@@ -183,26 +339,118 @@ async def run_start(req: StartRequest):
     return response
 
 
+def _resume_action_error(
+    action: str,
+    block_actions: Optional[dict],
+    interrupt_meta: "list[tuple[str, list]]",
+) -> "Optional[tuple[str, str, list]]":
+    """Validate a resume action against the parked interrupts' supported_actions.
+
+    Returns ``(block_name, bad_action, allowed_actions)`` for the FIRST interrupt
+    whose EFFECTIVE action is not in its declared ``supported_actions``, or
+    ``None`` when every interrupt accepts its action. An interrupt that declares
+    no ``supported_actions`` imposes no constraint (back-compat: not every
+    interrupt enumerates them). ``interrupt_meta`` is ``[(block_name,
+    supported_actions), ...]``; an interrupt's effective action is
+    ``block_actions[block_name]`` when provided, else the default ``action``.
+
+    This makes ``/run/resume`` reject an unsupported action with a 400 + the
+    allowed list instead of silently forwarding it (e.g. ``approve`` sent to a
+    DV-failure interrupt whose only stop action is ``abort``), which the graph
+    node would otherwise map to its own default and appear to "proceed".
+    """
+    ba = block_actions or {}
+    for block_name, supported in interrupt_meta:
+        if not supported:
+            continue
+        effective = ba.get(block_name, action) if block_name else action
+        if effective not in supported:
+            return (block_name, effective, list(supported))
+    return None
+
+
+def _resume_tick_or_park(has_pending_interrupt: bool, has_next_nodes: bool) -> str:
+    """Decide how ``POST /run/resume`` advances a not-running pipeline.
+
+    Returns one of:
+      - ``"resume"``: a parked interrupt is pending -> a real, *supported*
+        action is required (validated against ``supported_actions``) and
+        forwarded as ``Command(resume=...)``.
+      - ``"tick"``: NO pending interrupt but the checkpoint still has next
+        nodes (a stranded/paused run, e.g. after an ``aget_state``/
+        ``aupdate_state`` recovery) -> re-invoke the graph with ``cmd=None`` to
+        tick it forward, matching the ``/architecture/resume`` tick semantics
+        (the pipeline endpoint previously only 409'd here, so a stranded run
+        had no plain-tick path).
+      - ``"none"``: nothing to do (no interrupt, no next nodes) -> HTTP 409.
+
+    Guard: a PARKED run never ticks -- ``has_pending_interrupt`` wins so parked
+    runs still require a real action (fail-closed against the supported_actions
+    validation). Only a not-parked run with pending next nodes ticks.
+    """
+    if has_pending_interrupt:
+        return "resume"
+    if has_next_nodes:
+        return "tick"
+    return "none"
+
+
 @app.post("/run/resume")
 async def run_resume(req: ResumeRequest):
+    global _last_resume_ts
+    _last_resume_ts = time.time()  # Section 7b: the driver is alive
+    with contextlib.suppress(OSError):
+        _mk = Path(_PROJECT_ROOT) / "STALLED_INTERRUPT"
+        if _mk.exists():
+            _mk.unlink()
     await _pipeline.ensure_graph()
     if _pipeline.task is not None and not _pipeline.task.done():
         raise HTTPException(409, "pipeline still running; nothing to resume")
 
-    state_snapshot = await _pipeline.graph.aget_state(
-        {"configurable": {"thread_id": _pipeline.thread_id}}
-    )
-    if not state_snapshot or not state_snapshot.tasks:
-        raise HTTPException(409, "no pending interrupt")
+    graph_config = {"configurable": {"thread_id": _pipeline.thread_id}}
+    state_snapshot = await _pipeline.graph.aget_state(graph_config)
 
     # Collect all pending interrupt IDs so parallel-block runs all resume
     # with the same decision unless the caller provided per-block actions.
     interrupts: list[tuple[str, Any]] = []
-    for task in state_snapshot.tasks:
-        for intr in task.interrupts:
-            interrupts.append((intr.id, intr.value))
-    if not interrupts:
+    interrupt_meta: list[tuple[str, list]] = []
+    if state_snapshot and state_snapshot.tasks:
+        for task in state_snapshot.tasks:
+            for intr in task.interrupts:
+                interrupts.append((intr.id, intr.value))
+                _val = intr.value if isinstance(intr.value, dict) else {}
+                interrupt_meta.append((
+                    _val.get("block", _val.get("block_name", "")),
+                    _val.get("supported_actions", []),
+                ))
+
+    _has_next = bool(state_snapshot and state_snapshot.next)
+    _mode = _resume_tick_or_park(bool(interrupts), _has_next)
+    if _mode == "none":
         raise HTTPException(409, "no pending interrupt")
+    if _mode == "tick":
+        # No parked interrupt but the graph still has next nodes: plain tick
+        # (cmd=None) to advance a stranded/paused run without a fake action.
+        await _pipeline.safe_resume(None, graph_config)
+        return {
+            "resumed": True,
+            "ticked": True,
+            "next_nodes": list(state_snapshot.next),
+            "action": req.action,
+            "status": _pipeline.status,
+        }
+
+    # Reject an action the parked interrupt does not support (400 + allowed list)
+    # rather than silently forwarding it into the graph.
+    _bad = _resume_action_error(req.action, req.block_actions, interrupt_meta)
+    if _bad is not None:
+        _bn, _act, _allowed = _bad
+        _where = f" (block '{_bn}')" if _bn else ""
+        raise HTTPException(
+            400,
+            f"action '{_act}'{_where} not supported by the parked interrupt; "
+            f"allowed: {_allowed}",
+        )
 
     resume_value: Any = {
         "action": req.action,
@@ -218,7 +466,6 @@ async def run_resume(req: ResumeRequest):
     else:
         cmd = Command(resume=resume_value)
 
-    graph_config = {"configurable": {"thread_id": _pipeline.thread_id}}
     await _pipeline.safe_resume(cmd, graph_config)
     return {"resumed": True, "interrupts": len(interrupts), "action": req.action}
 
@@ -227,6 +474,23 @@ async def run_resume(req: ResumeRequest):
 async def run_pause():
     if _pipeline.task is None or _pipeline.task.done():
         return {"paused": False, "reason": "no running task"}
+    # Reap any in-flight LLM CLI child (codex/claude) AND its whole process
+    # group BEFORE cancelling the task. The blocking ``Popen`` runs in a thread
+    # executor that ``task.cancel()`` cannot reach, so without this reap the
+    # orphaned codex keeps running (2nd live occurrence: it kept burning tokens
+    # after a run pause). Pausing mid-LLM-call therefore DISCARDS that call's
+    # work -- the interrupted node simply re-runs from the last checkpoint on
+    # resume (LangGraph node-boundary semantics), which is correct: a paused
+    # in-flight generation was never committed to the graph state.
+    try:
+        from orchestrator.langchain.agents.coresmith_llm import (
+            reap_active_cli_processes,
+        )
+        reaped = reap_active_cli_processes()
+        if reaped:
+            log.warning("run/pause reaped %d in-flight CLI process group(s)", reaped)
+    except Exception:
+        log.warning("run/pause: CLI reap failed", exc_info=True)
     _pipeline.task.cancel()
     try:
         await _pipeline.task
@@ -234,6 +498,67 @@ async def run_pause():
         pass
     _pipeline.status = "paused"
     return {"paused": True}
+
+
+@app.post("/run/continue")
+async def run_continue():
+    """Continue a pipeline that has next_nodes but no pending interrupt.
+
+    Calls graph.ainvoke(None, config) to resume from current checkpoint
+    without resetting progress. Safe when status=done but pipeline_done=False.
+    """
+    if _pipeline.task is not None and not _pipeline.task.done():
+        raise HTTPException(409, "pipeline already running")
+    await _pipeline.ensure_graph()
+    snap = await _pipeline.graph.aget_state(
+        {"configurable": {"thread_id": _pipeline.thread_id}}
+    )
+    if not snap or not snap.next:
+        return {"continued": False, "reason": "no next nodes in checkpoint"}
+    config = {"configurable": {"thread_id": _pipeline.thread_id}}
+    await _pipeline.safe_start(None, config)
+    return {"continued": True, "next_nodes": list(snap.next), "status": _pipeline.status}
+
+
+@app.post("/run/restart-node")
+async def run_restart_node(req: "RestartNodeRequest"):
+    """Re-run the pipeline from the checkpoint where ``node`` is next, reusing
+    every block's on-disk RTL/TB (engine follow-up #8/#10).
+
+    Unlike ``run start --force`` (full pipeline restart + unconditional uarch
+    spec regen), this forks from a specific node so a late-stage re-drive --
+    re-run a skipped ``integration_check``, or ``validation_dv`` after a
+    hand-patch -- does NOT regenerate already-passing blocks. Requires the
+    pipeline to be idle (pause first if running).
+    """
+    if _pipeline.task is not None and not _pipeline.task.done():
+        raise HTTPException(409, "pipeline already running -- pause first")
+    refreshed = []
+    if req.refresh_sidecars:
+        # #6: re-sync intact-RTL blocks' contract sidecars to live before
+        # re-entering integration, so the staleness preflight does not force a
+        # mass-regen of already-passing blocks.
+        try:
+            import json as _json
+            from orchestrator.langgraph.pipeline_helpers import (
+                refresh_current_sidecars,
+            )
+            bq = os.path.join(_PROJECT_ROOT, ".coresmith", "block_queue.json")
+            names = []
+            if os.path.exists(bq):
+                data = _json.loads(open(bq).read())
+                names = [b.get("name") for b in data if b.get("name")]
+            refreshed = refresh_current_sidecars(_PROJECT_ROOT, names)
+        except Exception:  # noqa: BLE001 - best effort
+            log.warning("restart-node: sidecar refresh failed", exc_info=True)
+    result = await _pipeline.restart_from_node(req.node)
+    if refreshed:
+        result["sidecars_refreshed"] = refreshed
+    if result.get("error"):
+        raise HTTPException(400, result["error"] + (
+            " -- " + result["hint"] if result.get("hint") else ""))
+    result["status"] = _pipeline.status
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +715,6 @@ async def architecture_pause():
     _architecture.status = "paused"
     return {"paused": True}
 
-
 def _shape_arch_state(snap) -> dict:
     base = {
         "status": _architecture.status,
@@ -484,7 +808,7 @@ def _check_architecture_artifacts(project_root: str) -> list[str]:
     hard-fail — they soft-fail / abort silently — so the user thinks the
     run finished cleanly when it really skipped requirement validation.
 
-    Set CORESMITH_SKIP_ARCH_WARN=1 to suppress this warning (PPABench /
+    Set CORESMITH_SKIP_ARCH_WARN=1 to suppress this warning (the evaluation harness /
     rapid-iteration flows that intentionally skip the architecture phase).
     """
     if os.environ.get("CORESMITH_SKIP_ARCH_WARN", "").strip().lower() in {
@@ -529,7 +853,19 @@ def _shape_state(state_snapshot) -> dict:
     values = state_snapshot.values
     completed = values.get("completed_blocks", [])
     block_queue = values.get("block_queue", [])
-    completed_names = {b.get("name") for b in completed if b.get("name")}
+    # Audit F9: completed_blocks is APPEND-ONLY across resumes / re-validation
+    # passes -- the reference codec decoder accumulated 84 completion events for 21
+    # blocks, so the raw len() reported completed_count=84 and
+    # remaining_count=-63. Present attempt-scoped facts instead: one row per
+    # unique block (the LATEST completion event wins -- it reflects the final
+    # attempt), remaining floored at zero, and the raw append-only event count
+    # preserved separately for forensics.
+    latest_by_name: dict = {}
+    for b in completed:
+        name = b.get("name")
+        if name:
+            latest_by_name[name] = b
+    completed_names = set(latest_by_name)
 
     interrupts: list[dict] = []
     if state_snapshot.tasks:
@@ -543,13 +879,14 @@ def _shape_state(state_snapshot) -> dict:
                 interrupts.append({"id": intr.id, "payload": payload})
 
     base.update({
-        "completed_count": len(completed),
+        "completed_count": len(latest_by_name),
+        "completion_events": len(completed),
         "completed_blocks": [
             {"name": b.get("name"), "success": b.get("success"), "attempts": b.get("attempts", 1)}
-            for b in completed
+            for b in latest_by_name.values()
         ],
         "total_blocks": len(block_queue),
-        "remaining_count": len(block_queue) - len(completed),
+        "remaining_count": max(0, len(block_queue) - len(latest_by_name)),
         "pipeline_done": values.get("pipeline_done", False),
         "next_nodes": list(state_snapshot.next) if state_snapshot.next else [],
         "interrupts": interrupts,

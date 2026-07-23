@@ -851,12 +851,45 @@ class TestCocotbResultParsing:
         tb_file = tmp_path / "test_unit.py"
         tb_file.write_text('await Timer(1, unit="ns")\nClock(dut.clk, 10, unit="ns")\n')
 
-        monkeypatch.setattr(pipeline_helpers, "_cocotb_uses_plural_units", lambda: True)
+        monkeypatch.setattr(pipeline_helpers, "_cocotb_timing_keyword_mode",
+                            lambda: "units")
         pipeline_helpers._normalize_cocotb_timing_keywords(tb_file)
 
         content = tb_file.read_text()
         assert 'units="ns"' in content
         assert 'unit="ns"' not in content
+
+    def test_no_rewrite_when_cocotb_accepts_both_keywords(self, tmp_path, monkeypatch):
+        # C4 (exp-reference_codec-20260713): cocotb 2.x accepts BOTH `unit` (preferred)
+        # and `units` (deprecated alias). Rewriting either spelling on the
+        # STAGED copy breaks the TB's staged-vs-canonical SHA-256 self-check
+        # (_assert_staged_source_current) and aborts every sim at t=0. The
+        # normalizer must be a byte-exact no-op in "both" mode.
+        from orchestrator.langgraph import pipeline_helpers
+
+        original = 'await Timer(1, unit="ns")\nClock(dut.clk, 10, units="ns")\n'
+        tb_file = tmp_path / "test_unit.py"
+        tb_file.write_text(original)
+
+        monkeypatch.setattr(pipeline_helpers, "_cocotb_timing_keyword_mode",
+                            lambda: "both")
+        pipeline_helpers._normalize_cocotb_timing_keywords(tb_file)
+
+        assert tb_file.read_text() == original
+
+    def test_installed_cocotb2_detected_as_both(self):
+        # On the pinned toolchain (cocotb 2.x) the live detection must return
+        # "both" -- the exact misdetection C4 fixed ("units" in a signature
+        # that ALSO has "unit" used to force plural rewriting).
+        import inspect as _inspect
+
+        from cocotb.triggers import Timer
+
+        from orchestrator.langgraph import pipeline_helpers
+
+        params = _inspect.signature(Timer).parameters
+        if "unit" in params and "units" in params:
+            assert pipeline_helpers._cocotb_timing_keyword_mode() == "both"
 
 
 # ═══════════════════════════════════════════════════════════════════════════

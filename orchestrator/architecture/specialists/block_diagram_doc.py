@@ -23,6 +23,37 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
+def _hashable_label(value) -> str:
+    """Coerce a connection field (interface / data_width) to a hashable,
+    human-readable label.
+
+    Block-diagram connection records sometimes carry the ``interface`` or
+    ``data_width`` field as a structured ``dict`` (e.g. ``{"name": ...,
+    "data_width_bits": ...}``) or a ``list`` rather than a plain string.
+    ``set.add()`` on a raw dict/list raises ``TypeError: unhashable type``.
+    Normalize to a string so bus-hub note aggregation never crashes,
+    regardless of the upstream schema shape.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("name", "interface", "id", "label", "bundle"):
+            v = value.get(key)
+            if isinstance(v, str) and v:
+                return v
+        # Fall back to a stable serialization of the dict.
+        try:
+            return json.dumps(value, sort_keys=True)
+        except (TypeError, ValueError):
+            return str(value)
+    if isinstance(value, (list, tuple)):
+        parts = [_hashable_label(v) for v in value]
+        return ", ".join(p for p in parts if p)
+    return str(value)
+
+
 # ---------------------------------------------------------------------------
 # Node type classification
 # ---------------------------------------------------------------------------
@@ -286,10 +317,10 @@ def generate_block_diagram_doc(
         for c in bus_conns:
             connected_blocks.add(c.get("from", ""))
             connected_blocks.add(c.get("to", ""))
-            iface = c.get("interface", "")
+            iface = _hashable_label(c.get("interface", ""))
             if iface:
                 bus_interfaces.add(iface)
-            dw = c.get("data_width", "")
+            dw = _hashable_label(c.get("data_width", ""))
             if dw:
                 bus_widths.add(str(dw))
 
@@ -338,8 +369,8 @@ def generate_block_diagram_doc(
 
         src_id = block_id_map.get(src, src)
         tgt_id = block_id_map.get(tgt, tgt)
-        interface = conn.get("interface", "")
-        data_width = conn.get("data_width", "")
+        interface = _hashable_label(conn.get("interface", ""))
+        data_width = _hashable_label(conn.get("data_width", ""))
         bus_name = conn.get("bus_name", "")
 
         if bus_name:

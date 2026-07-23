@@ -10,7 +10,7 @@ to receive only the edge contracts where this block participates as the
 producer or consumer, plus the design-wide defaults. The result is
 formatted as a prompt fragment ready to drop into the user message.
 
-Why this exists: the v7 autopilot run produced a correct
+Why this exists: the v7 video_codec autopilot run produced a correct
 `interface_contracts.json` (incl. `bootstrap_policy.reset_seed` for the
 neighbor edge), but the per-block RTL generator did not honor it because
 it never read the file. This helper bridges that gap by giving each
@@ -92,6 +92,45 @@ def load_block_contracts(project_root: str, block_name: str) -> dict[str, Any]:
         if full.get(k)
     }
     return {"defaults": defaults, "edges": edges}
+
+
+def format_block_contracts_prompt_slim(block_name: str, view: dict[str, Any]) -> str:
+    """Slim contract fragment: keep the load-bearing bootstrap policy + a CLI
+    pointer to the full edge list, instead of dumping every edge JSON.
+
+    Used under ``CORESMITH_PROMPT_SLIM`` (default on). Returns '' when there are
+    no relevant edges (caller skips injection cleanly).
+    """
+    edges = view.get("edges") or []
+    if not edges:
+        return ""
+    lines = [
+        "",
+        f"## Interface contracts for `{block_name}` "
+        "(pull the full bit-level edge list: "
+        f"`\"${{CORESMITH_CLI:-coresmith}}\" contracts {block_name}`)",
+    ]
+    defaults = view.get("defaults") or {}
+    pack = defaults.get("default_packing_convention")
+    if pack:
+        lines.append(f"- design-wide packing convention: `{pack}`")
+    bootstrap_edges = [
+        e for e in edges if (e.get("bootstrap_policy") or {}).get("required")
+    ]
+    for e in bootstrap_edges:
+        bp = e.get("bootstrap_policy") or {}
+        lines.append(
+            f"- bootstrap: edge `{e.get('edge_id', '?')}` (role={e.get('role')}) "
+            f"requires `{bp.get('policy_type', 'unspecified')}` -- "
+            f"{(bp.get('rationale') or '').strip()}"
+        )
+    if bootstrap_edges:
+        lines.append(
+            "  (If producer on a `reset_seed` edge, drive a valid seeded output "
+            "on cycle 1 after reset; the equivalence gate checks the exact "
+            "contract with a fresh seed.)"
+        )
+    return "\n".join(lines)
 
 
 def format_block_contracts_prompt(block_name: str, view: dict[str, Any]) -> str:

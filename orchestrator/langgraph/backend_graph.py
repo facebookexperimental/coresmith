@@ -107,6 +107,7 @@ class BackendState(TypedDict):
     flat_sdc_path: str                   # syn/output/<design>/<design>.sdc
     synth_gate_count: int
     synth_area_um2: float
+    macro_bindings: list                 # Part C: [{name,lef,gds,lib,...}] bound shells
 
     # Current block tracking ────────────────────────────────────────────────
     current_block_index: int
@@ -169,6 +170,57 @@ class BackendState(TypedDict):
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "langchain" / "prompts"
 
+# Brace-safe prompt templating. Backend prompts embed Verilog/tcl snippets that
+# contain literal braces -- e.g. `assign io_out = {31'b0, done};` or a Verilog
+# replication `{4{oe}}`. A naive `str.format(**context)` treats every `{...}` as
+# a replacement field and raises `KeyError`/`ValueError` on such snippets,
+# crashing the EDA node for EVERY design (the LVS-prompt regression). `_safe_format`
+# substitutes ONLY the recognized `{name}` / `{name:spec}` / `{name!conv}` tokens
+# whose bare name is a key in `context`; it unescapes `{{`->`{` and `}}`->`}` like
+# `str.format`, and leaves ALL other braces (Verilog/tcl code, unknown names) exactly
+# as written. Result: any future code snippet in any prompt is safe by default.
+#
+# `\{\{` / `\}\}` are matched FIRST (ordered alternation, leftmost match) so an
+# escaped `{{name}}` renders to the literal `{name}` and is never substituted --
+# byte-identical to `str.format`. A field spec/conversion may not itself contain
+# braces (`[^{}]*`), which is true for every backend placeholder and keeps the
+# scan single-pass.
+_SAFE_FORMAT_RE = re.compile(
+    r"\{\{"                              # 1: escaped open brace -> "{"
+    r"|\}\}"                             # (no group): escaped close brace -> "}"
+    r"|\{(\w+)(?:!([rsa]))?(?::([^{}]*))?\}"  # 2:name 3:conversion 4:format-spec
+)
+
+
+def _safe_format(template: str, context: dict) -> str:
+    """Substitute recognized ``{placeholder}`` tokens, leave every other brace
+    literal, and unescape ``{{``/``}}`` -- never raising on Verilog/tcl braces.
+
+    Rendering is byte-identical to ``template.format(**context)`` for any prompt
+    whose only single-brace ``{name}`` tokens are context keys (all backend
+    prompts), while a ``{...}`` code snippet or an unknown ``{name}`` is passed
+    through unchanged instead of crashing.
+    """
+    def _sub(m: "re.Match") -> str:
+        text = m.group(0)
+        if text == "{{":
+            return "{"
+        if text == "}}":
+            return "}"
+        name, conv, spec = m.group(1), m.group(2), m.group(3)
+        if name not in context:
+            return text  # unknown placeholder / not a real field -> leave literal
+        value = context[name]
+        if conv == "r":
+            value = repr(value)
+        elif conv == "s":
+            value = str(value)
+        elif conv == "a":
+            value = ascii(value)
+        return format(value, spec or "")
+
+    return _SAFE_FORMAT_RE.sub(_sub, template)
+
 
 async def _run_llm_eda_step(
     step_name: str,
@@ -196,7 +248,7 @@ async def _run_llm_eda_step(
     from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
     prompt_path = _PROMPT_DIR / prompt_file
-    system_prompt = prompt_path.read_text().format(**context)
+    system_prompt = _safe_format(prompt_path.read_text(), context)
 
     user_message = (
         f"Execute the {step_name} step as described in the system prompt.\n"
@@ -279,8 +331,22 @@ def _resolve_netlist(state: BackendState) -> tuple[str, str]:
             if not sdc.exists():
                 synth_dir.mkdir(parents=True, exist_ok=True)
                 period_ns = 1000.0 / state.get("target_clock_mhz", 50.0)
+                # Discover the top's ACTUAL clock port -- a hardcoded
+                # `[get_ports clk]` never binds on a Caravel-style top whose
+                # clock is wb_clk_i: CTS then sees zero clock nets, the whole
+                # tree rides one unbuffered ~1400-fanout net, and STA is
+                # meaningless (live run: ~30k shorts from exactly this).
+                clk_port = "clk"
+                try:
+                    from orchestrator.langgraph.pipeline_helpers import (
+                        _detect_clock_port,
+                    )
+                    clk_port = (_detect_clock_port(
+                        rtl_path.read_text(errors="ignore")) or "clk")
+                except Exception:
+                    clk_port = "clk"
                 sdc.write_text(
-                    f"create_clock -name clk -period {period_ns} [get_ports clk]\n"
+                    f"create_clock -name clk -period {period_ns} [get_ports {clk_port}]\n"
                     f"set_input_delay {period_ns * 0.2:.1f} -clock clk [all_inputs]\n"
                     f"set_output_delay {period_ns * 0.2:.1f} -clock clk [all_outputs]\n"
                 )
@@ -292,6 +358,62 @@ def _resolve_netlist(state: BackendState) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 # Node: init_design  (Backend Lead -- discovers flat integration top)
 # ---------------------------------------------------------------------------
+
+def _select_integration_top(integration_dir: Path) -> tuple[str, str]:
+    """Return (top_file, top_module) for the real integration top.
+
+    The top is the module that instantiates other integration modules and is
+    itself instantiated by none (no parent). Falls back to the file with the
+    most child instantiations, then to sorted-first, so a single-file or
+    unparseable dir still yields a top. Returns ("", "") only for an empty dir.
+    """
+    files = sorted(integration_dir.glob("*.v"))
+    if not files:
+        return "", ""
+    mod_of: dict[str, str] = {}         # file -> its module name
+    text_of: dict[str, str] = {}
+    for f in files:
+        try:
+            src = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        text_of[str(f)] = src
+        m = re.search(r"^\s*module\s+(\w+)", src, re.MULTILINE)
+        if m:
+            mod_of[str(f)] = m.group(1)
+    if not mod_of:
+        return str(files[0]), ""
+    all_mods = set(mod_of.values())
+    # For each file: which OTHER integration modules does it instantiate, and
+    # is its OWN module instantiated by some other file?
+    instantiates: dict[str, int] = {}
+    instantiated_by_other: set[str] = set()
+    for fp, src in text_of.items():
+        my_mod = mod_of.get(fp, "")
+        cnt = 0
+        for other_mod in all_mods:
+            if other_mod == my_mod:
+                continue
+            if re.search(rf"(?<![\w]){re.escape(other_mod)}\s+(?:#\s*\([^;]*?\)\s*)?[\w\\]+\s*\(",
+                         src):
+                cnt += 1
+        instantiates[fp] = cnt
+        # a module is "used" if another file names it as an instance type
+        for fp2, src2 in text_of.items():
+            if fp2 == fp:
+                continue
+            if re.search(rf"(?<![\w]){re.escape(my_mod)}\s+(?:#\s*\([^;]*?\)\s*)?[\w\\]+\s*\(",
+                         src2):
+                instantiated_by_other.add(fp)
+                break
+    # Prefer a root (no parent); among those, the one instantiating the most
+    # children. Deterministic tie-break by sorted file order.
+    roots = [fp for fp in mod_of if fp not in instantiated_by_other]
+    pool = roots or list(mod_of)
+    _order = {str(f): i for i, f in enumerate(files)}
+    best = max(pool, key=lambda fp: (instantiates.get(fp, 0), -_order.get(fp, 0)))
+    return best, mod_of.get(best, "")
+
 
 async def init_design_node(state: BackendState) -> dict:
     """Discover the integration top-level RTL and all block RTL files.
@@ -316,23 +438,20 @@ async def init_design_node(state: BackendState) -> dict:
     # Discover all block RTL (source + glue)
     block_rtl = discover_block_rtl(pr, frontend_blocks)
 
-    # Find integration top-level RTL and extract actual module name
+    # Find integration top-level RTL and extract actual module name. Choose
+    # the ACTUAL top -- the module that instantiates the others and is
+    # instantiated by none -- not sorted(glob)[0]: the alphabetically-first
+    # wrapper is often a leaf GPIO adapter (openframe_project_wrapper) that
+    # instantiates nothing, and hardening that empty shell reported
+    # "COMPLETE 1/1" while never touching the real design.
     integration_dir = root / "rtl" / "integration"
     integration_top = ""
     if integration_dir.is_dir():
-        for f in sorted(integration_dir.glob("*.v")):
-            integration_top = str(f)
-            # Extract actual module name from the Verilog file so we
-            # don't rely on the sanitized PRD title (which produces
-            # mangled names like prd___16_point_..._top).
-            try:
-                _src = f.read_text(encoding="utf-8", errors="replace")
-                _mm = re.search(r'^\s*module\s+(\w+)', _src, re.MULTILINE)
-                if _mm:
-                    design_name = _mm.group(1)
-            except OSError:
-                pass
-            break
+        _top_f, _top_mod = _select_integration_top(integration_dir)
+        if _top_f:
+            integration_top = str(_top_f)
+            if _top_mod:
+                design_name = _top_mod
 
     # Single-block designs now always have an integration top-level wrapper
     # generated by integration_check_node, so no special bypass is needed.
@@ -456,13 +575,59 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
     result_json_path = str(Path(output_dir) / "synth_result.json")
 
     input_lines = [f"- Top-level: `{integration_top}`"]
+    _input_paths = [integration_top]
     for bname, bpath in block_rtl.items():
         if bpath != integration_top and Path(bpath).exists():
             input_lines.append(f"- Block `{bname}`: `{bpath}`")
+            _input_paths.append(bpath)
+
+    # Part B: the backend/PD synth selects the SRAM MACRO impl on the cs_sram
+    # wrappers (gated by CORESMITH_SRAM_MACRO, default ON). If the design
+    # instantiates a cs_sram_*/cs_rom_*/cs_mem_* wrapper and no input file
+    # already defines those modules, read the shared wrapper library too (so
+    # `hierarchy -check` resolves it); then a yosys `chparam ... MEM_IMPL
+    # "MACRO"` re-derives the wrappers to the `cs_mem_macro_shell` /
+    # `cs_rom_macro_shell` leaf (0 storage flops) instead of a flop array. This
+    # is the backend-only flip -- cocotb/Verilator DV keeps the default BEHAV.
+    _sram_macro_directive = ""
+    _sram_wrapper_lib = ""
+    try:
+        from orchestrator.langgraph.sram_wrapper import (
+            uses_wrapper as _uses_wrapper,
+            wrapper_lib_path as _wrapper_lib_path,
+            backend_sram_macro_directive as _macro_directive,
+        )
+        _combined = "".join(
+            Path(p).read_text(errors="ignore") for p in _input_paths
+            if p and Path(p).exists()
+        )
+        if _uses_wrapper(_combined):
+            _sram_macro_directive = _macro_directive()
+            _lib = _wrapper_lib_path()
+            _already_defined = bool(re.search(r"\bmodule\s+cs_(?:sram|mem|rom|fpmem)",
+                                              _combined))
+            if _lib and Path(_lib).exists() and not _already_defined \
+                    and _lib not in _input_paths:
+                input_lines.append(f"- SRAM wrapper library: `{_lib}`")
+                _sram_wrapper_lib = _lib
+    except Exception as _exc:  # noqa: BLE001 - macro selection is best-effort
+        log(f"  [FLAT-SYNTH] SRAM-macro directive setup skipped: {_exc!r}", YELLOW)
 
     with _tracer.start_as_current_span(f"Flat Top Synthesis [{design_name}]") as span:
         span.set_attribute("design_name", design_name)
 
+        # Synthesize against a liberty with the sky130 lpflow_*/probe* cells
+        # STRIPPED: dfflibmap/abc otherwise map real logic onto them (live
+        # run: 167 lpflow cells in the flat netlist) and they break LVS and
+        # skew timing. PnR-level set_dont_use cannot remove already-mapped
+        # cells, so the exclusion must happen HERE. Reuses the cached
+        # STA dont_use filter; falls back to the full liberty on any error.
+        _synth_lib = str(LIBERTY)
+        try:
+            from orchestrator.langgraph.ppa_check import _sta_dontuse_liberty
+            _synth_lib = _sta_dontuse_liberty(str(LIBERTY))
+        except Exception:  # noqa: BLE001 - never block synth on the filter
+            _synth_lib = str(LIBERTY)
         result = await _run_llm_eda_step(
             step_name=f"Flat Top Synthesis [{design_name}]",
             prompt_file="backend_synth_llm.md",
@@ -470,7 +635,7 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
                 "design_name": design_name,
                 "target_clock_mhz": target_clock,
                 "period_ns": period_ns,
-                "liberty_path": str(LIBERTY),
+                "liberty_path": _synth_lib,
                 "output_dir": output_dir,
                 "input_files": "\n".join(input_lines),
                 "input_delay_ns": period_ns * 0.2,
@@ -479,6 +644,8 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
                 "prior_failure": state.get("previous_error", "None"),
                 "constraints": _format_constraints(state),
                 "result_json_path": result_json_path,
+                "sram_macro_directive": _sram_macro_directive or "(none)",
+                "sram_wrapper_lib": _sram_wrapper_lib or "(already in inputs)",
             },
             result_json_path=result_json_path,
         )
@@ -495,12 +662,33 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
     })
 
     if result.get("success"):
+        _netlist = result.get("netlist_path", "")
+        # Part C: bind each cs_mem_macro_shell / cs_rom_macro_shell leaf that
+        # Part B emitted to a CONCRETE on-disk macro (pre-built, OpenRAM-
+        # composed/generated), reusing the frontend resolver + the PDK. A
+        # geometry that can be neither matched nor generated is a HARD, reported
+        # error -- NEVER a silent fall-back to a flop array. The resolved macro
+        # collateral is stashed for the DRC/LVS/PnR LEF/GDS/lib injection.
+        _bindings, _bind_err = _bind_macro_shells_for_backend(_netlist)
+        if _bind_err:
+            log(f"  [FLAT-SYNTH] macro-shell binding FAILED: {_bind_err}", RED)
+            write_graph_event(pr, "Flat Top Synthesis", "graph_node_exit", {
+                "design_name": design_name, "success": False,
+                "macro_binding_error": True, "graph": "backend",
+            })
+            return {
+                "phase": "synth",
+                "previous_error": _bind_err,
+                "flat_netlist_path": "",
+                "flat_sdc_path": "",
+            }
         return {
             "phase": "synth",
-            "flat_netlist_path": result.get("netlist_path", ""),
+            "flat_netlist_path": _netlist,
             "flat_sdc_path": result.get("sdc_path", ""),
             "synth_gate_count": result.get("gate_count", 0),
             "synth_area_um2": result.get("area_um2", 0.0),
+            "macro_bindings": _bindings,
         }
     else:
         return {
@@ -509,6 +697,124 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
             "flat_netlist_path": "",
             "flat_sdc_path": "",
         }
+
+
+def _bind_macro_shells_for_backend(netlist_path: str) -> tuple[list[dict], str]:
+    """Resolve every macro shell in the synthesized netlist to a concrete macro.
+
+    Returns ``(bindings, error)``: ``bindings`` is a list of
+    ``{name, lef, gds, lib, spice, verilog, shell}`` for the DRC/LVS/PnR
+    injection; ``error`` is a non-empty HARD-error string when a shell geometry
+    could be neither matched nor generated (never a silent flop fallback). A
+    no-shell design (concrete macros / no memory) returns ``([], "")``.
+
+    Best-effort on infrastructure faults (import/read errors are logged and do
+    NOT block the backend); only an UNRESOLVABLE geometry is a hard error.
+    """
+    if not netlist_path or not Path(netlist_path).exists():
+        return [], ""
+    try:
+        from orchestrator.langgraph.sram_wrapper import backend_sram_macro_enabled
+        if not backend_sram_macro_enabled():
+            return [], ""
+        from orchestrator.langgraph.macro_registry import bind_macro_shells
+        res = bind_macro_shells(netlist_path, allow_generate=True)
+    except Exception as exc:  # noqa: BLE001 - infra fault must not block backend
+        log(f"  [FLAT-SYNTH] macro-shell binding skipped (infra): {exc!r}", YELLOW)
+        return [], ""
+    if res.errors:
+        return [], (
+            "PPA/backend: macro-shell binding could not resolve a wrapped "
+            "memory to a placeable macro (would otherwise silently flop):\n- "
+            + "\n- ".join(res.errors)
+        )
+    bindings = [
+        {"name": mi.name, "lef": mi.lef, "gds": mi.gds, "lib": mi.lib,
+         "spice": mi.spice, "verilog": mi.verilog, "shell": sp.describe(),
+         # shell geometry (matches the netlist shell) + concrete-macro geometry
+         # (pin-adapter widths). Carried so PnR can materialize the shell into
+         # its concrete macro without re-reading the PDK.
+         "kind": sp.kind, "width": sp.width, "depth": sp.depth,
+         "nport": sp.nport, "ports": mi.ports,
+         "macro_data_bits": mi.data_bits, "macro_words": mi.words,
+         "macro_mask_bits": mi.mask_bits}
+        for sp, mi in res.resolved
+    ]
+    if res.plans:
+        from orchestrator.langgraph.sram_wrapper import (
+            macro_compose_tiles_enabled,
+        )
+        if macro_compose_tiles_enabled():
+            # Materialize each tiled-composition plan into a concrete binding
+            # (base tile macro + tile array), so PnR TILES + PLACES it and the
+            # memory-absent assertion covers it. A plan that cannot be realized
+            # by the shared-control tiling (genuine multi-bank) is a HARD,
+            # reported blocker -- never a silently mis-materialized/absent memory.
+            comp_bindings, comp_err = _composition_plan_bindings(res.plans)
+            if comp_err:
+                return [], comp_err
+            bindings.extend(comp_bindings)
+            if comp_bindings:
+                log(f"  [FLAT-SYNTH] materialized {len(comp_bindings)} tiled "
+                    f"composition(s): "
+                    + "; ".join(b["shell"] for b in comp_bindings), GREEN)
+        else:
+            log(f"  [FLAT-SYNTH] {len(res.plans)} shell(s) resolve to a tiled "
+                f"composition (RTL-level tiling); materialization DISABLED "
+                f"(CORESMITH_MACRO_COMPOSE_TILES=0) -- plan dropped", YELLOW)
+    if bindings:
+        log(f"  [FLAT-SYNTH] bound {len(bindings)} macro shell(s) to concrete "
+            f"macros: {', '.join(b['name'] for b in bindings)}", GREEN)
+    return bindings, ""
+
+
+def _composition_plan_bindings(
+    plans: list[tuple],
+) -> tuple[list[dict], str]:
+    """Turn tiled-composition plans (``[(ShellSpec, CompositionPlan), ...]``)
+    into ``macro_bindings`` entries the PnR/DRC/memory-absent flow consumes.
+
+    Each entry carries the BASE tile macro's collateral (so the DRC/LVS black
+    box + placed-macro assertion key on it) plus a ``composition`` sub-dict
+    (tile array shape) the netlist materializer tiles from. Returns
+    ``(bindings, error)``; ``error`` is non-empty for a plan the shared-control
+    tiling cannot realize (multi-bank depth) -- surfaced as a hard blocker
+    rather than a silently-wrong or absent memory.
+    """
+    out: list[dict] = []
+    for sp, plan in plans:
+        base = plan.base
+        if int(getattr(plan, "tiles_deep", 1)) > 1:
+            return [], (
+                "PPA/backend: macro-shell "
+                f"{sp.describe()} resolves to a MULTI-BANK tiled composition "
+                f"({plan.describe()}); the current tiling materializer realizes "
+                f"single-bank (width-tile / depth-over-provision) compositions "
+                f"only. A genuine multi-bank ({plan.tiles_deep} banks) memory "
+                f"needs per-bank select gating + a registered read mux -- it is "
+                f"surfaced as a blocker rather than shipped silently wrong or "
+                f"absent. Resize the memory to a single-bank geometry or provide "
+                f"a deep-enough pre-built macro."
+            )
+        out.append({
+            "name": base.name, "lef": base.lef, "gds": base.gds, "lib": base.lib,
+            "spice": base.spice, "verilog": base.verilog,
+            "shell": plan.describe(),
+            # shell geometry (matches the netlist shell) so the materializer
+            # keys the rewrite; base-macro geometry drives the tiling widths.
+            "kind": sp.kind, "width": sp.width, "depth": sp.depth,
+            "nport": sp.nport, "ports": base.ports or "1rw1r",
+            "macro_data_bits": base.data_bits, "macro_words": base.words,
+            "macro_mask_bits": base.mask_bits,
+            "composition": {
+                "tiles_wide": int(plan.tiles_wide),
+                "tiles_deep": int(plan.tiles_deep),
+                "provisioned_words": int(plan.provisioned_words),
+                "provisioned_bits": int(plan.provisioned_bits),
+                "base": base.name,
+            },
+        })
+    return out, ""
 
 
 def route_after_flat_synth(state: BackendState) -> str:
@@ -528,6 +834,128 @@ route_after_flat_synth.__edge_labels__ = {
 # ---------------------------------------------------------------------------
 # Node: run_pnr  (LLM-driven OpenROAD PnR)
 # ---------------------------------------------------------------------------
+
+def memory_absent_pnr_error(
+    macro_bindings: list[dict] | None, routed_def_path: str
+) -> str | None:
+    """Fix: the PnR analogue of the synth memory-as-flops gate.
+
+    If macros were BOUND at synth (`macro_bindings`) but NONE appears in the
+    placed layout (post-PnR DEF -- the physical `MacroInstsArea == 0` signal),
+    the shell->concrete-macro materialization did not reach PnR and the SRAM is
+    physically ABSENT (the chip would read all-zero). Return an actionable
+    hard-error string in that case, else None.
+
+    Composition-aware: a shell bound to an N-tile COMPOSITION plan must be
+    backed by its FULL set of placed tiles. A plan that was DROPPED (0 tiles) or
+    only PARTIALLY materialized (fewer base-macro instances than tiles_wide*
+    tiles_deep) is a memory-absent/partial layout -- the exact false-pass this
+    closes (`memory_absent_pnr_error` previously checked resolved binding NAMES,
+    not composition PLANS, so a dropped plan silently proceeded to DRC/LVS).
+
+    Pure + best-effort: returns None (no false-fail) when there are no bindings
+    or the DEF cannot be read, so a design without memories is never blocked.
+    """
+    bindings = [b for b in (macro_bindings or []) if b.get("name")]
+    if not bindings:
+        return None
+    if not routed_def_path or not Path(routed_def_path).exists():
+        return None
+    try:
+        text = Path(routed_def_path).read_text(errors="ignore")
+    except OSError:
+        return None
+
+    def _count(nm: str) -> int:
+        return len(re.findall(rf"(?<![\w]){re.escape(nm)}(?![\w])", text))
+
+    names = [b["name"] for b in bindings]
+    placed = sum(1 for nm in set(names) if _count(nm) > 0)
+    if placed == 0:
+        return (
+            f"Memory-absent layout: {len(names)} SRAM macro(s) were BOUND at "
+            f"synth ({', '.join(names)}) but 0 were PLACED in PnR (post-PnR "
+            f"MacroInstsArea == 0). The cs_mem_macro_shell -> concrete-macro "
+            f"materialization did not reach PnR -- OpenROAD read a shell-stub "
+            f"netlist, so the memory is physically ABSENT and the chip would "
+            f"read all-zero. Confirm prepare_pnr_working_copy materialized the "
+            f"shells (CORESMITH_PNR_MACRO_PLACEMENT) and that read_verilog used "
+            f"the <design>_macro.v netlist, then re-run PnR."
+        )
+    # A composition shell needs its whole tile set placed, not just >=1 macro.
+    for b in bindings:
+        comp = b.get("composition")
+        if not comp:
+            continue
+        required = max(
+            1,
+            int(comp.get("tiles_wide") or 1) * int(comp.get("tiles_deep") or 1),
+        )
+        found = _count(b["name"])
+        if found < required:
+            return (
+                f"Memory-absent composition: the cs_mem_macro_shell "
+                f"'{b.get('shell', b['name'])}' resolved to a {required}-tile "
+                f"composition of '{b['name']}' but only {found} tile(s) were "
+                f"PLACED in PnR. The tiled-composition plan was NOT fully "
+                f"materialized into the <design>_macro.v netlist -- so the "
+                f"memory is physically ABSENT/partial and the chip would read "
+                f"all-zero. Confirm CORESMITH_MACRO_COMPOSE_TILES + "
+                f"CORESMITH_PNR_MACRO_PLACEMENT tiled + placed every tile, then "
+                f"re-run PnR."
+            )
+    return None
+
+
+def pnr_linked_cell_count(routed_def_path: str) -> int | None:
+    """Return the placed-instance count from a routed DEF (`COMPONENTS <N> ;`),
+    or None when it can't be read. This is the count of cells OpenROAD actually
+    linked + placed as the top -- PnR only ADDS physical cells (tap/fill/CTS
+    buffers), so it is a lower bound on the synth gate count for the SAME top."""
+    if not routed_def_path or not Path(routed_def_path).exists():
+        return None
+    try:
+        text = Path(routed_def_path).read_text(errors="ignore")
+    except OSError:
+        return None
+    m = re.search(r"^\s*COMPONENTS\s+(\d+)\s*;", text, re.MULTILINE)
+    return int(m.group(1)) if m else None
+
+
+def pnr_cell_count_shortfall_error(
+    gate_count: int, routed_def_path: str, *, min_ratio: float = 0.5
+) -> str | None:
+    """Fix 2: hard-fail when the linked/placed design is far smaller than synth.
+
+    A gross deficit (e.g. 154 placed vs 4,682 synth gates, ratio ~0.03)
+    means a SUB-BLOCK was linked as the top instead of the full integration
+    netlist -- routing + signing off a fragment mislabeled as the chip. Returns
+    an actionable hard-error string in that case, else None.
+
+    Pure + best-effort: returns None (never a false-fail) when synth gate_count
+    is unknown/zero or the routed DEF can't be read. Defense-in-depth backstop
+    independent of the top-name heuristic (Fix 1)."""
+    try:
+        gc = int(gate_count or 0)
+    except (TypeError, ValueError):
+        return None
+    if gc <= 0:
+        return None
+    linked = pnr_linked_cell_count(routed_def_path)
+    if linked is None:
+        return None
+    if linked < min_ratio * gc:
+        return (
+            f"Cell-count shortfall: PnR linked/placed {linked} cell(s) but "
+            f"synth reported {gc} gate(s) for this design (ratio "
+            f"{linked / gc:.3f} < {min_ratio:.2f}). A sub-block was likely "
+            f"linked as the top instead of the full integration netlist -- "
+            f"refusing to sign off a {linked}-cell fragment as the "
+            f"{gc}-gate chip. Confirm link_design targets the real top "
+            f"(defined-but-not-instantiated module), then re-run PnR."
+        )
+    return None
+
 
 async def run_pnr_node(state: BackendState) -> dict:
     """Run OpenROAD PnR entirely within the inner Claude LLM.
@@ -598,14 +1026,42 @@ async def run_pnr_node(state: BackendState) -> dict:
     # design-specific variables substituted. The LLM agent can then
     # read, modify, and iterate on this script.
     from orchestrator.langgraph.backend_helpers import prepare_pnr_working_copy
-    tcl_path = prepare_pnr_working_copy(
-        design_name=block_name,
-        netlist_path=netlist_path,
-        sdc_path=sdc_path,
-        output_dir=output_dir,
-        utilization=utilization,
-        density=density,
-    )
+    try:
+        tcl_path = prepare_pnr_working_copy(
+            design_name=block_name,
+            netlist_path=netlist_path,
+            sdc_path=sdc_path,
+            output_dir=output_dir,
+            utilization=utilization,
+            density=density,
+            # Fix: feed the shell->concrete-macro bindings resolved at flat synth so
+            # PnR materializes + PLACES the SRAM (was left on the concrete-name-only
+            # path, so shell-bound memories reached PnR as empty stubs).
+            macro_bindings=state.get("macro_bindings"),
+        )
+    except Exception as _prep_exc:
+        # Fix 2: macro read/placement is NON-OPTIONAL when memories were bound at
+        # synth -- prepare_pnr_working_copy raises (LefDbuError / RuntimeError)
+        # rather than emit a macro-less TCL. Convert it into an honest PnR
+        # failure (routes to diagnose/park) so the run cannot proceed with the
+        # SRAM physically absent.
+        error_msg = f"PnR prep failed (macro placement required): {_prep_exc}"
+        log(f"  [PNR] FAILED: {error_msg}", RED)
+        write_graph_event(_pr(state), "Run PnR", "graph_node_exit", {
+            "block": block_name, "success": False, "error": error_msg,
+            "graph": "backend",
+        })
+        fail_result = {"success": False, "error": error_msg}
+        return {
+            "floorplan_result": fail_result,
+            "place_result": fail_result,
+            "cts_result": fail_result,
+            "route_result": fail_result,
+            "timing_result": {"met": False, "error": error_msg},
+            "power_result": fail_result,
+            "phase": "pnr",
+            "previous_error": error_msg,
+        }
 
     with _tracer.start_as_current_span(
         f"Run PnR [{block_name}] attempt {attempt}"
@@ -660,6 +1116,98 @@ async def run_pnr_node(state: BackendState) -> dict:
     wns = result.get("wns_ns", 0)
     timing_met = wns >= 0 if isinstance(wns, (int, float)) else False
 
+    # Fix: memory-absent hard-fail. If memories were bound at synth but the
+    # placed layout contains no macro, PnR shipped a logic-only die with the
+    # SRAM physically absent -- catch it here instead of downstream. Gated
+    # (default ON) so the pre-fix behavior is restorable.
+    #
+    # Fix 2: evaluate this on BOTH the success AND the failure path. On the
+    # failure path a bound-but-not-placed / un-routable memory-absent layout is
+    # converted into a clean, honest "memory-absent" diagnosis (the actionable
+    # error) instead of the LLM churning on an unrelated routing message -- and
+    # closes the reward-hack where the agent dropped the macro LEFs and routed a
+    # memory-less die that "passed".
+    try:
+        from orchestrator.langgraph.sram_wrapper import (
+            pnr_macro_placement_enabled,
+        )
+        if pnr_macro_placement_enabled():
+            _mem_err = memory_absent_pnr_error(
+                state.get("macro_bindings"), routed_def
+            )
+            if _mem_err:
+                # On the success path, demote to failure. On the failure path,
+                # surface the memory-absent diagnosis as the reported error.
+                pnr_ok = False
+                result["error"] = _mem_err
+                log(f"  [PNR] {_mem_err}", RED)
+    except Exception as _exc:  # never let the gate itself break PnR
+        log(f"  [PNR] memory-absent check skipped: {_exc!r}", YELLOW)
+
+    # Fix 2: cell-count guard. If PnR linked/placed far fewer cells than synth
+    # reported for this design, a SUB-BLOCK was linked as the top (a fragment
+    # mislabeled as the chip) -- demote to failure with an actionable diagnosis.
+    # Evaluated on BOTH the success and the failure path so a fragment can never
+    # ship a "clean" signoff. Gated (default ON) so the pre-fix behavior is
+    # restorable; independent of the Fix 1 top-name heuristic.
+    try:
+        from orchestrator.langgraph.sram_wrapper import (
+            pnr_cellcount_guard_enabled,
+            pnr_cellcount_min_ratio,
+        )
+        if pnr_cellcount_guard_enabled():
+            _cc_err = pnr_cell_count_shortfall_error(
+                gate_count, routed_def, min_ratio=pnr_cellcount_min_ratio()
+            )
+            if _cc_err:
+                pnr_ok = False
+                result["error"] = _cc_err
+                log(f"  [PNR] {_cc_err}", RED)
+    except Exception as _exc:  # never let the guard itself break PnR
+        log(f"  [PNR] cell-count guard skipped: {_exc!r}", YELLOW)
+
+    # Honest gate: a routed design that OpenROAD left with unresolved detailed-
+    # route DRC violations is NOT a passing PnR (same false-pass class as the
+    # synth/DRC honest gates). The inner LLM occasionally reports success:true
+    # on top of a non-empty route_drc.rpt (e.g. a truncated detailed_route that
+    # stopped at thousands of open markers), so trust the tool artifact: count
+    # the true violation ENTRIES and demote to failure. Evaluated on BOTH the
+    # success and the failure path; gated (default ON, CORESMITH_PNR_ROUTE_DRC_
+    # GATE=0 restores the pre-fix behavior). pnr_result.json is rewritten to
+    # reflect the demotion so no downstream default re-marks it success.
+    try:
+        from orchestrator.langgraph.backend_helpers import (
+            pnr_route_drc_gate_enabled,
+            count_route_drc_violations,
+        )
+        if pnr_route_drc_gate_enabled():
+            _route_drc_path = Path(output_dir) / "route_drc.rpt"
+            _rdrc = count_route_drc_violations(_route_drc_path)
+            result["route_drc_violations"] = _rdrc
+            if _rdrc > 0:
+                _rdrc_err = (
+                    f"Route-DRC gate: detailed routing left {_rdrc} unresolved "
+                    f"DRC violation(s) in {_route_drc_path}. Refusing to report "
+                    f"a passing PnR on a die with open detailed-route DRC "
+                    f"markers -- re-route to convergence, or disable the gate "
+                    f"with CORESMITH_PNR_ROUTE_DRC_GATE=0."
+                )
+                pnr_ok = False
+                result["success"] = False
+                if not result.get("error"):
+                    result["error"] = _rdrc_err
+                log(f"  [PNR] {_rdrc_err}", RED)
+                # Rewrite the tool artifact so pnr_result.json reflects the
+                # demotion (it was written success:true by the inner LLM).
+                try:
+                    Path(result_json_path).write_text(
+                        json.dumps(result, indent=2)
+                    )
+                except (OSError, TypeError):
+                    pass
+    except Exception as _exc:  # never let the gate itself break PnR
+        log(f"  [PNR] route-DRC gate skipped: {_exc!r}", YELLOW)
+
     write_graph_event(_pr(state), "Run PnR", "graph_node_exit", {
         "block": block_name,
         "success": pnr_ok,
@@ -712,8 +1260,11 @@ async def drc_node(state: BackendState) -> dict:
     from orchestrator.langgraph.backend_helpers import (
         MAGIC_RC,
         CELL_GDS,
+        CELL_LEF,
+        TECH_LEF,
         MAGIC_BIN,
         parse_drc_report,
+        macro_bboxes_from_def,
         render_layout_image,
     )
 
@@ -730,6 +1281,35 @@ async def drc_node(state: BackendState) -> dict:
         error_msg = f"Routed DEF not found: {routed_def}"
         return {"drc_result": {"clean": False, "errors": error_msg}, "phase": "drc", "previous_error": error_msg}
 
+    # SRAM-macro awareness for extraction: descending into a hard macro's
+    # transistor-level .mag is intractable on a mm-scale die (786 MB .ext,
+    # empty result JSON). Detect instantiated macros and pass their LEF
+    # abstracts + names so the DRC step reads the LEF and `extract halt`s each
+    # macro, comparing it as a black box (proven on matmul's 18 macros).
+    _macro_lefs: list[str] = []
+    _macro_names: list[str] = []
+    try:
+        from orchestrator.langgraph.macro_registry import (
+            detect_instantiated_macros,
+            discover_macros,
+        )
+        _reg = discover_macros()
+        for _mi in detect_instantiated_macros(routed_def, _reg):
+            if _mi.lef and _mi.name not in _macro_names:
+                _macro_lefs.append(_mi.lef)
+                _macro_names.append(_mi.name)
+    except Exception:  # noqa: BLE001 - macro awareness is best-effort
+        _macro_lefs, _macro_names = [], []
+    # Part C: also inject the collateral of the concrete macros the cs_mem/
+    # cs_rom shells were bound to at synth (macro_bindings), so a memory that
+    # entered as a `cs_mem_macro_shell` leaf is extracted as a black box here
+    # too -- not only the macros whose CONCRETE name already appears in the DEF.
+    for _b in (state.get("macro_bindings") or []):
+        _lef, _nm = _b.get("lef", ""), _b.get("name", "")
+        if _lef and _nm and _nm not in _macro_names and Path(_lef).exists():
+            _macro_lefs.append(_lef)
+            _macro_names.append(_nm)
+
     write_graph_event(_pr(state), "DRC", "graph_node_enter", {"block": block_name, "graph": "backend"})
 
     output_dir = _output_dir(state)
@@ -742,10 +1322,16 @@ async def drc_node(state: BackendState) -> dict:
         result = await _run_llm_eda_step(
             step_name=f"DRC [{block_name}]",
             prompt_file="backend_drc_llm.md",
+            # Magic DRC on a mm-scale die legitimately needs >20 min; the
+            # hardcoded 1200s default false-timed-out a live run and consumed
+            # its attempts. Env-tunable like the PNR step.
+            timeout=_eda_timeout("CORESMITH_DRC_TIMEOUT", 2400),
             context={
                 "design_name": block_name,
                 "magic_rc": str(MAGIC_RC),
                 "cell_gds": str(CELL_GDS),
+                "cell_lef": str(CELL_LEF),
+                "tech_lef": str(TECH_LEF),
                 "magic_bin": str(MAGIC_BIN),
                 "routed_def_path": routed_def,
                 "output_dir": output_dir,
@@ -753,6 +1339,9 @@ async def drc_node(state: BackendState) -> dict:
                 "prior_failure": state.get("previous_error", "None"),
                 "constraints": _format_constraints(state),
                 "result_json_path": result_json_path,
+                "macro_lefs": " ".join(_macro_lefs),
+                "macro_names": " ".join(_macro_names),
+                "has_macros": "yes" if _macro_names else "no",
             },
             result_json_path=result_json_path,
         )
@@ -763,15 +1352,38 @@ async def drc_node(state: BackendState) -> dict:
         spice_path = result.get("spice_path", "")
         report_path = result.get("report_path") or result.get("drc_report_path") or str(Path(output_dir) / "magic_drc.rpt")
 
+        # Signed-off hard-macro interiors: a hard macro stays a LEF abstract in
+        # the top-level Magic DRC, so its sub-min-area LEF pins (e.g. a small
+        # OpenRAM SRAM's 0.38x0.38 um met4 signal pins) are DRC'd as top-level
+        # met4 even though the real, signed-off macro GDS -- merged into the
+        # shipped GDS -- is clean. Build the placed-macro bboxes from the routed
+        # DEF (the placement Magic actually DRC'd) so the parser can drop those
+        # in-interior met1-4 artifacts. Self-guards on macro presence (returns
+        # [] when no registry macro is placed); env-gated default-ON. met5 is
+        # never excluded (top PDN runs over macros there).
+        macro_bboxes: list = []
+        try:
+            macro_bboxes = macro_bboxes_from_def(routed_def)
+        except Exception:  # noqa: BLE001 - bbox derivation is best-effort
+            macro_bboxes = []
+
         # The EDA agent occasionally writes contradictory JSON, for example
         # clean=false with violation_count=0 after Magic produced an empty
         # DRC report. Trust the tool artifact over the free-form summary.
         if Path(report_path).exists():
-            parsed_drc = parse_drc_report(report_path)
+            parsed_drc = parse_drc_report(report_path, macro_bboxes=macro_bboxes or None)
             parsed_count = parsed_drc.get("violation_count", -1)
             if parsed_count >= 0:
                 drc_count = parsed_count
                 drc_clean = bool(parsed_drc.get("clean", False))
+            _excl = parsed_drc.get("excluded_count", 0)
+            if _excl:
+                span.set_attribute("macro_interior_excluded", _excl)
+                write_graph_event(_pr(state), "DRC", "macro_interior_exclude", {
+                    "block": block_name, "graph": "backend",
+                    "excluded_count": _excl,
+                    "excluded_detail": parsed_drc.get("excluded_detail", {}),
+                })
 
         span.set_attribute("clean", drc_clean)
         span.set_attribute("violation_count", drc_count)
@@ -784,6 +1396,21 @@ async def drc_node(state: BackendState) -> dict:
     write_graph_event(_pr(state), "DRC", "graph_node_exit", {
         "block": block_name, "clean": drc_clean, "violation_count": drc_count, "graph": "backend",
     })
+
+    # Salvage conventional artifact paths when the step's result JSON came
+    # back empty/partial (live run: Magic completed with a clean report but
+    # ext2spice on a 786 MB full-parasitic .ext never finished, the JSON was
+    # written as 0 bytes, and the LVS node then hard-failed on an EMPTY
+    # spice_path even though the artifacts it needed were derivable). The
+    # tool artifacts on disk are the truth; the JSON is only a summary.
+    if not gds_path or not Path(gds_path).exists():
+        _conv_gds = Path(output_dir) / f"{block_name}.gds"
+        if _conv_gds.exists():
+            gds_path = str(_conv_gds)
+    if not spice_path or not Path(spice_path).exists():
+        _conv_spice = Path(output_dir) / f"{block_name}.spice"
+        if _conv_spice.exists():
+            spice_path = str(_conv_spice)
 
     out: dict = {"drc_result": {"clean": drc_clean, "violation_count": drc_count}, "phase": "drc"}
     if drc_clean:
@@ -814,6 +1441,13 @@ async def lvs_node(state: BackendState) -> dict:
     pwr_verilog = state.get("pwr_verilog_path", "")
 
     if not spice_path or not Path(spice_path).exists():
+        # The DRC step's result JSON can come back empty (extraction overrun)
+        # while the .spice exists at its conventional location -- or can be
+        # produced out-of-band. Look before hard-failing a structural error.
+        _conv = Path(_output_dir(state)) / f"{_block_name(state)}.spice"
+        if _conv.exists():
+            spice_path = str(_conv)
+    if not spice_path or not Path(spice_path).exists():
         error_msg = f"SPICE file not found: {spice_path}"
         return {"lvs_result": {"match": False, "errors": error_msg}, "phase": "lvs", "previous_error": error_msg}
     if not pwr_verilog or not Path(pwr_verilog).exists():
@@ -832,6 +1466,7 @@ async def lvs_node(state: BackendState) -> dict:
         result = await _run_llm_eda_step(
             step_name=f"LVS [{block_name}]",
             prompt_file="backend_lvs_llm.md",
+            timeout=_eda_timeout("CORESMITH_LVS_TIMEOUT", 2400),
             context={
                 "design_name": block_name,
                 "netgen_setup": str(NETGEN_SETUP),
@@ -849,13 +1484,44 @@ async def lvs_node(state: BackendState) -> dict:
         )
 
         match = result.get("match", False)
+        tie_analysis = ""
+        # Deterministic constant-tie / port-equivalence proof (default ON). When
+        # netgen reports a top-pin/net mismatch, only accept it as a match if it
+        # is PROVABLY a benign constant-tie/replication (caravel io_out/io_oeb
+        # tie-off) or a constant-tied unused macro input -- never an
+        # independently-driven real short. Grounds the verdict in the report +
+        # reference netlist instead of the inner LLM's free-form judgement, and
+        # never flips a netgen "match uniquely" to fail (no regression).
+        try:
+            from orchestrator.langgraph.macro_backend import (
+                classify_lvs_report,
+                lvs_verify_ties_enabled,
+            )
+            if not match and lvs_verify_ties_enabled():
+                report_path = result.get("report_path") or str(
+                    Path(output_dir) / f"{block_name}_lvs.rpt"
+                )
+                report_text = ""
+                if report_path and Path(report_path).exists():
+                    report_text = Path(report_path).read_text(errors="replace")
+                ref_v = ""
+                if pwr_verilog and Path(pwr_verilog).exists():
+                    ref_v = Path(pwr_verilog).read_text(errors="replace")
+                verdict = classify_lvs_report(report_text, ref_v)
+                if verdict.get("accept"):
+                    match = True
+                    tie_analysis = verdict.get("analysis", "")
+                    log(f"  [LVS] constant-tie proof accepted: {tie_analysis}",
+                        GREEN)
+        except Exception as _exc:  # never let the proof itself break LVS
+            log(f"  [LVS] constant-tie proof skipped: {_exc!r}", YELLOW)
         span.set_attribute("match", match)
 
     write_graph_event(_pr(state), "LVS", "graph_node_exit", {
         "block": block_name, "match": match,
         "device_delta": result.get("device_delta", 0),
         "net_delta": result.get("net_delta", 0),
-        "analysis": result.get("analysis", ""),
+        "analysis": tie_analysis or result.get("analysis", ""),
         "graph": "backend",
     })
 
@@ -866,6 +1532,7 @@ async def lvs_node(state: BackendState) -> dict:
             "net_delta": result.get("net_delta", 0),
             "report_path": result.get("report_path", ""),
             "llm_analysis": result.get("analysis", ""),
+            "tie_analysis": tie_analysis,
         },
         "phase": "lvs",
     }
@@ -880,6 +1547,29 @@ async def lvs_node(state: BackendState) -> dict:
 # ---------------------------------------------------------------------------
 # Node: timing_signoff
 # ---------------------------------------------------------------------------
+
+def _conditional_pass_allowed(wns_ns, *, waiver_exists: bool) -> bool:
+    """A-Fix 2h: a CONDITIONAL_PASS timing verdict counts as MET only when
+
+    - the worst negative slack is actually non-negative (``wns_ns >= 0``), OR
+    - a recorded timing waiver exists on disk, OR
+    - the operator opted in via ``CORESMITH_ALLOW_CONDITIONAL_PASS`` (or the
+      global ``CORESMITH_GATE_FAIL_OPEN``).
+
+    Otherwise an LLM that returns ``CONDITIONAL_PASS`` over a genuine timing
+    violation is fail-closed and routed to diagnose.
+    """
+    from orchestrator.langgraph.gate_guard import gate_fail_open_enabled
+    from orchestrator.profile import flag_enabled
+    if isinstance(wns_ns, (int, float)) and wns_ns >= 0:
+        return True
+    if waiver_exists:
+        return True
+    return (
+        flag_enabled("CORESMITH_ALLOW_CONDITIONAL_PASS", default=False)
+        or gate_fail_open_enabled()
+    )
+
 
 async def timing_signoff_node(state: BackendState) -> dict:
     """LLM-assisted post-route timing sign-off analysis.
@@ -934,11 +1624,22 @@ async def timing_signoff_node(state: BackendState) -> dict:
         sign_off = analysis.get("sign_off", "FAIL")
         met = analysis.get("timing_met", wns >= 0)
 
-        # CONDITIONAL_PASS counts as met (waivable violations)
+        # CONDITIONAL_PASS is met ONLY with non-negative slack, a recorded
+        # waiver, or an explicit operator opt-in (A-Fix 2h) -- otherwise it is
+        # fail-closed and routes to diagnose.
         if sign_off == "CONDITIONAL_PASS":
-            met = True
-            log(f"  [STA] Timing CONDITIONAL PASS @ {target_mhz} MHz "
-                f"(WNS={wns:.2f} ns) -- {analysis.get('assessment', '')}", YELLOW)
+            _waiver = (Path(_pr(state)) / ".coresmith" / "waivers"
+                       / f"timing_{block_name}.json")
+            if _conditional_pass_allowed(wns, waiver_exists=_waiver.exists()):
+                met = True
+                log(f"  [STA] Timing CONDITIONAL PASS @ {target_mhz} MHz "
+                    f"(WNS={wns:.2f} ns) -- {analysis.get('assessment', '')}",
+                    YELLOW)
+            else:
+                met = False
+                log(f"  [STA] CONDITIONAL_PASS REJECTED @ {target_mhz} MHz "
+                    f"(WNS={wns:.2f} ns < 0, no waiver) -- fail-closed, routing "
+                    f"to diagnose", RED)
         elif met:
             log(f"  [STA] Timing met @ {target_mhz} MHz (WNS={wns:.2f} ns)", GREEN)
         else:
@@ -1392,12 +2093,18 @@ async def ask_human_node(state: BackendState) -> dict:
         cat = entry.get("category", "UNKNOWN")
         category_counts[cat] = category_counts.get(cat, 0) + 1
 
+    _exhausted = state["attempt"] > state.get("max_attempts", 3)
     payload = {
         "type": "human_intervention_needed",
         "graph": "backend",
         "block_name": block_name,
         "attempt": state["attempt"],
         "max_attempts": state.get("max_attempts", 3),
+        # True when the block hit its attempt budget: a `retry` REOPENS it
+        # with a fresh budget (not a dead end). This replaces the old
+        # silent advance-to-complete-with-success:false on exhaustion.
+        "exhausted": _exhausted,
+        "retry_reopens": _exhausted,
         "phase": state.get("phase", ""),
         "error": state.get("previous_error", "")[:2000],
         "diagnosis": debug_result.get("diagnosis", ""),
@@ -1430,8 +2137,21 @@ async def ask_human_node(state: BackendState) -> dict:
 # ---------------------------------------------------------------------------
 
 async def increment_attempt_node(state: BackendState) -> dict:
-    """Bump the attempt counter."""
-    new_attempt = state["attempt"] + 1
+    """Bump the attempt counter, or RESET it when reopening after exhaustion.
+
+    When the block already exhausted its budget (attempt > max_attempts) and
+    the outer agent chose retry at the exhaustion park, re-entering here with
+    a bumped counter would immediately re-exhaust -> an unbreakable loop. A
+    post-exhaustion retry instead RESETS to attempt 1 (a fresh bounded budget,
+    granted only by an explicit human retry), so a design terminal at N/N can
+    be reopened and re-driven -- the missing 'reopen last block' path.
+    """
+    if state["attempt"] > state["max_attempts"]:
+        new_attempt = 1
+        log(f"  [REOPEN] Backend block reopened after exhaustion -- attempt "
+            f"budget reset to 1/{state['max_attempts']}", YELLOW)
+    else:
+        new_attempt = state["attempt"] + 1
     block_name = _block_name(state)
 
     with _tracer.start_as_current_span(
@@ -1589,6 +2309,7 @@ async def backend_complete_node(state: BackendState) -> dict:
                 from orchestrator.langgraph.backend_helpers import (
                     parse_openroad_reports,
                     parse_drc_report,
+                    macro_bboxes_from_def,
                 )
                 pnr_metrics = parse_openroad_reports(str(pnr_dir))
                 entry.update({
@@ -1604,10 +2325,18 @@ async def backend_complete_node(state: BackendState) -> dict:
                     "leakage_power_mw": pnr_metrics.get("leakage_power_mw", 0),
                     "timing_met": pnr_metrics.get("timing_met", False),
                 })
-                # DRC report
+                # DRC report -- apply the same signed-off hard-macro interior
+                # exclusion as the gate so the summary verdict is consistent.
                 drc_rpt = pnr_dir / "magic_drc.rpt"
                 if drc_rpt.exists():
-                    drc = parse_drc_report(str(drc_rpt))
+                    _def = blk.get("routed_def_path", "")
+                    _mbb: list = []
+                    try:
+                        if _def:
+                            _mbb = macro_bboxes_from_def(_def)
+                    except Exception:  # noqa: BLE001 - best-effort
+                        _mbb = []
+                    drc = parse_drc_report(str(drc_rpt), macro_bboxes=_mbb or None)
                     entry["drc_clean"] = drc.get("clean", False)
                     entry["drc_violations"] = drc.get("violation_count", -1)
             # Check for rendered images
@@ -1900,14 +2629,20 @@ route_after_human.__edge_labels__ = {
 
 
 def route_after_increment(state: BackendState) -> str:
-    """Route after incrementing: within limit -> target step, exhausted -> advance_block.
+    """Route after incrementing: within limit -> target step, exhausted ->
+    ask_human.
 
     When the retry target is a downstream step (DRC/LVS/timing), route
-    directly there instead of re-running PnR.
+    directly there instead of re-running PnR. On EXHAUSTION, PARK on the
+    human interrupt instead of silently advancing to backend_complete with
+    success=false: a false DRC-timeout (or any recoverable stall) then
+    surfaces as an actionable interrupt, and a retry reopens the block with a
+    fresh budget (see increment_attempt_node) rather than dead-ending a
+    design that was one methodology fix from closing.
     """
     exhausted = state["attempt"] > state["max_attempts"]
     if exhausted:
-        return "advance_block"
+        return "ask_human"
 
     action = (state.get("debug_result") or {}).get("next_action", "retry_pnr")
     target_mapping = {
@@ -1919,6 +2654,7 @@ def route_after_increment(state: BackendState) -> str:
 
 
 route_after_increment.__edge_labels__ = {
+    "ask_human": "EXHAUSTED -> PARK",
     "run_pnr": "RETRY PNR",
     "drc": "RETRY DRC",
     "lvs": "RETRY LVS",

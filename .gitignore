@@ -1,73 +1,98 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.egg-info/
-dist/
 build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Virtual environments
 venv/
 .venv/
+env/
+**/venv/
+**/*-venv/
 
-# Environment variables
+# Secrets / env (none expected; never commit)
 .env
+*.env
+!scripts/pdk-version.env
+auth.json
+*.key
+*.pem
 
-# Database
+# Databases / checkpoints / run state (NOT source) -- match at any depth
 *.db
 *.db-shm
 *.db-wal
+.coresmith/
+.coresmith.*/
+.cleared-before-*/
+.preserved-*/
+.txrx/
+codex-call-*/
+poll_arch.py
 
-# Pytest
-.pytest_cache/
-
-# IDE / Editor
-.vscode/
-.idea/
-.mcp.json
-.claude/
-.cursor/
-
-# Node
+# Build / sim / EDA artifacts
+*.log
+*.jsonl
+*.vcd
+*.fst
+*.ghw
+*.gch
+*.o
+*.a
+*.so
+*.dylib
+*.ext
+*.wasm
+sim_build/
+cpp_build/
+**/dist/
 node_modules/
 
-# PDK (large external data, downloaded at install time)
+# Large external data downloaded at install time
 .pdk/
+.pdk
 
-# Pipeline-generated artifacts
-rtl/
-tb/
-syn/
-sim_build/
-verification/
-arch/
+# MkDocs rendered site (source under mkdocs-site/docs/ stays tracked)
+mkdocs-site/site/
 
-# Runtime / pipeline data
-.coresmith/
-.txrx/
+# Top-level pipeline run OUTPUT dirs ONLY (leading slash = repo root).
+# Do NOT use bare names here: an unanchored `rtl/`/`langchain/` would wrongly
+# exclude orchestrator/langgraph/rtl_lib, orchestrator/langchain, etc.
+/rtl/
+/tb/
+/syn/
+/arch/
+/verification/
+/archive/
+/chip_finish/
+/traces/
 
-# Images and binary assets
-*.png
-*.jpg
-*.jpeg
-*.gif
-!docs/images/*.gif
-
-# One-off verification scripts
-verify_*.py
-
-# EDA extraction artifacts
-*.ext
-
-# Generated dashboard copies
-dashboard.html
-
-# Archived pipeline runs
-archive/
-
-# Chip finish output
-chip_finish/
-
-# OS files
+# Editor / IDE / OS
+.vscode/
+.idea/
+.cursor/
+.mcp.json
+.claude/
 .DS_Store
 Thumbs.db
+
+# One-off scratch
+verify_*.py
+dashboard.html
+*.bak
+*.bak.*
+*.orig
+
+# Replay fixtures ship their recorded call list + normalized digests as
+# committed test assets (small, content-addressed). The blanket *.jsonl rule
+# above (which excludes real run logs) must not swallow them.
+!orchestrator/tests/fixtures/replay/**/calls.jsonl
+# Stage fixtures mirror a project root, including its .coresmith/ state dir.
+# Re-include the dir first (git can't un-ignore a file whose parent dir is
+# excluded), then its contents.
+!orchestrator/tests/fixtures/stage/**/.coresmith/
+!orchestrator/tests/fixtures/stage/**/.coresmith/**
