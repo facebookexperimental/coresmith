@@ -17,29 +17,30 @@ Tests:
 
 from __future__ import annotations
 
+from pathlib import Path as _Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
 from orchestrator.langgraph.backend_graph import (
+    _PROMPT_DIR,
     BackendState,
-    build_backend_graph,
-    route_after_pnr,
-    route_after_drc,
-    route_after_lvs,
-    route_after_timing,
-    route_after_precheck,
-    route_decision,
-    route_after_human,
-    route_after_increment,
-    route_after_advance_lead,
-    init_design_node,
+    _safe_format,
     advance_block_node,
     backend_complete_node,
+    build_backend_graph,
+    init_design_node,
+    route_after_advance_lead,
+    route_after_drc,
+    route_after_human,
+    route_after_increment,
+    route_after_lvs,
+    route_after_pnr,
+    route_after_precheck,
+    route_after_timing,
+    route_decision,
 )
-
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -528,13 +529,6 @@ class TestCellCountGuardGate:
 # ---------------------------------------------------------------------------
 # Brace-safe prompt templating (_safe_format)
 # ---------------------------------------------------------------------------
-
-from pathlib import Path as _Path  # noqa: E402
-
-from orchestrator.langgraph.backend_graph import (  # noqa: E402
-    _safe_format,
-    _PROMPT_DIR,
-)
 
 # Prompts loaded by `_run_llm_eda_step` through the brace-safe formatter.
 _EDA_PROMPTS = [

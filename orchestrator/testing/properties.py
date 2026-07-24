@@ -17,8 +17,9 @@ checks the invariants that the engine must uphold regardless of LLM behavior:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any
 
 
 @dataclass
@@ -61,8 +62,8 @@ async def run_block_to_terminal(
     two_pass: bool = False,
     timeout_s: float = 20.0,
     max_resumes: int = 8,
-    answer_policy: Optional[Callable[[dict, int], Any]] = None,
-    initial_state: Optional[dict] = None,
+    answer_policy: Callable[[dict, int], Any] | None = None,
+    initial_state: dict | None = None,
 ) -> BlockRunResult:
     """Compile the block subgraph and drive it to terminal under a wall budget.
 
@@ -71,7 +72,6 @@ async def run_block_to_terminal(
     whole drive exceeds ``timeout_s`` (that is P1 failing).
     """
     from langgraph.checkpoint.memory import MemorySaver
-    from langgraph.types import Command
 
     from orchestrator.langgraph.pipeline_graph import build_block_subgraph
 
@@ -100,7 +100,7 @@ async def run_block_to_terminal(
 
     try:
         return await asyncio.wait_for(_drive(), timeout=timeout_s)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return BlockRunResult(terminal=False, passed=False, timed_out=True)
     except Exception as exc:  # noqa: BLE001
         # A raised exception (e.g. provider_exception fault) is a HARD crash,
@@ -135,7 +135,7 @@ def _default_block_state(block: dict, project_root: str) -> dict:
     }
 
 
-async def _first_interrupt(graph, config) -> Optional[dict]:
+async def _first_interrupt(graph, config) -> dict | None:
     snap = await graph.aget_state(config)
     if snap.tasks:
         for task in snap.tasks:

@@ -221,6 +221,7 @@ class TestErsDocValidation:
         # raw (un-normalized, partly-malformed) parameters block; the validation
         # path must normalize it on disk (boundary_values filled, bad dropped).
         import asyncio
+
         from orchestrator.architecture.specialists import ers_doc
         from orchestrator.langchain.agents import coresmith_llm
 
@@ -564,6 +565,7 @@ _AFFIRMED_EMPTY = _ers_body(
 class TestParametersBackstopE2E:
     def _run(self, tmp_path, monkeypatch, bodies, **kwargs):
         import asyncio
+
         from orchestrator.architecture.specialists import ers_doc
         from orchestrator.langchain.agents import coresmith_llm
 

@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import sys
 
-import pytest
-
 from orchestrator.architecture import model_integration as mi
 
 # A tiny "chip model": simulate(stimulus) -> (output, cycles). Pure Python.
@@ -102,7 +100,8 @@ def test_dispatch_uses_subprocess_when_knob_set(tmp_path, monkeypatch):
     path, models = _write_model(tmp_path, _CHIP)
     # in-process callable is intentionally WRONG to prove the subprocess (which
     # re-imports the real chip model from disk) is what actually runs
-    wrong = lambda s: ([999], -1)  # noqa: E731
+    def wrong(s):
+        return [999], -1
     res, t, e = mi._dispatch_simulate(wrong, path, models, {"n": 5000}, 30)
     ns: dict = {}
     exec(_CHIP, ns)

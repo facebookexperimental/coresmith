@@ -75,8 +75,6 @@ import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Optional
 
 # Reuse the sibling lint's comment/string blanker (comment-aware scanning is a
 # hard requirement -- `always` in a comment or `a*b` in a "..." literal must not
@@ -195,7 +193,7 @@ def _stmt_end(text: str, k: int) -> int:
     return n
 
 
-def _const_int(expr: str, params: dict[str, int]) -> Optional[int]:
+def _const_int(expr: str, params: dict[str, int]) -> int | None:
     """Resolve ``expr`` to an int if it is a decimal literal, a sized-decimal
     literal (``8'd12``), or a known parameter. Else None."""
     e = expr.strip()
@@ -234,10 +232,8 @@ def _pow2(v: int) -> bool:
 def _parse_trip(header: str, params: dict[str, int]) -> int:
     """Trip count of a ``for (init; cond; incr)`` header. x1 if unresolvable."""
     inner = header.strip()
-    if inner.startswith("("):
-        inner = inner[1:]
-    if inner.endswith(")"):
-        inner = inner[:-1]
+    inner = inner.removeprefix("(")
+    inner = inner.removesuffix(")")
     parts = inner.split(";")
     if len(parts) < 2:
         return _DEFAULT_TRIP
@@ -257,7 +253,7 @@ def _parse_trip(header: str, params: dict[str, int]) -> int:
         t = start - bound
     else:  # ">="
         t = start - bound + 1
-    return t if t > 0 else 0
+    return max(0, t)
 
 
 def _kw_at(text: str, k: int, kw: str) -> bool:
@@ -407,7 +403,7 @@ def _prev_ends_operand(text: str, i: int) -> bool:
 
 
 def _classify_operand(text: str, op_pos: int, direction: int,
-                      params: dict[str, int]) -> Optional[str]:
+                      params: dict[str, int]) -> str | None:
     """Classify the operand on one side of a binary operator at ``op_pos``.
 
     Returns ``"nonconst"`` (a variable / indexed reg / function call / paren or
@@ -846,7 +842,7 @@ class StageMap:
     """Declared per-stage arithmetic budget for a block (from the Amaranth model's
     machine-readable STAGE_BUDGET, parsed by ``latency_audit``)."""
     stages: list[dict] = field(default_factory=list)
-    declared_latency: Optional[int] = None
+    declared_latency: int | None = None
 
     @property
     def present(self) -> bool:
@@ -875,8 +871,8 @@ class StageMap:
         return self.stage_count >= 3
 
 
-def stage_map_from_budget(stage_budget: Optional[list[dict]],
-                          declared_latency: Optional[int] = None) -> StageMap:
+def stage_map_from_budget(stage_budget: list[dict] | None,
+                          declared_latency: int | None = None) -> StageMap:
     return StageMap(stages=list(stage_budget or []),
                     declared_latency=declared_latency)
 
@@ -949,9 +945,9 @@ class StageLintReport:
 
 
 def census_rtl(verilog_src: str, *,
-               stage_map: Optional[StageMap] = None,
-               mul_cap: Optional[int] = None,
-               factor: Optional[float] = None,
+               stage_map: StageMap | None = None,
+               mul_cap: int | None = None,
+               factor: float | None = None,
                enforce_stage_modules: bool = False) -> StageLintReport:
     """Full arithmetic-realization census of a Verilog source.
 
@@ -1342,9 +1338,17 @@ def census_signature(report: StageLintReport) -> str:
 
 
 __all__ = [
-    "stage_lint_enabled", "stage_modules_enabled",
-    "StageMap", "stage_map_from_budget", "load_stage_map",
-    "BlockCensus", "DefCensus", "StageLintReport", "census_rtl",
-    "StageModuleReport", "check_stage_modules",
-    "format_stage_lint_report", "census_signature",
+    "BlockCensus",
+    "DefCensus",
+    "StageLintReport",
+    "StageMap",
+    "StageModuleReport",
+    "census_rtl",
+    "census_signature",
+    "check_stage_modules",
+    "format_stage_lint_report",
+    "load_stage_map",
+    "stage_lint_enabled",
+    "stage_map_from_budget",
+    "stage_modules_enabled",
 ]

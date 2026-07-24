@@ -48,7 +48,7 @@ import struct
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ def discover_ports(rtl_text: str) -> dict[str, dict]:
     return ports
 
 
-def classify_contract(ports: dict[str, dict]) -> Optional[dict]:
+def classify_contract(ports: dict[str, dict]) -> dict | None:
     """Classify the framed-stream contract: clk/reset, s_axis group, m_axis
     group, sideband config inputs. None when the shape is unsupported."""
     names = set(ports)
@@ -97,7 +97,7 @@ def classify_contract(ports: dict[str, dict]) -> Optional[dict]:
         return None
     rst_active_low = rst.endswith("n")
 
-    def _group(direction: str) -> Optional[dict]:
+    def _group(direction: str) -> dict | None:
         # find <prefix>_tvalid with a matching _tready of the opposite driver
         for n, p in ports.items():
             if not n.endswith("_tvalid") or p["dir"] != direction:
@@ -153,7 +153,7 @@ def classify_contract(ports: dict[str, dict]) -> Optional[dict]:
     }
 
 
-def map_stimulus(stimulus: Any, contract: dict) -> Optional[dict]:
+def map_stimulus(stimulus: Any, contract: dict) -> dict | None:
     """Map a stimulus (dict / flat sequence) onto (payload bytes, sideband
     values) using the SAME conventions as the composed model's simulate():
     the array-valued field is the beat stream; scalar fields map to sideband
@@ -412,7 +412,7 @@ def generate_harness(contract: dict, top_module: str, sb_order: list[str]) -> st
 # ---------------------------------------------------------------------------
 
 def _build(workdir: Path, top_module: str, sources: list[str],
-           harness_cpp: Path) -> Optional[str]:
+           harness_cpp: Path) -> str | None:
     """verilate + build; returns the binary path or None (reason logged)."""
     timeout = int(float(os.environ.get(
         "CORESMITH_ACCEPTANCE_DV_BUILD_TIMEOUT_S", "900") or 900))
@@ -442,8 +442,7 @@ def _pack_cases(cases: list[tuple[str, dict]], sb_order: list[str],
         for _name, mapped in cases:
             sbv = mapped["sidebands"]
             f.write(struct.pack("<I", len(sb_order)))
-            for p in sb_order:
-                f.write(struct.pack("<I", sbv.get(p, 0) & 0xFFFFFFFF))
+            f.writelines(struct.pack("<I", sbv.get(p, 0) & 0xFFFFFFFF) for p in sb_order)
             payload = mapped["payload"]
             f.write(struct.pack("<I", len(payload)))
             f.write(bytes(payload))
@@ -485,13 +484,18 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
     if not shutil.which("verilator"):
         return _skip("verilator not on PATH")
 
-    from orchestrator.architecture.model_integration import (
-        _acceptance_stimulus_path, _import_module_from_path,
-        _load_reference_module, _run_reference, resolve_fidelity_metric,
-        fidelity_gate_enabled, compute_fidelity_derate,
-    )
     from orchestrator.architecture.composition import (
-        resolve_reference_implementation, resolve_reference_entrypoint,
+        resolve_reference_entrypoint,
+        resolve_reference_implementation,
+    )
+    from orchestrator.architecture.model_integration import (
+        _acceptance_stimulus_path,
+        _import_module_from_path,
+        _load_reference_module,
+        _run_reference,
+        compute_fidelity_derate,
+        fidelity_gate_enabled,
+        resolve_fidelity_metric,
     )
 
     art = _acceptance_stimulus_path(project_root)
@@ -568,7 +572,8 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
     # block-sim Makefile does when any source references it.
     try:
         from orchestrator.langgraph.sram_wrapper import (
-            uses_wrapper, wrapper_lib_path,
+            uses_wrapper,
+            wrapper_lib_path,
         )
 
         _any_wrapper = False

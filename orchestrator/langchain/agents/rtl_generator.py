@@ -173,11 +173,11 @@ def _pdk_budget_fragment(project_root: str = "") -> str:
     """
     try:
         from orchestrator.langgraph import pdk_characterize as _pdkc
-        from orchestrator.langgraph.pipeline_scheduler import (
-            pdk_budget_section as _budget,
-        )
         from orchestrator.langgraph.latency_audit import (
             resolve_target_clock_mhz as _clk,
+        )
+        from orchestrator.langgraph.pipeline_scheduler import (
+            pdk_budget_section as _budget,
         )
 
         if _pdkc.stage_enabled() and _pdkc.is_characterized():
@@ -466,9 +466,9 @@ class RTLGeneratorAgent:
             # Inlining the relevant edges forces the contract into the
             # generator's context window.
             from .contract_lookup import (
-                load_block_contracts,
                 format_block_contracts_prompt,
                 format_block_contracts_prompt_slim,
+                load_block_contracts,
             )
             _contracts_view = load_block_contracts(project_root, block_name)
             # B4 prompt-slim: emit the bootstrap policy + a `coresmith contracts

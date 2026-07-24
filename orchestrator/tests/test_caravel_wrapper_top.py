@@ -32,7 +32,6 @@ from orchestrator.langgraph.integration_helpers import (
     parse_verilog_ports,
 )
 
-
 # ---------------------------------------------------------------------------
 # Env-var gate: both branches (CLAUDE.md convention)
 # ---------------------------------------------------------------------------
@@ -199,7 +198,8 @@ def test_clk_rst_route_to_top(tmp_path):
     assert ".wb_rst_i(wb_rst_i)" in asm["verilog"]
     # No clk/rst got bundled onto an internal wire.
     assert "w_" not in "".join(
-        l for l in asm["verilog"].splitlines() if "wb_clk_i" in l and "wire w_" in l
+        line for line in asm["verilog"].splitlines()
+        if "wb_clk_i" in line and "wire w_" in line
     )
 
 

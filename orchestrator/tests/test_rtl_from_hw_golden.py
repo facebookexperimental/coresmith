@@ -85,6 +85,7 @@ def test_block_hw_golden_rel_resolves_path(tmp_path, monkeypatch):
 def test_rtl_generator_accepts_hw_golden_flag():
     """The agent signature must accept the new kwarg (back-compat default)."""
     import inspect
+
     from orchestrator.langchain.agents.rtl_generator import RTLGeneratorAgent
 
     sig = inspect.signature(RTLGeneratorAgent.generate)

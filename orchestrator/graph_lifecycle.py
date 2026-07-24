@@ -18,8 +18,7 @@ import logging
 import os
 import time
 import traceback
-from typing import Any, Optional
-
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -60,15 +59,15 @@ class GraphLifecycle:
 
         self.graph: Any = None
         self.checkpointer: Any = None
-        self.task: Optional[asyncio.Task] = None
+        self.task: asyncio.Task | None = None
         self.thread_id: str = name
         self.status: str = "idle"
         self.error_message: str = ""
 
         self._checkpointer_cm: Any = None
         self._lock = asyncio.Lock()
-        self._last_config: Optional[dict] = None
-        self._watchdog: Optional[asyncio.Task] = None
+        self._last_config: dict | None = None
+        self._watchdog: asyncio.Task | None = None
         self._watchdog_heals: int = 0
 
     # -- Recovery helpers ---------------------------------------------------
@@ -318,7 +317,7 @@ class GraphLifecycle:
             task.cancel()
             try:
                 await asyncio.wait_for(asyncio.shield(task), timeout=10)
-            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):  # noqa: BLE001
+            except (TimeoutError, asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         cfg = self._last_config or {
             "configurable": {"thread_id": self.thread_id}}
@@ -342,7 +341,7 @@ class GraphLifecycle:
                     return
         except asyncio.CancelledError:
             return
-        except Exception:  # noqa: BLE001 - watchdog must never kill the daemon
+        except Exception:
             logger.exception("[WEDGE-WATCHDOG] %s: watchdog crashed", self.name)
 
     def _arm_watchdog(self) -> None:

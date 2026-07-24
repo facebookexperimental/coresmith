@@ -23,33 +23,32 @@ the equivalent inlined-routing behaviour gets a fresh test pass.
 
 
 import json
-import pytest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import AsyncMock, patch
 
+import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
-import orchestrator.langgraph.pipeline_graph as pipeline_graph
+from orchestrator.langgraph import pipeline_graph
 from orchestrator.langgraph.pipeline_graph import (
     BlockState,
     OrchestratorState,
-    build_pipeline_graph,
-    build_block_subgraph,
-    route_after_uarch_review,
-    route_decision,
-    route_after_human,
-    route_after_integration_review,
-    route_after_integration_dv,
-    route_after_validation_dv,
-    route_next_tier,
-    init_block_node,
-    block_done_node,
-    pipeline_complete_node,
     ask_human_node,
+    block_done_node,
+    build_block_subgraph,
+    build_pipeline_graph,
+    init_block_node,
     integration_dv_node,
+    pipeline_complete_node,
+    route_after_human,
+    route_after_integration_dv,
+    route_after_integration_review,
+    route_after_uarch_review,
+    route_after_validation_dv,
+    route_decision,
+    route_next_tier,
     validation_dv_node,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1987,7 +1986,9 @@ class TestDiskFirstAgentToolsEnabled:
         assert agent.llm.disable_tools is False
 
     def test_integration_tb_generator_tools_enabled(self):
-        from orchestrator.langchain.agents.integration_testbench_generator import IntegrationTestbenchGenerator
+        from orchestrator.langchain.agents.integration_testbench_generator import (
+            IntegrationTestbenchGenerator,
+        )
         agent = IntegrationTestbenchGenerator()
         assert agent.llm.disable_tools is False
 
@@ -1997,6 +1998,7 @@ class TestIFP0014Fix:
 
     def test_small_die_refloorplan_uses_die_area_only(self, tmp_path):
         from pathlib import Path as _Path
+
         from orchestrator.langgraph.backend_helpers import generate_pnr_tcl
         tcl_path = generate_pnr_tcl(
             "tiny_block", "/fake/netlist.v", "/fake/sdc.sdc", str(tmp_path),
@@ -2917,7 +2919,7 @@ class TestIntegrationReviewSkipsPass1:
         monkeypatch.setattr(ira, "IntegrationReviewAgent", _Fake)
         monkeypatch.setattr(pipeline_graph, "interrupt",
                             lambda payload: {"action": "approve"})
-        out = await pipeline_graph.integration_review_node(self._state("uarch"))
+        await pipeline_graph.integration_review_node(self._state("uarch"))
         assert constructed["n"] == 1
 
 

@@ -17,7 +17,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # Exit codes (kept in sync with harness.cli).
 _EXIT_PASS = 0
@@ -84,7 +84,7 @@ def _resolve_rtl_path(pr: Path, spec: dict) -> str:
     return str(pr / "rtl" / f"{spec.get('name')}.v")
 
 
-def _resolve_tb_path(pr: Path, spec: dict, override: Optional[str]) -> str:
+def _resolve_tb_path(pr: Path, spec: dict, override: str | None) -> str:
     if override:
         p = Path(override)
         return str(p if p.is_absolute() else pr / override)
@@ -113,7 +113,7 @@ def run_block_equiv_gate(
     rtl_path: str,
     project_root: str | Path,
     *,
-    seed: Optional[int] = None,
+    seed: int | None = None,
 ) -> dict:
     """Run the RTL-vs-model byte-exact equivalence gate for one block.
 
@@ -140,6 +140,8 @@ def run_block_equiv_gate(
         from orchestrator.langgraph.gate_guard import gate_fail_open_enabled
         from orchestrator.langgraph.rtl_model_equiv import (
             check_rtl_model_equivalence as _check_equiv,
+        )
+        from orchestrator.langgraph.rtl_model_equiv import (
             rtl_model_equiv_enabled as _equiv_enabled,
         )
     except Exception as exc:  # noqa: BLE001
@@ -222,9 +224,14 @@ def verify_model(
     root = Path(pr)
     try:
         from orchestrator.langgraph.microarch_exp import (
-            elaborate_block_model, check_interface_constraint,
-            _expected_ports_for_block, _factory_params, _read_block_diagram,
-            _read_target_clock_mhz, _read_uarch_specs, _size_one_model,
+            _expected_ports_for_block,
+            _factory_params,
+            _read_block_diagram,
+            _read_target_clock_mhz,
+            _read_uarch_specs,
+            _size_one_model,
+            check_interface_constraint,
+            elaborate_block_model,
         )
     except Exception as exc:  # noqa: BLE001
         return VerifyResult(False, infra_error=True,
@@ -329,8 +336,8 @@ def verify_rtl(
     block_spec: dict,
     *,
     attempt: int = 0,
-    seed: Optional[int] = None,
-    tb_path: Optional[str] = None,
+    seed: int | None = None,
+    tb_path: str | None = None,
     no_equiv: bool = False,
     lint_only: bool = False,
     coverage: bool = False,
@@ -478,7 +485,7 @@ def verify_rtl(
     ), tests=tests)
 
 
-def _restore_env(key: str, prev: Optional[str]) -> None:
+def _restore_env(key: str, prev: str | None) -> None:
     if prev is None:
         os.environ.pop(key, None)
     else:
@@ -520,8 +527,11 @@ def verify_synth(
     # env-gated (CORESMITH_STAGE_LINT=0 bypasses).
     try:
         from orchestrator.langgraph.rtl_stage_lint import (
-            stage_lint_enabled, stage_modules_enabled, load_stage_map,
-            census_rtl, format_stage_lint_report,
+            census_rtl,
+            format_stage_lint_report,
+            load_stage_map,
+            stage_lint_enabled,
+            stage_modules_enabled,
         )
         if stage_lint_enabled():
             _sm = load_stage_map(root, block)
@@ -545,8 +555,10 @@ def verify_synth(
 
     try:
         from orchestrator.langgraph.ppa_check import (
-            probe_synth_generic, probe_synth_cellcount, parse_ff_budget,
             max_cell_ceiling,
+            parse_ff_budget,
+            probe_synth_cellcount,
+            probe_synth_generic,
         )
     except Exception as exc:  # noqa: BLE001
         return VerifyResult(False, infra_error=True,
@@ -649,9 +661,9 @@ def verify_synth(
 def verify_chip(
     pr: str | Path,
     *,
-    tb_path: Optional[str] = None,
-    seed: Optional[int] = None,
-    stimulus: Optional[str] = None,
+    tb_path: str | None = None,
+    seed: int | None = None,
+    stimulus: str | None = None,
     scoreboard: Any = None,
     record_source: str = "agent",
     attempt: int = 0,

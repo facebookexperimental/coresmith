@@ -75,7 +75,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Optional, TypedDict
+from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
@@ -174,14 +174,14 @@ def _microarch_incremental_enabled() -> bool:
     )
 
 
-def _model_mtime(path: Path) -> Optional[float]:
+def _model_mtime(path: Path) -> float | None:
     try:
         return path.stat().st_mtime if path.exists() else None
     except OSError:
         return None
 
 
-def _unchanged_since_pass(path: Path, prev_mtime: Optional[float]) -> bool:
+def _unchanged_since_pass(path: Path, prev_mtime: float | None) -> bool:
     """True when the model file is unchanged since it last passed a gate.
 
     ``prev_mtime`` is the model mtime recorded the last time the block passed
@@ -501,7 +501,7 @@ def _clustering_mode() -> str:
     return "off" if raw == "off" else "auto"
 
 
-def _edge_endpoints(conn: dict) -> tuple[Optional[str], Optional[str]]:
+def _edge_endpoints(conn: dict) -> tuple[str | None, str | None]:
     """Return (from_block, to_block) from a connection record (schema-tolerant)."""
     if not isinstance(conn, dict):
         return None, None
@@ -559,7 +559,7 @@ def _edge_is_tight(conn: dict) -> bool:
     return any(tok in text for tok in _TIGHT_EDGE_TOKENS)
 
 
-def _shared_parent_prefix(a: str, b: str) -> Optional[str]:
+def _shared_parent_prefix(a: str, b: str) -> str | None:
     """Return the shared decomposition-parent prefix of two block names, or None.
 
     Decomposition is not stamped in block_diagram.json, so a shared NAME PREFIX
@@ -776,7 +776,7 @@ def check_interface_constraint(
     return missing
 
 
-def _factory_params(model_path: str, block_name: str) -> Optional[list[str]]:
+def _factory_params(model_path: str, block_name: str) -> list[str] | None:
     """Best-effort import of a model and return its @block factory param names.
 
     Returns None when the file can't be imported / no factory found (the lint
@@ -805,7 +805,7 @@ def _factory_params(model_path: str, block_name: str) -> Optional[list[str]]:
         return None
 
 
-def _resolve_golden(project_root: str) -> tuple[Optional[str], str]:
+def _resolve_golden(project_root: str) -> tuple[str | None, str]:
     """Locate the reference software golden. Returns (path, source_text)."""
     path = None
     # Prefer inputs/golden.py -- the user names the golden explicitly, and the
@@ -895,7 +895,7 @@ def _newest_spec_mtime(project_root: str) -> float:
     return newest
 
 
-def _golden_mtime(golden_path: Optional[str]) -> float:
+def _golden_mtime(golden_path: str | None) -> float:
     if not golden_path:
         return 0.0
     try:
@@ -905,9 +905,9 @@ def _golden_mtime(golden_path: Optional[str]) -> float:
 
 
 def check_golden_spec_consistency(
-    golden_path: Optional[str],
+    golden_path: str | None,
     golden_sha: str,
-    stored: Optional[dict],
+    stored: dict | None,
     golden_mtime: float,
     newest_spec_mtime: float,
 ) -> dict:
@@ -972,7 +972,7 @@ def golden_spec_consistency_gate(project_root: str) -> dict:
     golden_mt = _golden_mtime(golden_path)
     spec_mt = _newest_spec_mtime(project_root)
 
-    stored: Optional[dict] = None
+    stored: dict | None = None
     hp = _golden_spec_hash_path(project_root)
     if hp.exists():
         try:
@@ -1025,7 +1025,7 @@ def _find_block_factory(module: Any, block_name: str):
     return None
 
 
-def elaborate_block_model(model_path: str, block_name: str) -> Optional[str]:
+def elaborate_block_model(model_path: str, block_name: str) -> str | None:
     """Import, elaborate, and convert one Amaranth block model.
 
     A guarded import catches source/import errors. ``Fragment.get`` then walks
@@ -1339,7 +1339,7 @@ def build_build_models_prompt(
     project_root: str,
     blocks: list[str],
     specs: dict[str, str],
-    golden_path: Optional[str],
+    golden_path: str | None,
     golden_src: str,
     feedback: str,
 ) -> str:
@@ -1424,7 +1424,7 @@ def build_build_models_prompt(
 def build_verify_models_prompt(
     project_root: str,
     blocks: list[str],
-    golden_path: Optional[str],
+    golden_path: str | None,
 ) -> str:
     models_dir = _block_models_dir(project_root)
     _n = len(blocks)
@@ -1454,7 +1454,7 @@ def build_diagnose_prompt(
     lint_errors: dict[str, str],
     verify_results: dict[str, dict],
     size_results: dict[str, dict],
-    golden_path: Optional[str],
+    golden_path: str | None,
 ) -> str:
     models_dir = _block_models_dir(project_root)
     fails = _collect_failures(lint_errors, verify_results, size_results)
@@ -1988,7 +1988,8 @@ async def ppa_judge_node(state: dict) -> dict:
     budgets: dict[str, dict] = {}
     try:
         from orchestrator.langgraph.ppa_check import (
-            parse_area_budget, parse_ff_budget,
+            parse_area_budget,
+            parse_ff_budget,
         )
         for b in blocks:
             budgets[b] = {
@@ -2223,17 +2224,17 @@ def _detect_memories(text: str) -> list[dict]:
         if isinstance(node, _ast.Name) and node.id in consts:
             return consts[node.id]
         if isinstance(node, _ast.BinOp):
-            l, r = _v(node.left), _v(node.right)
-            if l is None or r is None:
+            lv, r = _v(node.left), _v(node.right)
+            if lv is None or r is None:
                 return None
             if isinstance(node.op, _ast.Mult):
-                return l * r
+                return lv * r
             if isinstance(node.op, _ast.Add):
-                return l + r
+                return lv + r
             if isinstance(node.op, _ast.Sub):
-                return l - r
+                return lv - r
             if isinstance(node.op, _ast.FloorDiv) and r:
-                return l // r
+                return lv // r
         return None
 
     for n in _ast.walk(tree):
@@ -2306,7 +2307,9 @@ def _size_one_model(
       ``area_budget_um2`` (``ppa_check.parse_area_budget``). Over budget -> fail.
     """
     from orchestrator.langgraph.pipeline_scheduler import (
-        Node, schedule_dfg, pipeline_contract_text,
+        Node,
+        pipeline_contract_text,
+        schedule_dfg,
     )
 
     p = Path(model_path)
@@ -2351,7 +2354,7 @@ def _size_one_model(
     nid = 0
     for chain in per_line_chains:
         chain = sorted(chain, key=lambda o: order.get(o, 9))
-        prev: Optional[str] = None
+        prev: str | None = None
         for op in chain:
             this = f"n{nid}"
             nid += 1

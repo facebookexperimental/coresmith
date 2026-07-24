@@ -25,8 +25,6 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
-from typing import Any, Optional
 
 # Exit codes (single source of truth).
 EXIT_PASS = 0

@@ -46,7 +46,6 @@ from orchestrator.tests.fft16_fixtures import (
     FFT16_SAD_MARKDOWN,
 )
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Fix import-time side effect in constraints module
 # ═══════════════════════════════════════════════════════════════════════════
@@ -156,6 +155,7 @@ def isolated_project(tmp_path):
 def arch_graph():
     """Fresh architecture graph with in-memory checkpointer."""
     from langgraph.checkpoint.memory import MemorySaver
+
     from orchestrator.langgraph.architecture_graph import build_architecture_graph
 
     return build_architecture_graph(checkpointer=MemorySaver())
@@ -165,6 +165,7 @@ def arch_graph():
 def pipeline_graph():
     """Fresh pipeline graph with in-memory checkpointer."""
     from langgraph.checkpoint.memory import MemorySaver
+
     from orchestrator.langgraph.pipeline_graph import build_pipeline_graph
 
     return build_pipeline_graph(checkpointer=MemorySaver())
@@ -174,6 +175,7 @@ def pipeline_graph():
 def backend_graph():
     """Fresh backend graph with in-memory checkpointer."""
     from langgraph.checkpoint.memory import MemorySaver
+
     from orchestrator.langgraph.backend_graph import build_backend_graph
 
     return build_backend_graph(checkpointer=MemorySaver())

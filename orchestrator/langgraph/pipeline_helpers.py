@@ -22,7 +22,6 @@ Provides:
 
 from __future__ import annotations
 
-from orchestrator._timeouts import scaled
 import inspect
 import json
 import os
@@ -34,6 +33,8 @@ import time as _time
 from pathlib import Path
 
 import yaml
+
+from orchestrator._timeouts import scaled
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -163,13 +164,13 @@ def preflight_check(phases: list[str] | None = None) -> dict:
 
     if "backend" in phases:
         from orchestrator.langgraph.backend_helpers import (
-            TECH_LEF,
-            CELL_LEF,
             CELL_GDS,
-            MAGIC_RC,
-            OPENROAD_BIN,
+            CELL_LEF,
             MAGIC_BIN,
+            MAGIC_RC,
             NETGEN_BIN,
+            OPENROAD_BIN,
+            TECH_LEF,
         )
         if not TECH_LEF.exists():
             errors.append(f"Tech LEF not found: {TECH_LEF}")
@@ -1378,7 +1379,9 @@ async def _maybe_generate_block_golden(block: dict, callbacks: list = None) -> N
             # C10: try to answer the gap from the committed corpus.
             try:
                 from orchestrator.langchain.agents.gap_resolver import (
-                    GapResolver, apply_contract_amendments, build_gap_corpus,
+                    GapResolver,
+                    apply_contract_amendments,
+                    build_gap_corpus,
                 )
                 _corpus = build_gap_corpus(project_root, block_name, _gap)
                 _verdict = await GapResolver().resolve(
@@ -1432,9 +1435,9 @@ async def _maybe_generate_block_golden(block: dict, callbacks: list = None) -> N
             log(f"  [GAP-RESOLVE] {block_name}: RESOLVED from the committed "
                 f"corpus -- froze {len(_applied)} amendment(s) into the "
                 f"contract ({'; '.join(_applied[:4])}); regenerating", GREEN)
-            log(f"  [GAP-RESOLVE] NOTE: contract amended -- partner blocks' "
-                f"recorded passes may be invalidated (C5/C7 catch this on "
-                f"their next entry)", YELLOW)
+            log("  [GAP-RESOLVE] NOTE: contract amended -- partner blocks' "
+                "recorded passes may be invalidated (C5/C7 catch this on "
+                "their next entry)", YELLOW)
             # Reload the (now richer) contract slice for the next round.
             interface_contract = load_block_contracts(
                 project_root, block_name)
@@ -1444,7 +1447,8 @@ async def _maybe_generate_block_golden(block: dict, callbacks: list = None) -> N
         # by default; hard-fails only under CORESMITH_GOLDEN_FEASIBILITY_GATE.
         try:
             from orchestrator.architecture.model_integration import (
-                check_golden_feasibility, golden_feasibility_gate_enabled,
+                check_golden_feasibility,
+                golden_feasibility_gate_enabled,
             )
             fr = check_golden_feasibility(project_root, block_name)
             if fr.get("ran") and not fr.get("passed"):
@@ -1569,8 +1573,8 @@ async def generate_rtl(
     The agent reads the uArch spec, ERS, constraints, golden model, and
     previous error from disk, and writes the Verilog to block["rtl_target"].
     """
-    from orchestrator.langchain.agents.rtl_generator import RTLGeneratorAgent
     from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
+    from orchestrator.langchain.agents.rtl_generator import RTLGeneratorAgent
 
     rtl_path = PROJECT_ROOT / block["rtl_target"]
     rtl_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1670,6 +1674,8 @@ def lint_rtl(rtl_path: str, block_name: str, attempt: int = 1) -> dict:
     try:
         from orchestrator.langgraph.sram_wrapper import (
             uses_wrapper as _uses_wrapper,
+        )
+        from orchestrator.langgraph.sram_wrapper import (
             wrapper_lib_path as _wrapper_lib_path,
         )
         if _uses_wrapper(rtl_text):
@@ -1726,8 +1732,8 @@ async def generate_testbench(
     callbacks: list = None,
 ) -> dict:
     """Generate cocotb testbench -- disk-first, agent reads/writes all files."""
-    from orchestrator.langchain.agents.testbench_generator import TestbenchGeneratorAgent
     from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
+    from orchestrator.langchain.agents.testbench_generator import TestbenchGeneratorAgent
 
     rtl_path = str(PROJECT_ROOT / block["rtl_target"])
     tb_path_str = str(PROJECT_ROOT / block["testbench"])
@@ -1994,7 +2000,7 @@ def clear_build_products(sim_dir: Path) -> bool:
 def apply_build_fingerprint(
     sim_dir: Path,
     makefile_content: str,
-    sources: "list[str] | None" = None,
+    sources: list[str] | None = None,
 ) -> bool:
     """Clear a stale Verilator/cocotb build when its compile inputs changed.
 
@@ -2168,6 +2174,8 @@ def run_simulation(block: dict, rtl_path: str, tb_path: str, attempt: int = 1,
     try:
         from orchestrator.langgraph.sram_wrapper import (
             uses_wrapper as _uses_wrapper,
+        )
+        from orchestrator.langgraph.sram_wrapper import (
             wrapper_lib_path as _wrapper_lib_path,
         )
         _rtl_text = Path(rtl_path).read_text() if Path(rtl_path).exists() else ""
@@ -2273,8 +2281,7 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
             _v = int(float(block.get(_k) or 0))
         except (TypeError, ValueError):
             _v = 0
-        if _v > _sim_to_decl:
-            _sim_to_decl = _v
+        _sim_to_decl = max(_sim_to_decl, _v)
     # Prior-timeout count for THIS block persists across attempts / daemon
     # restarts via a tiny state file under the block dir.
     _to_state = sim_dir / "sim_timeout_state.json"
@@ -2394,6 +2401,8 @@ EXTRA_ARGS += --build-jobs {_build_jobs}
             try:
                 from orchestrator.harness.coverage import (
                     coverage_na_reason as _na_reason,
+                )
+                from orchestrator.harness.coverage import (
                     line_cov_gate_verdict,
                 )
 
@@ -2703,6 +2712,8 @@ def synthesize_block(
     try:
         from orchestrator.langgraph.sram_wrapper import (
             uses_wrapper as _uw,
+        )
+        from orchestrator.langgraph.sram_wrapper import (
             wrapper_lib_path as _wlp,
         )
         _rtl_src = Path(rtl_path).read_text() if Path(rtl_path).exists() else ""

@@ -16,7 +16,7 @@ _SRAM = "module sram_macro(\n  input clk\n);\n  reg [7:0] mem;\nendmodule"
 
 def _defs(paths, name):
     return sum(
-        len(re.findall(rf"^\s*module\s+{name}\b", open(p).read(), re.M))
+        len(re.findall(rf"^\s*module\s+{name}\b", open(p).read(), re.MULTILINE))
         for p in paths
     )
 

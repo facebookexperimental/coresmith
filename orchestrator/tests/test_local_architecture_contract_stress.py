@@ -32,7 +32,6 @@ import pytest
 from orchestrator.tests.conftest import wait_for_status
 from orchestrator.tests.test_live_architecture import _auto_answer_ers
 
-
 RUN_STRESS = os.environ.get("CORESMITH_RUN_LOCAL_ARCH_STRESS", "").lower() in {
     "1",
     "true",

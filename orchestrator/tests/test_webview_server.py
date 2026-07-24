@@ -30,7 +30,6 @@ from threading import Thread
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helpers — import serve.py from the vscode-ext directory (hyphenated name
 # prevents normal Python package import).
@@ -95,8 +94,7 @@ def write_events(tmp_path: Path, events: list[dict]):
     log_path = tmp_path / ".coresmith" / "pipeline_events.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "w") as f:
-        for ev in events:
-            f.write(json.dumps(ev) + "\n")
+        f.writelines(json.dumps(ev) + "\n" for ev in events)
 
 
 def write_llm_calls(tmp_path: Path, calls: list[dict]):
@@ -104,8 +102,7 @@ def write_llm_calls(tmp_path: Path, calls: list[dict]):
     log_path = tmp_path / ".coresmith" / "llm_calls.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "w") as f:
-        for call in calls:
-            f.write(json.dumps(call) + "\n")
+        f.writelines(json.dumps(call) + "\n" for call in calls)
 
 
 def write_live_stream(tmp_path: Path, pid: int, data: dict):

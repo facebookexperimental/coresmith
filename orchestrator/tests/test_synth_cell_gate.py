@@ -184,7 +184,8 @@ def test_delivered_abi_top_probed_and_drift_recorded(tmp_path, monkeypatch):
     canonical_top_drift defect is recorded. A drifted (broken) delivered top
     fails the gate even when the assembled manifest top is fine."""
     from orchestrator.langgraph.pipeline_graph import (
-        _chip_top_synth_ok, read_carried_forward_defects,
+        _chip_top_synth_ok,
+        read_carried_forward_defects,
     )
     monkeypatch.delenv("CORESMITH_SYNTH_CELL_GATE", raising=False)
     monkeypatch.setenv("CORESMITH_CHIP_TOP_MIN_CELLS", "0")
@@ -226,7 +227,8 @@ def test_delivered_top_with_module_collision_records_unchecked(tmp_path, monkeyp
     co-elaborated -- the gate stays judgeable on the manifest and records the
     drift as UNCHECKED instead of MODDUP-failing."""
     from orchestrator.langgraph.pipeline_graph import (
-        _chip_top_synth_ok, read_carried_forward_defects,
+        _chip_top_synth_ok,
+        read_carried_forward_defects,
     )
     if not shutil.which("yosys"):
         pytest.skip("yosys not available")

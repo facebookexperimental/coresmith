@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Optional
 
 
 def load_block_queue(project_root: str | Path) -> list[dict]:
@@ -52,8 +51,8 @@ def load_block_queue(project_root: str | Path) -> list[dict]:
         if bf.exists():
             try:
                 from orchestrator.langgraph.pipeline_helpers import (
-                    load_config,
                     get_sorted_block_queue,
+                    load_config,
                 )
                 os.environ["CORESMITH_BLOCKS_FILE"] = str(bf)
                 return get_sorted_block_queue(load_config())
@@ -62,15 +61,15 @@ def load_block_queue(project_root: str | Path) -> list[dict]:
 
     try:
         from orchestrator.langgraph.pipeline_helpers import (
-            load_config,
             get_sorted_block_queue,
+            load_config,
         )
         return get_sorted_block_queue(load_config())
     except Exception:  # noqa: BLE001
         return []
 
 
-def load_block_spec(project_root: str | Path, name: str) -> Optional[dict]:
+def load_block_spec(project_root: str | Path, name: str) -> dict | None:
     """The single block spec dict named ``name`` (or ``None`` if absent)."""
     for spec in load_block_queue(project_root):
         if isinstance(spec, dict) and spec.get("name") == name:

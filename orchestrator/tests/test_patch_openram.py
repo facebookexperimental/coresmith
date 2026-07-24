@@ -11,13 +11,10 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import pytest
-
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
-import patch_openram as po  # noqa: E402
-
+import patch_openram as po
 
 _BROKEN_BBOX = (
     "class hierarchy_layout:\n"

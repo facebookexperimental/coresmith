@@ -64,7 +64,7 @@ class QSPIRomResponderBFM:
     DUT-driven and only sampled. ``rom_data`` is the operand buffer the DUT reads.
     """
 
-    def __init__(self, dut, contract: "QSPIRomContract", rom_data: bytes):
+    def __init__(self, dut, contract: QSPIRomContract, rom_data: bytes):
         self.dut = dut
         self.c = contract
         self.rom = bytes(rom_data)
@@ -82,8 +82,6 @@ class QSPIRomResponderBFM:
 
     async def run(self):
         """Serve READ transactions until the sim ends. Never returns normally."""
-        import cocotb
-        from cocotb.triggers import Edge, RisingEdge, FallingEdge
 
         clk = getattr(self.dut, self.c.clk_name)
         miso = self._miso()

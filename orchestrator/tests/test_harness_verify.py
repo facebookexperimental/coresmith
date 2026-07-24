@@ -99,8 +99,8 @@ class TestVerifyModel:
 class TestRunBlockEquivGate:
     def _enable(self, monkeypatch, *, goldens=True, equiv=True, fail_open=False):
         import orchestrator.architecture.composition as comp
-        import orchestrator.langgraph.rtl_model_equiv as rme
         import orchestrator.langgraph.gate_guard as gg
+        import orchestrator.langgraph.rtl_model_equiv as rme
         monkeypatch.setattr(comp, "block_goldens_enabled", lambda: goldens)
         monkeypatch.setattr(rme, "rtl_model_equiv_enabled", lambda: equiv)
         monkeypatch.setattr(gg, "gate_fail_open_enabled", lambda: fail_open)

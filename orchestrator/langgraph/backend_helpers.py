@@ -26,15 +26,15 @@ import subprocess
 from pathlib import Path
 
 from orchestrator.langgraph.pipeline_helpers import (
-    PROJECT_ROOT,
+    GREEN,
     PDK_ROOT,
+    PROJECT_ROOT,
+    RED,
+    YELLOW,
     _write_step_log,
     _write_step_log_error,
     load_config,
     log,
-    GREEN,
-    RED,
-    YELLOW,
 )
 
 # ---------------------------------------------------------------------------
@@ -2126,15 +2126,19 @@ def placed_macro_bboxes(placements) -> list[dict]:
     for p in placements:
         tag = None
         if isinstance(p, dict):
-            x = float(p["x"]); y = float(p["y"])
-            w = float(p["w"]); h = float(p["h"])
+            x = float(p["x"])
+            y = float(p["y"])
+            w = float(p["w"])
+            h = float(p["h"])
             orient = str(p.get("orient", "N")).upper()
             layers = p.get("layers")
             tag = p.get("tag") or p.get("name")
         else:
-            x = float(p[0]); y = float(p[1])
+            x = float(p[0])
+            y = float(p[1])
             orient = str(p[2]).upper()
-            w = float(p[3]); h = float(p[4])
+            w = float(p[3])
+            h = float(p[4])
             layers = p[5] if len(p) > 5 else None
             tag = p[6] if len(p) > 6 else None
         if orient in _ORIENT_SWAP_WH:

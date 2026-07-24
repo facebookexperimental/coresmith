@@ -16,7 +16,6 @@ from pathlib import Path
 
 from orchestrator.langgraph import architecture_graph as ag
 
-
 _FAT_GOLDEN = '''
 import numpy as np
 

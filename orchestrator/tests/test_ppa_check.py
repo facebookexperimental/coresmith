@@ -543,8 +543,8 @@ class TestRunPreLayoutStaLoud:
 
         def fake_run(cmd, capture_output, text, timeout):
             tcl = Path(cmd[-1]).read_text()
-            rv = [l.split(None, 1)[1].strip()
-                  for l in tcl.splitlines() if l.startswith("read_verilog")][0]
+            rv = [line.split(None, 1)[1].strip()
+                  for line in tcl.splitlines() if line.startswith("read_verilog")][0]
             seen["netlist"] = Path(rv).read_text()
             return self._R(stdout="wns max -2.50\ntns max -10.00\n", rc=0)
 
@@ -557,6 +557,7 @@ class TestRunPreLayoutStaLoud:
 
     def test_unparseable_is_loud(self, tmp_path, monkeypatch, caplog):
         import logging
+
         import orchestrator.langgraph.ppa_check as pc
         nl, sdc, lib = self._inputs(tmp_path)
         monkeypatch.setattr(pc.shutil, "which", lambda _x: "/usr/bin/true")

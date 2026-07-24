@@ -270,9 +270,9 @@ class TestParseVerilogPorts:
 
 class TestDiscoverBlockPorts:
     def test_discovers_ports_from_rtl(self, tmp_path, monkeypatch):
-        from orchestrator.langgraph.tapeout_helpers import _discover_block_ports
-        import orchestrator.langgraph.tapeout_helpers as th
         import orchestrator.langgraph.pipeline_helpers as ph
+        import orchestrator.langgraph.tapeout_helpers as th
+        from orchestrator.langgraph.tapeout_helpers import _discover_block_ports
 
         monkeypatch.setattr(th, "PROJECT_ROOT", tmp_path)
         monkeypatch.setattr(ph, "PROJECT_ROOT", tmp_path)
@@ -304,9 +304,9 @@ class TestDiscoverBlockPorts:
         assert ports["data_out"]["direction"] == "output"
 
     def test_detects_rst_port_name(self, tmp_path, monkeypatch):
-        from orchestrator.langgraph.tapeout_helpers import _discover_block_ports
-        import orchestrator.langgraph.tapeout_helpers as th
         import orchestrator.langgraph.pipeline_helpers as ph
+        import orchestrator.langgraph.tapeout_helpers as th
+        from orchestrator.langgraph.tapeout_helpers import _discover_block_ports
 
         monkeypatch.setattr(th, "PROJECT_ROOT", tmp_path)
         monkeypatch.setattr(ph, "PROJECT_ROOT", tmp_path)
@@ -431,8 +431,9 @@ class TestFastPathDiagnosis:
     @pytest.mark.asyncio
     async def test_non_matching_error_falls_through(self, tmp_path):
         """Verify that non-matching errors are NOT fast-pathed (would need LLM)."""
+        from unittest.mock import AsyncMock, patch
+
         from orchestrator.langgraph.pipeline_graph import diagnose_node
-        from unittest.mock import patch, AsyncMock
 
         block_dir = self._setup_block(
             tmp_path, "test_block",
@@ -482,8 +483,9 @@ class TestBackendGate:
 
     @pytest.mark.asyncio
     async def test_missing_rtl_blocks_backend(self, tmp_path):
-        import orchestrator.mcp_server as mcp
         from unittest.mock import AsyncMock, patch
+
+        import orchestrator.mcp_server as mcp
 
         (tmp_path / ".coresmith").mkdir()
         block_specs = [
@@ -516,8 +518,9 @@ class TestBackendGate:
 
     @pytest.mark.asyncio
     async def test_all_blocks_present_passes_gate(self, tmp_path):
-        import orchestrator.mcp_server as mcp
         from unittest.mock import AsyncMock, patch
+
+        import orchestrator.mcp_server as mcp
 
         (tmp_path / ".coresmith").mkdir()
         block_specs = [
@@ -601,22 +604,25 @@ class TestUarchVerilogStub:
 
 class TestFilesystemSourceOfTruth:
     def test_uarch_generator_accepts_project_root(self):
-        from orchestrator.langchain.agents.uarch_spec_generator import UarchSpecGenerator
         import inspect
+
+        from orchestrator.langchain.agents.uarch_spec_generator import UarchSpecGenerator
 
         sig = inspect.signature(UarchSpecGenerator.generate)
         assert "project_root" in sig.parameters
 
     def test_rtl_generator_accepts_project_root(self):
-        from orchestrator.langchain.agents.rtl_generator import RTLGeneratorAgent
         import inspect
+
+        from orchestrator.langchain.agents.rtl_generator import RTLGeneratorAgent
 
         sig = inspect.signature(RTLGeneratorAgent.generate)
         assert "project_root" in sig.parameters
 
     def test_constraint_check_accepts_project_root(self):
-        from orchestrator.architecture.constraints import check_constraints
         import inspect
+
+        from orchestrator.architecture.constraints import check_constraints
 
         sig = inspect.signature(check_constraints)
         assert "project_root" in sig.parameters
@@ -668,8 +674,9 @@ class TestRegressionGuard:
     @pytest.mark.asyncio
     async def test_no_skip_when_best_result_failed(self, tmp_path):
         """Do NOT skip regen if best_result says sim did not pass."""
+        from unittest.mock import AsyncMock, patch
+
         from orchestrator.langgraph.pipeline_graph import generate_rtl_node
-        from unittest.mock import patch, AsyncMock
 
         block_name = "test_block"
         block = {
@@ -750,8 +757,9 @@ class TestBestResultPersistence:
 
     @pytest.mark.asyncio
     async def test_sim_pass_writes_best_result(self, tmp_path):
-        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
         from unittest.mock import patch
+
+        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
 
         block_name = "my_alu"
         block = {"name": block_name, "testbench": f"tb/cocotb/test_{block_name}.py"}
@@ -795,8 +803,9 @@ class TestBestResultPersistence:
 
     @pytest.mark.asyncio
     async def test_sim_fail_no_best_result(self, tmp_path):
-        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
         from unittest.mock import patch
+
+        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
 
         block_name = "buggy"
         block = {"name": block_name, "testbench": f"tb/cocotb/test_{block_name}.py"}
@@ -981,6 +990,7 @@ class TestIntegrationReviewAgent:
 
     def test_review_accepts_block_names_and_project_root(self):
         import inspect
+
         from orchestrator.langchain.agents.integration_review_agent import (
             IntegrationReviewAgent,
         )
@@ -996,6 +1006,7 @@ class TestIntegrationReviewAgent:
 class TestIntegrationLeadOutputPath:
     def test_integrate_accepts_output_path(self):
         import inspect
+
         from orchestrator.langchain.agents.integration_lead import (
             IntegrationLeadAgent,
         )
@@ -1004,6 +1015,7 @@ class TestIntegrationLeadOutputPath:
 
     def test_integration_tb_accepts_output_path(self):
         import inspect
+
         from orchestrator.langchain.agents.integration_testbench_generator import (
             IntegrationTestbenchGenerator,
         )

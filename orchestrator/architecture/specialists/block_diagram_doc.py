@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -441,13 +442,13 @@ def generate_block_diagram_doc(
             })
 
     # ── Build the full document ──
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     doc = {
         "version": {"id": "reactflow_json_1.0.0"},
         "metadata": {
             "design_name": design_name,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "source": "coresmith_architecture",
             "block_count": len(blocks),
             "connection_count": len(connections),

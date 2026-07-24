@@ -12,7 +12,8 @@ which would be slow (and a fork-storm risk on a 4-core box).
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 # Default passing results (shapes mirror the real helpers).
 LINT_CLEAN = {"clean": True, "warnings": ""}

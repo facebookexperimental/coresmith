@@ -20,7 +20,6 @@ status line (profile + seeded + already-set), re-emittable after logging is up.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import logging
 import os

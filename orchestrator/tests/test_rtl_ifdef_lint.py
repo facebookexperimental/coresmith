@@ -16,7 +16,6 @@ import pytest
 
 from orchestrator.langgraph import rtl_storage_lint as il
 
-
 # A minimized version of the ACTUAL rung-3 intra_rd_encode_core mock: the real
 # datapath under `ifndef SYNTHESIS (always + assign) and a counter-theater MOCK
 # under `else (coeff = in-128, memory read write-only, a cs_sram instance),

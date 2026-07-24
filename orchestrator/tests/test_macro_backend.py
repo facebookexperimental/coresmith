@@ -341,7 +341,8 @@ class TestOpenRAMFallback:
             return real_find(name, *a, **k)
         monkeypatch.setattr(_ilu, "find_spec", fake_find)
         # ensure `import openram` succeeds in the check by faking it present
-        import sys, types
+        import sys
+        import types
         monkeypatch.setitem(sys.modules, "openram", types.ModuleType("openram"))
         assert ogmod.openram_available() is False
         # now with a runnable __main__ present -> available

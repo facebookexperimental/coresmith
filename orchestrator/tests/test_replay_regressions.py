@@ -22,13 +22,12 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.testing import replay_provider as rp
-from orchestrator.testing.replay_provider import ReplayBackend, ReplayMissError
 from orchestrator.testing.prompt_norm import (
     normalize_prompt,
     prompt_digest,
     token_jaccard,
 )
+from orchestrator.testing.replay_provider import ReplayBackend, ReplayMissError
 
 pytestmark = pytest.mark.replay
 

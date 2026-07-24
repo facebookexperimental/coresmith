@@ -26,9 +26,10 @@ import contextvars
 import json as _json
 import logging
 import os
+import re as _re
+import shutil
 import signal
 import subprocess
-import shutil
 import tempfile
 import threading
 import time as _time_mod
@@ -815,7 +816,6 @@ def _find_agy_binary() -> str:
 # ``codex exec resume --help`` once per binary path, extract the flags it
 # advertises, and drop any resume-argv flag the CLI doesn't know about. Probe
 # failure -> ``None`` -> the legacy (unfiltered) argv, so old CLIs still work.
-import re as _re
 
 _RESUME_FLAGS_CACHE: dict[str, frozenset[str] | None] = {}
 _RESUME_FLAGS_CACHE_LOCK = threading.Lock()

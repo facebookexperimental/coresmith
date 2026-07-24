@@ -45,7 +45,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Constants / env knobs
@@ -175,7 +175,7 @@ def single_block_margin() -> float:
         return DEFAULT_SINGLE_BLOCK_MARGIN
 
 
-def die_budget_env_mm2() -> Optional[float]:
+def die_budget_env_mm2() -> float | None:
     """CORESMITH_DIE_BUDGET_MM2 override, or None."""
     raw = os.environ.get("CORESMITH_DIE_BUDGET_MM2", "").strip()
     if not raw:
@@ -371,7 +371,7 @@ def analytic_flop_bits_area_um2(width: int, depth: int) -> float:
     return float(width) * float(depth) * flop_um2_per_bit()
 
 
-def characterizer_warm(pdk: Optional[dict] = None) -> bool:
+def characterizer_warm(pdk: dict | None = None) -> bool:
     """True iff the memory characterizer cache has any rows (PDK pricing usable)."""
     try:
         from orchestrator.langgraph.mem_characterize import load_table
@@ -380,8 +380,8 @@ def characterizer_warm(pdk: Optional[dict] = None) -> bool:
         return False
 
 
-def price_mem_decl(decl: MemDecl, *, warm: Optional[bool] = None,
-                   pdk: Optional[dict] = None,
+def price_mem_decl(decl: MemDecl, *, warm: bool | None = None,
+                   pdk: dict | None = None,
                    target_mhz: float = 100.0) -> PricedMem:
     """Price one memory: real PDK area (warm cache) else analytic flop-bits.
 
@@ -404,7 +404,8 @@ def price_mem_decl(decl: MemDecl, *, warm: Optional[bool] = None,
     # is authoritative until an exact generated-LEF area exists.
     if decl.impl == "rom":
         from orchestrator.langgraph.sram_wrapper import (
-            rom_area_um2, rom_um2_per_bit,
+            rom_area_um2,
+            rom_um2_per_bit,
         )
         return PricedMem(
             decl=decl,
@@ -497,7 +498,7 @@ def price_mem_decl(decl: MemDecl, *, warm: Optional[bool] = None,
     )
 
 
-def price_manifest(decls: list[MemDecl], *, pdk: Optional[dict] = None,
+def price_manifest(decls: list[MemDecl], *, pdk: dict | None = None,
                    target_mhz: float = 100.0) -> list[PricedMem]:
     """Price every declaration (warm-cache probe done once for the batch)."""
     warm = characterizer_warm(pdk)
@@ -524,8 +525,8 @@ def _fmt_mm2(um2: float) -> str:
 
 
 def evaluate_mem_price(priced: list[PricedMem], *,
-                       area_budget_um2: Optional[float] = None,
-                       sanity_mm2: Optional[float] = None) -> MemPriceVerdict:
+                       area_budget_um2: float | None = None,
+                       sanity_mm2: float | None = None) -> MemPriceVerdict:
     """Gate a block's priced memory: per-memory sanity cap + Σ-vs-area-budget.
 
     * Any SINGLE memory over ``sanity_mm2`` (default 2.0 mm^2) is a hard FAIL,
@@ -588,7 +589,7 @@ def evaluate_mem_price(priced: list[PricedMem], *,
 _TRAJECTORY_EPS_UM2 = 1.0
 
 
-def trajectory_label(prev_total_um2: Optional[float], cur_total_um2: float) -> str:
+def trajectory_label(prev_total_um2: float | None, cur_total_um2: float) -> str:
     """Classify a revise round's Σ-priced-area against the previous round.
 
     ``"first"`` (no prior round) | ``"worse"`` (total went UP -- the regen added
@@ -606,7 +607,7 @@ def trajectory_label(prev_total_um2: Optional[float], cur_total_um2: float) -> s
     return "flat"
 
 
-def _pct_of_budget(area_um2: float, budget_um2: Optional[float]) -> str:
+def _pct_of_budget(area_um2: float, budget_um2: float | None) -> str:
     if budget_um2 and budget_um2 > 0:
         return f"{area_um2 / budget_um2 * 100:.0f}%"
     return "n/a"
@@ -616,11 +617,11 @@ def format_revise_directive(
     block: str,
     verdict: MemPriceVerdict,
     *,
-    area_budget_um2: Optional[float],
+    area_budget_um2: float | None,
     round_idx: int,
     max_revise: int,
-    prev_total_um2: Optional[float] = None,
-    prev_n_memories: Optional[int] = None,
+    prev_total_um2: float | None = None,
+    prev_n_memories: int | None = None,
     trajectory: str = "",
 ) -> str:
     """Build the directive-rich regen feedback threaded into the next spec prompt.
@@ -734,13 +735,13 @@ def format_revise_directive(
 
 
 def format_ledger(block: str, verdict: MemPriceVerdict, *,
-                  area_budget_um2: Optional[float],
+                  area_budget_um2: float | None,
                   manifest_present: bool,
                   note: str = "",
-                  over_budget: Optional[bool] = None,
+                  over_budget: bool | None = None,
                   deferred: bool = False,
                   deferred_reason: str = "",
-                  reject_rounds: Optional[int] = None,
+                  reject_rounds: int | None = None,
                   trajectory: str = "",
                   signature: str = "") -> dict[str, Any]:
     """Build the scoreboard-friendly ``mem_price.json`` ledger dict.
@@ -773,7 +774,7 @@ def format_ledger(block: str, verdict: MemPriceVerdict, *,
     }
 
 
-def write_ledger(project_root: str, block: str, ledger: dict[str, Any]) -> Optional[str]:
+def write_ledger(project_root: str, block: str, ledger: dict[str, Any]) -> str | None:
     """Persist the ledger to ``.coresmith/blocks/<block>/mem_price.json``."""
     try:
         d = Path(project_root) / ".coresmith" / "blocks" / block
@@ -801,7 +802,7 @@ def mentions_shuttle(*texts: str) -> bool:
     return any(tok in hay for tok in _SHUTTLE_TOKENS)
 
 
-def _prd_die_budget_mm2(prd: Optional[dict]) -> Optional[float]:
+def _prd_die_budget_mm2(prd: dict | None) -> float | None:
     """max_die_area_mm2 out of a PRD/ERS ``area_budget`` block, if present."""
     if not isinstance(prd, dict):
         return None
@@ -824,9 +825,9 @@ def _prd_die_budget_mm2(prd: Optional[dict]) -> Optional[float]:
     return None
 
 
-def resolve_die_budget_mm2(*, prd: Optional[dict] = None,
+def resolve_die_budget_mm2(*, prd: dict | None = None,
                            requirements: str = "",
-                           ers_technology_text: str = "") -> tuple[Optional[float], str]:
+                           ers_technology_text: str = "") -> tuple[float | None, str]:
     """Resolve the machine-readable die-area cap (mm^2) + its source.
 
     Priority: env ``CORESMITH_DIE_BUDGET_MM2`` > PRD/ERS ``max_die_area_mm2`` >
@@ -859,7 +860,7 @@ class RollupItem:
 @dataclass
 class DieRollupVerdict:
     ok: bool
-    die_budget_mm2: Optional[float]
+    die_budget_mm2: float | None
     budget_source: str
     subtotal_um2: float
     margin: float
@@ -880,9 +881,9 @@ def _rollup_table(items: list[RollupItem]) -> str:
 
 
 def evaluate_die_rollup(items: list[RollupItem], *,
-                        die_budget_mm2: Optional[float],
+                        die_budget_mm2: float | None,
                         budget_source: str = "",
-                        margin: Optional[float] = None) -> DieRollupVerdict:
+                        margin: float | None = None) -> DieRollupVerdict:
     """Sum per-item area + interconnect margin and compare to the die cap.
 
     No cap -> ``ok`` (never blocks) but ``has_cap`` False so the caller can LOG
@@ -946,7 +947,7 @@ def block_area_estimate_um2(block: dict) -> tuple[float, str]:
     return 0.0, "unknown"
 
 
-def read_ledger(project_root: str, block: str) -> Optional[dict[str, Any]]:
+def read_ledger(project_root: str, block: str) -> dict[str, Any] | None:
     """Load a block's persisted ``mem_price.json`` ledger dict, or None."""
     try:
         p = Path(project_root) / ".coresmith" / "blocks" / block / "mem_price.json"
@@ -958,7 +959,7 @@ def read_ledger(project_root: str, block: str) -> Optional[dict[str, Any]]:
         return None
 
 
-def read_block_ledger_area_um2(project_root: str, block: str) -> Optional[float]:
+def read_block_ledger_area_um2(project_root: str, block: str) -> float | None:
     """Total priced-memory area from a block's persisted mem_price ledger, or None."""
     data = read_ledger(project_root, block)
     if not data:

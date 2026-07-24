@@ -126,6 +126,7 @@ class TestExhaustionReopen:
 
     def test_increment_resets_after_exhaustion(self):
         import asyncio
+
         from orchestrator.langgraph.backend_graph import increment_attempt_node
         # re-entering with attempt already past the budget -> reset to 1
         out = asyncio.get_event_loop().run_until_complete(
@@ -136,6 +137,7 @@ class TestExhaustionReopen:
 
     def test_increment_bumps_within_budget(self):
         import asyncio
+
         from orchestrator.langgraph.backend_graph import increment_attempt_node
         out = asyncio.get_event_loop().run_until_complete(
             increment_attempt_node(

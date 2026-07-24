@@ -16,7 +16,6 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 CHIP_MODEL_FUNC = "chip_model"
@@ -45,7 +44,7 @@ class BlockPortInfo:
         return f"{self.name}({', '.join(self.params)})"
 
 
-def _method(cls: ast.ClassDef, name: str) -> Optional[ast.FunctionDef]:
+def _method(cls: ast.ClassDef, name: str) -> ast.FunctionDef | None:
     return next(
         (n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == name),
         None,
@@ -57,7 +56,7 @@ def _params(fn: ast.FunctionDef) -> list[str]:
     return [a.arg for a in args if a.arg != "self"]
 
 
-def _expr_name(node: ast.AST) -> Optional[str]:
+def _expr_name(node: ast.AST) -> str | None:
     if isinstance(node, ast.Name):
         return node.id
     if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
@@ -90,7 +89,7 @@ def _assignment_pairs(target: ast.AST, value: ast.AST):
         yield target, value
 
 
-def _analyze_block_module(path: Path) -> Optional[BlockPortInfo]:
+def _analyze_block_module(path: Path) -> BlockPortInfo | None:
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError) as exc:
@@ -181,7 +180,7 @@ def _map_call_args(call: ast.Call, params: list[str]) -> tuple[dict[str, ast.exp
     return bound, problems
 
 
-def _const_int(node: ast.AST, consts: dict[str, int]) -> Optional[int]:
+def _const_int(node: ast.AST, consts: dict[str, int]) -> int | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, int):
         return int(node.value)
     if isinstance(node, ast.Name):
@@ -190,14 +189,18 @@ def _const_int(node: ast.AST, consts: dict[str, int]) -> Optional[int]:
         left, right = _const_int(node.left, consts), _const_int(node.right, consts)
         if left is None or right is None:
             return None
-        if isinstance(node.op, ast.Add): return left + right
-        if isinstance(node.op, ast.Sub): return left - right
-        if isinstance(node.op, ast.Mult): return left * right
-        if isinstance(node.op, ast.FloorDiv) and right: return left // right
+        if isinstance(node.op, ast.Add):
+            return left + right
+        if isinstance(node.op, ast.Sub):
+            return left - right
+        if isinstance(node.op, ast.Mult):
+            return left * right
+        if isinstance(node.op, ast.FloorDiv) and right:
+            return left // right
     return None
 
 
-def _signal_width(call: ast.Call, consts: dict[str, int]) -> Optional[int]:
+def _signal_width(call: ast.Call, consts: dict[str, int]) -> int | None:
     if not call.args:
         return 1
     shape = call.args[0]
@@ -210,7 +213,7 @@ def _signal_width(call: ast.Call, consts: dict[str, int]) -> Optional[int]:
     return _const_int(shape, consts)
 
 
-def _signal_init_nonzero(call: ast.Call) -> Optional[bool]:
+def _signal_init_nonzero(call: ast.Call) -> bool | None:
     for kw in call.keywords:
         if kw.arg in ("init", "reset") and isinstance(kw.value, ast.Constant):
             return bool(kw.value.value)

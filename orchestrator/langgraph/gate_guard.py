@@ -34,8 +34,9 @@ from __future__ import annotations
 import logging
 import os
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any
 
 _LOG = logging.getLogger("coresmith.gate_guard")
 
@@ -81,7 +82,7 @@ def gate_guard(
     name: str,
     fn: Callable[..., Any],
     *args: Any,
-    classify: Optional[Callable[[Any], bool]] = None,
+    classify: Callable[[Any], bool] | None = None,
     **kwargs: Any,
 ) -> GateResult:
     """Run ``fn(*args, **kwargs)`` fail-closed and return a :class:`GateResult`.

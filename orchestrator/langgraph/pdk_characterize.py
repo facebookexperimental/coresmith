@@ -25,16 +25,14 @@ gates remain the backstop).
 """
 from __future__ import annotations
 
-import os
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from . import arith_characterize as _arith
 from . import mem_characterize as _mem
 
 # Re-export the consumer-facing predictors so the µArch agent imports one module.
-from .arith_characterize import predict_op_delay, ops_per_stage  # noqa: F401
-from .mem_characterize import predict_mem  # noqa: F401
+from .arith_characterize import ops_per_stage, predict_op_delay
+from .mem_characterize import predict_mem
 
 
 def stage_enabled() -> bool:
@@ -53,7 +51,7 @@ _DEFAULT_MEM_GRID = [
 ]
 
 
-def ensure_pdk_characterized(pdk: Optional[dict] = None, force: bool = False,
+def ensure_pdk_characterized(pdk: dict | None = None, force: bool = False,
                              warm_memory: bool = True) -> dict[str, Any]:
     """Run (or load from cache) BOTH the arithmetic + memory PDK characterizations.
 
@@ -88,7 +86,7 @@ def ensure_pdk_characterized(pdk: Optional[dict] = None, force: bool = False,
     return summary
 
 
-def is_characterized(pdk: Optional[dict] = None) -> bool:
+def is_characterized(pdk: dict | None = None) -> bool:
     """True if both models are present + non-degenerate in cache."""
     arith_ok = _arith.is_characterized(pdk)
     try:
@@ -99,14 +97,19 @@ def is_characterized(pdk: Optional[dict] = None) -> bool:
 
 
 __all__ = [
-    "ensure_pdk_characterized", "is_characterized", "stage_enabled",
-    "predict_op_delay", "ops_per_stage", "predict_mem",
+    "ensure_pdk_characterized",
+    "is_characterized",
+    "ops_per_stage",
+    "predict_mem",
+    "predict_op_delay",
+    "stage_enabled",
 ]
 
 
 if __name__ == "__main__":  # pragma: no cover
     from orchestrator.profile import apply as _apply_profile
     _apply_profile()
-    import json, sys
+    import json
+    import sys
     force = "--force" in sys.argv
     print(json.dumps(ensure_pdk_characterized(force=force), indent=2))

@@ -24,7 +24,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS dv_results (
@@ -84,14 +84,14 @@ CREATE INDEX IF NOT EXISTS idx_cov_block ON coverage_results(block);
 """
 
 
-def _b(x: Any) -> Optional[int]:
+def _b(x: Any) -> int | None:
     """Coerce a tri-state (None keeps NULL) boolean to an int for storage."""
     if x is None:
         return None
     return int(bool(x))
 
 
-def _json(x: Any) -> Optional[str]:
+def _json(x: Any) -> str | None:
     if x is None:
         return None
     try:
@@ -118,7 +118,7 @@ class Scoreboard:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def _reader_conn(self) -> Optional[sqlite3.Connection]:
+    def _reader_conn(self) -> sqlite3.Connection | None:
         """Read-only connection, or ``None`` if the db does not exist / can't open."""
         if not self.db_path.exists():
             return None
@@ -162,14 +162,14 @@ class Scoreboard:
         attempt: int = 0,
         passed: bool = False,
         skipped: bool = False,
-        seed: Optional[int] = None,
-        tests_passed: Optional[int] = None,
-        tests_total: Optional[int] = None,
-        tests_failed: Optional[int] = None,
+        seed: int | None = None,
+        tests_passed: int | None = None,
+        tests_total: int | None = None,
+        tests_failed: int | None = None,
         first_divergence: Any = None,
         detail: str = "",
         log_path: str = "",
-        duration_s: Optional[float] = None,
+        duration_s: float | None = None,
     ) -> bool:
         try:
             conn = self._writer_conn()
@@ -202,15 +202,15 @@ class Scoreboard:
         attempt: int = 0,
         source: str = "gate",
         probe: str = "",
-        cells: Optional[int] = None,
-        ff: Optional[int] = None,
-        mem_bits: Optional[int] = None,
-        area_um2: Optional[float] = None,
-        wns_ns: Optional[float] = None,
-        elaborated: Optional[bool] = None,
-        budget_ff: Optional[int] = None,
-        budget_area_um2: Optional[float] = None,
-        ppa_ok: Optional[bool] = None,
+        cells: int | None = None,
+        ff: int | None = None,
+        mem_bits: int | None = None,
+        area_um2: float | None = None,
+        wns_ns: float | None = None,
+        elaborated: bool | None = None,
+        budget_ff: int | None = None,
+        budget_area_um2: float | None = None,
+        ppa_ok: bool | None = None,
         reasons: Any = None,
         report_path: str = "",
     ) -> bool:
@@ -241,9 +241,9 @@ class Scoreboard:
         *,
         block: str,
         scope: str = "rtl",
-        points_total: Optional[int] = None,
-        points_hit: Optional[int] = None,
-        pct: Optional[float] = None,
+        points_total: int | None = None,
+        points_hit: int | None = None,
+        pct: float | None = None,
         uncovered: Any = None,
         dat_path: str = "",
         annotated_dir: str = "",
@@ -275,7 +275,7 @@ class Scoreboard:
         return [dict(r) for r in cur.fetchall()]
 
     def latest_dv(
-        self, block: Optional[str] = None, scope: Optional[str] = None,
+        self, block: str | None = None, scope: str | None = None,
     ) -> list[dict]:
         """Latest row per (block, scope). Filter by block/scope when given."""
         conn = self._reader_conn()
@@ -302,7 +302,7 @@ class Scoreboard:
         finally:
             conn.close()
 
-    def dv_rows(self, block: Optional[str] = None) -> list[dict]:
+    def dv_rows(self, block: str | None = None) -> list[dict]:
         conn = self._reader_conn()
         if conn is None:
             return []
@@ -319,7 +319,7 @@ class Scoreboard:
         finally:
             conn.close()
 
-    def latest_ppa(self, block: str) -> Optional[dict]:
+    def latest_ppa(self, block: str) -> dict | None:
         conn = self._reader_conn()
         if conn is None:
             return None
@@ -348,7 +348,7 @@ class Scoreboard:
         finally:
             conn.close()
 
-    def coverage_latest(self, block: str) -> Optional[dict]:
+    def coverage_latest(self, block: str) -> dict | None:
         conn = self._reader_conn()
         if conn is None:
             return None

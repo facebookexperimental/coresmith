@@ -7,7 +7,6 @@ RTL against a "+1" reference must FAIL with a divergence reason -- that is the
 proof this catches what an LLM-authored TB can be told to skip.
 """
 
-import os
 import shutil
 import textwrap
 from pathlib import Path

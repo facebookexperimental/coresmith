@@ -65,18 +65,18 @@ os.environ["CORESMITH_PROJECT_ROOT"] = _PROJECT_ROOT
 _TELEMETRY_ROOT = os.environ.get("CORESMITH_TELEMETRY_ROOT", _PROJECT_ROOT)
 
 # A-Fix 1: seed profile flag defaults before importing graph code.
-from orchestrator.profile import apply as _apply_profile  # noqa: E402
+from orchestrator.profile import apply as _apply_profile
 
 _apply_profile()
 
-from orchestrator.architecture.state import ARCH_DOC_DIR  # noqa: E402
-from orchestrator.telemetry import init_telemetry  # noqa: E402
+from orchestrator.architecture.state import ARCH_DOC_DIR
+from orchestrator.telemetry import init_telemetry
 
 init_telemetry(_TELEMETRY_ROOT)
 
 # Register the observability LLM hook (fires after every graph_node_exit)
-from orchestrator.langgraph.event_stream import register_exit_hook  # noqa: E402
-from orchestrator.langgraph.observer import observer_hook  # noqa: E402
+from orchestrator.langgraph.event_stream import register_exit_hook
+from orchestrator.langgraph.observer import observer_hook
 
 register_exit_hook(observer_hook)
 
@@ -113,7 +113,7 @@ server = FastMCP("coresmith-architecture")
 # the thin subclass below.
 # ---------------------------------------------------------------------------
 
-from orchestrator.graph_lifecycle import GraphLifecycle as _GraphLifecycle  # noqa: E402
+from orchestrator.graph_lifecycle import GraphLifecycle as _GraphLifecycle
 
 
 class GraphLifecycle(_GraphLifecycle):
@@ -1401,7 +1401,7 @@ async def get_pipeline_status(last_n: int = 25) -> str:
     Args:
         last_n: Number of recent events to show (default 25).
     """
-    from orchestrator.langgraph.event_stream import read_events, format_event_summary
+    from orchestrator.langgraph.event_stream import format_event_summary, read_events
 
     root = _project_root()
     events = read_events(root)
@@ -1693,8 +1693,8 @@ async def start_pipeline(
     # Priority 3: config.yaml blocks section
     if not block_queue:
         from orchestrator.langgraph.pipeline_helpers import (
-            load_config,
             get_sorted_block_queue,
+            load_config,
         )
         config = load_config()
         block_queue = get_sorted_block_queue(config)
@@ -1785,8 +1785,8 @@ def _aggregate_failure_summary() -> dict:
         Failure summary dict, or empty dict if no events.
     """
     from orchestrator.langgraph.event_stream import (
-        read_events,
         aggregate_failure_categories,
+        read_events,
     )
     events = read_events(_project_root())
     frontend_events = [
@@ -2453,6 +2453,7 @@ async def restart_block(
 
     # ── Build standalone block subgraph ───────────────────────────────
     from langgraph.checkpoint.memory import MemorySaver
+
     from orchestrator.langgraph.pipeline_graph import build_block_subgraph
 
     checkpointer = MemorySaver()
@@ -2793,12 +2794,12 @@ async def run_step(
         })
 
     # ── Run the step ──────────────────────────────────────────────────
+    from orchestrator.langgraph.event_stream import write_graph_event
     from orchestrator.langgraph.pipeline_helpers import (
         lint_rtl,
         run_simulation,
         synthesize_block,
     )
-    from orchestrator.langgraph.event_stream import write_graph_event
 
     # Map step names to the node names the webview timeline expects
     _step_node_names = {
@@ -2988,8 +2989,8 @@ async def start_backend(
         block_queue = json.loads(specs_path.read_text())
     else:
         from orchestrator.langgraph.pipeline_helpers import (
-            load_config,
             get_sorted_block_queue,
+            load_config,
         )
         config = load_config()
         block_queue = get_sorted_block_queue(config)
@@ -3358,9 +3359,7 @@ async def skip_backend_block() -> str:
 
     Convenience wrapper: if interrupted, resumes with action='skip'.
     """
-    if _backend.status == "interrupted":
-        return await resume_backend(action="skip")
-    elif _backend.status == "paused":
+    if _backend.status == "interrupted" or _backend.status == "paused":
         return await resume_backend(action="skip")
     else:
         return json.dumps({
@@ -5005,8 +5004,8 @@ async def get_node_prompt(graph_name: str, node_id: str) -> str:
 
 
 if __name__ == "__main__":
-    import atexit
     import asyncio
+    import atexit
 
     async def _shutdown():
         await _architecture.cleanup()

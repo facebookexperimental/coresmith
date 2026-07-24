@@ -15,7 +15,6 @@ Tests:
 
 from __future__ import annotations
 
-import os
 import subprocess
 import threading
 import time
@@ -23,27 +22,26 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 from orchestrator.langchain.agents import coresmith_llm
 from orchestrator.langchain.agents.coresmith_llm import (
-    ClaudeLLM,
+    _CLI_MODEL_MAP,
+    _CODEX_MODEL_MAP,
+    _RESUME_FLAGS_CACHE,
     DEFAULT_CODEX_MODEL,
     DEFAULT_MODEL,
-    _CODEX_MODEL_MAP,
-    _CLI_MODEL_MAP,
-    _detect_provider,
-    _log_llm_call,
-    _parse_codex_json,
-    _resolve_model,
-    _register_process,
-    _unregister_process,
+    ClaudeLLM,
     _active_processes,
     _active_processes_lock,
-    _codex_resume_supported_flags,
-    _RESUME_FLAGS_CACHE,
     _call_site_context,
+    _codex_resume_supported_flags,
+    _detect_provider,
     _llm_breakers,
     _llm_breakers_lock,
+    _log_llm_call,
+    _parse_codex_json,
+    _register_process,
+    _resolve_model,
+    _unregister_process,
     kill_active_cli_processes,
 )
 
@@ -636,8 +634,7 @@ class TestReasoningEffortTiering:
         assert self._effort_of(cmd) == "medium"
 
     def test_arch_reasoning_effort_default_and_env(self, monkeypatch):
-        from orchestrator.langchain.agents.coresmith_llm import (
-            arch_reasoning_effort)
+        from orchestrator.langchain.agents.coresmith_llm import arch_reasoning_effort
         monkeypatch.delenv("CORESMITH_CODEX_REASONING_EFFORT_ARCH",
                            raising=False)
         assert arch_reasoning_effort() == "xhigh"
@@ -942,7 +939,7 @@ class TestCallSiteAttribution:
             asyncio.run(model.call(system="s", prompt="p", run_name="b"))
 
         lines = (tmp_path / ".coresmith" / "llm_calls.jsonl").read_text().strip().splitlines()
-        idxs = [_json.loads(l)["call_index"] for l in lines[-2:]]
+        idxs = [_json.loads(line)["call_index"] for line in lines[-2:]]
         assert idxs[1] > idxs[0]
 
 
@@ -962,9 +959,8 @@ class TestFailedCallLogging:
         model = ClaudeLLM(model="opus-4.7", timeout=10)
         with patch.object(
             model, "_run_cli_with_watchdog", side_effect=RuntimeError("provider boom"),
-        ):
-            with pytest.raises(RuntimeError):
-                asyncio.run(model.call(system="s", prompt="p", run_name="rn"))
+        ), pytest.raises(RuntimeError):
+            asyncio.run(model.call(system="s", prompt="p", run_name="rn"))
 
         log = tmp_path / ".coresmith" / "llm_calls.jsonl"
         rec = _json.loads(log.read_text().strip().splitlines()[-1])

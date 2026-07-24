@@ -58,14 +58,13 @@ import operator
 import os
 import re
 from pathlib import Path
-from typing import Annotated, Optional, TypedDict
+from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send, interrupt
 from opentelemetry import trace
 
 from orchestrator.langgraph.event_stream import write_graph_event
-from orchestrator.utils import smart_truncate
 from orchestrator.langgraph.integration_helpers import (
     discover_block_rtl,
     generate_integration_testbench,
@@ -76,7 +75,11 @@ from orchestrator.langgraph.integration_helpers import (
     run_integration_simulation,
 )
 from orchestrator.langgraph.pipeline_helpers import (
+    CYAN,
+    GREEN,
     PROJECT_ROOT,
+    RED,
+    YELLOW,
     create_golden_model_wrapper,
     diagnose_failure,
     fix_lint_errors,
@@ -89,11 +92,8 @@ from orchestrator.langgraph.pipeline_helpers import (
     log,
     run_simulation,
     synthesize_block,
-    CYAN,
-    GREEN,
-    RED,
-    YELLOW,
 )
+from orchestrator.utils import smart_truncate
 
 _tracer = trace.get_tracer("coresmith.langgraph.pipeline_graph")
 
@@ -250,19 +250,19 @@ class BlockState(TypedDict):
     sim_passed: bool
     synth_success: bool
     synth_gate_count: int
-    ppa_ok: Optional[bool]        # deterministic PPA gate verdict (None = not run)
+    ppa_ok: bool | None        # deterministic PPA gate verdict (None = not run)
     ppa_reasons: list             # human-readable budget-divergence reasons
     # Mem-price gate DEFER: set on the accept path when the bounded revise loop
     # gave up on an over-budget spec, so the deferred excess is carried into
     # state (die rollup + integration review also read the on-disk ledger flags).
-    mem_price_deferred: Optional[dict]
+    mem_price_deferred: dict | None
     # uArch feasibility verdict (from the spec's machine-readable
     # {feasible, blocking_issues} JSON summary). A non-empty blocking-issues list
     # means the block CANNOT be built byte-exactly with its frozen interface;
     # review_uarch_spec_node fires the `uarch_feasibility` interrupt instead of
     # letting a stub proceed to RTL. Threaded from generate_uarch_spec_node.
-    uarch_blocking_issues: Optional[list]
-    uarch_feasible: Optional[bool]
+    uarch_blocking_issues: list | None
+    uarch_feasible: bool | None
 
     # File paths (set by nodes, consumed by routing and downstream nodes) ───
     rtl_path: str          # path to generated Verilog file
@@ -279,7 +279,7 @@ class BlockState(TypedDict):
     force_regen_tb: bool
 
     # Human interaction ─────────────────────────────────────────────────────
-    human_response: Optional[dict]
+    human_response: dict | None
 
     # Output (reducer -- flows back to orchestrator) ────────────────────────
     completed_blocks: Annotated[list[dict], operator.add]
@@ -329,25 +329,25 @@ class OrchestratorState(TypedDict):
     completed_blocks: Annotated[list[dict], operator.add]
 
     # Integration review decision (set by integration_review_node) ────────
-    integration_review_action: Optional[str]
+    integration_review_action: str | None
 
     # Integration check results ────────────────────────────────────────────
-    integration_result: Optional[dict]  # set by integration_check node
+    integration_result: dict | None  # set by integration_check node
 
     # Model-integration gate results ───────────────────────────────────────
-    model_integration_result: Optional[dict]  # set by model_integration node (env-gated)
+    model_integration_result: dict | None  # set by model_integration node (env-gated)
 
     # Integration DV results ───────────────────────────────────────────────
-    integration_dv_result: Optional[dict]  # set by integration_dv node
+    integration_dv_result: dict | None  # set by integration_dv node
 
     # Validation DV results ────────────────────────────────────────────────
-    validation_dv_result: Optional[dict]  # set by validation_dv node
+    validation_dv_result: dict | None  # set by validation_dv node
 
     # Top-level contract audit results ─────────────────────────────────────
-    contract_audit_result: Optional[dict]  # set by integration/validation DV failure triage
+    contract_audit_result: dict | None  # set by integration/validation DV failure triage
 
     # Signoff scorecard (set by final_report_node just before END) ──────────
-    final_report: Annotated[Optional[dict], _last]
+    final_report: Annotated[dict | None, _last]
 
     # Terminal ──────────────────────────────────────────────────────────────
     pipeline_done: bool
@@ -554,7 +554,7 @@ def _advisory_composition_defect(project_root: str, gate: str,
 
 
 def _persist_block_coverage(project_root: str, block_name: str,
-                            cov: Optional[dict]) -> None:
+                            cov: dict | None) -> None:
     """Persist the per-block line-coverage fact from a block-DV run.
 
     ``cov`` is ``run_simulation``'s ``coverage`` sub-dict: either
@@ -593,7 +593,7 @@ def _persist_block_coverage(project_root: str, block_name: str,
 
 
 def _persist_block_throughput(project_root: str, block_name: str,
-                              rec: Optional[dict]) -> None:
+                              rec: dict | None) -> None:
     """Persist the per-block measured-throughput fact from a block-DV run.
 
     ``rec`` is ``run_simulation``'s ``throughput`` sub-dict (the
@@ -759,7 +759,7 @@ def _write_block_session_id(project_root: str, block_name: str, sid: str) -> Non
         pass
 
 
-def _mem_price_fresh_escalation_pending(project_root: str, block_name: str) -> Optional[int]:
+def _mem_price_fresh_escalation_pending(project_root: str, block_name: str) -> int | None:
     """One-shot fresh-session escalation signal from the mem-price gate.
 
     Returns the identical-round count N when the gate flagged entrenchment for
@@ -780,7 +780,7 @@ def _mem_price_fresh_escalation_pending(project_root: str, block_name: str) -> O
         return None
 
 
-def _consume_mem_price_fresh_escalation(project_root: str, block_name: str) -> Optional[int]:
+def _consume_mem_price_fresh_escalation(project_root: str, block_name: str) -> int | None:
     """Read-and-delete the one-shot fresh-session escalation marker (so it fires
     for exactly the NEXT regen, whether that regen is gate- or operator-driven)."""
     n = _mem_price_fresh_escalation_pending(project_root, block_name)
@@ -983,7 +983,7 @@ def _ers_parameters_block_present(project_root: str) -> bool:
         return False
 
 
-def _mem_price_gate_verdict(project_root: str, block_name: str) -> Optional[dict]:
+def _mem_price_gate_verdict(project_root: str, block_name: str) -> dict | None:
     """Tier-2 per-block memory-price gate at spec acceptance (Deliverable 1).
 
     Parses the spec's machine-readable ``# MEM`` manifest, prices each memory
@@ -997,7 +997,7 @@ def _mem_price_gate_verdict(project_root: str, block_name: str) -> Optional[dict
     declares a typed ``parameters`` block (new-schema run).
     """
     from orchestrator.langgraph import mem_price as _mprice
-    from orchestrator.langgraph.ppa_check import parse_area_budget, floor_area_budget
+    from orchestrator.langgraph.ppa_check import floor_area_budget, parse_area_budget
 
     spec_path = (Path(project_root) / "arch" / "uarch_specs" / f"{block_name}.md")
     if not spec_path.exists():
@@ -1438,7 +1438,9 @@ async def review_uarch_spec_node(state: BlockState) -> dict:
     # the µarch PPA judge enforces it as a `throughput` violation downstream.
     try:
         from orchestrator.langgraph.perf_roofline import (
-            roofline_enabled, emit_perf_model, read_perf_model,
+            emit_perf_model,
+            read_perf_model,
+            roofline_enabled,
         )
         if roofline_enabled():
             emit_perf_model(_pr(state), block_name)
@@ -2015,8 +2017,9 @@ async def generate_rtl_node(state: BlockState) -> dict:
     if lint_clean:
         try:
             from orchestrator.langgraph.rtl_storage_lint import (
-                ifdef_lint_enabled, find_functional_ifdef_regions,
+                find_functional_ifdef_regions,
                 format_ifdef_lint_report,
+                ifdef_lint_enabled,
             )
             if ifdef_lint_enabled():
                 _is_lib = f"{os.sep}rtl_lib{os.sep}" in rtl_path
@@ -2054,8 +2057,12 @@ async def generate_rtl_node(state: BlockState) -> dict:
     if lint_clean:
         try:
             from orchestrator.langgraph.rtl_stage_lint import (
-                stage_lint_enabled, stage_modules_enabled, load_stage_map,
-                census_rtl, format_stage_lint_report, census_signature,
+                census_rtl,
+                census_signature,
+                format_stage_lint_report,
+                load_stage_map,
+                stage_lint_enabled,
+                stage_modules_enabled,
             )
             if stage_lint_enabled():
                 _sm = load_stage_map(_pr(state), block_name)
@@ -2598,7 +2605,7 @@ async def generate_testbench_node(state: BlockState) -> dict:
         # DV alone can't see -- so fail closed. A parity build that can't compile
         # (toolchain) SKIPs, never false-fails. Env-gated CORESMITH_BRANCH_PARITY
         # (default ON only when a conditional region exists).
-        parity_info: Optional[dict] = None
+        parity_info: dict | None = None
         if sim_passed and rtl_path and Path(rtl_path).exists():
             try:
                 from orchestrator.harness.branch_parity import check_branch_parity
@@ -2612,8 +2619,8 @@ async def generate_testbench_node(state: BlockState) -> dict:
                     }
                     if not _par.ok:
                         sim_passed = False
-                        log(f"  [PARITY] sim vs synth macro worlds DIVERGE -- "
-                            f"FAIL-CLOSED (split-brain hardware)", RED)
+                        log("  [PARITY] sim vs synth macro worlds DIVERGE -- "
+                            "FAIL-CLOSED (split-brain hardware)", RED)
                         try:
                             (block_dir / "previous_error.txt").write_text(
                                 _par.as_prev_error(block_name)
@@ -2793,7 +2800,7 @@ def _record_ppa_tooling_waiver(project_root: str, block_name: str) -> None:
 
 
 def _ppa_should_park_tooling_missing(
-    project_root: str, ppa_ok: Optional[bool], ppa_meta: Optional[dict]
+    project_root: str, ppa_ok: bool | None, ppa_meta: dict | None
 ) -> bool:
     """A-Fix 2f decision (pure): PARK when the deterministic PPA gate could not
     run because its tooling (yosys) is absent, under the STRICT profile, and it
@@ -2854,10 +2861,10 @@ def _evaluate_ppa_gate(
     project_root: str,
     block_name: str,
     rtl_path: str,
-    synth_result: Optional[dict],
+    synth_result: dict | None,
     *,
     require_gate_flag: bool = True,
-) -> tuple[Optional[bool], list, dict]:
+) -> tuple[bool | None, list, dict]:
     """Deterministic PPA gate (CORESMITH_PPA_GATE=1). Returns (ppa_ok, reasons, meta).
 
     Keyed off a memory-PRESERVING probe so a correctly-inferred SRAM is NOT
@@ -2884,10 +2891,17 @@ def _evaluate_ppa_gate(
     tooling_missing.
     """
     from orchestrator.langgraph.ppa_check import (
-        evaluate_ppa, parse_ff_budget, parse_area_budget, floor_area_budget,
-        ppa_gate_enabled, probe_synth_generic, run_pre_layout_sta,
-        run_maxfanout_buffered_sta, sta_maxfanout_enabled,
-        mem_lib_sources_for_rtl, ppa_honor_feas_override_enabled,
+        evaluate_ppa,
+        floor_area_budget,
+        mem_lib_sources_for_rtl,
+        parse_area_budget,
+        parse_ff_budget,
+        ppa_gate_enabled,
+        ppa_honor_feas_override_enabled,
+        probe_synth_generic,
+        run_maxfanout_buffered_sta,
+        run_pre_layout_sta,
+        sta_maxfanout_enabled,
     )
     if require_gate_flag and not ppa_gate_enabled():
         return None, [], {}
@@ -2939,7 +2953,7 @@ def _evaluate_ppa_gate(
             f"budget dimensions (area/logic-FF) DEFERRED to the die-level "
             f"rollup (hard FF ceiling + timing still gate)", YELLOW)
 
-    def _flag(reasons: list, checks: Optional[list] = None) -> tuple[bool, list, dict]:
+    def _flag(reasons: list, checks: list | None = None) -> tuple[bool, list, dict]:
         log(f"  [PPA] {block_name} -> diagnose: {'; '.join(reasons)}", RED)
         block_dir = Path(project_root) / ".coresmith" / "blocks" / block_name
         block_dir.mkdir(parents=True, exist_ok=True)
@@ -3001,9 +3015,13 @@ def _evaluate_ppa_gate(
     # flop array; an ABOVE-threshold flop memory is then a hard fail with
     # actionable guidance. cs_fpmem and sub-threshold memories are never flagged.
     from orchestrator.langgraph.sram_wrapper import (
-        mem_flop_gate_enabled as _mem_flop_gate_on,
-        gate_memory_as_flops as _gate_mem_flops,
         fpmem_instances as _fpmem_insts,
+    )
+    from orchestrator.langgraph.sram_wrapper import (
+        gate_memory_as_flops as _gate_mem_flops,
+    )
+    from orchestrator.langgraph.sram_wrapper import (
+        mem_flop_gate_enabled as _mem_flop_gate_on,
     )
     if _mem_flop_gate_on():
         import re as _re_mf
@@ -3030,9 +3048,13 @@ def _evaluate_ppa_gate(
     # cloud with a generic techmap and fail on a techmap timeout or a cell count
     # past the ceiling.
     from orchestrator.langgraph.ppa_check import (
-        probe_synth_cellcount as _probe_cells,
-        synth_cell_gate_enabled as _cell_gate_on,
         max_cell_ceiling as _cell_ceiling,
+    )
+    from orchestrator.langgraph.ppa_check import (
+        probe_synth_cellcount as _probe_cells,
+    )
+    from orchestrator.langgraph.ppa_check import (
+        synth_cell_gate_enabled as _cell_gate_on,
     )
     if _cell_gate_on():
         cprobe = _probe_cells(rtl_path, block_name, timeout_s=_synth_timeout)
@@ -3058,10 +3080,18 @@ def _evaluate_ppa_gate(
     # bounded. When a PDK is present the real STA/WNS check below also enforces
     # this; this proxy covers the SKIP_SYNTH case where no STA exists.
     from orchestrator.langgraph.ppa_check import (
-        probe_logic_depth as _probe_depth,
-        logic_depth_gate_enabled as _depth_gate_on,
-        max_logic_depth as _max_depth,
         logic_depth_advisory_with_pdk_enabled as _depth_advisory_on,
+    )
+    from orchestrator.langgraph.ppa_check import (
+        logic_depth_gate_enabled as _depth_gate_on,
+    )
+    from orchestrator.langgraph.ppa_check import (
+        max_logic_depth as _max_depth,
+    )
+    from orchestrator.langgraph.ppa_check import (
+        probe_logic_depth as _probe_depth,
+    )
+    from orchestrator.langgraph.ppa_check import (
         sta_tooling_available as _sta_available,
     )
     if _depth_gate_on():
@@ -3221,10 +3251,16 @@ def _chip_top_synth_ok(
     fails the chip.
     """
     from orchestrator.langgraph.ppa_check import (
-        probe_synth_cellcount_multi as _probe_multi,
-        synth_cell_gate_enabled as _cell_gate_on,
-        max_cell_ceiling as _cell_ceiling,
         chip_top_min_cells as _cell_floor,
+    )
+    from orchestrator.langgraph.ppa_check import (
+        max_cell_ceiling as _cell_ceiling,
+    )
+    from orchestrator.langgraph.ppa_check import (
+        probe_synth_cellcount_multi as _probe_multi,
+    )
+    from orchestrator.langgraph.ppa_check import (
+        synth_cell_gate_enabled as _cell_gate_on,
     )
     if not _cell_gate_on() or not top_rtl_path or not Path(top_rtl_path).exists():
         return True, ""
@@ -3235,6 +3271,8 @@ def _chip_top_synth_ok(
         )
         from orchestrator.langgraph.sram_wrapper import (
             uses_wrapper as _uses_wrapper,
+        )
+        from orchestrator.langgraph.sram_wrapper import (
             wrapper_lib_path as _wrapper_lib_path,
         )
         if _uses_wrapper(_all_rtl):
@@ -3286,7 +3324,7 @@ def _chip_top_synth_ok(
     try:
         _top_txt = Path(top_rtl_path).read_text(errors="ignore")
         import re as _re24
-        _mods = _re24.findall(r"^\s*module\s+([A-Za-z_]\w*)", _top_txt, _re24.M)
+        _mods = _re24.findall(r"^\s*module\s+([A-Za-z_]\w*)", _top_txt, _re24.MULTILINE)
         for _pref in ("openframe_project_wrapper", "user_project_wrapper"):
             if _pref in _mods:
                 _top_name = _pref
@@ -3311,7 +3349,7 @@ def _chip_top_synth_ok(
         _dpath = Path(project_root) / "rtl" / "chip_top.v"
         _dedup_resolved = {str(Path(_p).resolve()) for _p in deduped}
         if _dpath.exists() and str(_dpath.resolve()) not in _dedup_resolved:
-            _mod_re = _re3.compile(r"^\s*module\s+([A-Za-z_]\w*)", _re3.M)
+            _mod_re = _re3.compile(r"^\s*module\s+([A-Za-z_]\w*)", _re3.MULTILINE)
             _d_mods = _mod_re.findall(_dpath.read_text(errors="ignore"))
             _defined: set = set()
             for _p in deduped:
@@ -3404,7 +3442,7 @@ def _chip_top_synth_ok(
     return True, ""
 
 
-def _resolve_run_die_budget(project_root: str) -> tuple[Optional[float], str]:
+def _resolve_run_die_budget(project_root: str) -> tuple[float | None, str]:
     """Resolve the run's die-area budget (mm^2) + source for the measured rollup.
 
     env CORESMITH_DIE_BUDGET_MM2 > PRD ``max_die_area_mm2`` (``.coresmith/
@@ -3785,8 +3823,10 @@ async def synthesize_node(state: BlockState) -> dict:
         if _os.environ.get("CORESMITH_STORAGE_PRESYNTH_GATE", "1").strip() != "0":
             try:
                 from orchestrator.langgraph.rtl_storage_lint import (
-                    find_flat_packed_dynamic_storage, format_lint_report,
-                    find_oversized_memory_arrays, format_memory_tier_report,
+                    find_flat_packed_dynamic_storage,
+                    find_oversized_memory_arrays,
+                    format_lint_report,
+                    format_memory_tier_report,
                 )
                 _src = Path(rtl_path).read_text()
                 _rpt = find_flat_packed_dynamic_storage(_src)
@@ -3824,7 +3864,7 @@ async def synthesize_node(state: BlockState) -> dict:
                     }
                     span.set_attribute("memory_tier_gate_failed", True)
             except Exception as _e:  # never let the gate crash the node
-                logger.warning("pre-synth storage gate error: %s", _e)
+                log(f"  [SYNTH] pre-synth storage gate error: {_e}", RED)
 
         local_attempt = 0
         for local_attempt in range(0 if storage_gate_failed
@@ -4060,8 +4100,8 @@ async def diagnose_node(state: BlockState) -> dict:
     # instead of looping -- the diagnose node had already flagged needs_human.
     _wall_budget = float(os.environ.get("CORESMITH_BLOCK_WALL_BUDGET_S", "0") or 0)
     if _wall_budget > 0:
-        import time as _time
         import json as _jw
+        import time as _time
         _seen = block_dir / "_first_seen.txt"
         if not _seen.exists():
             _seen.write_text(str(_time.time()))
@@ -4738,7 +4778,6 @@ async def block_done_node(state: BlockState) -> dict:
 
     block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
     constr_path = block_dir / "constraints.json"
-    import json as _json
     constraints = _load_constraints_safe(constr_path)
 
     if all_passed:
@@ -4878,12 +4917,13 @@ def route_after_synth(state: BlockState) -> str:
     """
     if not state.get("synth_success"):
         return "diagnose"
-    from orchestrator.langgraph.ppa_check import ppa_gate_enabled
     # rung2 defect 2: under SKIP_SYNTH the PDK-free synthesizability probes run
     # and GATE unconditionally (they need no PDK / no PPA-budget flag), so a
     # probe FAIL (ppa_ok False) must route to diagnose there too -- otherwise
     # SKIP_SYNTH would run the probes but ignore their verdict.
     import os as _os_ras
+
+    from orchestrator.langgraph.ppa_check import ppa_gate_enabled
     _skip_synth = _os_ras.environ.get("CORESMITH_SKIP_SYNTH") == "1"
     if (ppa_gate_enabled() or _skip_synth) and state.get("ppa_ok") is False:
         return "diagnose"
@@ -5231,7 +5271,10 @@ def _gate_feedback_for_block(mir: dict, block_name: str,
         parts.append(f"reference expected {exp}; composed chip observed {obs}.")
         try:
             from orchestrator.architecture.model_integration import (
-                first_divergence_offset as _fdo, _is_byteseq as _ibs,
+                _is_byteseq as _ibs,
+            )
+            from orchestrator.architecture.model_integration import (
+                first_divergence_offset as _fdo,
             )
             e, o = mir.get("expected"), mir.get("observed")
             if _ibs(e) and _ibs(o):
@@ -5390,6 +5433,7 @@ async def integration_review_node(state: OrchestratorState) -> dict:
     # hang). Flag off -> unchanged. CORESMITH_STRICT_INTEGRATION_REVIEW=1 forces
     # the old per-tier review (and its auto-revise) back on for both passes.
     import os as _os
+
     from orchestrator.architecture import composition as _composition
     if (
         _composition.block_goldens_enabled()
@@ -5421,10 +5465,10 @@ async def integration_review_node(state: OrchestratorState) -> dict:
                 "integration_review_failed": False}
 
     try:
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
         from orchestrator.langchain.agents.integration_review_agent import (
             IntegrationReviewAgent,
         )
-        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
         agent = IntegrationReviewAgent(model=DEFAULT_MODEL, temperature=0.1)
         result = await agent.review(
             block_names=block_names,
@@ -5930,6 +5974,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
     so the outer agent can diagnose and fix.
     """
     import asyncio
+
     from orchestrator.langchain.agents.integration_lead import IntegrationLeadAgent
 
     pr = state.get("project_root", str(PROJECT_ROOT))
@@ -6233,8 +6278,9 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         # adapter as a peer block -- so the daemon never delivered a gradeable
         # wired top and every chip-lead hand-assembled one.
         from orchestrator.langgraph.integration_helpers import (
-            detect_wrapper_block, load_interface_contract_edges,
+            detect_wrapper_block,
             generate_caravel_wrapper_top,
+            load_interface_contract_edges,
         )
         _wrapper_block = detect_wrapper_block(modules)
         if _wrapper_block is not None and _deterministic_caravel_top_enabled():
@@ -6364,10 +6410,10 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         # operator override. Wrapped in gate_guard so a checker exception is
         # fail-closed (surfaced as an error mismatch), never a silent pass.
         if _deterministic_integration_check_enabled():
+            from orchestrator.langgraph.gate_guard import gate_guard
             from orchestrator.langgraph.integration_helpers import (
                 check_integration_compatibility,
             )
-            from orchestrator.langgraph.gate_guard import gate_guard
 
             gr = gate_guard(
                 "integration_compat",
@@ -6468,8 +6514,9 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         # CORESMITH_IFDEF_LINT=0 bypasses.
         try:
             from orchestrator.langgraph.rtl_storage_lint import (
-                ifdef_lint_enabled, find_functional_ifdef_regions,
+                find_functional_ifdef_regions,
                 format_ifdef_lint_report,
+                ifdef_lint_enabled,
             )
             if ifdef_lint_enabled() and chip_top_text:
                 _ir = find_functional_ifdef_regions(chip_top_text)
@@ -7382,7 +7429,6 @@ async def uarch_integration_gate_node(state: OrchestratorState) -> dict:
     ``revise_contract`` action; ``pipeline_phase`` stays ``"uarch"`` so a retry
     re-enters the gate -- the flip to ``"rtl"`` only happens in begin_rtl_pass.
     """
-    from orchestrator.architecture import composition as _composition
     from orchestrator.architecture import model_integration as _model_integration
 
     pr = state.get("project_root", str(PROJECT_ROOT))
@@ -8217,7 +8263,7 @@ def _maybe_run_chip_equiv(
     except Exception:  # noqa: BLE001
         return None
 
-    from orchestrator.langgraph.gate_guard import gate_guard, gate_fail_open_enabled
+    from orchestrator.langgraph.gate_guard import gate_fail_open_enabled, gate_guard
     from orchestrator.langgraph.rtl_model_equiv import (
         check_chip_model_equivalence,
         rtl_model_equiv_enabled,
@@ -8320,7 +8366,7 @@ def _maxgeo_gate_enabled() -> bool:
     return (os.environ.get("CORESMITH_MAXGEO_GATE", "1") or "1") != "0"
 
 
-def _coerce_pos_int(v) -> Optional[int]:
+def _coerce_pos_int(v) -> int | None:
     """Positive-int coercion for extent fields (rejects bools / non-ints)."""
     try:
         if isinstance(v, bool):
@@ -8444,7 +8490,7 @@ def _tb_maxgeo_pairs(tb_path: str) -> dict:
     return pairs
 
 
-def _maxgeo_gate_verdict(project_root: str, tb_path: str) -> Optional[dict]:
+def _maxgeo_gate_verdict(project_root: str, tb_path: str) -> dict | None:
     """``None`` -> gate passes / no-ops. Otherwise a violation dict: the design
     declares dimensional maxima but the testbench's ``# MAXGEO`` marker does not
     prove a max-geometry case for every declared dimension.
@@ -9749,7 +9795,8 @@ async def final_report_node(state: OrchestratorState) -> dict:
     pr = _pr(state)
     try:
         from orchestrator.langgraph.final_report import (
-            build_final_report, render_markdown,
+            build_final_report,
+            render_markdown,
         )
         report = build_final_report(dict(state), pr, scoreboard=_scoreboard(pr))
         md = render_markdown(report)

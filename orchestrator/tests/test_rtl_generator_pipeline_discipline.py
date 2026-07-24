@@ -16,8 +16,6 @@ from __future__ import annotations
 
 import importlib
 
-import pytest
-
 from orchestrator.langchain.agents import rtl_generator as rg
 from orchestrator.langchain.prompts.skills import load_skills
 

@@ -23,8 +23,8 @@ from orchestrator.langgraph import pipeline_graph
 from orchestrator.langgraph.pipeline_graph import (
     build_pipeline_graph,
     model_integration_node,
-    route_after_model_integration,
     route_after_integration,
+    route_after_model_integration,
     route_after_uarch_gate,
 )
 

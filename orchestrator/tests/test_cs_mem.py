@@ -27,11 +27,11 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.langgraph.integration_helpers import _dedup_module_sources
-from orchestrator.langgraph.sram_wrapper import wrapper_lib_path
 from orchestrator.langchain.agents.integration_lead import (
     assert_no_memory_primitive_defined,
 )
+from orchestrator.langgraph.integration_helpers import _dedup_module_sources
+from orchestrator.langgraph.sram_wrapper import wrapper_lib_path
 
 _LIB = wrapper_lib_path()
 
@@ -42,7 +42,7 @@ requires_verilator = pytest.mark.skipif(
 
 def _defs(paths, name):
     return sum(
-        len(re.findall(rf"^\s*module\s+{name}\b", Path(p).read_text(), re.M))
+        len(re.findall(rf"^\s*module\s+{name}\b", Path(p).read_text(), re.MULTILINE))
         for p in paths
     )
 

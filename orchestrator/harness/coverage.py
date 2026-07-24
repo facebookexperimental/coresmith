@@ -17,7 +17,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 
 def coverage_enabled() -> bool:
@@ -49,7 +49,7 @@ def line_cov_floor() -> float:
         return 70.0
 
 
-def line_cov_gate_verdict(sim_dir: str | Path) -> Optional[dict[str, Any]]:
+def line_cov_gate_verdict(sim_dir: str | Path) -> dict[str, Any] | None:
     """Evaluate the line-coverage floor for one block-DV sim directory.
 
     Returns ``None`` when the gate is NOT APPLICABLE (gate disabled, no
@@ -164,7 +164,7 @@ def coverage_record(sim_dir: str | Path) -> dict[str, Any]:
     }
 
 
-def find_coverage_dat(sim_dir: str | Path) -> Optional[Path]:
+def find_coverage_dat(sim_dir: str | Path) -> Path | None:
     sim = Path(sim_dir)
     for name in ("coverage.dat", "logs/coverage.dat"):
         cand = sim / name
@@ -174,7 +174,7 @@ def find_coverage_dat(sim_dir: str | Path) -> Optional[Path]:
     return hits[0] if hits else None
 
 
-def annotate(sim_dir: str | Path, *, timeout_s: int = 120) -> Optional[Path]:
+def annotate(sim_dir: str | Path, *, timeout_s: int = 120) -> Path | None:
     """Run ``verilator_coverage --annotate`` on the sim dir's coverage.dat.
 
     Returns the annotated-output directory, or ``None`` when the tool or the

@@ -15,13 +15,10 @@ none here by design -- the equivalence function is monkeypatched).
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from orchestrator.langgraph import pipeline_graph
 from orchestrator.langgraph.integration_helpers import VerilogModule, VerilogPort
-
 
 # ---------------------------------------------------------------------------
 # Env gate + seed helpers

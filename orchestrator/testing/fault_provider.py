@@ -20,12 +20,11 @@ import os
 import threading
 
 from orchestrator.testing.faults import (
-    FaultClass,
-    FaultSchedule,
-    FaultSpec,
     PROVIDER_EXCEPTION_MESSAGE,
     STALL_CONTENT,
     TIMEOUT_CONTENT,
+    FaultClass,
+    FaultSchedule,
 )
 from orchestrator.testing.success_scripts import CannedDesignScript
 
@@ -184,7 +183,7 @@ class FaultBackend:
         from orchestrator.testing.success_scripts import _rtl_module
 
         for p in self._target_v_paths(prompt, root):
-            scratch = Path(root) / f"codex-call-scratch" / p.name
+            scratch = Path(root) / "codex-call-scratch" / p.name
             try:
                 scratch.parent.mkdir(parents=True, exist_ok=True)
                 scratch.write_text(_rtl_module(p.stem), encoding="utf-8")

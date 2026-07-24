@@ -12,17 +12,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from orchestrator.langgraph.block_complexity import (
     MODELING_ALGO_THRESHOLD,
     MODELING_LOC_THRESHOLD,
+    _parse_functions,
     estimate_block_complexity,
     propose_decomposition,
     resolve_block_slice,
-    _parse_functions,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures: a FAT golden (many algorithms, high LOC, cross-function state) and

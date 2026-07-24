@@ -18,10 +18,8 @@ The LLM produces Markdown directly (no JSON parsing required).
 from __future__ import annotations
 
 import json
-from typing import Any
-
 from pathlib import Path
-
+from typing import Any
 
 _PROMPT_FILE = Path(__file__).resolve().parents[2] / "langchain" / "prompts" / "frd_spec.md"
 SYSTEM_PROMPT = _PROMPT_FILE.read_text()
@@ -95,10 +93,13 @@ async def generate_frd(
                 f"{constraint_feedback}"
             )
 
-        from orchestrator.langchain.agents.coresmith_llm import (
-            DEFAULT_MODEL, ClaudeLLM, arch_reasoning_effort)
-
         import os as _os
+
+        from orchestrator.langchain.agents.coresmith_llm import (
+            DEFAULT_MODEL,
+            ClaudeLLM,
+            arch_reasoning_effort,
+        )
         _arch_to = int(_os.environ.get("CORESMITH_ARCH_LLM_TIMEOUT_S", "1200") or 1200)
         # FRD carries the FUNC vectors + perf budgets the gates enforce ->
         # higher reasoning tier (codex-only; no-op on other providers).

@@ -329,7 +329,7 @@ def expand_placements_to_flattened(
         return placed
     from collections import OrderedDict
 
-    grouped: "OrderedDict[str, tuple[MacroInfo, list[str]]]" = OrderedDict()
+    grouped: OrderedDict[str, tuple[MacroInfo, list[str]]] = OrderedDict()
     for mi, inst in placed:
         entry = grouped.get(mi.name)
         if entry is None:
@@ -1146,7 +1146,7 @@ def materialize_macro_netlist(
 
     replaced: list[tuple[str, dict]] = []
 
-    def _sub(m: "re.Match") -> str:
+    def _sub(m: re.Match) -> str:
         block = m.group(0)
         specs = detect_macro_shells(block)
         if not specs:

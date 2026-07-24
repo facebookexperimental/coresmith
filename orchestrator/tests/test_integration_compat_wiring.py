@@ -21,7 +21,6 @@ from orchestrator.langgraph.integration_helpers import (
     VerilogPort,
 )
 
-
 # ---------------------------------------------------------------------------
 # Pure helpers: env gate + merge
 # ---------------------------------------------------------------------------

@@ -17,9 +17,8 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from orchestrator.langgraph.pipeline_helpers import (
     PROJECT_ROOT,
@@ -29,7 +28,6 @@ from orchestrator.langgraph.pipeline_helpers import (
     clear_build_products,
     run_wavekit_vcd_audit,
 )
-
 
 # ---------------------------------------------------------------------------
 # Port parsing
@@ -58,7 +56,7 @@ class VerilogModule:
     parameters: dict[str, str] = field(default_factory=dict)
     filepath: str = ""
 
-    def port_by_name(self, name: str) -> Optional[VerilogPort]:
+    def port_by_name(self, name: str) -> VerilogPort | None:
         for p in self.ports:
             if p.name == name:
                 return p
@@ -220,8 +218,8 @@ def _find_port_fuzzy(
     module: VerilogModule,
     port_name: str,
     connection_name: str,
-    prefer_direction: Optional[str] = None,
-) -> Optional[VerilogPort]:
+    prefer_direction: str | None = None,
+) -> VerilogPort | None:
     """Find a port by exact name, then by common naming conventions.
 
     Tries: exact match, snake_case variants, with/without block prefix.
@@ -236,7 +234,7 @@ def _find_port_fuzzy(
     multi-interface blocks). Preferring the port whose direction matches the
     connection role fixes it. Exact matches (unambiguous) are unaffected.
     """
-    def _pick(cands: list[VerilogPort]) -> Optional[VerilogPort]:
+    def _pick(cands: list[VerilogPort]) -> VerilogPort | None:
         cands = [c for c in cands if c is not None]
         if not cands:
             return None
@@ -499,7 +497,7 @@ _SHARED_SIGNAL_PATTERNS = {
 }
 
 
-def _is_shared_signal(port_name: str) -> Optional[str]:
+def _is_shared_signal(port_name: str) -> str | None:
     """Check if a port name is a shared infrastructure signal (clk, rst).
 
     Returns the canonical signal name ('clk', 'rst') or None.
@@ -819,7 +817,7 @@ def _is_power_pin(port_name: str) -> bool:
     return bool(_POWER_PIN_RE.match(port_name))
 
 
-def detect_wrapper_block(modules: dict[str, VerilogModule]) -> Optional[str]:
+def detect_wrapper_block(modules: dict[str, VerilogModule]) -> str | None:
     """Identify the pad-adapter / Caravel wrapper block among the parsed modules.
 
     Prefers a block literally named ``user_project_wrapper``; else the block
@@ -911,7 +909,7 @@ _WRAP_RST_RE = re.compile(
 )
 
 
-def _wrap_shared_signal(port_name: str) -> Optional[str]:
+def _wrap_shared_signal(port_name: str) -> str | None:
     if _WRAP_CLK_RE.match(port_name):
         return "clk"
     if _WRAP_RST_RE.match(port_name):
@@ -951,7 +949,7 @@ def generate_caravel_wrapper_top(
     edges: list[dict],
     rtl_paths: dict[str, str],
     output_dir: str,
-    wrapper_block: Optional[str] = None,
+    wrapper_block: str | None = None,
 ) -> dict:
     """Assemble a wired ``user_project_wrapper`` chip_top deterministically.
 
@@ -976,7 +974,10 @@ def generate_caravel_wrapper_top(
 
     clk_name = "wb_clk_i"
     rst_name = "wb_rst_i"          # Caravel wb_rst_i is active-high
-    rst_info = _detect_reset_convention(modules)
+    # Per-block reset polarity here is decided port-by-port below (a port
+    # named with a trailing "n" is treated as active-low), independent of
+    # the whole-design consensus computed by _detect_reset_convention() --
+    # unlike generate_chip_top's single blended top-level reset above.
 
     # ---- connected pairs from the contract edges ----
     pairs: set[frozenset] = set()
@@ -997,7 +998,7 @@ def generate_caravel_wrapper_top(
             out.setdefault(_signal_key(p.name), []).append(p)
         return out
 
-    def _port_exact(bn: str, pname: str) -> Optional[VerilogPort]:
+    def _port_exact(bn: str, pname: str) -> VerilogPort | None:
         if not pname:
             return None
         for p in modules[bn].ports:
@@ -1019,7 +1020,7 @@ def generate_caravel_wrapper_top(
     #     connection instantiates, so we bind that specific field instead of
     #     [0]-picking. A width mismatch across a NAMED edge is a real contract
     #     break -> refuse (fall back), never truncate.
-    def _resolve_fields(bn: str, pname) -> Optional[list[VerilogPort]]:
+    def _resolve_fields(bn: str, pname) -> list[VerilogPort] | None:
         """Resolve an edge port name to the block's RTL ports.
 
         A contract may name a channel's fields as a SLASH-COMPOUND string
@@ -1316,6 +1317,8 @@ def lint_top_level(
     try:
         from orchestrator.langgraph.sram_wrapper import (
             uses_wrapper as _uses_wrapper,
+        )
+        from orchestrator.langgraph.sram_wrapper import (
             wrapper_lib_path as _wrapper_lib_path,
         )
         _all_rtl = "".join(
@@ -1460,7 +1463,7 @@ def load_architecture_connections(project_root: str) -> tuple[list[dict], str]:
 async def generate_integration_testbench(
     design_name: str,
     top_rtl_path: str,
-    modules: dict[str, "VerilogModule"],
+    modules: dict[str, VerilogModule],
     connections: list[dict],
     block_rtl_paths: dict[str, str],
     prd_summary: str = "",
@@ -1518,7 +1521,7 @@ async def generate_integration_testbench(
 async def generate_validation_testbench(
     design_name: str,
     top_rtl_path: str,
-    modules: dict[str, "VerilogModule"],
+    modules: dict[str, VerilogModule],
     connections: list[dict],
     block_rtl_paths: dict[str, str],
     ers_context: str,
@@ -1733,15 +1736,21 @@ def _dedup_module_sources(
                 # -> True; `ifndef SYNTHESIS -> False (active under lint); any
                 # non-SYNTHESIS guard -> assume active (False).
                 synth_stack.append(_is_synth and not _neg)
-                out.append(lines[i]); i += 1; continue
+                out.append(lines[i])
+                i += 1
+                continue
             if _s.startswith("`else"):
                 if synth_stack:
                     synth_stack[-1] = not synth_stack[-1]
-                out.append(lines[i]); i += 1; continue
+                out.append(lines[i])
+                i += 1
+                continue
             if _s.startswith("`endif"):
                 if synth_stack:
                     synth_stack.pop()
-                out.append(lines[i]); i += 1; continue
+                out.append(lines[i])
+                i += 1
+                continue
             m = mod_re.match(lines[i])
             if m:
                 name = m.group(1)
@@ -1819,6 +1828,7 @@ def run_integration_simulation(
     """
     import os
     import shutil
+
     from orchestrator.langgraph.pipeline_helpers import (
         _normalize_cocotb_timing_keywords,
         _parse_cocotb_summary,
@@ -1844,6 +1854,8 @@ def run_integration_simulation(
     try:
         from orchestrator.langgraph.sram_wrapper import (
             uses_wrapper as _uses_wrapper,
+        )
+        from orchestrator.langgraph.sram_wrapper import (
             wrapper_lib_path as _wrapper_lib_path,
         )
         _all_rtl = "".join(
@@ -2123,7 +2135,7 @@ def discover_block_rtl(
 
 def detect_glue_block_needs(
     connections: list[dict],
-    modules: dict[str, "VerilogModule"],
+    modules: dict[str, VerilogModule],
 ) -> list[dict]:
     """Detect where glue/adapter blocks are needed between connected modules.
 

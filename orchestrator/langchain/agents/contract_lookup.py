@@ -276,8 +276,8 @@ def format_block_contracts_prompt(block_name: str, view: dict[str, Any]) -> str:
 
 
 __all__ = [
-    "load_interface_contracts",
     "filter_contracts_for_block",
-    "load_block_contracts",
     "format_block_contracts_prompt",
+    "load_block_contracts",
+    "load_interface_contracts",
 ]

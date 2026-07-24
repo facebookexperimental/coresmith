@@ -14,8 +14,8 @@ import pytest
 
 from orchestrator.state_store.store import Scoreboard
 from orchestrator.state_store.trust import (
-    write_oracle_manifest,
     check_oracle_manifest,
+    write_oracle_manifest,
 )
 
 

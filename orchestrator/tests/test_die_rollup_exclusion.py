@@ -110,6 +110,7 @@ class TestContainerSubsume:
         # and prefer the sha1 match
         import hashlib
         import json as _json
+
         from orchestrator.langgraph.pipeline_graph import _container_block_names
         (tmp_path / "rtl" / "integration").mkdir(parents=True)
         leaf = tmp_path / "rtl" / "aes_core.v"
@@ -133,6 +134,7 @@ class TestContainerSubsume:
 
     def test_container_detection_via_include(self, tmp_path):
         import json as _json
+
         from orchestrator.langgraph.pipeline_graph import _container_block_names
         # leaf block
         (tmp_path / "rtl").mkdir()

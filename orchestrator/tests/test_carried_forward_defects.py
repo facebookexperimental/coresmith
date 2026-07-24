@@ -19,7 +19,6 @@ from orchestrator.langgraph.bfm_lib import (
     detect_dut_mastered_buses,
 )
 
-
 # ---- multi-role classifier -------------------------------------------------
 
 _TOP_WITH_ROM = """
@@ -64,7 +63,8 @@ def test_detect_bus_roles_unmodeled_list(tmp_path):
 
 def test_record_and_read_carried_forward_defect(tmp_path):
     from orchestrator.langgraph.pipeline_graph import (
-        record_carried_forward_defect, read_carried_forward_defects,
+        read_carried_forward_defects,
+        record_carried_forward_defect,
     )
     d = {"gate": "model_integration", "kind": "composition_mismatch",
          "unmodeled": "DUT-mastered second bus (rom_*) not modeled",

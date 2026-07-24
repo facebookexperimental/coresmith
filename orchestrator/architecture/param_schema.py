@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # The three parameter roles. ``dimension`` / ``range`` carry a numeric extent
 # (max) that an RTL index/address/counter width must survive; ``mode`` is a
@@ -64,7 +64,7 @@ BACKSTOP_MARKER_KEY = "parameters_backstop"
 BACKSTOP_EMPTY_MARKER = "empty_no_dims_derivable"
 
 
-def _num(value: Any) -> Optional[float | int]:
+def _num(value: Any) -> float | int | None:
     """Coerce a JSON scalar to a positive-or-zero number, else ``None``.
 
     Rejects bools (``True``/``False`` are ints in Python but never a dimension).
@@ -109,7 +109,7 @@ def compute_boundary_values(max_val: Any) -> list:
     return sorted(vals)
 
 
-def normalize_parameter(entry: Any) -> tuple[Optional[dict], list[str]]:
+def normalize_parameter(entry: Any) -> tuple[dict | None, list[str]]:
     """Validate + normalize ONE parameter object.
 
     Returns ``(normalized, errors)``. When ``errors`` is non-empty the entry is
@@ -299,7 +299,7 @@ def _harvest_candidate_dims(obj: Any, out: dict) -> None:
 
 
 def derive_parameters(
-    sources: Any, frd_text: Optional[str] = None
+    sources: Any, frd_text: str | None = None
 ) -> list[dict]:
     """Derive a normalized ``parameters`` list from machine-readable ``sources``.
 
@@ -339,7 +339,7 @@ def derive_parameters(
 # Readers / consumers
 # ---------------------------------------------------------------------------
 
-def _load_ers(project_root: str | Path) -> Optional[dict]:
+def _load_ers(project_root: str | Path) -> dict | None:
     """Load ``.coresmith/ers_spec.json``; ``None`` on any error."""
     try:
         p = Path(project_root) / ".coresmith" / "ers_spec.json"
@@ -351,7 +351,7 @@ def _load_ers(project_root: str | Path) -> Optional[dict]:
         return None
 
 
-def ers_parameters_raw(ers_doc: Optional[dict]) -> Optional[list]:
+def ers_parameters_raw(ers_doc: dict | None) -> list | None:
     """Return the raw ``parameters`` list from an ERS doc dict (``ers`` sub-key
     or top-level), or ``None`` when the key is ABSENT. An empty list is
     returned as ``[]`` (present-but-empty), NOT ``None`` -- the distinction is
@@ -365,7 +365,7 @@ def ers_parameters_raw(ers_doc: Optional[dict]) -> Optional[list]:
     return block if isinstance(block, list) else None
 
 
-def _is_backstop_empty(ers_doc: Optional[dict]) -> bool:
+def _is_backstop_empty(ers_doc: dict | None) -> bool:
     """True when the ERS carries an EMPTY ``parameters`` block that the
     presence-backstop ([rung3r2-fixes-3]) fabricated because the generator
     omitted the key twice and no dims were derivable. Such a block is NOT a

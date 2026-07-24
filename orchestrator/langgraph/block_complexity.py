@@ -40,7 +40,7 @@ import ast
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # Engine-helper imports (deferred / graceful): the pipeline scheduler gives us a
 # real op-count -> cycles latency estimate, and mem_characterize is reused for
@@ -49,7 +49,7 @@ from typing import Any, Optional
 try:  # pragma: no cover - trivial import guard
     from orchestrator.langgraph.ppa_check import parse_ff_budget
 except Exception:  # pragma: no cover
-    def parse_ff_budget(text: str) -> Optional[int]:  # type: ignore
+    def parse_ff_budget(text: str) -> int | None:  # type: ignore
         m = re.search(r"flip_flop_budget[^\d\n]{0,16}(\d[\d,]*)", text or "",
                       re.IGNORECASE)
         return int(m.group(1).replace(",", "")) if m else None
@@ -128,7 +128,7 @@ class ComplexityEstimate:
     loc: int = 0
     distinct_algorithms: int = 0
     cyclomatic: int = 0
-    ff_budget: Optional[int] = None
+    ff_budget: int | None = None
     over_budget: bool = False
     axis_breaches: list[str] = field(default_factory=list)
     golden_functions: list[str] = field(default_factory=list)
@@ -268,7 +268,7 @@ def _walk_body(func: ast.AST, fs: FuncStat) -> None:
             fs.stateful_regs += 1
 
 
-def _call_name(node: ast.AST) -> Optional[str]:
+def _call_name(node: ast.AST) -> str | None:
     if isinstance(node, ast.Name):
         return node.id
     if isinstance(node, ast.Attribute):
@@ -276,7 +276,7 @@ def _call_name(node: ast.AST) -> Optional[str]:
     return None
 
 
-def _subscript_base(node: ast.Subscript) -> Optional[str]:
+def _subscript_base(node: ast.Subscript) -> str | None:
     v = node.value
     # unwrap chained subscripts / attributes to the root name
     while isinstance(v, ast.Subscript):
@@ -359,7 +359,7 @@ def python_source_slice_fns(python_source_ref: str,
 
 
 def resolve_block_slice(block_name: str, stats: dict[str, FuncStat],
-                        extra_entries: Optional[tuple[str, ...]] = None,
+                        extra_entries: tuple[str, ...] | None = None,
                         max_depth: int = 6) -> list[str]:
     """Transitively close the golden call graph from a block's entry hints.
 
@@ -404,7 +404,7 @@ def resolve_block_slice(block_name: str, stats: dict[str, FuncStat],
 def resolve_block_slice_regions(
     block_name: str,
     golden_source: str,
-    extra_entries: Optional[tuple[str, ...]] = None,
+    extra_entries: tuple[str, ...] | None = None,
     require_entry_hints: bool = True,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """Resolve a block's golden slice as (function_names, source regions).
@@ -444,7 +444,7 @@ def resolve_block_slice_regions(
 # 1. estimate_block_complexity
 # ---------------------------------------------------------------------------
 
-def _estimate_latency_cyc(op_count: int, pdk: Optional[dict] = None) -> int:
+def _estimate_latency_cyc(op_count: int, pdk: dict | None = None) -> int:
     """Op-count -> cycles via the pipeline scheduler's chaining model.
 
     Reuses ``pipeline_scheduler.schedule_reduction`` to turn a bag of ``op_count``
@@ -471,9 +471,9 @@ def _estimate_latency_cyc(op_count: int, pdk: Optional[dict] = None) -> int:
 
 def estimate_block_complexity(block_name: str, golden_path: str,
                               spec_text: str = "",
-                              pdk: Optional[dict] = None,
-                              stats: Optional[dict[str, FuncStat]] = None,
-                              slice_fns: Optional[list[str]] = None,
+                              pdk: dict | None = None,
+                              stats: dict[str, FuncStat] | None = None,
+                              slice_fns: list[str] | None = None,
                               ) -> dict[str, Any]:
     """Score a block's golden slice on 4 axes vs its uArch budget (no LLM).
 
@@ -758,9 +758,9 @@ def _interface_contract_for(sub_name: str, block_name: str) -> dict[str, Any]:
 
 def propose_decomposition(block_name: str, golden_path: str,
                           spec_text: str = "",
-                          pdk: Optional[dict] = None,
-                          stats: Optional[dict[str, FuncStat]] = None,
-                          slice_fns: Optional[list[str]] = None,
+                          pdk: dict | None = None,
+                          stats: dict[str, FuncStat] | None = None,
+                          slice_fns: list[str] | None = None,
                           ) -> list[dict[str, Any]]:
     """Propose a min-cut sub-block partition of a fat block along golden funcs.
 
@@ -839,13 +839,13 @@ def _short_block(block_name: str) -> str:
 
 
 __all__ = [
-    "FuncStat",
+    "MODELING_ALGO_THRESHOLD",
+    "MODELING_CYCLO_THRESHOLD",
+    "MODELING_LOC_THRESHOLD",
     "ComplexityEstimate",
+    "FuncStat",
     "SubBlock",
     "estimate_block_complexity",
     "propose_decomposition",
     "resolve_block_slice",
-    "MODELING_LOC_THRESHOLD",
-    "MODELING_ALGO_THRESHOLD",
-    "MODELING_CYCLO_THRESHOLD",
 ]

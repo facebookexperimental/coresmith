@@ -81,7 +81,6 @@ class TestRefreshCurrentSidecars:
 class TestRestartFromNode:
     @pytest.mark.asyncio
     async def test_forks_from_matching_checkpoint(self):
-        import types
         from orchestrator.graph_lifecycle import GraphLifecycle
 
         # a fake graph exposing aget_state_history + a spy safe_start

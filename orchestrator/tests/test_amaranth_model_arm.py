@@ -1,9 +1,7 @@
 """Focused contract tests for the experimental Amaranth behavioral arm."""
-from pathlib import Path
 
 from orchestrator.architecture.composition_audit import audit_chip_model
 from orchestrator.langgraph.microarch_exp import elaborate_block_model
-
 
 BLOCK = '''
 from amaranth import Elaboratable, Module

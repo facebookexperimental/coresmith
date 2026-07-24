@@ -53,8 +53,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
 # Names a deterministic, pure-Python block reference might be exported under.
 # The golden-model wrapper re-exports the FULL namespace (incl. underscore
@@ -130,7 +130,7 @@ _PORT_RE = re.compile(
 )
 
 
-def _module_name(rtl_text: str) -> Optional[str]:
+def _module_name(rtl_text: str) -> str | None:
     m = re.search(r"\bmodule\s+([A-Za-z_][A-Za-z0-9_$]*)", rtl_text)
     return m.group(1) if m else None
 
@@ -161,7 +161,7 @@ def _parse_ports(rtl_text: str) -> dict:
     return ports
 
 
-def _classify_axis(ports: dict) -> Optional[dict]:
+def _classify_axis(ports: dict) -> dict | None:
     """Identify a single s_axis in / single m_axis out AXI-Stream interface.
 
     Returns a dict describing the discovered signal names, or None if the
@@ -169,7 +169,7 @@ def _classify_axis(ports: dict) -> Optional[dict]:
     The signal name may carry a stream-name infix
     (``s_axis_<name>_tdata``), so we match by prefix + ``t<field>`` suffix.
     """
-    def _find(prefix: str, field: str) -> Optional[str]:
+    def _find(prefix: str, field: str) -> str | None:
         suffix = "t" + field
         cands = [
             n for n in ports
@@ -254,13 +254,14 @@ def _is_hardware_block(obj) -> bool:
     """True for an Amaranth Elaboratable class (not a value->value oracle)."""
     try:
         import inspect
+
         from amaranth import Elaboratable
         return inspect.isclass(obj) and issubclass(obj, Elaboratable)
     except (ImportError, TypeError):
         return False
 
 
-def _resolve_reference(mod, block_name: str) -> Optional[Callable]:
+def _resolve_reference(mod, block_name: str) -> Callable | None:
     """Find a deterministic, pure-Python reference callable for the block.
 
     Tries (in order): a callable named exactly ``<block_name>`` (if not a
@@ -304,7 +305,7 @@ def _resolve_reference(mod, block_name: str) -> Optional[Callable]:
     return None
 
 
-def _expected_stream(ref: Callable, in_bytes: list, mask: int) -> Optional[list]:
+def _expected_stream(ref: Callable, in_bytes: list, mask: int) -> list | None:
     """Compute the expected output byte stream from the reference.
 
     Two calling conventions are supported, tried in order:
@@ -496,7 +497,7 @@ class EquivAdapter:
 
     name = "base"
 
-    def classify(self, ports: dict) -> Optional[dict]:
+    def classify(self, ports: dict) -> dict | None:
         """Return a harness config for this shape, or None if ports don't match."""
         raise NotImplementedError
 
@@ -548,7 +549,7 @@ class AxisAdapter(EquivAdapter):
 
 
 # Custom/design adapters (registered on load), tried BEFORE the AXIS default.
-_ADAPTER_REGISTRY: "dict[str, EquivAdapter]" = {}
+_ADAPTER_REGISTRY: dict[str, EquivAdapter] = {}
 _AXIS_ADAPTER = AxisAdapter()
 _DESIGN_ADAPTERS_LOADED: set = set()
 
@@ -575,7 +576,7 @@ def _load_design_adapters(project_root) -> None:
 
 
 def select_equiv_adapter(ports: dict,
-                         project_root=None) -> Optional[EquivAdapter]:
+                         project_root=None) -> EquivAdapter | None:
     """First adapter whose ``classify(ports)`` matches: design adapters (from
     ``arch/equiv_adapters/``) first, then the AXIS default. None if nothing fits.
     """

@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
 
 from .classifier import (
     arch_indicates_qspi_slave,
@@ -53,25 +52,25 @@ __all__ = [
     "QSPIMasterBFM",
     "QSPIRomContract",
     "QSPIRomResponderBFM",
-    "render_rom_bfm_module",
-    "render_rom_contract_literal",
     "StimulusPlan",
-    "classify_chip_bus",
     "arch_indicates_qspi_slave",
+    "build_plan_from_run",
+    "classify_chip_bus",
+    "conformance_enabled",
     "describe_unmodeled_roles",
     "detect_bus_roles",
     "detect_dut_mastered_buses",
-    "build_plan_from_run",
+    "deterministic_bfm_enabled",
+    "plan_deterministic_dv",
     "render_bfm_module",
-    "render_contract_literal",
-    "render_integration_tb",
     "render_conformance_tb",
     "render_conformance_test_fn",
-    "plan_deterministic_dv",
+    "render_contract_literal",
+    "render_integration_tb",
+    "render_rom_bfm_module",
+    "render_rom_contract_literal",
     "write_deterministic_integration_tb",
     "write_qspi_conformance_tb",
-    "deterministic_bfm_enabled",
-    "conformance_enabled",
 ]
 
 
@@ -114,8 +113,8 @@ def conformance_enabled() -> bool:
 def plan_deterministic_dv(
     project_root: str,
     top_rtl_source: str,
-    connections: Optional[list] = None,
-) -> tuple[Optional[QSPIContract], Optional[StimulusPlan]]:
+    connections: list | None = None,
+) -> tuple[QSPIContract | None, StimulusPlan | None]:
     """Classify the chip-top bus and, if QSPI-slave, build a host-flow plan.
 
     Returns ``(contract, plan)`` when a deterministic, contract-enforcing DV is

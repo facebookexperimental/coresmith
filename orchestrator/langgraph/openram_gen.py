@@ -201,7 +201,7 @@ def ensure_openram_patched() -> bool:
         _scripts = _repo / "scripts"
         if str(_scripts) not in sys.path:
             sys.path.insert(0, str(_scripts))
-        import patch_openram as _po  # noqa: PLC0415
+        import patch_openram as _po
         return _po.patch_openram().ok
     except Exception as exc:  # noqa: BLE001 - never let self-heal break caller
         # Non-fatal, but NOT silent: a swallowed bug here (e.g. a missing

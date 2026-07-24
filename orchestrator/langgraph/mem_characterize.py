@@ -44,9 +44,9 @@ import re
 import subprocess
 import sys
 import tempfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Engine helper imports (degrade gracefully if a dependency is missing)
@@ -55,10 +55,10 @@ from orchestrator.langgraph.sram_wrapper import wrapper_lib_path
 
 try:
     from orchestrator.langgraph.backend_helpers import (
+        CELL_LEF,
         LIBERTY,
         OPENROAD_BIN,
         TECH_LEF,
-        CELL_LEF,
     )
 except Exception:  # pragma: no cover - only if PDK consts unresolvable
     LIBERTY = TECH_LEF = CELL_LEF = Path("/nonexistent")
@@ -144,11 +144,11 @@ class MemPoint:
     depth: int
     impl: str                       # flop | registered_flop | macro
     bits: int = 0
-    area_um2: Optional[float] = None
-    fmax_mhz: Optional[float] = None
-    ff: Optional[int] = None        # flip-flop count (flop impls only)
-    cell_count: Optional[int] = None
-    macro_feasible: Optional[bool] = None
+    area_um2: float | None = None
+    fmax_mhz: float | None = None
+    ff: int | None = None        # flip-flop count (flop impls only)
+    cell_count: int | None = None
+    macro_feasible: bool | None = None
     macro_impl: str = ""            # exact | compose | openram | "" (n/a)
     routability_risk: str = ""      # low | medium | high
     notes: str = ""
@@ -163,7 +163,7 @@ class MemPoint:
 # PDK fingerprint (so the cache key changes when the PDK changes)
 # ---------------------------------------------------------------------------
 
-def pdk_hash(pdk: Optional[dict] = None) -> str:
+def pdk_hash(pdk: dict | None = None) -> str:
     """Stable short hash of the PDK identity used for this characterization."""
     parts = [str(LIBERTY), str(TECH_LEF)]
     try:
@@ -367,7 +367,7 @@ _ARRIVAL_RE = re.compile(r"([\d.]+)\s+data arrival time")
 
 def _worst_path_delay_ns(netlist: str, top: str, liberty: str,
                          openroad_bin: str = OPENROAD_BIN,
-                         timeout_s: int = STA_TIMEOUT_S) -> Optional[float]:
+                         timeout_s: int = STA_TIMEOUT_S) -> float | None:
     """Worst-path data-delay (ns), ideal-clock pre-layout, via OpenROAD STA.
 
     The critical path for a flop memory is the combinational read mux
@@ -416,7 +416,7 @@ def _worst_path_delay_ns(netlist: str, top: str, liberty: str,
 
 
 def _find_fmax(netlist: str, top: str, liberty: str,
-               timeout_s: int = STA_TIMEOUT_S) -> Optional[float]:
+               timeout_s: int = STA_TIMEOUT_S) -> float | None:
     """Fmax (MHz) = 1000 / worst_path_delay_ns, measured in a single STA report."""
     delay = _worst_path_delay_ns(netlist, top, liberty, timeout_s=timeout_s)
     if delay is None or delay <= 0:
@@ -431,7 +431,7 @@ def _find_fmax(netlist: str, top: str, liberty: str,
 _LEF_SIZE_RE = re.compile(r"SIZE\s+([\d.]+)\s+BY\s+([\d.]+)", re.IGNORECASE)
 
 
-def _lef_area_um2(lef_path: str) -> Optional[float]:
+def _lef_area_um2(lef_path: str) -> float | None:
     try:
         text = Path(lef_path).read_text(errors="ignore")
     except OSError:
@@ -442,7 +442,7 @@ def _lef_area_um2(lef_path: str) -> Optional[float]:
     return float(m.group(1)) * float(m.group(2))
 
 
-def _lib_access_time_ns(lib_path: str) -> Optional[float]:
+def _lib_access_time_ns(lib_path: str) -> float | None:
     """Worst clk->dout access time (ns) from the macro's .lib timing arcs.
 
     Reads the largest ``cell_rise``/``cell_fall`` value among the data-out pin
@@ -473,10 +473,11 @@ def _resolve_macro(ports: str, width: int, depth: int) -> MemPoint:
     area by the tile count and use the base macro's access time (the read path
     of one tile; bank muxing adds a small select that we surface as a note).
     """
-    from orchestrator.langgraph.openram_gen import (
-        ensure_macro, CompositionPlan,
-    )
     from orchestrator.langgraph.macro_registry import MacroInfo
+    from orchestrator.langgraph.openram_gen import (
+        CompositionPlan,
+        ensure_macro,
+    )
 
     pt = MemPoint(ports=ports, width=width, depth=depth, impl="macro")
     try:
@@ -534,7 +535,7 @@ def _resolve_macro(ports: str, width: int, depth: int) -> MemPoint:
 # Routability-risk heuristic (no P&R in the sweep)
 # ---------------------------------------------------------------------------
 
-def _routability_risk(impl: str, depth: int, fmax_mhz: Optional[float]) -> str:
+def _routability_risk(impl: str, depth: int, fmax_mhz: float | None) -> str:
     """Heuristic risk from the flop read-mux fan-out (depth) + measured Fmax.
 
     A deep combinational/registered read mux is an N:1 mux whose fan-out grows
@@ -632,8 +633,8 @@ def build_grid(widths=DEFAULT_WIDTHS, depths=DEFAULT_DEPTHS,
     return out
 
 
-def characterize_memories(grid: Optional[list[tuple[str, int, int]]] = None,
-                          pdk: Optional[dict] = None,
+def characterize_memories(grid: list[tuple[str, int, int]] | None = None,
+                          pdk: dict | None = None,
                           impls: tuple[str, ...] = IMPLS,
                           liberty: str = "",
                           verbose: bool = True) -> list[MemPoint]:
@@ -666,11 +667,11 @@ def characterize_memories(grid: Optional[list[tuple[str, int, int]]] = None,
     return rows
 
 
-def cache_path(pdk: Optional[dict] = None) -> Path:
+def cache_path(pdk: dict | None = None) -> Path:
     return CACHE_DIR / f"{pdk_hash(pdk)}.json"
 
 
-def save_table(rows: list[MemPoint], pdk: Optional[dict] = None) -> Path:
+def save_table(rows: list[MemPoint], pdk: dict | None = None) -> Path:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = cache_path(pdk)
     payload = {
@@ -682,7 +683,7 @@ def save_table(rows: list[MemPoint], pdk: Optional[dict] = None) -> Path:
     return path
 
 
-def load_table(pdk: Optional[dict] = None) -> list[MemPoint]:
+def load_table(pdk: dict | None = None) -> list[MemPoint]:
     path = cache_path(pdk)
     if not path.exists():
         return []
@@ -730,7 +731,7 @@ class MemModel:
         self.area_importances: dict[str, float] = {}
         self.fmax_importances: dict[str, float] = {}
 
-    def fit(self, rows: list[MemPoint]) -> "MemModel":
+    def fit(self, rows: list[MemPoint]) -> MemModel:
         # only rows with a usable target
         self._rows = [r for r in rows if r.area_um2 or r.fmax_mhz]
         X, ya, yf, mask_a, mask_f = [], [], [], [], []
@@ -741,8 +742,8 @@ class MemModel:
             yf.append(r.fmax_mhz if r.fmax_mhz else 0.0)
             mask_f.append(r.fmax_mhz is not None and r.fmax_mhz > 0)
         try:
-            from sklearn.ensemble import GradientBoostingRegressor
             import numpy as np
+            from sklearn.ensemble import GradientBoostingRegressor
             Xn = np.array(X)
             self.kind = "gbt"
             if sum(mask_a) >= 4:
@@ -763,7 +764,7 @@ class MemModel:
 
     # ---- prediction ----
     def _knn_predict(self, ports: str, width: int, depth: int, impl: str,
-                     target: str) -> Optional[float]:
+                     target: str) -> float | None:
         # nearest neighbours in (log_depth, log_width, ports, impl) space among
         # rows with that target present; inverse-distance weighted.
         cand = [r for r in self._rows
@@ -787,14 +788,14 @@ class MemModel:
         wsum = sum(1.0 / (d + 1e-6) for d, _ in scored)
         return sum((1.0 / (d + 1e-6)) * v for d, v in scored) / wsum
 
-    def predict_area(self, ports: str, width: int, depth: int, impl: str) -> Optional[float]:
+    def predict_area(self, ports: str, width: int, depth: int, impl: str) -> float | None:
         if self.kind == "gbt" and self._area_model is not None:
             import numpy as np
             return float(self._area_model.predict(
                 np.array([_features(ports, width, depth, impl)]))[0])
         return self._knn_predict(ports, width, depth, impl, "area_um2")
 
-    def predict_fmax(self, ports: str, width: int, depth: int, impl: str) -> Optional[float]:
+    def predict_fmax(self, ports: str, width: int, depth: int, impl: str) -> float | None:
         if self.kind == "gbt" and self._fmax_model is not None:
             import numpy as np
             return float(self._fmax_model.predict(
@@ -802,8 +803,8 @@ class MemModel:
         return self._knn_predict(ports, width, depth, impl, "fmax_mhz")
 
 
-def fit_model(table: Optional[list[MemPoint]] = None,
-              pdk: Optional[dict] = None) -> MemModel:
+def fit_model(table: list[MemPoint] | None = None,
+              pdk: dict | None = None) -> MemModel:
     rows = table if table is not None else load_table(pdk)
     return MemModel().fit(rows)
 
@@ -863,7 +864,7 @@ def _fallback_um2_per_bit() -> float:
         return 25.0
 
 
-def grid_bounds(table: list[MemPoint]) -> Optional[tuple[int, int, int, int, int]]:
+def grid_bounds(table: list[MemPoint]) -> tuple[int, int, int, int, int] | None:
     """(min_w, max_w, min_d, max_d, max_bits) over rows with a usable measurement.
 
     Bounds the actual characterized geometries (any row carrying an area OR an
@@ -925,7 +926,7 @@ def _extrapolate_area(width: int, depth: int, impl: str,
     return _per_bit_area_cost(table, impl) * float(width * depth)
 
 
-def _worst_in_grid_fmax(table: list[MemPoint], impl: str) -> Optional[float]:
+def _worst_in_grid_fmax(table: list[MemPoint], impl: str) -> float | None:
     """Slowest (min) Fmax among characterized rows for `impl`, or None if none.
 
     The conservative clamp for an out-of-grid Fmax: a memory LARGER than anything
@@ -938,7 +939,7 @@ def _worst_in_grid_fmax(table: list[MemPoint], impl: str) -> Optional[float]:
 
 
 def _extrapolate_fmax(width: int, depth: int, impl: str,
-                      table: list[MemPoint]) -> Optional[float]:
+                      table: list[MemPoint]) -> float | None:
     """Out-of-grid Fmax: clamp to the worst (slowest) in-grid Fmax for this impl.
 
     We deliberately pick the SIMPLER defensible option (clamp-to-worst) over a
@@ -956,8 +957,8 @@ def _extrapolate_fmax(width: int, depth: int, impl: str,
 
 def predict_mem(width: int, depth: int, ports: str = "1rw",
                 target_mhz: float = 100.0,
-                model: Optional[MemModel] = None,
-                pdk: Optional[dict] = None) -> dict[str, Any]:
+                model: MemModel | None = None,
+                pdk: dict | None = None) -> dict[str, Any]:
     """Recommend an impl + predict PPA for a memory geometry.
 
     Returns ``{recommended_impl, pred_area_um2, pred_fmax_mhz, macro_feasible,
@@ -989,7 +990,7 @@ def predict_mem(width: int, depth: int, ports: str = "1rw",
     macro_row = next((r for r in table if r.impl == "macro"
                       and r.ports == ports and r.width == width
                       and r.depth == depth), None)
-    resolved_macro: Optional[MemPoint] = None
+    resolved_macro: MemPoint | None = None
     if macro_row is not None:
         macro_feasible = bool(macro_row.macro_feasible)
     else:
@@ -1009,8 +1010,8 @@ def predict_mem(width: int, depth: int, ports: str = "1rw",
         if impl == "macro":
             if not macro_feasible:
                 continue
-            area: Optional[float] = None
-            fmax: Optional[float] = None
+            area: float | None = None
+            fmax: float | None = None
             src = ""
             # 1) cached measured row (byte-identical to prior behavior)
             if macro_row is not None:
@@ -1159,7 +1160,7 @@ def _cmd_predict(args: list[str]) -> int:
     return 0
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
         print("usage: python -m orchestrator.langgraph.mem_characterize "

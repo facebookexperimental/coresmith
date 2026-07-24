@@ -15,19 +15,16 @@ Hermetic: no LLM, no EDA toolchain, no network. Uses the checked-in RTL fixtures
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
 from orchestrator.langgraph.rtl_stage_lint import (
-    BlockCensus,
     StageMap,
     census_rtl,
     census_signature,
     check_stage_modules,
     format_stage_lint_report,
-    load_stage_map,
     stage_lint_enabled,
     stage_map_from_budget,
     stage_modules_enabled,

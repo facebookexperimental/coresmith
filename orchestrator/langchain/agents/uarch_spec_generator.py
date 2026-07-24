@@ -16,7 +16,6 @@ before writing Verilog.
 
 from __future__ import annotations
 
-from orchestrator._timeouts import scaled
 import json
 import re
 from pathlib import Path
@@ -24,6 +23,7 @@ from typing import Any
 
 from opentelemetry import trace
 
+from orchestrator._timeouts import scaled
 from orchestrator.langchain.prompts.skills import load_skills as _load_skills
 
 from .coresmith_llm import ClaudeLLM
@@ -173,8 +173,7 @@ class UarchSpecGenerator:
     """Agent for generating microarchitecture specifications."""
 
     def __init__(self, model: str | None = None, temperature: float = 0.2):
-        from orchestrator.langchain.agents.coresmith_llm import (
-            arch_reasoning_effort, block_model)
+        from orchestrator.langchain.agents.coresmith_llm import arch_reasoning_effort, block_model
         model = model or block_model()
         # The uarch spec carries the feasibility verdict + the frozen
         # microarchitecture every RTL attempt lowers -> higher reasoning tier
@@ -255,8 +254,8 @@ class UarchSpecGenerator:
             # into one unregistered ~27 ns cloud is the exact Fmax-miss class
             # this section exists to prevent.
             try:
-                from orchestrator.langgraph import pdk_characterize as _pdkc
                 from orchestrator.langgraph import arith_characterize as _arith
+                from orchestrator.langgraph import pdk_characterize as _pdkc
                 from orchestrator.langgraph.pipeline_scheduler import (
                     pdk_budget_section as _budget,
                 )
@@ -291,9 +290,11 @@ class UarchSpecGenerator:
                             except Exception:  # noqa: BLE001
                                 pass
                     else:
-                        import logging as _lg2, sys as _sys2
+                        import logging as _lg2
+                        import sys as _sys2
                         try:
-                            _h = _arith.pdk_hash(); _cp = _arith._cache_path()
+                            _h = _arith.pdk_hash()
+                            _cp = _arith._cache_path()
                         except Exception:  # noqa: BLE001
                             _h, _cp = "?", "?"
                         _warn = (
@@ -329,8 +330,8 @@ class UarchSpecGenerator:
             # Read architecture docs from disk so the LLM actually has
             # the ERS, block diagram connections, and FRD it's told to follow
             if project_root:
-                from pathlib import Path as _P
                 import json as _json
+                from pathlib import Path as _P
 
                 _root = _P(project_root)
 
@@ -419,8 +420,8 @@ class UarchSpecGenerator:
                 # (handshake protocol, field positions, bootstrap policy).
                 # Inlining prevents the spec author from drifting from it.
                 from .contract_lookup import (
-                    load_block_contracts,
                     format_block_contracts_prompt,
+                    load_block_contracts,
                 )
                 _contracts_view = load_block_contracts(project_root, block_name)
                 _contracts_fragment = format_block_contracts_prompt(

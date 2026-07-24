@@ -41,10 +41,8 @@ import json
 import os
 import threading
 from pathlib import Path
-from typing import Optional
 
 from orchestrator.testing.prompt_norm import (
-    normalize_prompt,
     prompt_digest,
     token_jaccard,
 )
@@ -137,9 +135,9 @@ class ReplayBackend:
 
     def __init__(
         self,
-        fixture: Optional[ReplayFixture | str | Path] = None,
+        fixture: ReplayFixture | str | Path | None = None,
         *,
-        strict: Optional[bool] = None,
+        strict: bool | None = None,
     ) -> None:
         self._lock = threading.RLock()
         self.success = CannedDesignScript()
@@ -147,7 +145,7 @@ class ReplayBackend:
         self._served: dict[str, int] = {}
         self._consumed: set[int] = set()
         self.strict = _strict_default() if strict is None else strict
-        self.fixture: Optional[ReplayFixture] = None
+        self.fixture: ReplayFixture | None = None
         if fixture is None:
             env = os.environ.get("CORESMITH_REPLAY_FIXTURE", "").strip()
             if env:
@@ -319,7 +317,7 @@ class ReplayBackend:
 # ---------------------------------------------------------------------------
 # Module singleton (the seam coresmith_llm._get_testing_backend calls)
 # ---------------------------------------------------------------------------
-_BACKEND: Optional[ReplayBackend] = None
+_BACKEND: ReplayBackend | None = None
 _BACKEND_LOCK = threading.Lock()
 
 
@@ -331,7 +329,7 @@ def get_backend() -> ReplayBackend:
         return _BACKEND
 
 
-def set_fixture(fixture: ReplayFixture | str | Path, *, strict: Optional[bool] = None) -> ReplayBackend:
+def set_fixture(fixture: ReplayFixture | str | Path, *, strict: bool | None = None) -> ReplayBackend:
     b = get_backend()
     b.set_fixture(fixture)
     if strict is not None:

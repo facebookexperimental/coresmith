@@ -15,13 +15,13 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator.testing import fault_provider as fp
 from orchestrator.testing.faults import (
+    PROVIDER_EXCEPTION_MESSAGE,
     FaultClass,
     FaultSchedule,
     FaultSpec,
-    PROVIDER_EXCEPTION_MESSAGE,
 )
-from orchestrator.testing import fault_provider as fp
 
 pytestmark = pytest.mark.fault_injection
 

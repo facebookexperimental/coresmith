@@ -15,7 +15,6 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -24,7 +23,7 @@ def repo_root() -> Path:
     return _REPO_ROOT
 
 
-def bootstrap_project_root(arg: Optional[str] = None) -> Path:
+def bootstrap_project_root(arg: str | None = None) -> Path:
     """Resolve the project root and export ``CORESMITH_PROJECT_ROOT``.
 
     Resolution order: explicit ``arg`` -> ``$CORESMITH_PROJECT_ROOT`` -> error.
@@ -44,7 +43,7 @@ def bootstrap_project_root(arg: Optional[str] = None) -> Path:
     return root
 
 
-def harness_child_env(extra: Optional[dict] = None) -> dict:
+def harness_child_env(extra: dict | None = None) -> dict:
     """Environment for spawned harness children (make/verilator/yosys/cocotb).
 
     Prepends the repo venv bin + the repo ``bin/`` to PATH so ``coresmith`` and

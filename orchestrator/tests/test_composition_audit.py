@@ -23,8 +23,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from orchestrator.architecture.composition_audit import (
     audit_chip_model,
     audit_violations,
@@ -654,7 +652,7 @@ class TestCrashTracebackLocalization:
 
     def _project(self, tmp_path):
         _models_dir(tmp_path, crasher=CRASHING_MODEL)
-        chip = _chip(tmp_path, CRASHING_CHIP)
+        _chip(tmp_path, CRASHING_CHIP)
         _write(tmp_path / "inputs" / "toy_golden.py", REFERENCE_IMPL)
         return tmp_path
 

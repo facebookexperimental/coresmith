@@ -20,30 +20,29 @@ from pathlib import Path
 import pytest
 
 from orchestrator.langgraph.backend_helpers import (
-    generate_pnr_tcl,
-    generate_drc_tcl,
-    generate_rcx_tcl,
-    parse_openroad_reports,
-    parse_drc_report,
-    parse_pnr_stdout,
-    placed_macro_bboxes,
-    macro_bboxes_from_def,
-    drc_macro_interior_exclude_enabled,
-    MAGIC_DRC_UM_PER_INTERNAL_UNIT,
-    _drc_rule_layer,
-    _parse_magic_drc_count,
-    _count_drc_report_violations,
-    drc_report_fallback_enabled,
-    _parse_lvs_deltas,
-    TECH_LEF,
     CELL_LEF,
     LIBERTY,
-    OPENROAD_BIN,
     MAGIC_BIN,
+    MAGIC_DRC_UM_PER_INTERNAL_UNIT,
     NETGEN_BIN,
+    OPENROAD_BIN,
     PROJECT_ROOT,
+    TECH_LEF,
+    _count_drc_report_violations,
+    _drc_rule_layer,
+    _parse_lvs_deltas,
+    _parse_magic_drc_count,
+    drc_macro_interior_exclude_enabled,
+    drc_report_fallback_enabled,
+    generate_drc_tcl,
+    generate_pnr_tcl,
+    generate_rcx_tcl,
+    macro_bboxes_from_def,
+    parse_drc_report,
+    parse_openroad_reports,
+    parse_pnr_stdout,
+    placed_macro_bboxes,
 )
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Tcl Generation
@@ -784,7 +783,7 @@ class TestDrcIntegration:
 
     @pytest.mark.slow
     def test_run_drc_flow(self, tmp_path):
-        from orchestrator.langgraph.backend_helpers import run_pnr_flow, run_drc_flow
+        from orchestrator.langgraph.backend_helpers import run_drc_flow, run_pnr_flow
 
         out_dir = str(tmp_path / "pnr")
         pnr = run_pnr_flow(
@@ -814,7 +813,9 @@ class TestLvsIntegration:
     @pytest.mark.slow
     def test_run_lvs_flow(self, tmp_path):
         from orchestrator.langgraph.backend_helpers import (
-            run_pnr_flow, run_drc_flow, run_lvs_flow,
+            run_drc_flow,
+            run_lvs_flow,
+            run_pnr_flow,
         )
 
         out_dir = str(tmp_path / "pnr")

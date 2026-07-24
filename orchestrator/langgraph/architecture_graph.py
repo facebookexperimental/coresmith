@@ -43,7 +43,7 @@ from __future__ import annotations
 import json
 import operator
 from pathlib import Path
-from typing import Annotated, Optional, TypedDict
+from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
@@ -121,18 +121,18 @@ class ArchGraphState(TypedDict):
     phase: str  # prd | sad | frd | block_diagram | memory_map | clock_tree | register_spec | constraints | finalize | documentation
 
     # PRD (Product Requirements Document) -- "What functionality is needed?"
-    prd_spec: Optional[dict]       # Full PRD document (Phase 2 output)
-    prd_questions: Optional[list]  # Sizing questions (Phase 1 output)
-    prd_answers: Optional[dict]    # Architect answers used to draft the PRD
+    prd_spec: dict | None       # Full PRD document (Phase 2 output)
+    prd_questions: list | None  # Sizing questions (Phase 1 output)
+    prd_answers: dict | None    # Architect answers used to draft the PRD
 
     # SAD (System Architecture Document) -- "How do we get there and why?"
-    sad_spec: Optional[dict]
+    sad_spec: dict | None
 
     # FRD (Functional Requirements Document) -- "How well should it work?"
-    frd_spec: Optional[dict]
+    frd_spec: dict | None
 
     # ERS (Engineering Requirements Specification) -- final synthesized doc
-    ers_spec: Optional[dict]
+    ers_spec: dict | None
 
     # Accumulating (reducers -- append, never overwrite)
     violations_history: Annotated[list[dict], operator.add]
@@ -140,12 +140,12 @@ class ArchGraphState(TypedDict):
     human_response_history: Annotated[list[dict], operator.add]  # Fix #7: full escalation history
 
     # Latest results (overwritten each cycle)
-    block_diagram: Optional[dict]
-    memory_map: Optional[dict]
-    clock_tree: Optional[dict]
-    register_spec: Optional[dict]
-    benchmark_data: Optional[dict]
-    constraint_result: Optional[dict]
+    block_diagram: dict | None
+    memory_map: dict | None
+    clock_tree: dict | None
+    register_spec: dict | None
+    benchmark_data: dict | None
+    constraint_result: dict | None
     human_feedback: str
 
     # Doc-fix repair path: how many times the Doc Fix node has regenerated a
@@ -163,20 +163,20 @@ class ArchGraphState(TypedDict):
 
     # Output-contract ownership gate (catches a decomposition orphaning a
     # global output responsibility before interfaces are frozen)
-    output_contract_verdict: Optional[dict]
+    output_contract_verdict: dict | None
     output_contract_retries: int
 
     # Block-complexity gate (catches a monolith block that fused too many
     # distinct golden algorithms for a byte-exact model to ever reproduce)
-    block_complexity_verdict: Optional[dict]
+    block_complexity_verdict: dict | None
     block_complexity_retries: int
 
     # Block diagram visualization document
-    block_diagram_doc: Optional[dict]
+    block_diagram_doc: dict | None
     block_diagram_doc_validation_errors: list[str]
 
     # Human interaction
-    human_response: Optional[dict]
+    human_response: dict | None
 
     # Terminal state
     success: bool
@@ -2631,7 +2631,7 @@ def _clean_diagram_target() -> str:
     )
 
 
-def _resolve_complexity_golden(project_root: str) -> Optional[str]:
+def _resolve_complexity_golden(project_root: str) -> str | None:
     """Resolve the run's golden reference for AST-based complexity scoring.
     Returns None when no golden is discoverable -- non-golden designs (e.g.
     a hand-written blocks.yaml run) then pass the gate through as a no-op."""

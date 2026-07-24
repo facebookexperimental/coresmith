@@ -213,6 +213,7 @@ def test_agent_chip_verify_uses_scratch_namespace(tmp_path, monkeypatch):
     """verify_chip(record_source="agent") must build in sim_build/agent_integration,
     never the gate-authoritative sim_build/integration."""
     import json as _json
+
     from orchestrator.harness import verify as V
 
     (tmp_path / ".coresmith").mkdir(parents=True, exist_ok=True)

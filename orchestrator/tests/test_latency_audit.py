@@ -11,12 +11,9 @@ model location, the RTL stage-map render, and fail-open behaviour.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from orchestrator.langgraph import latency_audit as la
-
 
 # A small, well-formed model declaration: 10 + 9*(5+16) = 199 cycles.
 GOOD_SOURCE = '''

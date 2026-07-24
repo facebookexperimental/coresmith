@@ -147,4 +147,4 @@ class OutputContractReviewAgent:
         return result
 
 
-__all__ = ["OutputContractReviewAgent", "OUTPUT_CONTRACT_REVIEW_PROMPT"]
+__all__ = ["OUTPUT_CONTRACT_REVIEW_PROMPT", "OutputContractReviewAgent"]

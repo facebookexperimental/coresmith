@@ -30,22 +30,21 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
 from orchestrator.langgraph.architecture_graph import (
-    ArchGraphState,
     _DOC_FIX_MAX_ATTEMPTS,
+    ArchGraphState,
     _partition_constraint_violations,
     _persist_intermediate_state,
     build_architecture_graph,
     doc_fix_node,
+    review_diagram,
+    route_after_constraint_escalation,
+    route_after_constraints,
+    route_after_diagram_escalation,
+    route_after_exhausted_escalation,
+    route_after_increment,
     route_after_prd,
     route_after_prd_escalation,
-    review_diagram,
-    route_after_diagram_escalation,
-    route_after_constraints,
-    route_after_constraint_escalation,
-    route_after_increment,
-    route_after_exhausted_escalation,
 )
-
 from orchestrator.tests.fft16_fixtures import (
     FFT16_BLOCK_DIAGRAM,
     FFT16_CLOCK_TREE,
@@ -58,7 +57,6 @@ from orchestrator.tests.fft16_fixtures import (
     FFT16_REQUIREMENTS,
     FFT16_SAD_DOCUMENT,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -117,7 +115,7 @@ def _patch_all_specialists(
         new_callable=AsyncMock,
         return_value=prd_result,
     ))
-    from orchestrator.tests.fft16_fixtures import FFT16_SAD_MARKDOWN, FFT16_FRD_MARKDOWN
+    from orchestrator.tests.fft16_fixtures import FFT16_FRD_MARKDOWN, FFT16_SAD_MARKDOWN
     stack.enter_context(patch(
         "orchestrator.architecture.specialists.sad_spec.generate_sad",
         new_callable=AsyncMock,
@@ -1111,8 +1109,8 @@ class TestHappyPath:
         assert result["error"] == ""
 
         # Verify block specs written
-        from pathlib import Path
         import json
+        from pathlib import Path
         specs_path = Path(result["block_specs_path"])
         assert specs_path.exists()
         specs = json.loads(specs_path.read_text())

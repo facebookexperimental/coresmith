@@ -13,10 +13,9 @@ are kept out of the generic engine and live in downstream design collateral.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 
-def resolve_golden_path(run_dir: str) -> Optional[str]:
+def resolve_golden_path(run_dir: str) -> str | None:
     """Return the absolute path to the run's reference-implementation model.
 
     Prefers ``<run_dir>/inputs/golden.py``; otherwise falls back to the

@@ -12,15 +12,16 @@ Usage:
 
 import argparse
 import json
+
+# Resolve project root: honour CORESMITH_PROJECT_ROOT env var (same as MCP server),
+# then try .cursor/mcp.json, then fall back to relative path from this file.
+import os as _os
 import sys
 import time
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-# Resolve project root: honour CORESMITH_PROJECT_ROOT env var (same as MCP server),
-# then try .cursor/mcp.json, then fall back to relative path from this file.
-import os as _os
 
 def _resolve_project_root() -> Path:
     # 1. Env var (matches MCP server)
@@ -51,7 +52,7 @@ if str(_CODE_ROOT) != str(PROJECT_ROOT):
     sys.path.insert(0, str(_CODE_ROOT))
 
 # Initialise lightweight OTel tracing (no-op if already done)
-from orchestrator.telemetry import init_telemetry  # noqa: E402
+from orchestrator.telemetry import init_telemetry
 
 init_telemetry(str(PROJECT_ROOT))
 
@@ -491,8 +492,9 @@ def get_node_descriptions() -> dict:
 
     try:
         from orchestrator.mcp_server import (
-            _ARCH_NODE_META, _PIPELINE_NODE_META,
+            _ARCH_NODE_META,
             _BACKEND_NODE_META,
+            _PIPELINE_NODE_META,
         )
         # Architecture meta: keys are already Title Case display labels.
         for label, attrs in (_ARCH_NODE_META or {}).items():
@@ -1735,7 +1737,7 @@ class WebviewHandler(SimpleHTTPRequestHandler):
         real_wfile = self.wfile
 
         class _NoBody:
-            __slots__ = ("_w", "_suppress")
+            __slots__ = ("_suppress", "_w")
             def __init__(self, w):
                 self._w = w
                 self._suppress = False

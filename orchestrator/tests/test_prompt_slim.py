@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from orchestrator.langchain.agents import rtl_generator as rg
 from orchestrator.langchain.agents.contract_lookup import (
     format_block_contracts_prompt,

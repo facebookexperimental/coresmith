@@ -34,11 +34,12 @@ import importlib.util
 import inspect
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from opentelemetry import trace
 
 from orchestrator._timeouts import scaled
+from orchestrator.langchain.prompts.skills import load_skills as _load_skills
 
 from .coresmith_llm import ClaudeLLM
 
@@ -62,7 +63,6 @@ else:  # pragma: no cover - prompt ships with the repo
 # Inject the shared streaming-protocol skills so generated block models follow
 # the same handshake + framing (tvalid/tready, tlast/tuser) conventions every
 # other coresmith agent uses -- this is what lets the blocks COMPOSE.
-from orchestrator.langchain.prompts.skills import load_skills as _load_skills
 _SKILLS_TEXT = _load_skills(
     "axi_stream", "srdy_drdy", "arithmetic_precision", "serialization_contract",
     "buffer_stride_contract", "no_stimulus_keyed_memorization", "pipeline_contract")
@@ -120,8 +120,7 @@ class BlockGoldenGenerator:
     """Agent that produces an Amaranth block model (.py) for one block."""
 
     def __init__(self, model: str | None = None, temperature: float = 0.1):
-        from orchestrator.langchain.agents.coresmith_llm import (
-            arch_reasoning_effort, block_model)
+        from orchestrator.langchain.agents.coresmith_llm import arch_reasoning_effort, block_model
 
         model = model or block_model()
         # The block model is generated inside the uarch stage and is the
@@ -143,8 +142,8 @@ class BlockGoldenGenerator:
         reference_impl_path: str,
         project_root: str,
         output_path: str,
-        slice_functions: Optional[list[str]] = None,
-        slice_regions: Optional[list[dict[str, Any]]] = None,
+        slice_functions: list[str] | None = None,
+        slice_regions: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Generate ``arch/block_models/<block>.py`` (an Amaranth block model).
 
@@ -292,7 +291,7 @@ class BlockGoldenGenerator:
             # Persist the authoritative block->golden-slice mapping alongside the
             # model so downstream gates (golden-feasibility, complexity advisory)
             # consume the exact slice instead of re-deriving it by name-matching.
-            slice_path: Optional[str] = None
+            slice_path: str | None = None
             if slice_functions:
                 sidecar = out.with_suffix(".slice.json")
                 try:

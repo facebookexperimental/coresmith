@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from orchestrator.harness import coverage as cov
 from orchestrator.harness import verify as V
 from orchestrator.state_store.store import Scoreboard

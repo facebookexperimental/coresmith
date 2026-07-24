@@ -32,7 +32,6 @@ import fnmatch
 import json
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
 
 class FaultClass(str, Enum):
@@ -50,7 +49,7 @@ class FaultClass(str, Enum):
     CLI_HANG = "cli_hang"
 
     @classmethod
-    def in_process(cls) -> list["FaultClass"]:
+    def in_process(cls) -> list[FaultClass]:
         """The 11 pure in-process fault classes (all except CLI_HANG, which
         needs a real subprocess + scaled watchdog to exercise)."""
         return [c for c in cls if c is not cls.CLI_HANG]
@@ -77,9 +76,9 @@ class FaultSpec:
 
     fault: FaultClass
     run_name_glob: str = "*"
-    call_index: Optional[int] = None
-    every_n: Optional[int] = None
-    max_faults: Optional[int] = None
+    call_index: int | None = None
+    every_n: int | None = None
+    max_faults: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.fault, FaultClass):
@@ -112,7 +111,7 @@ class FaultSpec:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "FaultSpec":
+    def from_dict(cls, d: dict) -> FaultSpec:
         return cls(
             fault=FaultClass(d["fault"]),
             run_name_glob=d.get("run_name_glob", "*"),
@@ -132,7 +131,7 @@ class FaultSchedule:
         return json.dumps([s.to_dict() for s in self.specs])
 
     @classmethod
-    def from_json(cls, blob: str) -> "FaultSchedule":
+    def from_json(cls, blob: str) -> FaultSchedule:
         if not blob or not blob.strip():
             return cls([])
         data = json.loads(blob)
@@ -142,12 +141,12 @@ class FaultSchedule:
         return cls([FaultSpec.from_dict(d) for d in data])
 
     @classmethod
-    def from_env(cls, env_var: str = "CORESMITH_FAULT_SCHEDULE") -> "FaultSchedule":
+    def from_env(cls, env_var: str = "CORESMITH_FAULT_SCHEDULE") -> FaultSchedule:
         import os
 
         return cls.from_json(os.environ.get(env_var, ""))
 
     @classmethod
-    def single(cls, fault: FaultClass, **kw) -> "FaultSchedule":
+    def single(cls, fault: FaultClass, **kw) -> FaultSchedule:
         """Convenience: a schedule with one spec faulting matching calls."""
         return cls([FaultSpec(fault=fault, **kw)])

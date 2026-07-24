@@ -363,7 +363,8 @@ class TestTopModuleScoping:
 
     def test_helper_module_ports_not_in_sidebands(self):
         from orchestrator.langgraph.acceptance_dv import (
-            classify_contract, discover_ports,
+            classify_contract,
+            discover_ports,
         )
 
         rtl = """
@@ -477,13 +478,15 @@ endmodule
 
     def test_two_input_streams_skips(self):
         from orchestrator.langgraph.acceptance_dv import (
-            classify_contract, discover_ports,
+            classify_contract,
+            discover_ports,
         )
         assert classify_contract(discover_ports(self._AES_TOP)) is None
 
     def test_single_input_stream_still_classifies(self):
         from orchestrator.langgraph.acceptance_dv import (
-            classify_contract, discover_ports,
+            classify_contract,
+            discover_ports,
         )
         c = classify_contract(discover_ports(self._SINGLE_TOP))
         assert c is not None

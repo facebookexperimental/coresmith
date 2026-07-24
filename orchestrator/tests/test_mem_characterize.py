@@ -11,13 +11,10 @@ is exercised separately by the standalone `sweep` entrypoint.)
 """
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from orchestrator.langgraph import mem_characterize as mc
 from orchestrator.langgraph.mem_characterize import MemPoint
-
 
 # --------------------------------------------------------------------------
 # Parsing: yosys stat table + STA arrival

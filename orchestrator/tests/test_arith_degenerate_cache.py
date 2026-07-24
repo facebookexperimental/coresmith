@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from orchestrator.langgraph import arith_characterize as ac
 from orchestrator.langgraph import latency_audit as la
 

@@ -26,11 +26,14 @@ import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
+from orchestrator.langchain.agents.coresmith_llm import (
+    _active_processes,
+    _active_processes_lock,
+    _register_process,
+    reap_active_cli_processes,
+)
 from orchestrator.langgraph import mem_price as mp
 from orchestrator.langgraph import pipeline_graph as pg
-
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -138,13 +141,6 @@ class TestOperatorSpecPin:
 # ===========================================================================
 # Item 2 -- run-pause reaps the in-flight CLI child's process group
 # ===========================================================================
-
-from orchestrator.langchain.agents.coresmith_llm import (  # noqa: E402
-    _active_processes,
-    _active_processes_lock,
-    _register_process,
-    reap_active_cli_processes,
-)
 
 
 class TestPauseReap:

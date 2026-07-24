@@ -38,7 +38,7 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # State channels merged with an append reducer -- must never be overwritten by
 # the root-rewrite aupdate_state (it would DOUBLE the list).
@@ -138,7 +138,7 @@ class StageContext:
     project_root: str
     manifest: dict
     graph: Any = None
-    config: Optional[dict] = None
+    config: dict | None = None
     artifacts_copied: list = field(default_factory=list)
     _saver_cm: Any = None
     _saver: Any = None
@@ -162,7 +162,7 @@ async def materialize_stage(
     project_root,
     monkeypatch,
     *,
-    strict: Optional[bool] = None,
+    strict: bool | None = None,
 ) -> StageContext:
     """Rehydrate a stage fixture into ``project_root`` and return a StageContext.
 

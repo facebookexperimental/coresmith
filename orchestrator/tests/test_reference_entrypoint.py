@@ -23,7 +23,7 @@ def _mk_module(name: str, func_names: list[str]) -> types.ModuleType:
     mod = types.ModuleType(name)
     mod.__name__ = name
     for fn_name in func_names:
-        def _f(*a, **k):  # noqa: ANN002, ANN003 - toy
+        def _f(*a, **k):
             return None
         _f.__name__ = fn_name
         _f.__module__ = name

@@ -21,12 +21,12 @@ resolve_reference_entrypoint, _run_reference signature mapping, and the
 from __future__ import annotations
 
 import textwrap
+import types as _types
 from pathlib import Path
 
 import pytest
 
 from orchestrator.architecture import composition
-
 
 # ---------------------------------------------------------------------------
 # Toy block goldens (written to disk, loaded via importlib like real ones)
@@ -442,8 +442,6 @@ class TestResolveReference:
 # ---------------------------------------------------------------------------
 # resolve_reference_entrypoint
 # ---------------------------------------------------------------------------
-
-import types as _types  # noqa: E402
 
 
 def _make_ref_module(src: str, name: str = "_test_ref_mod"):

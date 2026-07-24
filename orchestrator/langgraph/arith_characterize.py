@@ -28,19 +28,23 @@ import json
 import logging
 import math
 import os
-import re
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 # Reuse the memory characterizer's resolved PDK paths, STA helper inputs, and
 # PDK fingerprint so the two characterizations share one cache key.
 from .mem_characterize import (
-    LIBERTY, TECH_LEF, CELL_LEF, OPENROAD_BIN, pdk_hash, _ARRIVAL_RE,
+    _ARRIVAL_RE,
     _YOSYS_AREA_RE,
+    CELL_LEF,
+    LIBERTY,
+    OPENROAD_BIN,
+    TECH_LEF,
+    pdk_hash,
 )
 
 # --------------------------------------------------------------------------- #
@@ -307,7 +311,7 @@ def _synth_comb(src_path: str, top: str, liberty: str,
 
 
 def _comb_delay_ns(netlist: str, top: str, liberty: str,
-                   timeout_s: int = STA_TIMEOUT_S) -> Optional[float]:
+                   timeout_s: int = STA_TIMEOUT_S) -> float | None:
     """Worst input->output combinational delay (ns) via OpenROAD STA.
 
     A combinational op has no clock, so we constrain input->output directly with
@@ -365,12 +369,12 @@ def _comb_delay_ns(netlist: str, top: str, liberty: str,
 class OpPoint:
     op: str
     width: int           # operand bitwidth (or #terms for SAD)
-    delay_ns: Optional[float]
-    area_um2: Optional[float]
+    delay_ns: float | None
+    area_um2: float | None
     error: str = ""
 
 
-def _measure(verilog: str, top: str, liberty: str) -> tuple[Optional[float], Optional[float], str]:
+def _measure(verilog: str, top: str, liberty: str) -> tuple[float | None, float | None, str]:
     """Synth + STA one op top. Returns (delay_ns, area_um2, error)."""
     with tempfile.NamedTemporaryFile("w", suffix=".v", delete=False,
                                      dir=str(CACHE_DIR)) as fh:
@@ -397,9 +401,9 @@ def _measure(verilog: str, top: str, liberty: str) -> tuple[Optional[float], Opt
 WIDTH_SWEEP_OPS = ("add", "sub", "mul", "cmp", "mux", "shift", "gfmul", "xortree")
 
 
-def characterize_ops(widths: Optional[list[int]] = None,
-                     sad_terms: Optional[list[int]] = None,
-                     lut_widths: Optional[list[int]] = None,
+def characterize_ops(widths: list[int] | None = None,
+                     sad_terms: list[int] | None = None,
+                     lut_widths: list[int] | None = None,
                      liberty: str = "") -> list[OpPoint]:
     """Sweep every operator x width through synth+STA. Returns the raw points."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -456,14 +460,14 @@ def fit_delay_model(points: list[OpPoint]) -> dict[str, dict[str, float]]:
 # --------------------------------------------------------------------------- #
 # Cache + public API
 # --------------------------------------------------------------------------- #
-def _cache_path(pdk: Optional[dict] = None) -> Path:
+def _cache_path(pdk: dict | None = None) -> Path:
     return CACHE_DIR / f"arith_{pdk_hash(pdk)}.json"
 
 
 logger = logging.getLogger(__name__)
 
 
-def _model_is_degenerate(doc: Optional[dict]) -> bool:
+def _model_is_degenerate(doc: dict | None) -> bool:
     """A characterization is degenerate when STA produced no usable delays.
 
     Happens when OpenROAD/STA isn't available on this box (every synth+STA
@@ -479,7 +483,7 @@ def _model_is_degenerate(doc: Optional[dict]) -> bool:
     return all(int(m.get("n", 0)) == 0 for m in model.values())
 
 
-def is_characterized(pdk: Optional[dict] = None) -> bool:
+def is_characterized(pdk: dict | None = None) -> bool:
     """True iff a NON-degenerate arithmetic delay model is cached for this PDK."""
     path = _cache_path(pdk)
     if not path.exists():
@@ -491,8 +495,8 @@ def is_characterized(pdk: Optional[dict] = None) -> bool:
     return not _model_is_degenerate(doc)
 
 
-def ensure_characterized(pdk: Optional[dict] = None, force: bool = False,
-                         widths: Optional[list[int]] = None) -> dict[str, Any]:
+def ensure_characterized(pdk: dict | None = None, force: bool = False,
+                         widths: list[int] | None = None) -> dict[str, Any]:
     """Load the cached arithmetic delay model, or run the sweep once and cache it.
 
     This is the entry point the PDK-characterization stage calls. Cheap on every
@@ -538,7 +542,7 @@ def ensure_characterized(pdk: Optional[dict] = None, force: bool = False,
 _MODEL_CACHE: dict[str, dict] = {}
 
 
-def _load_model(pdk: Optional[dict] = None) -> Optional[dict[str, Any]]:
+def _load_model(pdk: dict | None = None) -> dict[str, Any] | None:
     key = pdk_hash(pdk)
     if key in _MODEL_CACHE:
         return _MODEL_CACHE[key]
@@ -558,7 +562,7 @@ def _fit_delay(m: dict, w: int) -> float:
     return max(0.0, m["a"] * w + m["b"] * math.log2(w) + m["c"])
 
 
-def is_op_characterized(op: str, pdk: Optional[dict] = None) -> Optional[bool]:
+def is_op_characterized(op: str, pdk: dict | None = None) -> bool | None:
     """True iff `op` has its OWN fitted delay entry in the characterized model.
 
     ``None`` when the PDK itself is uncharacterized (no model doc at all) --
@@ -570,7 +574,7 @@ def is_op_characterized(op: str, pdk: Optional[dict] = None) -> Optional[bool]:
     return op in (doc.get("model") or {})
 
 
-def _conservative_unknown_delay(width: int, model: dict) -> Optional[float]:
+def _conservative_unknown_delay(width: int, model: dict) -> float | None:
     """Delay proxy for an op OUTSIDE the characterized vocabulary.
 
     An uncharacterized op is NEVER timing-free -- assuming it is (returning
@@ -585,7 +589,7 @@ def _conservative_unknown_delay(width: int, model: dict) -> Optional[float]:
     return best if best > 0 else None
 
 
-def predict_op_delay(op: str, width: int, pdk: Optional[dict] = None) -> Optional[float]:
+def predict_op_delay(op: str, width: int, pdk: dict | None = None) -> float | None:
     """Predicted combinational delay (ns) of `op` at `width` (or #terms for sad).
 
     Returns None ONLY when the PDK model isn't characterized yet (no model doc
@@ -609,7 +613,7 @@ def predict_op_delay(op: str, width: int, pdk: Optional[dict] = None) -> Optiona
 
 
 def ops_per_stage(op: str, width: int, period_ns: float,
-                  pdk: Optional[dict] = None) -> Optional[int]:
+                  pdk: dict | None = None) -> int | None:
     """How many `op`s of `width` chain within one clock `period_ns` (>=1).
 
     A convenience for the scheduler / uArch prompt: the per-stage arithmetic
@@ -630,7 +634,7 @@ def ops_per_stage(op: str, width: int, period_ns: float,
 
 
 def op_width_in_grid(op: str, width: int,
-                     pdk: Optional[dict] = None) -> Optional[bool]:
+                     pdk: dict | None = None) -> bool | None:
     """Applicability-domain companion to ``predict_op_delay`` (no numeric change).
 
     The XLS delay form ``a*W + b*log2(W) + c`` extrapolates SANELY (monotone,
@@ -655,7 +659,7 @@ def op_width_in_grid(op: str, width: int,
 
 
 def predict_op_delay_annotated(op: str, width: int,
-                               pdk: Optional[dict] = None) -> dict[str, Any]:
+                               pdk: dict | None = None) -> dict[str, Any]:
     """``predict_op_delay`` + applicability flags, for consumers that want the
     delay AND its provenance in one call. Numeric ``delay_ns`` is unchanged.
 
@@ -677,9 +681,15 @@ def predict_op_delay_annotated(op: str, width: int,
 
 
 __all__ = [
-    "characterize_ops", "fit_delay_model", "ensure_characterized",
-    "predict_op_delay", "predict_op_delay_annotated", "op_width_in_grid",
-    "ops_per_stage", "is_op_characterized", "OpPoint",
+    "OpPoint",
+    "characterize_ops",
+    "ensure_characterized",
+    "fit_delay_model",
+    "is_op_characterized",
+    "op_width_in_grid",
+    "ops_per_stage",
+    "predict_op_delay",
+    "predict_op_delay_annotated",
 ]
 
 

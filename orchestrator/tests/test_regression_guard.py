@@ -121,7 +121,6 @@ class TestPpaRetryBypass:
                     / "rtl_backup_attempt2.v").exists()
 
     def test_bypass_helper_invalidates_sim_cache(self, tmp_path):
-        from pathlib import Path
 
         import orchestrator.langgraph.pipeline_graph as pg
 

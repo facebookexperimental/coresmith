@@ -39,7 +39,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +146,7 @@ def _iface_base(name: Any) -> str:
     return x
 
 
-def _iface_is_input(iname: str, spec: Any) -> Optional[bool]:
+def _iface_is_input(iname: str, spec: Any) -> bool | None:
     """True=input, False=output, None=ambiguous. Handles _in/_out, AXI
     s_axis/m_axis naming, and pin ``*_i``/``*_o`` direction suffixes."""
     n = str(iname).lower()
@@ -191,7 +191,7 @@ def _iface_tokens(iname: str, spec: Any) -> set[str]:
     return toks
 
 
-def external_input_tokens(project_root: str) -> Optional[set[str]]:
+def external_input_tokens(project_root: str) -> set[str] | None:
     """Tokens of the design's declared EXTERNAL (boundary) input signals.
 
     A boundary input is an INPUT interface that is NOT the consumer side of any

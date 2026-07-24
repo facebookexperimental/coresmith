@@ -9,9 +9,9 @@ re-baselined -- editing those to make RTL 'match' stays ORACLE_TAMPER."""
 from pathlib import Path
 
 from orchestrator.state_store.trust import (
-    write_oracle_manifest,
     check_oracle_manifest,
     rebaseline_oracle_specs,
+    write_oracle_manifest,
 )
 
 

@@ -6,10 +6,9 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-from orchestrator.utils import engine_git_sha
 from orchestrator.langgraph import final_report as fr
+from orchestrator.utils import engine_git_sha
 
 
 def test_engine_git_sha_returns_str():

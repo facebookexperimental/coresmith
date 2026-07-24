@@ -21,7 +21,6 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Optional
 
 from .qspi_contract import QSPIContract
 
@@ -65,7 +64,7 @@ def _bus_protocol_says_qspi(project_root: str) -> bool:
     return False
 
 
-def _connections_have_qspi(connections: Optional[list]) -> bool:
+def _connections_have_qspi(connections: list | None) -> bool:
     if not connections:
         return False
     for c in connections:
@@ -113,7 +112,7 @@ def _reg_map_overrides(project_root: str) -> dict:
 
 
 def arch_indicates_qspi_slave(
-    project_root: str, connections: Optional[list] = None
+    project_root: str, connections: list | None = None
 ) -> bool:
     """RTL-free QSPI-slave hint from the architecture artifacts alone.
 
@@ -159,7 +158,7 @@ def detect_dut_mastered_buses(top_rtl_source: str) -> list[str]:
 def detect_bus_roles(
     project_root: str,
     top_rtl_source: str = "",
-    connections: Optional[list] = None,
+    connections: list | None = None,
 ) -> dict:
     """Multi-role, DUT-blind classification of the chip-top external bus.
 
@@ -206,7 +205,7 @@ def detect_bus_roles(
 def describe_unmodeled_roles(
     project_root: str,
     top_rtl_source: str = "",
-    connections: Optional[list] = None,
+    connections: list | None = None,
 ) -> str:
     """Name the SPECIFIC unmodeled bus role(s), for the advisory / carried-defect.
 
@@ -220,8 +219,8 @@ def describe_unmodeled_roles(
 def classify_chip_bus(
     project_root: str,
     top_rtl_source: str,
-    connections: Optional[list] = None,
-) -> Optional[QSPIContract]:
+    connections: list | None = None,
+) -> QSPIContract | None:
     """Return a QSPIContract if the chip-top external bus is QSPI-slave, else None.
 
     Decision (all DUT-blind):

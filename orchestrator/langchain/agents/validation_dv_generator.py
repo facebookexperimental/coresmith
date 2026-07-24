@@ -199,7 +199,7 @@ class ValidationDVGenerator:
                     r"assert[^\n]*(golden|reference|expected_(?:output|bytes|"
                     r"bits|value|result|word|state|crc))",
                     testbench,
-                    re.I,
+                    re.IGNORECASE,
                 )
             )
             if not _golden_output_assert:

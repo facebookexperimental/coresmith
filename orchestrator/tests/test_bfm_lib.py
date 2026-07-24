@@ -355,7 +355,8 @@ def test_metatest_rejects_nonconformant_read_serializer(tmp_path):
 
 def test_rom_bfm_module_is_deterministic_and_parses():
     from orchestrator.langgraph.bfm_lib import (
-        QSPIRomContract, render_rom_bfm_module,
+        QSPIRomContract,
+        render_rom_bfm_module,
     )
     r = QSPIRomContract(pin_prefix="rom", read_cmd=0x03, addr_bytes=3)
     a = render_rom_bfm_module(r)

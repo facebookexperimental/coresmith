@@ -224,8 +224,8 @@ class TestConstraintChecker:
         """Build an AsyncMock for ClaudeLLM.call that returns the configured
         response per constraint id. Maps from constraint id (looked up via
         run_name) to a {pass, violation_text, ...} dict."""
-        from unittest.mock import AsyncMock
         import json as _json
+        from unittest.mock import AsyncMock
 
         async def _fake_call(*args, **kwargs):
             run_name = kwargs.get("run_name", "")
@@ -238,6 +238,7 @@ class TestConstraintChecker:
     @pytest.mark.asyncio
     async def test_all_subagents_pass_returns_no_violations(self, sample_block_diagram):
         from unittest.mock import patch
+
         from orchestrator.architecture.constraints import check_constraints
 
         # Every subagent returns PASS
@@ -255,6 +256,7 @@ class TestConstraintChecker:
     @pytest.mark.asyncio
     async def test_one_subagent_failure_surfaces_as_violation(self, sample_block_diagram):
         from unittest.mock import patch
+
         from orchestrator.architecture.constraints import check_constraints
 
         # gate_budget subagent fails; others pass
@@ -293,6 +295,7 @@ class TestConstraintChecker:
         at all. CDC presence requires multiple clock domains; with an empty
         clock_tree it must be skipped."""
         from unittest.mock import patch
+
         from orchestrator.architecture.constraints import check_constraints
 
         called_ids: list[str] = []
@@ -324,6 +327,7 @@ class TestConstraintChecker:
         """If a subagent returns unparseable output, the check is reported as
         a warning-severity violation rather than silently passing."""
         from unittest.mock import AsyncMock, patch
+
         from orchestrator.architecture.constraints import check_constraints
 
         with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
@@ -346,6 +350,7 @@ class TestConstraintChecker:
         """A subagent that raises (timeout, API error) becomes a warning-severity
         violation tagged with `_subagent_error`."""
         from unittest.mock import AsyncMock, patch
+
         from orchestrator.architecture.constraints import check_constraints
 
         with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
@@ -398,6 +403,7 @@ class TestConstraintChecker:
         producer and consumer of a connection, the violation flows through
         with the right check id."""
         from unittest.mock import patch
+
         from orchestrator.architecture.constraints import check_constraints
 
         mock_call = self._make_subagent_mock(per_check_response={
@@ -690,11 +696,12 @@ class TestEndToEndStateFlow:
         All specialists now use LLMs; mock them to keep this as a unit test.
         """
         from unittest.mock import AsyncMock, patch
-        from orchestrator.architecture.state import ArchitectureState, load_state, save_state
-        from orchestrator.architecture.specialists.memory_map import analyze_memory_map
-        from orchestrator.architecture.specialists.clock_tree import analyze_clock_tree
-        from orchestrator.architecture.specialists.register_spec import analyze_register_spec
+
         from orchestrator.architecture.constraints import check_constraints
+        from orchestrator.architecture.specialists.clock_tree import analyze_clock_tree
+        from orchestrator.architecture.specialists.memory_map import analyze_memory_map
+        from orchestrator.architecture.specialists.register_spec import analyze_register_spec
+        from orchestrator.architecture.state import ArchitectureState, load_state, save_state
 
         ct_response = json.dumps({
             "domains": [{"name": "clk_sys", "frequency_mhz": 50.0, "source": "PLL"}],
@@ -800,6 +807,7 @@ class TestInterfaceDefinition:
         canonical schema. We mock the LLM to return a known good response."""
         from pathlib import Path
         from unittest.mock import AsyncMock, patch
+
         from orchestrator.architecture.specialists.interface_definition import (
             analyze_interface_definition,
         )
@@ -915,11 +923,12 @@ class TestInterfaceDefinition:
         import json as _json
         from pathlib import Path
         from unittest.mock import AsyncMock, patch
-        from orchestrator.architecture.specialists.interface_definition import (
-            analyze_interface_definition,
-        )
+
         from orchestrator.architecture.constraints import (
             _check_interface_family_coherence,
+        )
+        from orchestrator.architecture.specialists.interface_definition import (
+            analyze_interface_definition,
         )
 
         monkeypatch.delenv("CORESMITH_INTERFACE_FAMILY_PROPAGATION", raising=False)
@@ -962,11 +971,12 @@ class TestInterfaceDefinition:
         import json as _json
         from pathlib import Path
         from unittest.mock import AsyncMock, patch
-        from orchestrator.architecture.specialists.interface_definition import (
-            analyze_interface_definition,
-        )
+
         from orchestrator.architecture.constraints import (
             _check_interface_family_coherence,
+        )
+        from orchestrator.architecture.specialists.interface_definition import (
+            analyze_interface_definition,
         )
 
         monkeypatch.setenv("CORESMITH_INTERFACE_FAMILY_PROPAGATION", "0")
@@ -996,6 +1006,7 @@ class TestInterfaceDefinition:
         data_width_bits doesn't equal the sum of field widths."""
         from pathlib import Path
         from unittest.mock import AsyncMock, patch
+
         from orchestrator.architecture.specialists.interface_definition import (
             analyze_interface_definition,
         )
@@ -1049,6 +1060,7 @@ class TestInterfaceDefinition:
         exactly one contract entry. Validator should flag missing ones."""
         from pathlib import Path
         from unittest.mock import AsyncMock, patch
+
         from orchestrator.architecture.specialists.interface_definition import (
             analyze_interface_definition,
         )
@@ -1100,6 +1112,7 @@ class TestInterfaceDefinition:
         flow_control_policy.semantics == free_running (or skid)."""
         from pathlib import Path
         from unittest.mock import AsyncMock, patch
+
         from orchestrator.architecture.specialists.interface_definition import (
             analyze_interface_definition,
         )
@@ -1173,6 +1186,7 @@ class TestInterfaceDefinition:
         """elastic_fifo with min_buffer_depth_beats < 2 should be flagged."""
         from pathlib import Path
         from unittest.mock import AsyncMock, patch
+
         from orchestrator.architecture.specialists.interface_definition import (
             analyze_interface_definition,
         )
@@ -1255,8 +1269,8 @@ class TestCrossSpecContractAdherence:
 
     def _stub_call(self, per_check_response):
         """Same pattern as TestConstraintChecker._make_subagent_mock."""
-        from unittest.mock import AsyncMock
         import json as _json
+        from unittest.mock import AsyncMock
 
         async def _fake_call(*args, **kwargs):
             run_name = kwargs.get("run_name", "")
@@ -1288,6 +1302,7 @@ class TestCrossSpecContractAdherence:
         """When interface_contracts.json exists with non-empty contracts,
         the cross_spec_contract_adherence subagent must be invoked."""
         from unittest.mock import patch
+
         from orchestrator.architecture.constraints import check_constraints
 
         contracts = {
@@ -1327,6 +1342,7 @@ class TestCrossSpecContractAdherence:
     @pytest.mark.asyncio
     async def test_subagent_skipped_when_no_contracts(self, tmp_project):
         from unittest.mock import patch
+
         from orchestrator.architecture.constraints import check_constraints
 
         called: list[str] = []
@@ -1404,8 +1420,9 @@ class TestCrossSpecFifoDepthAdherence:
     def test_artifact_bundle_includes_rtl_heads(self, tmp_project):
         """The audit must see the per-block RTL heads in the bundle so it
         can grep for `localparam DEPTH = N` declarations."""
-        from orchestrator.architecture.constraints import _build_artifact_bundle
         from pathlib import Path
+
+        from orchestrator.architecture.constraints import _build_artifact_bundle
 
         rtl_dir = Path(tmp_project) / "rtl" / "design"
         rtl_dir.mkdir(parents=True)

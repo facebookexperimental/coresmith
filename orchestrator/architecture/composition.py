@@ -42,8 +42,9 @@ import logging
 import os
 import re
 from collections import defaultdict, deque
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional, Tuple
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +187,7 @@ def _load_validation_kpis(project_root: str) -> list[dict]:
 
 def resolve_functional_acceptance(
     project_root: str,
-) -> Optional[Callable[[Any, Any], bool]]:
+) -> Callable[[Any, Any], bool] | None:
     """Resolve a declared functional-acceptance predicate ``accept(expected, observed)``.
 
     Resolution order (first hit wins):
@@ -234,7 +235,7 @@ def _load_acceptance_callable(
     spec: str,
     project_root: str | None = None,
     default_func: str = "accept",
-) -> Optional[Callable[[Any, Any], Any]]:
+) -> Callable[[Any, Any], Any] | None:
     """Load an ``<default_func>(expected, observed)`` callable from ``path.py[:name]``.
 
     ``spec`` is a filesystem path to a ``.py`` (optionally suffixed
@@ -275,7 +276,7 @@ def _load_acceptance_callable(
     return None
 
 
-def resolve_throughput_floor(project_root: str) -> Optional[float]:
+def resolve_throughput_floor(project_root: str) -> float | None:
     """Resolve the maximum allowed cycle count (the throughput *floor*).
 
     The gate compares ``observed_cycles`` against this value; a run that takes
@@ -390,7 +391,7 @@ _INLINE_STIM_RE = re.compile(
 )
 
 
-def _extract_structured(chunk: str) -> tuple[Optional[dict], Optional[Any]]:
+def _extract_structured(chunk: str) -> tuple[dict | None, Any | None]:
     """Pull a machine-readable stimulus/expected pair out of a FUNC chunk.
 
     Recognises two shapes:
@@ -402,8 +403,8 @@ def _extract_structured(chunk: str) -> tuple[Optional[dict], Optional[Any]]:
 
     Returns ``(stimulus_struct, expected_struct)`` where each may be ``None``.
     """
-    stimulus_struct: Optional[dict] = None
-    expected_struct: Optional[Any] = None
+    stimulus_struct: dict | None = None
+    expected_struct: Any | None = None
 
     for m in _JSON_FENCE_RE.finditer(chunk):
         try:
@@ -681,7 +682,7 @@ def _public_callables(module) -> list[tuple[str, Callable]]:
 def resolve_reference_entrypoint(
     project_root: str,
     ref_module,
-) -> Tuple[Optional[Callable], str]:
+) -> tuple[Callable | None, str]:
     """Resolve the callable that IS the design's executable oracle.
 
     Resolution order (first hit wins):
@@ -763,7 +764,7 @@ def resolve_reference_entrypoint(
     return None, env_entry or ""
 
 
-def _resolve_dotted_entry(spec: str, ref_module) -> Optional[Callable]:
+def _resolve_dotted_entry(spec: str, ref_module) -> Callable | None:
     """Resolve a ``"func"`` / ``"module:func"`` / ``"a.b.func"`` entry spec.
 
     ``module:func`` imports ``module`` (a dotted import path) and reads ``func``
@@ -800,7 +801,7 @@ def _resolve_dotted_entry(spec: str, ref_module) -> Optional[Callable]:
     return _getattr_path(ref_module, spec)
 
 
-def _getattr_path(obj, dotted: str) -> Optional[Callable]:
+def _getattr_path(obj, dotted: str) -> Callable | None:
     """``getattr`` along a dotted path; return the callable or None."""
     if obj is None or not dotted:
         return None
@@ -855,7 +856,7 @@ def load_block_goldens(
             module = _import_module_from_path(
                 path, f"_coresmith_blkgolden_{name}"
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise RuntimeError(
                 f"block golden {path} failed to import: "
                 f"{type(exc).__name__}: {exc}"
@@ -872,13 +873,13 @@ def load_block_goldens(
             raise RuntimeError(f"block golden {path} has no BlockGolden class")
         try:
             instance = block_cls()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise RuntimeError(
                 f"block golden {path} BlockGolden() failed to instantiate: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
         # Attach the declared ports so compose_and_run can map edges.
-        instance._coresmith_ports = ports  # noqa: SLF001
+        instance._coresmith_ports = ports
         out[name] = instance
     return out
 
@@ -1489,7 +1490,8 @@ def _deep_equal(a, b) -> bool:
         b = list(b)
     if _np is not None and (isinstance(a, _np.ndarray) or isinstance(b, _np.ndarray)):
         try:
-            aa = _np.asarray(a); bb = _np.asarray(b)
+            aa = _np.asarray(a)
+            bb = _np.asarray(b)
             return aa.shape == bb.shape and bool(_np.array_equal(aa, bb))
         except Exception:
             return False
@@ -1630,7 +1632,7 @@ class ReferenceInvocationError(RuntimeError):
 
 
 def _run_reference(
-    entry_callable: Optional[Callable],
+    entry_callable: Callable | None,
     stimulus_struct: Any,
     *,
     reraise: bool = False,
@@ -1695,7 +1697,7 @@ def _run_reference(
         # Non-dict stimulus: single positional argument.
         result = entry_callable(stimulus_struct)
         return _normalize_ref_output(result)
-    except Exception as exc:  # noqa: BLE001 - reference signature/behaviour
+    except Exception as exc:
         logger.warning(
             "composition gate: reference entry call failed: %s: %s",
             type(exc).__name__,

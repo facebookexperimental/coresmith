@@ -26,9 +26,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 from .qspi_contract import QSPIContract
 
@@ -77,7 +78,7 @@ def _import_from_path(path: Path, mod_name: str):
     return mod
 
 
-def _load_reference(project_root: str) -> Optional[Callable]:
+def _load_reference(project_root: str) -> Callable | None:
     """Find the pure golden reference ``run(stimulus)`` for this run.
 
     Prefers ``inputs/*golden*.py`` with a module-level ``run`` (the FRD
@@ -101,7 +102,7 @@ def _load_reference(project_root: str) -> Optional[Callable]:
     return None
 
 
-def _load_acceptance_case(project_root: str) -> Optional[tuple[str, Any]]:
+def _load_acceptance_case(project_root: str) -> tuple[str, Any] | None:
     """Load the FIRST acceptance case ``(name, stimulus)`` for this run.
 
     The deterministic DV uses the first acceptance case (the KAT) as its
@@ -132,7 +133,7 @@ def _load_acceptance_case(project_root: str) -> Optional[tuple[str, Any]]:
 
 def build_plan_from_run(
     project_root: str, contract: QSPIContract
-) -> Optional[StimulusPlan]:
+) -> StimulusPlan | None:
     """Build a deterministic host-flow plan + oracle from the run artifacts.
 
     Returns None when a contract-faithful, self-contained plan cannot be
@@ -149,7 +150,7 @@ def build_plan_from_run(
     # Map stimulus -> IN-window bytes + CFG0 scalar (host-flow convention).
     key_bytes = b""
     data_bytes = b""
-    cfg0_val: Optional[int] = None
+    cfg0_val: int | None = None
     if isinstance(stim, dict):
         key_bytes = _flatten_bytes(stim.get("key"))
         data_bytes = _flatten_bytes(

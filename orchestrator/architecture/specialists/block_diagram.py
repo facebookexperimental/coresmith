@@ -18,9 +18,10 @@ from __future__ import annotations
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any
 
-from pathlib import Path
+from orchestrator.langchain.prompts.skills import load_skills as _load_skills
 
 _PROMPT_FILE = Path(__file__).resolve().parents[2] / "langchain" / "prompts" / "block_diagram.md"
 SYSTEM_PROMPT = _PROMPT_FILE.read_text()
@@ -31,7 +32,6 @@ SYSTEM_PROMPT = _PROMPT_FILE.read_text()
 # cross-candidate selection / per-unit recon feedback). The skill is self-gating
 # (it only applies when the design has that coupling), so it is safe to load for
 # every block-diagram generation.
-from orchestrator.langchain.prompts.skills import load_skills as _load_skills
 # The block-diagram author decides the decomposition -- it needs the SAME
 # reference skills the uArch author has, so it partitions with memory-vs-flops,
 # arithmetic-precision, pipeline and throughput budgets in mind (not just the
@@ -85,8 +85,8 @@ def _scan_golden_models(
     Returns:
         A formatted string summarising the discovered models.
     """
-    from pathlib import Path
     import ast
+    from pathlib import Path
 
     roots: list[Path] = []
     for candidate in (
@@ -389,9 +389,9 @@ async def analyze_block_diagram(
         ) + _SKILLS_SUFFIX
 
         # Import here to avoid circular deps and allow mocking in tests
-        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
-
         import os as _os
+
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
         _arch_to = int(_os.environ.get("CORESMITH_ARCH_LLM_TIMEOUT_S", "1200") or 1200)
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=_arch_to)
 

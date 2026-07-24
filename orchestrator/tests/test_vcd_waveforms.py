@@ -23,14 +23,13 @@ from pathlib import Path
 import pytest
 
 from orchestrator.architecture.specialists.chip_finish_dashboard import (
+    _collect_vcd_waveforms,
+    _detect_clock_period,
     _parse_vcd_header,
     _parse_vcd_values,
-    _detect_clock_period,
     _vcd_to_wavedrom,
-    _collect_vcd_waveforms,
     inject_vcd_waveforms,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

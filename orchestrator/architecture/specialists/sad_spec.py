@@ -19,10 +19,8 @@ The LLM produces Markdown directly (no JSON parsing required).
 from __future__ import annotations
 
 import json
-from typing import Any
-
 from pathlib import Path
-
+from typing import Any
 
 _PROMPT_FILE = Path(__file__).resolve().parents[2] / "langchain" / "prompts" / "sad_spec.md"
 SYSTEM_PROMPT = _PROMPT_FILE.read_text()
@@ -126,7 +124,10 @@ async def generate_sad(
             )
 
         from orchestrator.langchain.agents.coresmith_llm import (
-            DEFAULT_MODEL, ClaudeLLM, arch_reasoning_effort)
+            DEFAULT_MODEL,
+            ClaudeLLM,
+            arch_reasoning_effort,
+        )
 
         # SAD decomposition mistakes (e.g. a shared store frozen inside a
         # functional block) cost whole triage rounds -> higher reasoning tier.

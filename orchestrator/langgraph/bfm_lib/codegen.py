@@ -262,7 +262,7 @@ def render_integration_tb(
     contract: QSPIContract,
     design_name: str,
     plan: StimulusPlan,
-    rom_contract: "QSPIRomContract | None" = None,
+    rom_contract: QSPIRomContract | None = None,
     rom_data: bytes = b"",
     *,
     include_conformance: bool = False,

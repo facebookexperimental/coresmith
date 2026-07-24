@@ -16,12 +16,14 @@ Strategy:
 
 from __future__ import annotations
 
-from orchestrator._timeouts import scaled
 import re
 from pathlib import Path
 from typing import Any
 
 from opentelemetry import trace
+
+from orchestrator._timeouts import scaled
+from orchestrator.langchain.prompts.skills import load_skills as _load_skills
 
 from .coresmith_llm import ClaudeLLM
 
@@ -39,8 +41,6 @@ SYSTEM_PROMPT = _PROMPT_FILE.read_text()
 # work + PULL state via the `coresmith` CLI, and the fresh-seed gate discipline
 # (a TB that only passes on a pinned seed FAILS the gate). Wired UNCONDITIONALLY
 # so it is present whether or not CORESMITH_PROMPT_SLIM is set.
-from orchestrator.langchain.prompts.skills import load_skills as _load_skills
-
 _VERIFY_SKILL = _load_skills("verify_in_context")
 if _VERIFY_SKILL:
     SYSTEM_PROMPT = (

@@ -348,7 +348,8 @@ class TestLefDbuNormalization:
         assert "DATABASE MICRONS 2000" not in out
         # EVERY line except the DATABASE MICRONS line is byte-identical -> no
         # coordinate value was scaled (that would corrupt the macro geometry).
-        mask = lambda t: re.sub(r"DATABASE MICRONS \d+", "DATABASE MICRONS _", t)
+        def mask(t):
+            return re.sub(r"DATABASE MICRONS \d+", "DATABASE MICRONS _", t)
         assert mask(src) == mask(out)
         # spot-check a coordinate survived verbatim.
         assert "SIZE 200.005 BY 300.010 ;" in out
@@ -413,7 +414,8 @@ class TestPrepareNormalizesMacroLefs:
         assert "DATABASE MICRONS 1000" in norm                    # normalized to tech
         assert "DATABASE MICRONS 2000" not in norm
         # coordinates byte-identical vs the original 2000-DBU LEF.
-        mask = lambda t: re.sub(r"DATABASE MICRONS \d+", "DATABASE MICRONS _", t)
+        def mask(t):
+            return re.sub(r"DATABASE MICRONS \d+", "DATABASE MICRONS _", t)
         assert mask(Path(lef).read_text()) == mask(norm)
 
     def test_env_off_no_normalization(self, tmp_path, monkeypatch):

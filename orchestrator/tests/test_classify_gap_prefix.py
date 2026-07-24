@@ -12,8 +12,6 @@ single-block re-spec), and keeps a true offset-0 mismatch as 'contract'.
 """
 from __future__ import annotations
 
-import pytest
-
 from orchestrator.architecture.model_integration import (
     _classify_gap,
     first_divergence_offset,

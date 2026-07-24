@@ -19,8 +19,6 @@ import os
 import time
 from pathlib import Path
 
-import pytest
-
 from orchestrator.graph_lifecycle import GraphLifecycle
 
 

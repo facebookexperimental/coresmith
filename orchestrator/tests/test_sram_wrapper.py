@@ -5,10 +5,7 @@
 """Unit tests for the generic SRAM-wrapper gate (sram_wrapper.py)."""
 import os
 
-import pytest
-
 from orchestrator.langgraph import sram_wrapper as sw
-
 
 BIG_RAW = """
 module myblock (input clk);

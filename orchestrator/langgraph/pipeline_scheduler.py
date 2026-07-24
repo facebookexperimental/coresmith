@@ -25,9 +25,8 @@ pipeline contract (piece #3) that constrains both the Amaranth block model and R
 """
 from __future__ import annotations
 
-import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
 
 from .arith_characterize import predict_op_delay as _default_delay
 
@@ -80,8 +79,8 @@ def _topo_order(node_ids: list[str], edges: list[tuple[str, str]]) -> list[str]:
 
 def schedule_dfg(nodes: list[Node], edges: list[tuple[str, str]],
                  period_ns: float,
-                 delay_fn: Optional[Callable[[str, int], Optional[float]]] = None,
-                 pdk: Optional[dict] = None) -> Schedule:
+                 delay_fn: Callable[[str, int], float | None] | None = None,
+                 pdk: dict | None = None) -> Schedule:
     """Chaining-ASAP schedule of a DFG to meet ``period_ns``.
 
     ``edges`` are (producer_id, consumer_id) data dependencies. ``delay_fn(op,
@@ -144,8 +143,8 @@ def schedule_dfg(nodes: list[Node], edges: list[tuple[str, str]],
 
 def schedule_reduction(op: str, width: int, n_terms: int, period_ns: float,
                        combine: str = "add",
-                       delay_fn: Optional[Callable[[str, int], Optional[float]]] = None,
-                       pdk: Optional[dict] = None) -> Schedule:
+                       delay_fn: Callable[[str, int], float | None] | None = None,
+                       pdk: dict | None = None) -> Schedule:
     """Schedule an N-term reduction: N leaf ops feeding a balanced ``combine`` tree.
 
     This is the canonical search/accumulate shape (e.g. a SAD/SSD over N pixels,
@@ -203,7 +202,7 @@ def pipeline_contract_text(sched: Schedule, title: str = "datapath") -> str:
 
 
 def pdk_budget_section(target_clock_mhz: float = 50.0,
-                       pdk: Optional[dict] = None) -> str:
+                       pdk: dict | None = None) -> str:
     """Render the characterized arithmetic timing budget for the µArch prompt.
 
     Returns '' if the PDK arithmetic model isn't characterized yet (caller skips
@@ -281,8 +280,14 @@ def pdk_budget_section(target_clock_mhz: float = 50.0,
     )
 
 
-__all__ = ["Node", "Schedule", "schedule_dfg", "schedule_reduction",
-           "pipeline_contract_text", "pdk_budget_section"]
+__all__ = [
+    "Node",
+    "Schedule",
+    "pdk_budget_section",
+    "pipeline_contract_text",
+    "schedule_dfg",
+    "schedule_reduction",
+]
 
 
 if __name__ == "__main__":  # pragma: no cover

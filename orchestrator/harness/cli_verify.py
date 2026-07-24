@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any
 
 # Exit codes (kept in sync with harness.cli).
 EXIT_PASS = 0
@@ -54,8 +53,8 @@ def cmd_verify_model(args) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_USAGE
-    from orchestrator.harness import verify as V
     from orchestrator.harness import blocks as B
+    from orchestrator.harness import verify as V
 
     if getattr(args, "all", False):
         names = B.block_names(root)

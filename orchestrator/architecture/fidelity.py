@@ -36,8 +36,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ def fidelity_gate_enabled() -> bool:
 
 def resolve_fidelity_metric(
     project_root: str,
-) -> Optional[Callable[[Any, Any], float]]:
+) -> Callable[[Any, Any], float] | None:
     """Resolve a declared ``fidelity(expected, observed) -> float`` callable.
 
     Resolution order (first hit wins), mirroring
@@ -188,7 +189,7 @@ def _better_or_equal(measured: float, threshold: float, direction: str) -> bool:
 
 def compute_fidelity_derate(
     project_root: str, expected: Any, observed: Any
-) -> Optional[dict]:
+) -> dict | None:
     """Score ``observed`` against ``expected`` and the declared budget.
 
     Returns a verdict dict, or ``None`` when no fidelity metric is declared (the
@@ -220,7 +221,7 @@ def compute_fidelity_derate(
     if within and escalate_floor is not None:
         escalate = not _better_or_equal(measured, escalate_floor, direction)
 
-    derate_pct: Optional[float] = None
+    derate_pct: float | None = None
     if isinstance(ideal, (int, float)) and ideal != 0:
         gap = (ideal - measured) if direction == "higher" else (measured - ideal)
         derate_pct = max(0.0, 100.0 * gap / abs(ideal))
@@ -243,7 +244,7 @@ _LEDGER_NAME = "derate_ledger.json"
 
 def write_derate_ledger(
     project_root: str,
-    fid: Optional[dict],
+    fid: dict | None,
     *,
     byte_exact: bool,
     block: str = "_integrated",
@@ -302,7 +303,7 @@ def write_derate_ledger(
         logger.warning("fidelity gate: could not write derate ledger: %s", exc)
 
 
-def read_derate_escalation(project_root: str) -> Optional[dict]:
+def read_derate_escalation(project_root: str) -> dict | None:
     """Return the integrated derate entry that needs chip-lead sign-off, else None.
 
     The composition gate passes functionally at a within-budget derate, but when

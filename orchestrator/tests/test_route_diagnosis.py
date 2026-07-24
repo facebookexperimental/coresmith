@@ -12,11 +12,6 @@ CORESMITH_ROUTE_DIAGNOSIS env gate (both branches).
 """
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
-import pytest
-
 from orchestrator.langgraph.pipeline_graph import (
     _compose_actionable_error,
     _route_diagnosis_to_previous_error,

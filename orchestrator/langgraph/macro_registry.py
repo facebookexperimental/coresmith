@@ -486,7 +486,7 @@ def detect_macro_shells(text: str) -> list[ShellSpec]:
 class BindResult:
     """Outcome of binding every macro shell in a design to a concrete macro."""
 
-    resolved: list[tuple[ShellSpec, "MacroInfo"]] = field(default_factory=list)
+    resolved: list[tuple[ShellSpec, MacroInfo]] = field(default_factory=list)
     plans: list[tuple[ShellSpec, object]] = field(default_factory=list)  # CompositionPlan
     errors: list[str] = field(default_factory=list)
 
@@ -495,7 +495,7 @@ class BindResult:
         return not self.errors
 
     @property
-    def macros(self) -> list["MacroInfo"]:
+    def macros(self) -> list[MacroInfo]:
         return [mi for _, mi in self.resolved]
 
 

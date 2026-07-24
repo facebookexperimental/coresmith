@@ -22,17 +22,25 @@ each node carry an arbitrary delay without a real EDA model.
 
 from __future__ import annotations
 
+import dataclasses
 import random
 
 import pytest
 
 from orchestrator.langgraph.pipeline_scheduler import (
-    Node, Schedule, schedule_dfg, schedule_reduction, _topo_order,
+    Node,
+    Schedule,
+    _topo_order,
+    schedule_dfg,
+    schedule_reduction,
 )
 
 EPS = 1e-9
-# width (ps) -> delay (ns); each node's width IS its delay.
-DFN = lambda op, w: w / 1000.0
+
+
+def DFN(op, w):
+    """width (ps) -> delay (ns); each node's width IS its delay."""
+    return w / 1000.0
 
 
 def _d(delay_ns: float) -> int:
@@ -212,7 +220,8 @@ def test_parallel_prefix_scan():
         nxt = list(cur)
         for i in range(n):
             if i - step >= 0:
-                nid = f"p{k}"; k += 1
+                nid = f"p{k}"
+                k += 1
                 nodes.append(Node(nid, "add", _d(3.8)))
                 edges.append((cur[i], nid))
                 edges.append((cur[i - step], nid))
@@ -237,9 +246,12 @@ def test_fft_butterfly_network():
         nxt = list(cur)
         for i in range(0, n, width * 2):
             for j in range(width):
-                tw = Node(f"tw{bid}", "mul", _d(6.8)); bid += 1
-                a = Node(f"ba{bid}", "add", _d(3.8)); bid += 1
-                s = Node(f"bs{bid}", "sub", _d(3.8)); bid += 1
+                tw = Node(f"tw{bid}", "mul", _d(6.8))
+                bid += 1
+                a = Node(f"ba{bid}", "add", _d(3.8))
+                bid += 1
+                s = Node(f"bs{bid}", "sub", _d(3.8))
+                bid += 1
                 nodes += [tw, a, s]
                 top, bot = cur[i + j], cur[i + j + width]
                 edges += [(bot, tw.id), (top, a.id), (tw.id, a.id),
@@ -373,7 +385,8 @@ def _random_dag(rng: random.Random, max_nodes: int, period: float):
     layers, i = [], 0
     while i < n:
         w = rng.randint(1, min(6, n - i))
-        layers.append(ids[i:i + w]); i += w
+        layers.append(ids[i:i + w])
+        i += w
     nodes = []
     for nid in ids:
         # delays spanning 0, sub-period, near-period, and over-period
@@ -392,9 +405,6 @@ def _random_dag(rng: random.Random, max_nodes: int, period: float):
             for u in rng.sample(pool, k):
                 edges.append((u, nid))
     return nodes, edges, layers
-
-
-import dataclasses
 
 
 def test_verifier_has_teeth_dependency():

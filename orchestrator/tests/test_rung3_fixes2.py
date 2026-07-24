@@ -226,7 +226,8 @@ def _wire_integration_node(monkeypatch, tmp_path, *, tb_body):
     tb = _write_tb(tmp_path / "tb" / "chip_tb.py", tb_body)
 
     from orchestrator.langgraph.integration_helpers import (
-        VerilogModule, VerilogPort,
+        VerilogModule,
+        VerilogPort,
     )
 
     monkeypatch.setattr(

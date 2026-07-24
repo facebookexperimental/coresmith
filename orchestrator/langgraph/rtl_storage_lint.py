@@ -139,7 +139,7 @@ class StorageLintReport:
         return not self.findings
 
     @property
-    def min_finding_bits(self) -> "int | None":
+    def min_finding_bits(self) -> int | None:
         """Width of the SMALLEST offending reg (the one closest to the
         threshold), or None when clean. This is the finding a reviewer is most
         likely to accept as borderline."""
@@ -147,7 +147,7 @@ class StorageLintReport:
             return None
         return min(f.width_bits for f in self.findings)
 
-    def proximity_ratio(self) -> "float | None":
+    def proximity_ratio(self) -> float | None:
         """The closest finding's width as a MULTIPLE of the threshold (bits vs
         threshold). ~1.0-2.0 = borderline; large = clearly over. None when
         clean or the threshold is degenerate. Recorded in the verdict so an
@@ -330,9 +330,9 @@ def _mem_is_sram_backed(name: str, verilog_src: str) -> bool:
 
 def find_oversized_memory_arrays(
     verilog_src: str,
-    max_words: "int | None" = None,
-    max_bits: "int | None" = None,
-    period_ns: "float | None" = None,
+    max_words: int | None = None,
+    max_bits: int | None = None,
+    period_ns: float | None = None,
     pdk=None,
 ) -> MemoryTierReport:
     """Find register-tier memories that belong in an SRAM macro (Section 5f/4a).
@@ -452,7 +452,7 @@ def format_lint_report(report: StorageLintReport, block: str = "") -> str:
     if report.ok:
         return ""
     head = (
-        f"WIDE FLAT PACKED STORAGE WITH DYNAMIC PART-SELECT"
+        "WIDE FLAT PACKED STORAGE WITH DYNAMIC PART-SELECT"
         + (f" in {block}" if block else "")
         + f" ({len(report.findings)} reg(s), threshold {report.min_bits} bits):\n"
     )
@@ -579,26 +579,54 @@ def _blank_comments_strings(src: str) -> str:
         nxt = src[i + 1] if i + 1 < n else ""
         if state is None:
             if c == "/" and nxt == "/":
-                state = "line"; out.append("  "); i += 2; continue
+                state = "line"
+                out.append("  ")
+                i += 2
+                continue
             if c == "/" and nxt == "*":
-                state = "block"; out.append("  "); i += 2; continue
+                state = "block"
+                out.append("  ")
+                i += 2
+                continue
             if c == '"':
-                state = "str"; out.append('"'); i += 1; continue
-            out.append(c); i += 1; continue
+                state = "str"
+                out.append('"')
+                i += 1
+                continue
+            out.append(c)
+            i += 1
+            continue
         if state == "line":
             if c == "\n":
-                state = None; out.append("\n"); i += 1; continue
-            out.append(" "); i += 1; continue
+                state = None
+                out.append("\n")
+                i += 1
+                continue
+            out.append(" ")
+            i += 1
+            continue
         if state == "block":
             if c == "*" and nxt == "/":
-                state = None; out.append("  "); i += 2; continue
-            out.append("\n" if c == "\n" else " "); i += 1; continue
+                state = None
+                out.append("  ")
+                i += 2
+                continue
+            out.append("\n" if c == "\n" else " ")
+            i += 1
+            continue
         # state == 'str'
         if c == "\\" and nxt:
-            out.append("  "); i += 2; continue
+            out.append("  ")
+            i += 2
+            continue
         if c == '"':
-            state = None; out.append('"'); i += 1; continue
-        out.append("\n" if c == "\n" else " "); i += 1; continue
+            state = None
+            out.append('"')
+            i += 1
+            continue
+        out.append("\n" if c == "\n" else " ")
+        i += 1
+        continue
     return "".join(out)
 
 
@@ -827,11 +855,20 @@ def format_ifdef_lint_report(report: IfdefLintReport, block: str = "") -> str:
 
 
 __all__ = [
-    "StorageFinding", "StorageLintReport",
-    "find_flat_packed_dynamic_storage", "format_lint_report",
-    "MemoryTierFinding", "MemoryTierReport", "find_oversized_memory_arrays",
-    "format_memory_tier_report", "flat_read_mux_ns",
-    "DEFAULT_MAX_WORDS", "DEFAULT_MAX_BITS",
-    "IfdefFinding", "IfdefLintReport", "ifdef_lint_enabled",
-    "find_functional_ifdef_regions", "format_ifdef_lint_report",
+    "DEFAULT_MAX_BITS",
+    "DEFAULT_MAX_WORDS",
+    "IfdefFinding",
+    "IfdefLintReport",
+    "MemoryTierFinding",
+    "MemoryTierReport",
+    "StorageFinding",
+    "StorageLintReport",
+    "find_flat_packed_dynamic_storage",
+    "find_functional_ifdef_regions",
+    "find_oversized_memory_arrays",
+    "flat_read_mux_ns",
+    "format_ifdef_lint_report",
+    "format_lint_report",
+    "format_memory_tier_report",
+    "ifdef_lint_enabled",
 ]

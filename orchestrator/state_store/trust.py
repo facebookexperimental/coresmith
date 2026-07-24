@@ -18,11 +18,11 @@ treated as "nothing to check" (non-blocking), NOT a tamper.
 from __future__ import annotations
 
 import hashlib
-import os
 import json
+import os
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 _MANIFEST_NAME = "oracle_manifest.json"
 
@@ -31,7 +31,7 @@ def _manifest_path(project_root: str | Path) -> Path:
     return Path(project_root) / ".coresmith" / _MANIFEST_NAME
 
 
-def _sha256(path: Path) -> Optional[str]:
+def _sha256(path: Path) -> str | None:
     try:
         h = hashlib.sha256()
         with path.open("rb") as fh:
@@ -107,7 +107,7 @@ def _digest_map(project_root: str | Path) -> dict[str, str]:
     return out
 
 
-def write_oracle_manifest(project_root: str | Path) -> Optional[dict]:
+def write_oracle_manifest(project_root: str | Path) -> dict | None:
     """Snapshot the oracle files' hashes to ``.coresmith/oracle_manifest.json``.
 
     Best-effort: returns the manifest dict on success, ``None`` on failure.

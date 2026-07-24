@@ -1,8 +1,6 @@
 """Tests for the generic stimulus<->contract consistency guard."""
 import json
 
-import pytest
-
 from orchestrator.architecture import stimulus_contract_guard as scg
 
 _ENV = [

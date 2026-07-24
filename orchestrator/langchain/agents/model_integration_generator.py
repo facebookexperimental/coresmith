@@ -35,6 +35,7 @@ from typing import Any
 from opentelemetry import trace
 
 from orchestrator._timeouts import scaled
+from orchestrator.langchain.prompts.skills import load_skills as _load_skills
 
 from .coresmith_llm import ClaudeLLM
 
@@ -57,7 +58,6 @@ else:  # pragma: no cover - prompt ships with the repo
 
 # Inject the shared streaming-protocol skills so the chip wiring honours the same
 # handshake + framing (tvalid/tready, tlast/tuser propagation) the block models do.
-from orchestrator.langchain.prompts.skills import load_skills as _load_skills
 _SKILLS_TEXT = _load_skills("axi_stream", "srdy_drdy")
 if _SKILLS_TEXT:
     SYSTEM_PROMPT = (

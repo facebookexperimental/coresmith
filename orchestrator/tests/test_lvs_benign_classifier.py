@@ -30,12 +30,10 @@ Hermetic -- no EDA tools / PDK needed.
 """
 from __future__ import annotations
 
-import pytest
-
 from orchestrator.langgraph.backend_helpers import (
     classify_netgen_lvs_benign,
-    reconcile_lvs_match,
     lvs_benign_classify_enabled,
+    reconcile_lvs_match,
 )
 
 _GATE = "CORESMITH_LVS_BENIGN_CLASSIFY"

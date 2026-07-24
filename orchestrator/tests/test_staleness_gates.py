@@ -18,9 +18,9 @@ assemble (truncation adapters would destroy the amended semantics).
 import json
 
 from orchestrator.langgraph.pipeline_helpers import (
+    block_contract_sha1,
     detect_model_interface_gap,
     stale_uarch_spec_blocks,
-    block_contract_sha1,
 )
 
 

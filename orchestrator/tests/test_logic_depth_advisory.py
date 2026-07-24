@@ -15,17 +15,18 @@ WNS is the authority); PDK-absent runs keep it gating. Env
 """
 from __future__ import annotations
 
-import pytest
-
-from orchestrator.langgraph import ppa_check as pc
 from orchestrator.langgraph import pipeline_graph as pg
+from orchestrator.langgraph import ppa_check as pc
 
 
 class TestStaToolingAvailable:
     def _synth(self, tmp_path):
-        nl = tmp_path / "n.v"; nl.write_text("x")
-        sdc = tmp_path / "n.sdc"; sdc.write_text("x")
-        lib = tmp_path / "n.lib"; lib.write_text("x")
+        nl = tmp_path / "n.v"
+        nl.write_text("x")
+        sdc = tmp_path / "n.sdc"
+        sdc.write_text("x")
+        lib = tmp_path / "n.lib"
+        lib.write_text("x")
         return {"netlist_path": str(nl), "sdc_path": str(sdc),
                 "liberty_path": str(lib)}
 

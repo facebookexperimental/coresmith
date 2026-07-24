@@ -23,12 +23,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from orchestrator.langchain.agents.integration_lead import (
-    IntegrationLeadAgent,
-    SYSTEM_PROMPT,
     _PROMPT_FILE,
+    SYSTEM_PROMPT,
+    IntegrationLeadAgent,
     assert_blocks_instantiated,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -543,8 +542,8 @@ class TestIntegrationCheckNode:
 
     @pytest.mark.asyncio
     async def test_skips_when_no_rtl_parsed(self):
-        from orchestrator.langgraph.pipeline_graph import integration_check_node
         from orchestrator.langgraph.integration_helpers import VerilogModule
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
 
         blocks = self._make_completed_blocks(["a", "b"])
         state = self._make_state(blocks)
@@ -571,10 +570,11 @@ class TestIntegrationCheckNode:
 
     @pytest.mark.asyncio
     async def test_calls_integration_lead_agent(self):
-        from orchestrator.langgraph.pipeline_graph import integration_check_node
         from orchestrator.langgraph.integration_helpers import (
-            VerilogModule, VerilogPort,
+            VerilogModule,
+            VerilogPort,
         )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
 
         blocks = self._make_completed_blocks(["block_a", "block_b"])
         state = self._make_state(blocks)
@@ -652,10 +652,11 @@ class TestIntegrationCheckNode:
 
     @pytest.mark.asyncio
     async def test_agent_failure_skips_gracefully(self):
-        from orchestrator.langgraph.pipeline_graph import integration_check_node
         from orchestrator.langgraph.integration_helpers import (
-            VerilogModule, VerilogPort,
+            VerilogModule,
+            VerilogPort,
         )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
 
         blocks = self._make_completed_blocks(["a", "b"])
         state = self._make_state(blocks)
@@ -691,10 +692,11 @@ class TestIntegrationCheckNode:
 
     @pytest.mark.asyncio
     async def test_agent_parse_error_skips(self):
-        from orchestrator.langgraph.pipeline_graph import integration_check_node
         from orchestrator.langgraph.integration_helpers import (
-            VerilogModule, VerilogPort,
+            VerilogModule,
+            VerilogPort,
         )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
 
         blocks = self._make_completed_blocks(["a", "b"])
         state = self._make_state(blocks)
@@ -738,10 +740,11 @@ class TestIntegrationCheckNode:
 
     @pytest.mark.asyncio
     async def test_lint_failure_triggers_interrupt(self):
-        from orchestrator.langgraph.pipeline_graph import integration_check_node
         from orchestrator.langgraph.integration_helpers import (
-            VerilogModule, VerilogPort,
+            VerilogModule,
+            VerilogPort,
         )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
 
         blocks = self._make_completed_blocks(["a", "b"])
         state = self._make_state(blocks)
@@ -799,10 +802,11 @@ class TestIntegrationCheckNode:
 
     @pytest.mark.asyncio
     async def test_mismatch_errors_trigger_interrupt(self):
-        from orchestrator.langgraph.pipeline_graph import integration_check_node
         from orchestrator.langgraph.integration_helpers import (
-            VerilogModule, VerilogPort,
+            VerilogModule,
+            VerilogPort,
         )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
 
         blocks = self._make_completed_blocks(["a", "b"])
         state = self._make_state(blocks)
@@ -867,10 +871,11 @@ class TestIntegrationCheckNode:
 
     @pytest.mark.asyncio
     async def test_clean_integration_passes(self):
-        from orchestrator.langgraph.pipeline_graph import integration_check_node
         from orchestrator.langgraph.integration_helpers import (
-            VerilogModule, VerilogPort,
+            VerilogModule,
+            VerilogPort,
         )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
 
         blocks = self._make_completed_blocks(["a", "b"])
         state = self._make_state(blocks)
@@ -924,10 +929,11 @@ class TestIntegrationCheckNode:
 
     @pytest.mark.asyncio
     async def test_fix_rtl_resume_action(self):
-        from orchestrator.langgraph.pipeline_graph import integration_check_node
         from orchestrator.langgraph.integration_helpers import (
-            VerilogModule, VerilogPort,
+            VerilogModule,
+            VerilogPort,
         )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
 
         blocks = self._make_completed_blocks(["a", "b"])
         state = self._make_state(blocks)
@@ -1041,10 +1047,12 @@ class TestIntegrationCheckWarningTriage:
         }
 
     def _common_patches(self, mismatches, interrupt_response):
-        from orchestrator.langgraph.integration_helpers import (
-            VerilogModule, VerilogPort,
-        )
         from contextlib import ExitStack
+
+        from orchestrator.langgraph.integration_helpers import (
+            VerilogModule,
+            VerilogPort,
+        )
 
         stack = ExitStack()
         mod = VerilogModule(name="a", ports=[VerilogPort("clk", "input")])
@@ -1234,6 +1242,7 @@ class TestIntegrationCheckWarningTriage:
 class TestGraphConstruction:
     def test_pipeline_graph_compiles_with_agent_node(self):
         from langgraph.checkpoint.memory import MemorySaver
+
         from orchestrator.langgraph.pipeline_graph import build_pipeline_graph
 
         graph = build_pipeline_graph(checkpointer=MemorySaver())
@@ -1241,6 +1250,7 @@ class TestGraphConstruction:
 
     def test_integration_check_node_in_graph(self):
         from langgraph.checkpoint.memory import MemorySaver
+
         from orchestrator.langgraph.pipeline_graph import build_pipeline_graph
 
         graph = build_pipeline_graph(checkpointer=MemorySaver())

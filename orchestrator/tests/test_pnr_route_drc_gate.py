@@ -22,7 +22,6 @@ from orchestrator.langgraph import backend_graph as bg
 from orchestrator.langgraph import backend_helpers as bh
 from orchestrator.langgraph import macro_registry as mr
 
-
 # --- generic synthetic collateral -----------------------------------------
 
 def _route_drc_rpt(n: int) -> str:

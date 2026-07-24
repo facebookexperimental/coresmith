@@ -3,13 +3,14 @@
 # wherever you'd normally import ClaudeLLM (or use sitecustomize.py to auto-load it).
 
 from __future__ import annotations
-from orchestrator._timeouts import scaled
+
 import logging
 import os
 import shutil
 import subprocess
 import time
 
+from orchestrator._timeouts import scaled
 from orchestrator.langchain.agents import coresmith_llm as _slm
 
 logger = logging.getLogger(__name__)

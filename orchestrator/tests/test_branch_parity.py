@@ -19,7 +19,6 @@ import pytest
 
 from orchestrator.harness import branch_parity as bp
 
-
 _BLOCK = {"name": "blk"}
 _RTL_WITH_REGION = (
     "module blk(input clk, output reg [7:0] q);\n"

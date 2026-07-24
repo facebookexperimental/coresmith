@@ -46,8 +46,8 @@ All heavy imports are deferred so this module stays import-light.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
 
 # The synth-side preprocessor defines the parity build applies to the DESIGN.
 # SYNTHESIS is the canonical macro the split-brain mock keyed on; CORESMITH_SRAM_SYNTH
@@ -154,8 +154,8 @@ def check_branch_parity(
     rtl_path: str,
     tb_path: str,
     attempt: int = 1,
-    rtl_text: Optional[str] = None,
-    sim_runner: Optional[Callable] = None,
+    rtl_text: str | None = None,
+    sim_runner: Callable | None = None,
 ) -> ParityResult:
     """Run the branch-parity smoke for one block.
 
@@ -179,7 +179,9 @@ def check_branch_parity(
                             reason="no conditional region / gate off")
 
     if sim_runner is None:
-        from orchestrator.langgraph.pipeline_helpers import run_simulation as sim_runner  # type: ignore
+        from orchestrator.langgraph.pipeline_helpers import (
+            run_simulation as sim_runner,  # type: ignore
+        )
 
     # Pin ONE seed so both builds see the identical stimulus. Restore whatever
     # was there (a caller-pinned seed for debugging) afterward.
@@ -227,6 +229,9 @@ def check_branch_parity(
 
 
 __all__ = [
-    "ParityResult", "SYNTH_PARITY_DEFINES",
-    "has_conditional_region", "branch_parity_enabled", "check_branch_parity",
+    "SYNTH_PARITY_DEFINES",
+    "ParityResult",
+    "branch_parity_enabled",
+    "check_branch_parity",
+    "has_conditional_region",
 ]

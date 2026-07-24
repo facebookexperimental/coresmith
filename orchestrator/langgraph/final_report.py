@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 SCHEMA_VERSION = "coresmith.final_report/v1"
 
@@ -32,7 +32,7 @@ SCHEMA_VERSION = "coresmith.final_report/v1"
 # Small helpers
 # ---------------------------------------------------------------------------
 
-def _num(x: Any) -> Optional[float]:
+def _num(x: Any) -> float | None:
     try:
         if x is None:
             return None
@@ -41,13 +41,13 @@ def _num(x: Any) -> Optional[float]:
         return None
 
 
-def _int(x: Any) -> Optional[int]:
+def _int(x: Any) -> int | None:
     n = _num(x)
     return int(n) if n is not None else None
 
 
-def fmax_mhz(wns_ns: Optional[float], period_ns: Optional[float]
-             ) -> Optional[float]:
+def fmax_mhz(wns_ns: float | None, period_ns: float | None
+             ) -> float | None:
     """Achieved Fmax (MHz) from pre-layout WNS and the clock period.
 
     ``achieved_period = period - WNS`` (WNS<0 => slower than target); Fmax =
@@ -64,14 +64,14 @@ def fmax_mhz(wns_ns: Optional[float], period_ns: Optional[float]
     return round(1000.0 / achieved, 2)
 
 
-def _period_ns(target_clock_mhz: Optional[float]) -> Optional[float]:
+def _period_ns(target_clock_mhz: float | None) -> float | None:
     f = _num(target_clock_mhz)
     if f is None or f <= 0:
         return None
     return 1000.0 / f
 
 
-def _dv_one(sb: Any, block: str, scope: str) -> Optional[dict]:
+def _dv_one(sb: Any, block: str, scope: str) -> dict | None:
     """Latest single dv_results row for (block, scope), or None."""
     if sb is None:
         return None
@@ -82,7 +82,7 @@ def _dv_one(sb: Any, block: str, scope: str) -> Optional[dict]:
     return rows[0] if rows else None
 
 
-def _read_json(path: Path) -> Optional[dict]:
+def _read_json(path: Path) -> dict | None:
     try:
         if path.exists():
             return json.loads(path.read_text())
@@ -197,7 +197,7 @@ def _block_throughput(project_root: str, block: str) -> dict:
     return {"applicable": False, "reason": "no throughput recorded"}
 
 
-def _block_ppa(sb: Any, block: str, period_ns: Optional[float]) -> dict:
+def _block_ppa(sb: Any, block: str, period_ns: float | None) -> dict:
     row = None
     if sb is not None:
         try:
@@ -227,7 +227,7 @@ def _block_ppa(sb: Any, block: str, period_ns: Optional[float]) -> dict:
 
 
 def _block_testbenches(project_root: str, block: str, spec: dict,
-                       dv_row: Optional[dict], dv_pass: Optional[bool]
+                       dv_row: dict | None, dv_pass: bool | None
                        ) -> list[dict]:
     """Enumerate the testbenches that ran for a block, by name.
 
@@ -306,7 +306,7 @@ def _completed_for(state: dict, block: str) -> dict:
 
 def build_final_report(state: dict, project_root: str, *,
                        scoreboard: Any = None,
-                       now: Optional[float] = None) -> dict:
+                       now: float | None = None) -> dict:
     """Aggregate the run's recorded facts into a signoff-scorecard dict.
 
     ``scoreboard`` is a ``Scoreboard`` instance (duck-typed: ``latest_dv``,
@@ -404,7 +404,7 @@ def build_final_report(state: dict, project_root: str, *,
     integ_dv_row = _dv_one(sb, design_name, "chip")
     valid_dv_row = _dv_one(sb, design_name, "validation")
 
-    def _stage(result: dict, row: Optional[dict], kind: str) -> dict:
+    def _stage(result: dict, row: dict | None, kind: str) -> dict:
         passed = result.get("passed")
         if passed is None and row is not None:
             passed = bool(row.get("passed"))
@@ -560,12 +560,12 @@ def build_final_report(state: dict, project_root: str, *,
     return report
 
 
-def _iso(now: Optional[float]) -> str:
+def _iso(now: float | None) -> str:
     t = now if now is not None else time.time()
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
 
 
-def _floor_from_blocks(blocks: list[dict]) -> Optional[float]:
+def _floor_from_blocks(blocks: list[dict]) -> float | None:
     for b in blocks:
         f = b.get("coverage", {}).get("floor")
         if f is not None:
@@ -573,7 +573,7 @@ def _floor_from_blocks(blocks: list[dict]) -> Optional[float]:
     return None
 
 
-def _verdict_word(passed: Optional[bool], ran: bool) -> str:
+def _verdict_word(passed: bool | None, ran: bool) -> str:
     if not ran or passed is None:
         return "n/a"
     return "pass" if passed else "fail"
@@ -821,7 +821,7 @@ def render_markdown(report: dict) -> str:
     return "\n".join(lines)
 
 
-def _verdict_md(passed: Optional[bool], ran: Optional[bool]) -> str:
+def _verdict_md(passed: bool | None, ran: bool | None) -> str:
     if not ran or passed is None:
         return "n/a"
     return "PASS ✅" if passed else "FAIL ❌"
@@ -834,5 +834,9 @@ def _req_note(valid: dict) -> str:
     return valid.get("action_taken") or ""
 
 
-__all__ = ["build_final_report", "render_markdown", "fmax_mhz",
-           "SCHEMA_VERSION"]
+__all__ = [
+    "SCHEMA_VERSION",
+    "build_final_report",
+    "fmax_mhz",
+    "render_markdown",
+]

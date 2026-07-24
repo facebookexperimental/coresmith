@@ -43,7 +43,7 @@ import operator
 import os
 import re
 from pathlib import Path
-from typing import Annotated, Optional, TypedDict
+from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
@@ -51,12 +51,12 @@ from opentelemetry import trace
 
 from orchestrator.langgraph.event_stream import write_graph_event
 from orchestrator.langgraph.pipeline_helpers import (
-    PROJECT_ROOT,
-    log,
     CYAN,
     GREEN,
+    PROJECT_ROOT,
     RED,
     YELLOW,
+    log,
 )
 
 _tracer = trace.get_tracer("coresmith.langgraph.backend_graph")
@@ -122,16 +122,16 @@ class BackendState(TypedDict):
 
     # Phase results (overwritten each cycle) ───────────────────────────────
     # run_pnr produces floorplan+place+cts+route+timing+power in one shot
-    floorplan_result: Optional[dict]
-    place_result: Optional[dict]
-    cts_result: Optional[dict]
-    route_result: Optional[dict]
-    drc_result: Optional[dict]
-    lvs_result: Optional[dict]
-    timing_result: Optional[dict]
-    power_result: Optional[dict]
-    debug_result: Optional[dict]
-    precheck_result: Optional[dict]
+    floorplan_result: dict | None
+    place_result: dict | None
+    cts_result: dict | None
+    route_result: dict | None
+    drc_result: dict | None
+    lvs_result: dict | None
+    timing_result: dict | None
+    power_result: dict | None
+    debug_result: dict | None
+    precheck_result: dict | None
 
     # Artifact paths (set by run_pnr, consumed by drc/lvs)
     routed_def_path: Annotated[str, _last]
@@ -143,7 +143,7 @@ class BackendState(TypedDict):
 
     # Tapeout wrapper (generated before MPW precheck) ───────────────────
     wrapper_rtl_path: Annotated[str, _last]
-    wrapper_result: Optional[dict]
+    wrapper_result: dict | None
     submission_dir: Annotated[str, _last]
 
     # Step log file paths ──────────────────────────────────────────────────
@@ -153,7 +153,7 @@ class BackendState(TypedDict):
     completed_blocks: Annotated[list[dict], operator.add]
 
     # Human interaction ────────────────────────────────────────────────────
-    human_response: Optional[dict]
+    human_response: dict | None
 
     # Terminal ─────────────────────────────────────────────────────────────
     backend_done: bool
@@ -201,7 +201,7 @@ def _safe_format(template: str, context: dict) -> str:
     prompts), while a ``{...}`` code snippet or an unknown ``{name}`` is passed
     through unchanged instead of crashing.
     """
-    def _sub(m: "re.Match") -> str:
+    def _sub(m: re.Match) -> str:
         text = m.group(0)
         if text == "{{":
             return "{"
@@ -593,9 +593,13 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
     _sram_wrapper_lib = ""
     try:
         from orchestrator.langgraph.sram_wrapper import (
-            uses_wrapper as _uses_wrapper,
-            wrapper_lib_path as _wrapper_lib_path,
             backend_sram_macro_directive as _macro_directive,
+        )
+        from orchestrator.langgraph.sram_wrapper import (
+            uses_wrapper as _uses_wrapper,
+        )
+        from orchestrator.langgraph.sram_wrapper import (
+            wrapper_lib_path as _wrapper_lib_path,
         )
         _combined = "".join(
             Path(p).read_text(errors="ignore") for p in _input_paths
@@ -965,7 +969,10 @@ async def run_pnr_node(state: BackendState) -> dict:
     and timing analysis in a single LLM session.
     """
     from orchestrator.langgraph.backend_helpers import (
-        TECH_LEF, CELL_LEF, LIBERTY, OPENROAD_BIN,
+        CELL_LEF,
+        LIBERTY,
+        OPENROAD_BIN,
+        TECH_LEF,
         render_layout_image,
     )
 
@@ -1177,8 +1184,8 @@ async def run_pnr_node(state: BackendState) -> dict:
     # reflect the demotion so no downstream default re-marks it success.
     try:
         from orchestrator.langgraph.backend_helpers import (
-            pnr_route_drc_gate_enabled,
             count_route_drc_violations,
+            pnr_route_drc_gate_enabled,
         )
         if pnr_route_drc_gate_enabled():
             _route_drc_path = Path(output_dir) / "route_drc.rpt"
@@ -1258,13 +1265,13 @@ async def drc_node(state: BackendState) -> dict:
     """Run Magic DRC, GDS generation, and SPICE extraction entirely
     within the inner Claude LLM."""
     from orchestrator.langgraph.backend_helpers import (
-        MAGIC_RC,
         CELL_GDS,
         CELL_LEF,
-        TECH_LEF,
         MAGIC_BIN,
-        parse_drc_report,
+        MAGIC_RC,
+        TECH_LEF,
         macro_bboxes_from_def,
+        parse_drc_report,
         render_layout_image,
     )
 
@@ -1427,7 +1434,7 @@ async def drc_node(state: BackendState) -> dict:
 
 async def lvs_node(state: BackendState) -> dict:
     """Run Netgen LVS comparison entirely within the inner Claude LLM."""
-    from orchestrator.langgraph.backend_helpers import NETGEN_SETUP, NETGEN_BIN
+    from orchestrator.langgraph.backend_helpers import NETGEN_BIN, NETGEN_SETUP
 
     block = state["current_block"]
     block_name = block["name"]
@@ -2044,9 +2051,7 @@ async def decide_node(state: BackendState) -> dict:
 
         if debug_result.get("escalate") and attempt < max_attempts:
             action = "ask_human"
-        elif debug_result.get("escalate"):
-            action = "escalate"
-        elif attempt >= max_attempts:
+        elif debug_result.get("escalate") or attempt >= max_attempts:
             action = "escalate"
         elif debug_result.get("needs_human"):
             action = "ask_human"
@@ -2307,9 +2312,9 @@ async def backend_complete_node(state: BackendState) -> dict:
             pnr_dir = pr / "syn" / "output" / name / "pnr"
             if pnr_dir.is_dir():
                 from orchestrator.langgraph.backend_helpers import (
-                    parse_openroad_reports,
-                    parse_drc_report,
                     macro_bboxes_from_def,
+                    parse_drc_report,
+                    parse_openroad_reports,
                 )
                 pnr_metrics = parse_openroad_reports(str(pnr_dir))
                 entry.update({

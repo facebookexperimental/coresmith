@@ -16,10 +16,10 @@ Document hierarchy:  PRD -> SAD -> FRD -> Block Diagram -> ... -> ERS
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
-from pathlib import Path
-
+from orchestrator.langchain.prompts.skills import load_skills as _load_skills
 
 _PROMPT_FILE = Path(__file__).resolve().parents[2] / "langchain" / "prompts" / "ers_doc.md"
 SYSTEM_PROMPT = _PROMPT_FILE.read_text()
@@ -28,8 +28,6 @@ SYSTEM_PROMPT = _PROMPT_FILE.read_text()
 # fixed for the whole pipeline — downstream uArch/RTL obey it. Inject the same
 # SRAM-vs-flops skill the uArch agent gets so the ERS does not blanket-mandate
 # flip-flop scratchpads (which synthesize into huge, slow register files).
-from orchestrator.langchain.prompts.skills import load_skills as _load_skills
-
 _SKILLS_TEXT = _load_skills("memory_macro_vs_flops")
 
 
@@ -125,9 +123,9 @@ async def generate_ers_doc(
             "After writing, respond with only the file path confirmation."
         )
 
-        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
-
         import os as _os
+
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
         _arch_to = int(_os.environ.get("CORESMITH_ARCH_LLM_TIMEOUT_S", "1200") or 1200)
         llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=_arch_to)
 

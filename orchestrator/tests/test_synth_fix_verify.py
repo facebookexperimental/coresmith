@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 import orchestrator.langgraph.pipeline_helpers as ph
 
 _FLAT = "module b; reg [1023:0] x_q; wire w = x_q[i +: 8]; endmodule\n"

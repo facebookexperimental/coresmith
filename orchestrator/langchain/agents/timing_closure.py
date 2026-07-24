@@ -17,13 +17,14 @@ All modifications are traced via OpenTelemetry for auditability.
 
 from __future__ import annotations
 
-from orchestrator._timeouts import scaled
 import json
 import re
 from pathlib import Path
 from typing import Any
 
 from opentelemetry import trace
+
+from orchestrator._timeouts import scaled
 
 from .coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 

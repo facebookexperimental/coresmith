@@ -26,7 +26,6 @@ from pathlib import Path
 
 import pytest
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # R1a: validate_rtl_ports removed
 # ═══════════════════════════════════════════════════════════════════════════
@@ -96,8 +95,9 @@ class TestUarchAutoApprove:
         assert result["human_response"]["action"] == "approve"
 
     def test_integration_review_in_orchestrator(self):
-        from orchestrator.langgraph.pipeline_graph import build_pipeline_graph
         from langgraph.checkpoint.memory import MemorySaver
+
+        from orchestrator.langgraph.pipeline_graph import build_pipeline_graph
 
         graph = build_pipeline_graph(checkpointer=MemorySaver())
         node_names = set(graph.get_graph().nodes.keys())
@@ -140,10 +140,11 @@ class TestDvRules:
         assert "DV RULES" in content
 
     def test_testbench_agent_user_message_includes_dv_rules(self):
+        import inspect
+
         from orchestrator.langchain.agents.testbench_generator import (
             TestbenchGeneratorAgent,
         )
-        import inspect
         source = inspect.getsource(TestbenchGeneratorAgent.generate)
         assert "DV_RULES.md" in source
 
@@ -213,8 +214,9 @@ class TestRtlRegressionGuard:
     async def test_sim_pass_writes_best_result(self, tmp_path):
         # simulate_node was merged into generate_testbench_node; the
         # best_result.json side-effect is now produced inside that node.
-        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
         from unittest.mock import patch
+
+        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
 
         block_name = "test_block"
         block_dir = tmp_path / ".coresmith" / "blocks" / block_name
@@ -381,8 +383,9 @@ class TestPnrDieSizeGateCount:
         assert "-utilization" in floorplan
 
     def test_run_pnr_flow_accepts_gate_count(self):
-        from orchestrator.langgraph.backend_helpers import run_pnr_flow
         import inspect
+
+        from orchestrator.langgraph.backend_helpers import run_pnr_flow
 
         sig = inspect.signature(run_pnr_flow)
         assert "gate_count" in sig.parameters
@@ -409,6 +412,7 @@ class TestChipFinishDashboard:
 
     def test_no_llm_in_dashboard_generator(self):
         import inspect
+
         from orchestrator.architecture.specialists.chip_finish_dashboard import (
             generate_chip_finish_dashboard,
         )

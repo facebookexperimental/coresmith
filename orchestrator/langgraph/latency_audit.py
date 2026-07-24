@@ -34,7 +34,6 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from .arith_characterize import predict_op_delay as _predict
 
@@ -59,8 +58,8 @@ class StageAudit:
     iters: int
     ops: list[str]
     rationale: str = ""
-    per_cycle_delay_ns: Optional[float] = None  # None -> uncharacterized
-    fits_period: Optional[bool] = None          # None -> couldn't price
+    per_cycle_delay_ns: float | None = None  # None -> uncharacterized
+    fits_period: bool | None = None          # None -> couldn't price
     uncharacterized_ops: list[str] = field(default_factory=list)
 
     @property
@@ -71,7 +70,7 @@ class StageAudit:
 @dataclass
 class AuditReport:
     stages: list[StageAudit]
-    declared_latency: Optional[int]
+    declared_latency: int | None
     summed_latency: int
     period_ns: float
     reconciles: bool
@@ -85,7 +84,7 @@ class AuditReport:
         return self.parsed and not self.infeasible and self.reconciles
 
 
-def _parse_op(token: str) -> Optional[tuple[str, int]]:
+def _parse_op(token: str) -> tuple[str, int] | None:
     m = _OP_RE.match(str(token).strip())
     if not m:
         return None
@@ -95,7 +94,7 @@ def _parse_op(token: str) -> Optional[tuple[str, int]]:
     return op, w
 
 
-def _eval_const_int(node: ast.AST) -> Optional[int]:
+def _eval_const_int(node: ast.AST) -> int | None:
     """Safely evaluate a constant-integer arithmetic AST node.
 
     The block-golden prompt teaches ``DECLARED_LATENCY_CYCLES = 10 + 9*5 + 9*16``
@@ -132,14 +131,14 @@ def _eval_const_int(node: ast.AST) -> Optional[int]:
     return None
 
 
-def parse_stage_budget(source: str) -> tuple[list[dict], Optional[int]]:
+def parse_stage_budget(source: str) -> tuple[list[dict], int | None]:
     """Extract STAGE_BUDGET (list[dict]) and DECLARED_LATENCY_CYCLES (int).
 
     Uses AST + literal_eval so arbitrary code in the model never executes.
     Returns ([], None) if neither is present / parseable.
     """
     stages: list[dict] = []
-    declared: Optional[int] = None
+    declared: int | None = None
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -165,7 +164,7 @@ def parse_stage_budget(source: str) -> tuple[list[dict], Optional[int]]:
 
 
 def audit_source(source: str, target_clock_mhz: float = 50.0,
-                 pdk: Optional[dict] = None) -> AuditReport:
+                 pdk: dict | None = None) -> AuditReport:
     """Parse + price + reconcile a model's STAGE_BUDGET."""
     period = 1000.0 / max(1e-6, target_clock_mhz)
     raw_stages, declared = parse_stage_budget(source)
@@ -202,7 +201,7 @@ def audit_source(source: str, target_clock_mhz: float = 50.0,
             priced_any = True
 
         per_cycle = chain if priced_any else None
-        fits: Optional[bool] = None
+        fits: bool | None = None
         if per_cycle is not None:
             fits = per_cycle <= period + 1e-9
             if not fits:
@@ -229,7 +228,7 @@ def audit_source(source: str, target_clock_mhz: float = 50.0,
 
 
 def find_block_model(project_root: str | os.PathLike,
-                     block_name: str) -> Optional[Path]:
+                     block_name: str) -> Path | None:
     """Locate the Amaranth block model file for ``block_name``.
 
     Block models live under ``arch/block_models/``; names vary
@@ -330,8 +329,8 @@ def resolve_target_clock_mhz(project_root: str | os.PathLike,
 
 
 def stage_map_fragment(project_root: str | os.PathLike, block_name: str,
-                       target_clock_mhz: Optional[float] = None,
-                       pdk: Optional[dict] = None) -> str:
+                       target_clock_mhz: float | None = None,
+                       pdk: dict | None = None) -> str:
     """Locate the block model, audit it, and render its stage map (or '').
 
     ``target_clock_mhz=None`` resolves the run's real clock from the run dir
@@ -352,7 +351,13 @@ def stage_map_fragment(project_root: str | os.PathLike, block_name: str,
 
 
 __all__ = [
-    "audit_enabled", "StageAudit", "AuditReport",
-    "parse_stage_budget", "audit_source", "find_block_model",
-    "format_stage_map", "stage_map_fragment", "resolve_target_clock_mhz",
+    "AuditReport",
+    "StageAudit",
+    "audit_enabled",
+    "audit_source",
+    "find_block_model",
+    "format_stage_map",
+    "parse_stage_budget",
+    "resolve_target_clock_mhz",
+    "stage_map_fragment",
 ]

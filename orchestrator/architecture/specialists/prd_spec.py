@@ -25,10 +25,8 @@ The specialist runs in two modes:
 
 from __future__ import annotations
 
-from typing import Any
-
 from pathlib import Path
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # System prompt -- loaded from external .md file
@@ -242,7 +240,10 @@ async def gather_prd(
             )
 
         from orchestrator.langchain.agents.coresmith_llm import (
-            DEFAULT_MODEL, ClaudeLLM, arch_reasoning_effort)
+            DEFAULT_MODEL,
+            ClaudeLLM,
+            arch_reasoning_effort,
+        )
 
         # PRD is a frozen artifact every downstream stage inherits -> spend
         # the higher reasoning tier here (codex-only; no-op on other providers).

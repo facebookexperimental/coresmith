@@ -343,8 +343,8 @@ def _read_uarch_specs(project_root: str) -> dict[str, dict]:
 def _gather_frontend_context(project_root: str) -> str:
     """Aggregate frontend pipeline events into a summary context."""
     from orchestrator.langgraph.event_stream import (
-        read_events,
         aggregate_failure_categories,
+        read_events,
     )
 
     events = read_events(project_root)

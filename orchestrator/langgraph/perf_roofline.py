@@ -48,7 +48,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .arith_characterize import predict_op_delay as _predict_delay
 
@@ -118,8 +118,8 @@ class DataflowSpec:
     op_unit: str = "op"              # what one "op" is (block / frame / item)
     # Cross-reference to the FRD throughput requirement + the design's own claim.
     perf_req_id: str = ""            # e.g. "PERF-001"
-    perf_req_cyc_per_op: Optional[float] = None   # the FRD cap (None -> self-impose)
-    declared_cyc_per_op: Optional[float] = None   # the design's own claimed cyc/op
+    perf_req_cyc_per_op: float | None = None   # the FRD cap (None -> self-impose)
+    declared_cyc_per_op: float | None = None   # the design's own claimed cyc/op
     derate: float = _DEFAULT_DERATE
     notes: str = ""
 
@@ -127,7 +127,7 @@ class DataflowSpec:
 # --------------------------------------------------------------------------- #
 # PDK-aware pricing (delegates to the real op-delay characterizer)
 # --------------------------------------------------------------------------- #
-def _op_delay(op: str, width: int, pdk: Optional[dict]) -> Optional[float]:
+def _op_delay(op: str, width: int, pdk: dict | None) -> float | None:
     """Combinational delay (ns) via the engine's ``predict_op_delay``.
 
     Returns None ONLY when the PDK is uncharacterized (no model doc). An op
@@ -138,7 +138,7 @@ def _op_delay(op: str, width: int, pdk: Optional[dict]) -> Optional[float]:
 
 
 def _stage_partition(chain: list[Op], budget_ns: float,
-                     pdk: Optional[dict]) -> tuple[list[float], list[Op], int]:
+                     pdk: dict | None) -> tuple[list[float], list[Op], int]:
     """Greedily pack a serial op chain into pipeline stages, each <= budget.
 
     Returns (per-stage comb delay list, ops whose OWN delay exceeds the budget,
@@ -170,7 +170,7 @@ def _stage_partition(chain: list[Op], budget_ns: float,
     return stages, over, unpriced
 
 
-def _cone_delay_ns(ops: list[Op], pdk: Optional[dict]) -> tuple[float, int]:
+def _cone_delay_ns(ops: list[Op], pdk: dict | None) -> tuple[float, int]:
     """Total combinational delay (ns) of a serial op cone using the REAL
     characterizer delays, plus a count of ops the PDK could not price.
 
@@ -190,7 +190,7 @@ def _cone_delay_ns(ops: list[Op], pdk: Optional[dict]) -> tuple[float, int]:
 
 
 def _rec_latency_cyc(rc: RecCycle, budget_ns: float,
-                     pdk: Optional[dict]) -> tuple[int, float, bool]:
+                     pdk: dict | None) -> tuple[int, float, bool]:
     """Fmax-COUPLED recurrence latency: ``(latency_cyc, cone_delay_ns, priced)``.
 
     The latency once around a loop-carried recurrence is the number of
@@ -222,7 +222,7 @@ def _rec_latency_cyc(rc: RecCycle, budget_ns: float,
     return lat + int(rc.extra_latency_cyc), round(cone_ns, 4), priced
 
 
-def analyze(spec: DataflowSpec, pdk: Optional[dict] = None) -> dict:
+def analyze(spec: DataflowSpec, pdk: dict | None = None) -> dict:
     """Compute the coupled Fmax + throughput roofline for one block."""
     budget = spec.T_ns - spec.margin_ns
     if budget <= 0:
@@ -299,7 +299,7 @@ def analyze(spec: DataflowSpec, pdk: Optional[dict] = None) -> dict:
     if req is None:
         req = self_imposed
     claim = spec.declared_cyc_per_op
-    meets_req: Optional[bool] = None
+    meets_req: bool | None = None
     if claim is not None:
         meets_req = claim <= req + 1e-9
 
@@ -384,7 +384,7 @@ def analyze(spec: DataflowSpec, pdk: Optional[dict] = None) -> dict:
 _PERF_BLOCK_RE = re.compile(r"```perf\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE)
 
 
-def _as_op(item: Any) -> Optional[Op]:
+def _as_op(item: Any) -> Op | None:
     """Accept ["mul",16] / ["mul",16,"label"] / {"op":..,"width":..}."""
     if isinstance(item, (list, tuple)) and len(item) >= 2:
         return Op(str(item[0]), int(item[1]),
@@ -396,7 +396,7 @@ def _as_op(item: Any) -> Optional[Op]:
 
 
 def parse_perf_spec(source: str, block_name: str = "",
-                    default_clock_mhz: float = 50.0) -> Optional[DataflowSpec]:
+                    default_clock_mhz: float = 50.0) -> DataflowSpec | None:
     """Extract a ``perf`` block from a uArch spec and build a DataflowSpec.
 
     Returns None when no ``perf`` block is present or it cannot be parsed --
@@ -469,8 +469,8 @@ def _block_dir(project_root: str | os.PathLike, block_name: str) -> Path:
 
 
 def perf_model_for_block(project_root: str | os.PathLike, block_name: str,
-                         target_clock_mhz: Optional[float] = None,
-                         pdk: Optional[dict] = None) -> Optional[dict]:
+                         target_clock_mhz: float | None = None,
+                         pdk: dict | None = None) -> dict | None:
     """Locate the block's uArch spec, parse its ``perf`` block, and analyze it.
 
     Returns the perf_model dict, or None when the spec has no ``perf`` block
@@ -495,8 +495,8 @@ def perf_model_for_block(project_root: str | os.PathLike, block_name: str,
 
 
 def emit_perf_model(project_root: str | os.PathLike, block_name: str,
-                    target_clock_mhz: Optional[float] = None,
-                    pdk: Optional[dict] = None) -> Optional[Path]:
+                    target_clock_mhz: float | None = None,
+                    pdk: dict | None = None) -> Path | None:
     """Compute + persist ``perf_model.json`` into the block state dir.
 
     Returns the written path, or None when there was nothing to emit (no
@@ -517,7 +517,7 @@ def emit_perf_model(project_root: str | os.PathLike, block_name: str,
 
 
 def read_perf_model(project_root: str | os.PathLike,
-                    block_name: str) -> Optional[dict]:
+                    block_name: str) -> dict | None:
     """Read a previously emitted perf_model.json (or None)."""
     try:
         p = _block_dir(project_root, block_name) / "perf_model.json"
@@ -555,7 +555,15 @@ def format_perf_fragment(model: dict) -> str:
 
 
 __all__ = [
-    "roofline_enabled", "Op", "Resource", "RecCycle", "DataflowSpec",
-    "analyze", "parse_perf_spec", "perf_model_for_block", "emit_perf_model",
-    "read_perf_model", "format_perf_fragment",
+    "DataflowSpec",
+    "Op",
+    "RecCycle",
+    "Resource",
+    "analyze",
+    "emit_perf_model",
+    "format_perf_fragment",
+    "parse_perf_spec",
+    "perf_model_for_block",
+    "read_perf_model",
+    "roofline_enabled",
 ]

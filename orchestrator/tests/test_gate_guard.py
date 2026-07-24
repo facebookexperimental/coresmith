@@ -45,7 +45,7 @@ class TestGateGuard:
 
     def test_classify_maps_return_to_passed(self):
         # An empty violations list means "pass"; a non-empty one means "fail".
-        ok = gate_guard("g", lambda: [], classify=lambda v: len(v) == 0)
+        ok = gate_guard("g", list, classify=lambda v: len(v) == 0)
         bad = gate_guard("g", lambda: ["x"], classify=lambda v: len(v) == 0)
         assert ok.passed is True
         assert bad.passed is False

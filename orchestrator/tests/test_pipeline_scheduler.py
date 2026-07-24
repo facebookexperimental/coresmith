@@ -9,7 +9,10 @@ from __future__ import annotations
 import pytest
 
 from orchestrator.langgraph.pipeline_scheduler import (
-    Node, schedule_dfg, schedule_reduction, pipeline_contract_text,
+    Node,
+    pipeline_contract_text,
+    schedule_dfg,
+    schedule_reduction,
 )
 
 

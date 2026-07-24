@@ -19,16 +19,15 @@ from orchestrator import profile
 # The 9 rewired enable-helpers.
 from orchestrator.architecture.composition import block_goldens_enabled
 from orchestrator.architecture.fidelity import fidelity_gate_enabled
+from orchestrator.langgraph.latency_audit import audit_enabled as latency_audit_enabled
+from orchestrator.langgraph.pdk_characterize import stage_enabled as pdk_stage_enabled
+from orchestrator.langgraph.pipeline_helpers import _rtl_from_hw_golden_enabled
 from orchestrator.langgraph.ppa_check import (
+    logic_depth_gate_enabled,
     ppa_gate_enabled,
     synth_cell_gate_enabled,
-    logic_depth_gate_enabled,
 )
-from orchestrator.langgraph.pdk_characterize import stage_enabled as pdk_stage_enabled
-from orchestrator.langgraph.latency_audit import audit_enabled as latency_audit_enabled
-from orchestrator.langgraph.pipeline_helpers import _rtl_from_hw_golden_enabled
 from orchestrator.langgraph.rtl_model_equiv import rtl_model_equiv_enabled
-
 
 # (helper, env_flag, legacy_default, strict_seeds_on)
 HELPERS = [

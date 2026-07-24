@@ -17,7 +17,6 @@ from pathlib import Path
 
 from orchestrator.architecture import model_integration
 
-
 REFERENCE_IMPL = '''\
 def run(stim):
     return [v + 1 for v in stim]

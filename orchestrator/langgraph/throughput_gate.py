@@ -41,10 +41,9 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from . import perf_roofline as _pr
 
@@ -129,7 +128,7 @@ def gate_math(measured: float, declared: float) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Declared / peak lookup  (REUSE the perf_roofline parser)
 # --------------------------------------------------------------------------- #
-def _perf_model(project_root: str | os.PathLike, block_name: str) -> Optional[dict]:
+def _perf_model(project_root: str | os.PathLike, block_name: str) -> dict | None:
     """The block's perf model dict, reusing perf_roofline's §6.1 parser.
 
     Prefers the already-emitted ``perf_model.json``; when absent (e.g. the v2
@@ -147,7 +146,7 @@ def _perf_model(project_root: str | os.PathLike, block_name: str) -> Optional[di
 
 
 def declared_cyc_per_op(project_root: str | os.PathLike,
-                        block_name: str) -> Optional[float]:
+                        block_name: str) -> float | None:
     """The uArch author's declared §6.1 cyc/op for this block, or None."""
     m = _perf_model(project_root, block_name)
     if not m:
@@ -160,7 +159,7 @@ def declared_cyc_per_op(project_root: str | os.PathLike,
 
 
 def roofline_peak_cyc_per_op(project_root: str | os.PathLike,
-                             block_name: str) -> Optional[float]:
+                             block_name: str) -> float | None:
     """The roofline PEAK cyc/op (the squeeze loop's target), or None."""
     m = _perf_model(project_root, block_name)
     if not m:
@@ -189,7 +188,7 @@ def binding_constraint_text(project_root: str | os.PathLike,
 # --------------------------------------------------------------------------- #
 # Artifact parsing
 # --------------------------------------------------------------------------- #
-def _rtl_mtime(rtl_path: str | os.PathLike | None) -> Optional[float]:
+def _rtl_mtime(rtl_path: str | os.PathLike | None) -> float | None:
     """Modification time (epoch s) of the block's current RTL, or None."""
     if not rtl_path:
         return None
@@ -201,7 +200,7 @@ def _rtl_mtime(rtl_path: str | os.PathLike | None) -> Optional[float]:
 
 
 def _read_artifact(sim_dir: str | os.PathLike, name: str,
-                   min_mtime: Optional[float] = None) -> Optional[dict]:
+                   min_mtime: float | None = None) -> dict | None:
     """Locate + parse a throughput artifact from a sim dir (never raises).
 
     Accepts either ``measured_cyc_per_op`` or ``cyc_per_op`` as the key so a
@@ -256,7 +255,7 @@ def _read_artifact(sim_dir: str | os.PathLike, name: str,
 def read_throughput_artifact(
     sim_dir: str | os.PathLike,
     rtl_path: str | os.PathLike | None = None,
-) -> Optional[dict]:
+) -> dict | None:
     """Parse the block ``throughput_measured.json`` artifact (or None).
 
     When ``rtl_path`` is given, an artifact older than the RTL is ignored as
@@ -266,7 +265,7 @@ def read_throughput_artifact(
     return _read_artifact(sim_dir, BLOCK_ARTIFACT, _rtl_mtime(rtl_path))
 
 
-def read_chip_throughput_artifact(sim_dir: str | os.PathLike) -> Optional[dict]:
+def read_chip_throughput_artifact(sim_dir: str | os.PathLike) -> dict | None:
     """Parse the chip ``integration_throughput.json`` artifact (or None)."""
     return _read_artifact(sim_dir, CHIP_ARTIFACT)
 
@@ -274,7 +273,7 @@ def read_chip_throughput_artifact(sim_dir: str | os.PathLike) -> Optional[dict]:
 # --------------------------------------------------------------------------- #
 # Block-level gate + record  (one dict serves gate AND persistence)
 # --------------------------------------------------------------------------- #
-def _na(reason: str, declared: Optional[float] = None) -> dict:
+def _na(reason: str, declared: float | None = None) -> dict:
     return {
         "gate": "measured_throughput", "scope": "block",
         "applicable": False, "passed": None,
@@ -285,7 +284,7 @@ def _na(reason: str, declared: Optional[float] = None) -> dict:
 
 
 def _deficit_report(block_name: str, measured: float, declared: float,
-                    threshold: float, ratio: Optional[float],
+                    threshold: float, ratio: float | None,
                     binding: str) -> str:
     lines = [
         f"MEASURED-THROUGHPUT GATE: block '{block_name}' runs "
@@ -388,7 +387,7 @@ def evaluate_block_throughput(project_root: str | os.PathLike, block_name: str,
 
 
 def squeeze_needed(project_root: str | os.PathLike, block_name: str,
-                   measured_cyc_per_op: Optional[float]) -> Optional[dict]:
+                   measured_cyc_per_op: float | None) -> dict | None:
     """Should the squeeze loop fire for this (passing) block?
 
     Fires only when a measured number exists AND it sits above the roofline
@@ -453,8 +452,8 @@ def format_squeeze_request(block_name: str, need: dict) -> str:
 # Chip-level (integration) measured throughput
 # --------------------------------------------------------------------------- #
 def chip_throughput_budget(project_root: str | os.PathLike,
-                           state: Optional[dict] = None
-                           ) -> tuple[Optional[float], str, str]:
+                           state: dict | None = None
+                           ) -> tuple[float | None, str, str]:
     """Resolve a chip-level cyc/op budget for the integration gate (best-effort).
 
     Sources, in priority order (deterministic, never raises):
@@ -513,7 +512,7 @@ def chip_throughput_budget(project_root: str | os.PathLike,
 
 def evaluate_chip_throughput(project_root: str | os.PathLike,
                              sim_dir: str | os.PathLike,
-                             state: Optional[dict] = None) -> dict:
+                             state: dict | None = None) -> dict:
     """Chip-level measured-throughput record from an integration-DV sim dir.
 
     Reads the deterministic-BFM cycle-accounting artifact, resolves a chip
@@ -589,7 +588,7 @@ def persist_chip_throughput(project_root: str | os.PathLike,
         pass
 
 
-def read_chip_throughput(project_root: str | os.PathLike) -> Optional[dict]:
+def read_chip_throughput(project_root: str | os.PathLike) -> dict | None:
     """Read the persisted chip throughput record (or None)."""
     try:
         p = Path(project_root) / ".coresmith" / "chip_throughput.json"
@@ -601,12 +600,24 @@ def read_chip_throughput(project_root: str | os.PathLike) -> Optional[dict]:
 
 
 __all__ = [
-    "THRESHOLD_RATIO", "BLOCK_ARTIFACT", "CHIP_ARTIFACT",
-    "measured_throughput_gate_enabled", "throughput_squeeze_enabled",
-    "squeeze_max_rounds", "threshold_for", "gate_math",
-    "declared_cyc_per_op", "roofline_peak_cyc_per_op",
-    "binding_constraint_text", "read_throughput_artifact",
-    "read_chip_throughput_artifact", "evaluate_block_throughput",
-    "squeeze_needed", "format_squeeze_request", "chip_throughput_budget",
-    "evaluate_chip_throughput", "persist_chip_throughput", "read_chip_throughput",
+    "BLOCK_ARTIFACT",
+    "CHIP_ARTIFACT",
+    "THRESHOLD_RATIO",
+    "binding_constraint_text",
+    "chip_throughput_budget",
+    "declared_cyc_per_op",
+    "evaluate_block_throughput",
+    "evaluate_chip_throughput",
+    "format_squeeze_request",
+    "gate_math",
+    "measured_throughput_gate_enabled",
+    "persist_chip_throughput",
+    "read_chip_throughput",
+    "read_chip_throughput_artifact",
+    "read_throughput_artifact",
+    "roofline_peak_cyc_per_op",
+    "squeeze_max_rounds",
+    "squeeze_needed",
+    "threshold_for",
+    "throughput_squeeze_enabled",
 ]

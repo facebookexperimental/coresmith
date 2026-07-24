@@ -19,7 +19,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Fix #15 -- Atomic file writes
 # ---------------------------------------------------------------------------
@@ -238,7 +237,7 @@ def smart_truncate(
 # Engine provenance (Section 7a)
 # ---------------------------------------------------------------------------
 
-_ENGINE_SHA_CACHE: "dict[str, str]" = {}
+_ENGINE_SHA_CACHE: dict[str, str] = {}
 
 
 def engine_git_sha(short: bool = True) -> str:

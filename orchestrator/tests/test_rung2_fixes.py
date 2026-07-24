@@ -18,11 +18,9 @@ tooling-missing branch monkeypatches shutil.which). Compatible with
 """
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 
 import pytest
-
 
 _REPO = Path(__file__).resolve().parents[2]
 
@@ -111,8 +109,8 @@ class TestUarchGateSkipVsPass:
     async def test_golden_run_still_passes(self, tmp_path, monkeypatch):
         """A design whose gate actually compared models must PASS unchanged."""
         monkeypatch.setenv("CORESMITH_BLOCK_GOLDENS", "1")
-        from orchestrator.langgraph import pipeline_graph as pg
         from orchestrator.architecture import model_integration as mi
+        from orchestrator.langgraph import pipeline_graph as pg
 
         async def _noop(_pr):
             return None
@@ -262,7 +260,8 @@ class TestPpaGatePdkFreeUnderSkipSynth:
         monkeypatch.delenv("CORESMITH_GATE_FAIL_OPEN", raising=False)
         from orchestrator.langgraph import ppa_check as pc
         from orchestrator.langgraph.pipeline_graph import (
-            _evaluate_ppa_gate, _ppa_should_park_tooling_missing,
+            _evaluate_ppa_gate,
+            _ppa_should_park_tooling_missing,
         )
 
         monkeypatch.setattr(pc.shutil, "which", lambda _b: None)
@@ -328,7 +327,8 @@ class TestEscalationRetryDocFix:
 
     def test_escalation_retry_over_budget_falls_through_to_block_diagram(self):
         from orchestrator.langgraph.architecture_graph import (
-            route_after_constraint_escalation, _DOC_FIX_MAX_ATTEMPTS,
+            _DOC_FIX_MAX_ATTEMPTS,
+            route_after_constraint_escalation,
         )
         state = {
             "human_response": {"action": "retry"},
@@ -409,8 +409,9 @@ class TestConstraintMultiViolation:
     async def test_subagent_surfaces_all_violations(self, monkeypatch):
         import json
         from unittest.mock import AsyncMock
-        import orchestrator.architecture.constraints as constraints
+
         import orchestrator.langchain.agents.coresmith_llm as llm_mod
+        from orchestrator.architecture import constraints
 
         response = json.dumps({
             "pass": False,
@@ -448,8 +449,9 @@ class TestConstraintMultiViolation:
     async def test_subagent_legacy_single_violation_still_works(self, monkeypatch):
         import json
         from unittest.mock import AsyncMock
-        import orchestrator.architecture.constraints as constraints
+
         import orchestrator.langchain.agents.coresmith_llm as llm_mod
+        from orchestrator.architecture import constraints
 
         response = json.dumps({
             "pass": False,

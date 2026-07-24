@@ -34,7 +34,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ _FF_BUDGET_RE = re.compile(r"flip_flop_budget[^\d\n]{0,16}(\d[\d,]*)", re.IGNORE
 _INT_TOKEN_RE = re.compile(r"^\d[\d,]*$")
 
 
-def _cell_count(line: str) -> Optional[int]:
+def _cell_count(line: str) -> int | None:
     """The per-cell-type count on a Yosys ``stat`` line, format-agnostic.
 
     Yosys 0.65 prints ``<count>  <cellname>`` while 0.33 prints
@@ -76,7 +76,7 @@ def _cell_count(line: str) -> Optional[int]:
     return None
 
 
-def parse_ff_budget(uarch_spec_text: str) -> Optional[int]:
+def parse_ff_budget(uarch_spec_text: str) -> int | None:
     """Pull the ``flip_flop_budget`` integer out of a uArch spec, or None.
 
     Tolerates the documented forms: ``flip_flop_budget ≈ 1200``,
@@ -132,7 +132,7 @@ _AREA_UNIT_RE = re.compile(
 )
 
 
-def parse_area_budget(uarch_spec_text: str) -> Optional[float]:
+def parse_area_budget(uarch_spec_text: str) -> float | None:
     """Pull the per-block die-area budget (um^2, SRAM included) from a uArch spec.
 
     Tolerates ``area_budget_um2 = 250000``, `` `die_area_budget_um2`: 1,200,000 ``,
@@ -199,10 +199,10 @@ def is_structural_glue_block(block_name: str = "", uarch_spec_text: str = "") ->
 
 
 def floor_area_budget(
-    area_budget_um2: Optional[float],
+    area_budget_um2: float | None,
     block_name: str = "",
     uarch_spec_text: str = "",
-) -> Optional[float]:
+) -> float | None:
     """Clamp a structural glue/wrapper/adapter block's parsed area budget up to
     :data:`GLUE_AREA_FLOOR_UM2` so a parse artifact (or a genuinely tiny declared
     value like ``~2 um2``) can't false-flag a pin-mux on area.
@@ -380,7 +380,7 @@ def probe_synth_generic(
     *,
     yosys_bin: str = "yosys",
     timeout_s: int = 300,
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     """PDK-free, memory-PRESERVING synth probe for the PPA gate.
 
     Runs ``proc; opt; memory_collect; stat`` -- deliberately NOT
@@ -446,7 +446,7 @@ def probe_synth_generic(
     }
 
 
-def count_cells_from_stat(stat_text: str) -> Optional[int]:
+def count_cells_from_stat(stat_text: str) -> int | None:
     """Total cell count from a Yosys ``stat`` (``Number of cells: N``).
 
     Uses the LAST occurrence so a post-techmap stat (the materialized gate
@@ -471,8 +471,8 @@ def probe_synth_cellcount(
     *,
     yosys_bin: str = "yosys",
     timeout_s: int = 300,
-    cwd: Optional[str] = None,
-) -> Optional[dict[str, Any]]:
+    cwd: str | None = None,
+) -> dict[str, Any] | None:
     """PDK-free generic-techmap probe that MATERIALIZES the gate cloud to count
     cells -- the synthesizability dimension the memory-PRESERVING FF probe is
     structurally blind to.
@@ -539,8 +539,8 @@ def probe_synth_cellcount_multi(
     *,
     yosys_bin: str = "yosys",
     timeout_s: int = 300,
-    cwd: Optional[str] = None,
-) -> Optional[dict[str, Any]]:
+    cwd: str | None = None,
+) -> dict[str, Any] | None:
     """Multi-source variant of :func:`probe_synth_cellcount` for the integrated
     chip_top (top + block RTLs + the cs_mem library), already deduped by the
     caller so yosys sees no MODDUP. Same return contract.
@@ -632,7 +632,7 @@ def chip_top_min_cells() -> int:
         return 64
 
 
-def count_logic_depth_from_ltp(ltp_text: str) -> Optional[int]:
+def count_logic_depth_from_ltp(ltp_text: str) -> int | None:
     """Longest combinational path length (logic levels) from a Yosys ``ltp``
     dump (``Longest topological path in <m> (length=N)``). Last match wins.
     """
@@ -646,7 +646,7 @@ _CS_MEM_REF_RE = re.compile(r"\bcs_(?:sram|fpmem|rom)\w*\b")
 
 
 def _dedup_sources(rtl_path: str,
-                   extra_sources: Optional[list[str]]) -> list[str]:
+                   extra_sources: list[str] | None) -> list[str]:
     """``[rtl_path] + extra_sources`` deduped by resolved path, order kept.
 
     A repeated source (the cs_mem library aggregated more than once for a
@@ -709,8 +709,8 @@ def probe_logic_depth(
     *,
     yosys_bin: str = "yosys",
     timeout_s: int = 300,
-    extra_sources: Optional[list[str]] = None,
-) -> Optional[dict[str, Any]]:
+    extra_sources: list[str] | None = None,
+) -> dict[str, Any] | None:
     """PDK-free combinational-DEPTH probe -- the longest register-to-register
     logic path (levels) via ``ltp -noff``.
 
@@ -801,7 +801,7 @@ def logic_depth_advisory_with_pdk_enabled() -> bool:
     return flag_enabled("CORESMITH_LOGIC_DEPTH_ADVISORY_WITH_PDK", default=True)
 
 
-def sta_tooling_available(synth_result: Optional[dict]) -> bool:
+def sta_tooling_available(synth_result: dict | None) -> bool:
     """True when a real pre-layout STA can run for this block.
 
     Requires the ``sta`` binary on PATH AND a ``synth_result`` that carries a
@@ -826,7 +826,7 @@ _SDC_PERIOD_RE = re.compile(
 )
 
 
-def parse_sdc_period_ns(sdc_text: str) -> Optional[float]:
+def parse_sdc_period_ns(sdc_text: str) -> float | None:
     """Pull the (tightest) ``create_clock -period`` value (ns) from an SDC, or
     None. Used to give the timing gate the clock period so a negative-slack
     verdict can report how many stages a path is over and drive re-pipelining."""
@@ -837,7 +837,7 @@ def parse_sdc_period_ns(sdc_text: str) -> Optional[float]:
     return min(vals) if vals else None
 
 
-def parse_sta_report(report_text: str) -> dict[str, Optional[float]]:
+def parse_sta_report(report_text: str) -> dict[str, float | None]:
     """Parse WNS/TNS (ns) from an OpenSTA ``report_wns``/``report_tns`` dump.
 
     Accepts BOTH the legacy ``wns <N>`` / ``tns <N>`` form and the OpenSTA 3.x
@@ -846,7 +846,7 @@ def parse_sta_report(report_text: str) -> dict[str, Optional[float]]:
     the parse returned nothing and WNS/TNS silently came back ``None`` -- a
     dependency on the box's ``sta`` sed-wrapper that the engine must not rely on.
     """
-    out: dict[str, Optional[float]] = {"wns_ns": None, "tns_ns": None}
+    out: dict[str, float | None] = {"wns_ns": None, "tns_ns": None}
     for key, tag in (("wns_ns", "wns"), ("tns_ns", "tns")):
         # ``(?:\s+max)?`` optionally swallows the OpenSTA 3.x corner token so
         # both ``wns -3.42`` and ``wns max -3.42`` parse to the same number.
@@ -876,19 +876,19 @@ class PpaVerdict:
 
 def evaluate_ppa(
     *,
-    actual_ff: Optional[int],
-    ff_budget: Optional[int],
+    actual_ff: int | None,
+    ff_budget: int | None,
     ff_tolerance_pct: float = 25.0,
     ff_floor: int = 2000,
     hard_ff_ceiling: int = 50000,
-    storage_ff: Optional[int] = None,
-    actual_area_um2: Optional[float] = None,
-    area_budget_um2: Optional[float] = None,
+    storage_ff: int | None = None,
+    actual_area_um2: float | None = None,
+    area_budget_um2: float | None = None,
     area_tolerance_pct: float = 20.0,
-    wns_ns: Optional[float] = None,
+    wns_ns: float | None = None,
     wns_margin_ns: float = 0.0,
-    period_ns: Optional[float] = None,
-    sta_error: Optional[str] = None,
+    period_ns: float | None = None,
+    sta_error: str | None = None,
     budget_overridden: bool = False,
 ) -> PpaVerdict:
     """Compare synthesized metrics against budgets. Only flags what it can.
@@ -928,7 +928,7 @@ def evaluate_ppa(
 
     # LOGIC vs STORAGE flip-flops. The budget is a logic-FF budget; subtract
     # declared storage so a legitimate buffer/memory is never judged against it.
-    logic_ff: Optional[int] = actual_ff
+    logic_ff: int | None = actual_ff
     if actual_ff is not None and storage_ff:
         logic_ff = max(0, actual_ff - int(storage_ff))
 
@@ -1122,7 +1122,7 @@ def _timing_hard_floor_ns() -> float:
 
 
 def _wns_repipeline_reason(wns_ns: float, over_ns: float,
-                           period_ns: Optional[float], gross: bool) -> str:
+                           period_ns: float | None, gross: bool) -> str:
     """Actionable re-pipeline feedback for a negative-slack verdict.
 
     Surfaces WHICH register-to-register path is over and BY HOW MUCH, and the
@@ -1406,7 +1406,7 @@ def run_pre_layout_sta(
     top_module: str,
     *,
     timeout_s: int = 300,
-) -> Optional[dict[str, Optional[float]]]:
+) -> dict[str, float | None] | None:
     """Pre-layout STA on the mapped netlist via OpenSTA.
 
     Ideal-clock, no wire RC -> optimistic, but it catches gross violations
@@ -1437,7 +1437,7 @@ def run_pre_layout_sta(
         if not p or not Path(p).exists():
             return None
 
-    def _fail(reason: str) -> dict[str, Optional[float]]:
+    def _fail(reason: str) -> dict[str, float | None]:
         logger.warning(
             "pre-layout STA produced no timing for %s: %s", top_module, reason
         )
@@ -1607,7 +1607,7 @@ def _maxfanout_synth_script(sources: list[str], lib: str, netlist: Path,
 def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
                           buffered: bool, period_ns: float, top: str,
                           clk_port: str, yosys_bin: str, sta_bin: str,
-                          timeout_s: int) -> tuple[Optional[float], str]:
+                          timeout_s: int) -> tuple[float | None, str]:
     """Synth (blackbox-mem, optionally fan-out-buffered) + OpenSTA at period.
 
     Returns ``(wns_ns, "")`` on success or ``(None, detail)`` on any error so a
@@ -1660,7 +1660,7 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
     out = sp.stdout + sp.stderr
     m = re.search(r"CORESMITH_WNS\s+([-0-9.eE+]+)", out)
     if m is None:
-        m = re.search(r"worst slack\s*(?:-?max)?\s*([-0-9.eE+]+)", out, re.I)
+        m = re.search(r"worst slack\s*(?:-?max)?\s*([-0-9.eE+]+)", out, re.IGNORECASE)
     if m is None:
         return None, "sta_parse_fail: " + out[-400:]
     return float(m.group(1)), ""
@@ -1674,8 +1674,8 @@ def run_maxfanout_buffered_sta(
     clk_port: str = "clk",
     *,
     timeout_s: int = 300,
-    extra_sources: Optional[list[str]] = None,
-) -> Optional[dict[str, Optional[float]]]:
+    extra_sources: list[str] | None = None,
+) -> dict[str, float | None] | None:
     """Fan-out-aware pre-layout STA: max(unbuffered BASE, fan-out-BUFFERED) WNS.
 
     Synthesizes ``rtl_path`` to Sky130 cells from source TWICE at ``period_ns``
@@ -1846,8 +1846,8 @@ def probe_memory_flops(
     apply_macro: bool = True,
     yosys_bin: str = "yosys",
     timeout_s: int = 300,
-    cwd: Optional[str] = None,
-) -> Optional[dict[str, Any]]:
+    cwd: str | None = None,
+) -> dict[str, Any] | None:
     """Memory-preserving, MACRO-aware synth probe for the memory-as-flops gate.
 
     Reads ``rtl_paths`` (design + the cs_sram wrapper library), applies the

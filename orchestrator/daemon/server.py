@@ -36,7 +36,7 @@ import socket
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # Resolve project root + telemetry before importing any graph code.
 _PROJECT_ROOT = os.environ.get(
@@ -48,19 +48,19 @@ os.environ["CORESMITH_PROJECT_ROOT"] = _PROJECT_ROOT
 # A-Fix 1: seed profile flag defaults BEFORE importing graph code -- the
 # pipeline builder reads gate-enable helpers (e.g. block_goldens_enabled) at
 # build time, so the profile must be applied first.
-from orchestrator.profile import apply as _apply_profile  # noqa: E402
+from orchestrator.profile import apply as _apply_profile
 
 _apply_profile()
 
-from orchestrator.telemetry import init_telemetry  # noqa: E402
+from orchestrator.telemetry import init_telemetry
 
 init_telemetry(_PROJECT_ROOT)
 
-from fastapi import FastAPI, HTTPException  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
-import uvicorn  # noqa: E402
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
-from orchestrator.graph_lifecycle import GraphLifecycle  # noqa: E402
+from orchestrator.graph_lifecycle import GraphLifecycle
 
 log = logging.getLogger("coresmithd")
 log.setLevel(logging.INFO)
@@ -165,7 +165,7 @@ class ResumeRequest(BaseModel):
     action: str = "approve"
     feedback: str = ""
     rtl_fix_description: str = ""
-    block_actions: Optional[dict] = None
+    block_actions: dict | None = None
     rationale: str = ""
 
 
@@ -193,7 +193,7 @@ class ArchResumeRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 @contextlib.asynccontextmanager
-async def _lifespan(_app: "FastAPI"):
+async def _lifespan(_app: FastAPI):
     # Defect 3 (rung1): the import-time _apply_profile() above logs its
     # profile-seed line BEFORE uvicorn configures logging, so it goes nowhere.
     # Re-emit it now (startup runs after uvicorn's logging is up) through the
@@ -341,9 +341,9 @@ async def run_start(req: StartRequest):
 
 def _resume_action_error(
     action: str,
-    block_actions: Optional[dict],
-    interrupt_meta: "list[tuple[str, list]]",
-) -> "Optional[tuple[str, str, list]]":
+    block_actions: dict | None,
+    interrupt_meta: list[tuple[str, list]],
+) -> tuple[str, str, list] | None:
     """Validate a resume action against the parked interrupts' supported_actions.
 
     Returns ``(block_name, bad_action, allowed_actions)`` for the FIRST interrupt
@@ -521,7 +521,7 @@ async def run_continue():
 
 
 @app.post("/run/restart-node")
-async def run_restart_node(req: "RestartNodeRequest"):
+async def run_restart_node(req: RestartNodeRequest):
     """Re-run the pipeline from the checkpoint where ``node`` is next, reusing
     every block's on-disk RTL/TB (engine follow-up #8/#10).
 
@@ -540,6 +540,7 @@ async def run_restart_node(req: "RestartNodeRequest"):
         # mass-regen of already-passing blocks.
         try:
             import json as _json
+
             from orchestrator.langgraph.pipeline_helpers import (
                 refresh_current_sidecars,
             )
@@ -549,7 +550,7 @@ async def run_restart_node(req: "RestartNodeRequest"):
                 data = _json.loads(open(bq).read())
                 names = [b.get("name") for b in data if b.get("name")]
             refreshed = refresh_current_sidecars(_PROJECT_ROOT, names)
-        except Exception:  # noqa: BLE001 - best effort
+        except Exception:
             log.warning("restart-node: sidecar refresh failed", exc_info=True)
     result = await _pipeline.restart_from_node(req.node)
     if refreshed:
@@ -762,8 +763,8 @@ def _shape_arch_state(snap) -> dict:
 def _load_block_queue(blocks_file: str) -> list[dict]:
     """Resolve blocks the same way mcp_server.start_pipeline does."""
     from orchestrator.langgraph.pipeline_helpers import (
-        load_config,
         get_sorted_block_queue,
+        load_config,
     )
 
     if blocks_file:

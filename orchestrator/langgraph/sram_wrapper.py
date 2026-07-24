@@ -20,7 +20,6 @@ it is safe to unit-test and to call from the PPA gate with no EDA tools.
 """
 from __future__ import annotations
 
-import math
 import os
 import re
 from dataclasses import dataclass

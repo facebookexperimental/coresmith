@@ -16,8 +16,12 @@ from __future__ import annotations
 
 import asyncio
 
+from orchestrator.architecture.constraints import (
+    _check_interface_family_coherence,
+)
 from orchestrator.architecture.specialists.interface_definition import (
     _max_interface_width,
+    _propagate_edge_families,
     _validate_contracts,
 )
 from orchestrator.langgraph import architecture_graph as ag
@@ -272,13 +276,6 @@ def test_new_families_accepted_no_crash():
 # propagation SELECTS, not merely that hand-labeled correct contracts don't
 # crash.
 # ---------------------------------------------------------------------------
-
-from orchestrator.architecture.specialists.interface_definition import (  # noqa: E402
-    _propagate_edge_families,
-)
-from orchestrator.architecture.constraints import (  # noqa: E402
-    _check_interface_family_coherence,
-)
 
 
 def _generic_family_diagram():

@@ -33,34 +33,34 @@ import inspect
 import logging
 import os
 import random
-import secrets
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
-from orchestrator.architecture.fidelity import (
-    compute_fidelity_derate,
-    fidelity_gate_enabled,
-    resolve_fidelity_metric,
-    write_derate_ledger,
-)
 # Reuse the v1 helpers that are still correct under v2.
 from orchestrator.architecture.composition import (
     BLOCK_MODELS_DIRNAME,
+    ReferenceInvocationError,
+    _normalize_ref_output,
+    _outputs_match,
+    _run_reference,
     bit_exact_enabled,
     block_goldens_enabled,
     gate_allow_nondegenerate_enabled,
+    gate_epsilon,
+    output_has_float,
+    outputs_close,
     parse_func_vectors,
     resolve_functional_acceptance,
     resolve_reference_entrypoint,
     resolve_reference_implementation,
     resolve_throughput_floor,
-    gate_epsilon,
-    output_has_float,
-    outputs_close,
-    _outputs_match,
-    _normalize_ref_output,
-    _run_reference,
-    ReferenceInvocationError,
+)
+from orchestrator.architecture.fidelity import (
+    compute_fidelity_derate,
+    fidelity_gate_enabled,
+    resolve_fidelity_metric,
+    write_derate_ledger,
 )
 
 logger = logging.getLogger(__name__)
@@ -105,7 +105,7 @@ def _load_reference_module(path: str):
     return _import_module_from_path(Path(path), "_coresmith_reference_impl")
 
 
-def _default_stimulus(entry_callable: Optional[Callable]) -> Any:
+def _default_stimulus(entry_callable: Callable | None) -> Any:
     """Derive a small default stimulus from the reference entry signature.
 
     Policy (documented): a single short ascending list ``[1, 2, 3, 4]`` is
@@ -166,7 +166,7 @@ def _stimulus_from_file(p: Path) -> tuple[Any, bool]:
     return stim, True
 
 
-def _load_env_stimulus(project_root: Optional[str] = None) -> tuple[Any, bool]:
+def _load_env_stimulus(project_root: str | None = None) -> tuple[Any, bool]:
     """Resolve the model-integration stimulus.
 
     Order: (1) ``CORESMITH_MODEL_STIMULUS`` env file, then (2) auto-discover
@@ -229,7 +229,7 @@ def _resolve_gate_seed() -> int:
     return gate_seed()
 
 
-def _seeded_stimulus(entry_callable: Optional[Callable], seed: int) -> Any:
+def _seeded_stimulus(entry_callable: Callable | None, seed: int) -> Any:
     """A FRESH seeded 1-D int stream for the SEEDED tier.
 
     Returns ``None`` when the reference is not a 1-D-stream entry (more than one
@@ -369,7 +369,7 @@ def _load_frd_func_vectors(project_root: str) -> list[dict]:
 def _run_extra_stimulus_tiers(
     *,
     project_root: str,
-    entry_callable: Optional[Callable],
+    entry_callable: Callable | None,
     entry_name: str,
     ref_module: Any,
     simulate: Callable,
@@ -389,7 +389,7 @@ def _run_extra_stimulus_tiers(
     """
     violations: list[dict] = []
 
-    def _one(stimulus: Any, *, tier: str, seed: Optional[int] = None,
+    def _one(stimulus: Any, *, tier: str, seed: int | None = None,
              func_id: str = "") -> None:
         try:
             expected = _run_reference(entry_callable, stimulus, reraise=True)
@@ -550,7 +550,7 @@ def _load_block_diagram(project_root: str) -> dict:
     return bd if isinstance(bd, dict) else {}
 
 
-def _first_divergence_block(project_root: str, gap_class: Optional[str] = None) -> str:
+def _first_divergence_block(project_root: str, gap_class: str | None = None) -> str:
     """Return "" (unlocalized -> broadcast) for a composed-output divergence.
 
     A wrong-bytes / wrong-length divergence in the COMPOSED output cannot be
@@ -704,7 +704,7 @@ _FIELD_SYNONYMS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _terminal_for_field(field: str, bd: dict, conns: list[dict]) -> Optional[str]:
+def _terminal_for_field(field: str, bd: dict, conns: list[dict]) -> str | None:
     """Best-effort: the graph-TERMINAL (sink) block that emits output ``field``.
 
     A field maps to the block whose name / interface keys / description most
@@ -718,7 +718,6 @@ def _terminal_for_field(field: str, bd: dict, conns: list[dict]) -> Optional[str
     blocks = [b for b in bd.get("blocks", []) if b.get("name")]
     names = [b["name"] for b in blocks]
     by_name = {b["name"]: b for b in blocks}
-    nameset = set(names)
     # Datapath-only edges for sink detection: a monitor/status sideband consumer
     # is not a datapath sink and must not mask the real functional-output block.
     dp = _datapath_connections(conns, bd)
@@ -760,7 +759,7 @@ def _terminal_for_field(field: str, bd: dict, conns: list[dict]) -> Optional[str
             s += 1  # tie-break toward the graph-terminal output block
         return s
 
-    best: tuple[int, Optional[str]] = (0, None)
+    best: tuple[int, str | None] = (0, None)
     for n in names:
         sc = _block_score(n)
         if sc > best[0]:
@@ -888,7 +887,7 @@ def _localize_affected_blocks(
     return [n for n in order if n in affected]
 
 
-def _split_observed(observed: Any) -> tuple[Any, Optional[int]]:
+def _split_observed(observed: Any) -> tuple[Any, int | None]:
     """Split a ``simulate()`` return into ``(output, cycles)``.
 
     The v2 ``simulate(stimulus)`` contract returns a ``(output, cycles)``
@@ -1602,7 +1601,7 @@ def _dispatch_simulate(simulate, chip_model_path, models_dir, stimulus,
 
 def _run_fidelity_tier(
     project_root: str, expected: Any, observed: Any, violations: list[dict]
-) -> Optional[dict]:
+) -> dict | None:
     """Fidelity tier of the composition gate (microarchitecture step 2).
 
     Scores the composed output against the declared metric + budget, records the
@@ -1677,7 +1676,7 @@ def full_model_dv_enabled() -> bool:
 def _run_full_model_dv(
     *,
     project_root: str,
-    entry_callable: Optional[Callable],
+    entry_callable: Callable | None,
     entry_name: str,
     simulate: Callable,
     chip_model_path: Path,
@@ -1848,7 +1847,7 @@ def _run_full_model_dv(
 
 
 def _mark_gate_info(
-    result_info: Optional[dict],
+    result_info: dict | None,
     *,
     skipped: bool,
     reason: str = "",
@@ -1871,7 +1870,7 @@ def _mark_gate_info(
 
 
 def run_model_integration_gate(
-    project_root: str, result_info: Optional[dict] = None
+    project_root: str, result_info: dict | None = None
 ) -> list[dict]:
     """Run the deterministic model-integration gate.
 
@@ -2025,7 +2024,7 @@ def describe_gate_status(project_root: str) -> dict:
 
 
 def _run_gate_inner(
-    project_root: str, result_info: Optional[dict] = None
+    project_root: str, result_info: dict | None = None
 ) -> list[dict]:
     root = Path(project_root)
 
@@ -2555,7 +2554,7 @@ def _run_gate_inner(
     functional_passed = not violations
 
     # --- Throughput branch -------------------------------------------------
-    throughput_ok: Optional[bool] = None
+    throughput_ok: bool | None = None
     if observed_cycles is None:
         logger.info(
             "model integration gate: simulate() returned no cycle count "

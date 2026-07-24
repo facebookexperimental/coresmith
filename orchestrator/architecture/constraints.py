@@ -61,7 +61,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-
 # Canonical artifact identifiers a constraint violation can be attributed to.
 # Kept flat + lowercase so the graph's Doc Fix router can partition on them.
 _KNOWN_SOURCE_DOCS = frozenset({
@@ -87,8 +86,7 @@ def normalize_source_doc(value: Any) -> str:
     # Strip common suffixes/paths ("arch/sad_spec.md" -> "sad").
     stem = v.replace("\\", "/").split("/")[-1]
     for suffix in ("_spec.md", "_spec", "_doc.md", "_doc", ".json", ".md"):
-        if stem.endswith(suffix):
-            stem = stem[: -len(suffix)]
+        stem = stem.removesuffix(suffix)
     if stem in _KNOWN_SOURCE_DOCS:
         return stem
     # Word-boundary alias search ("block diagram" -> "block_diagram").
