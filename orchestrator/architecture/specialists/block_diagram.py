@@ -18,12 +18,53 @@ from __future__ import annotations
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any
 
-from pathlib import Path
+from orchestrator.langchain.prompts.skills import load_skills as _load_skills
 
 _PROMPT_FILE = Path(__file__).resolve().parents[2] / "langchain" / "prompts" / "block_diagram.md"
 SYSTEM_PROMPT = _PROMPT_FILE.read_text()
+
+# Decomposition guidance: most datapaths stream cleanly, but trial/RD-decision +
+# reconstruction-feedback computations must be CONSOLIDATED into one block, not
+# split across streaming stages (a forward-only pipeline can't express the
+# cross-candidate selection / per-unit recon feedback). The skill is self-gating
+# (it only applies when the design has that coupling), so it is safe to load for
+# every block-diagram generation.
+# The block-diagram author decides the decomposition -- it needs the SAME
+# reference skills the uArch author has, so it partitions with memory-vs-flops,
+# arithmetic-precision, pipeline and throughput budgets in mind (not just the
+# decomposition/contract skills). Missing these is why fat/memory-fused blocks
+# were proposed and only caught (or missed) downstream.
+_SKILLS_TEXT = _load_skills(
+    "feedback_coupled_decomposition", "serialization_contract",
+    "buffer_stride_contract", "output_contract_ownership",
+    "memory_macro_vs_flops", "arithmetic_precision",
+    "pipeline_contract", "throughput_budget_contract")
+# NOTE: skill text may contain literal ``{...}`` (e.g. the serialization
+# contract's ``{pred_mode(k), coeff_bits(k)}`` bit-layout example). It must NOT
+# be passed through ``str.format()`` or those braces are parsed as format
+# fields and raise KeyError. Keep the skill suffix separate from the
+# format-templated base prompt and append it only AFTER formatting.
+_SKILLS_SUFFIX = ""
+if _SKILLS_TEXT:
+    _SKILLS_SUFFIX = (
+        "\n\n# Reference Skill (use to choose the block decomposition)\n\n"
+        + _SKILLS_TEXT
+    )
+
+# Give the block-diagram author the LIVE SRAM-macro menu + OpenRAM policy -- the
+# same on-chip-memory context the uArch author gets -- so it hoists shared
+# stores into their own memory_subsystem block sized against what the backend
+# can actually place. Best-effort; appended after format() (may contain braces).
+try:
+    from orchestrator.langgraph.macro_registry import (
+        sram_policy_context as _sram_policy_context,
+    )
+    _SKILLS_SUFFIX += _sram_policy_context()
+except Exception:  # noqa: BLE001 - discovery is best-effort
+    pass
 
 
 def _scan_golden_models(
@@ -44,8 +85,8 @@ def _scan_golden_models(
     Returns:
         A formatted string summarising the discovered models.
     """
-    from pathlib import Path
     import ast
+    from pathlib import Path
 
     roots: list[Path] = []
     for candidate in (
@@ -338,17 +379,21 @@ async def analyze_block_diagram(
 
         user_message = "\n".join(parts)
 
-        # Fill template variables in the system prompt
+        # Fill template variables in the system prompt. Only the base prompt
+        # template is formatted; the skill suffix (which may contain literal
+        # braces) is appended afterwards so it is never parsed as format fields.
         system_prompt = SYSTEM_PROMPT.format(
             benchmark_context=benchmark_context,
             constraint_context=constraint_context,
             feedback_context=feedback_context,
-        )
+        ) + _SKILLS_SUFFIX
 
         # Import here to avoid circular deps and allow mocking in tests
-        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
+        import os as _os
 
-        llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
+        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
+        _arch_to = int(_os.environ.get("CORESMITH_ARCH_LLM_TIMEOUT_S", "1200") or 1200)
+        llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=_arch_to)
 
         try:
             content = await llm.call(

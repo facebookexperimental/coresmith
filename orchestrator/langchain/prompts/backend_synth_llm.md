@@ -20,6 +20,27 @@ succeeds, then report structured results.
 
 {input_files}
 
+## SRAM/ROM macro selection (physical-design synth)
+
+CoreSmith memory wrappers (`cs_sram_1rw`/`cs_sram_1rw1r`/`cs_rom_1r`) are
+BEHAVIORAL flop arrays by default (for simulation). In the backend/physical
+flow they MUST synthesize to the empty macro-shell leaf (`cs_mem_macro_shell` /
+`cs_rom_macro_shell`, 0 storage flip-flops) so the PD flow can bind them to a
+real SRAM/ROM macro -- otherwise a wrapped memory becomes an enormous,
+un-routable flop array.
+
+- SRAM wrapper library to read (if listed and not already in the inputs):
+  `{sram_wrapper_lib}`
+- Macro-select directive: `{sram_macro_directive}`
+
+If the directive above is not `(none)`, you MUST insert it in the Yosys script
+**immediately after all `read_verilog` lines and BEFORE `hierarchy`** (it
+re-derives the wrapper modules with `MEM_IMPL="MACRO"`; running it after
+`hierarchy` is a no-op). Naming a wrapper module that the design does not use is
+only a harmless warning. Do NOT apply it to `cs_fpmem_*` (the intended flop
+tier). After synth, confirm the netlist contains `cs_mem_macro_shell` /
+`cs_rom_macro_shell` instances (not a `$mem`/flop array) for wrapped memories.
+
 ## Required Outputs
 
 All outputs go in: `{output_dir}/`
@@ -31,7 +52,10 @@ All outputs go in: `{output_dir}/`
 ## Procedure
 
 1. Write a Yosys `.ys` script that:
-   - Reads all input Verilog files listed above
+   - Reads all input Verilog files listed above (include the SRAM wrapper
+     library if one is listed under "Input Files")
+   - Inserts the macro-select directive (see "SRAM/ROM macro selection") right
+     here, BEFORE `hierarchy`, when it is not `(none)`
    - Sets `hierarchy -check -top {design_name}`
    - Runs `proc; opt; fsm; opt; memory; opt`
    - Maps to Sky130 HD cells: `techmap; opt; dfflibmap -liberty $lib; abc -liberty $lib; clean; opt_clean -purge`

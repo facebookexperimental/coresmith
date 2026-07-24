@@ -38,10 +38,60 @@ first/last blocks in the dataflow, generate adapter logic:
 
 - **Serial-to-parallel**: N-bit chip input -> M-bit block input (M > N)
 - **Parallel-to-serial**: M-bit block output -> N-bit chip output (N < M)
-- **Width adapters**: zero-extension, truncation for inter-block mismatches
+- **Width adapters**: zero-extension for WIDENING only
 - **FIFO bridges**: if PRD specifies buffering between blocks
 
+**NEVER TRUNCATE AN INTER-BLOCK SIGNAL.** A consumer port narrower than its
+producer means one of the two blocks was generated against a STALE interface
+contract (e.g. the contract was widened to add an opcode or kind field and
+only one side was re-specced). Truncation silently destroys exactly those
+newest, semantically-loaded bits -- the chip lints clean and then cannot
+process a single input. Do NOT generate a `trunc_*` adapter: report the pair
+as a `width_mismatch` ERROR in `mismatches`, naming BOTH blocks and both
+widths, so the stale block gets re-specced instead of silently narrowed.
+(Chip-BOUNDARY serial/parallel conversion per the PRD is fine; the ban is on
+truncating block-to-block payloads.)
+
 Embed glue logic as submodule definitions in the same Verilog file.
+
+### SHARED-SERVICE ARBITERS: REGISTER THE GRANT (ready/valid stability)
+
+When N requesters share one service (a bit-reader, a memory port, a
+completion channel) through an arbiter you author, the arbiter MUST obey
+AXI-stream stability on its output request: **once `req_valid` is asserted,
+`req_data`/`req_last` and the selected requester MUST NOT change until
+`req_ready` accepts the beat** (and, for request/response services, until the
+matching response completes). A purely COMBINATIONAL priority mux over live
+request lines violates this the moment a higher-priority requester arrives
+mid-handshake: the payload swaps under a held `req_valid`, the response is
+routed to the wrong requester, and the bug only fires under contention +
+backpressure -- it passes every uncontended test. Therefore:
+
+- Register the grant (a small FSM or a grant flop): pick a requester only
+  when idle, hold grant + payload stable through the request handshake and
+  its response, then release.
+- Use round-robin (not fixed priority) when a low-priority requester can be
+  starved by a busy high-priority one.
+- In the integration TB notes, flag overlapping-request + backpressure as a
+  contention case validation must exercise.
+
+### LIBRARY MEMORY CELLS ARE PROVIDED -- NEVER DEFINE THEM
+The CoreSmith toolflow supplies a shared memory library
+(`rtl_lib/cs_sram.v`) that defines `cs_mem_1rw`, `cs_mem_1rw1r`,
+`cs_sram_1rw`, `cs_sram_1rw1r`, `cs_fpmem_1rw`, `cs_fpmem_1rw1r`, and
+`cs_mem_macro_shell`. These cells are read in alongside your chip_top in
+lint, simulation, and synthesis.
+
+You may **INSTANTIATE** any `cs_mem_*` / `cs_sram_*` / `cs_fpmem_*` cell a
+block needs, but you must **NEVER define, redeclare, blackbox, or stub** any
+module whose name starts with `cs_mem_`, `cs_sram_`, or `cs_fpmem_`. Do NOT
+write `module cs_sram_1rw1r ... endmodule`, do NOT write a
+`(* blackbox *)` empty body for one, and do NOT "embed the submodule
+definition" for them even though Task 2 tells you to embed glue/adapter
+definitions. A stubbed memory cell silently makes every memory read all
+zeros and is rejected by a postcondition check that will force a retry.
+When you instantiate one, just reference it -- the real behavioral body is
+already on the source path.
 
 ## TASK 3: TOP-LEVEL VERILOG GENERATION
 

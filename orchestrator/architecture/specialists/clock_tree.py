@@ -17,9 +17,8 @@ multi-domain architectures when the block diagram warrants it.
 from __future__ import annotations
 
 import json
-from typing import Any
-
 from pathlib import Path
+from typing import Any
 
 _PROMPT_FILE = Path(__file__).resolve().parents[2] / "langchain" / "prompts" / "clock_tree.md"
 SYSTEM_PROMPT = _PROMPT_FILE.read_text()

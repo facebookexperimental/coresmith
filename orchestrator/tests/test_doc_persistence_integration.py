@@ -31,7 +31,6 @@ from orchestrator.tests.fft16_fixtures import (
     FFT16_SAD_MARKDOWN,
 )
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Doc Store Integration (uses fft16_full_docs fixture)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -54,8 +53,13 @@ class TestDocStoreIntegration:
 
     def test_each_reader_returns_correct_data(self, fft16_full_docs):
         from orchestrator.architecture.doc_store import (
-            read_prd, read_sad, read_frd, read_block_diagram,
-            read_memory_map, read_clock_tree, read_register_spec,
+            read_block_diagram,
+            read_clock_tree,
+            read_frd,
+            read_memory_map,
+            read_prd,
+            read_register_spec,
+            read_sad,
         )
 
         assert read_prd(fft16_full_docs) == FFT16_PRD_DOCUMENT
@@ -83,7 +87,9 @@ class TestDocStoreIntegration:
 
     def test_no_coresmith_dir_returns_all_none(self, tmp_path):
         from orchestrator.architecture.doc_store import (
-            list_documents, read_prd, read_sad,
+            list_documents,
+            read_prd,
+            read_sad,
         )
 
         result = list_documents(str(tmp_path))

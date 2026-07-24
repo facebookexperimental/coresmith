@@ -160,6 +160,71 @@ def _daemon_start(args):
             k, v = line.split("=", 1)
             env.setdefault(k.strip(), v.strip())
 
+    # PATH is special: env.setdefault above never applies it (PATH always
+    # exists in the ambient env), so toolchain dirs from the run's LAUNCH env
+    # were silently lost on a bare-shell restart -- observed as cocotb picking
+    # system Verilator 5.020 over oss-cad-suite's 5.051 and failing its >=5.036
+    # requirement. The launch PATH is persisted under CORESMITH_SAVED_PATH (see
+    # the persist block below); on restart, PREPEND any of its entries missing
+    # from the current PATH (prepend, not append, so the launch toolchain wins
+    # over same-named system tools -- exactly what sourcing run_env.sh did).
+    # The venv/repo-bin injections below still land in front of everything.
+    _saved_path = env.get("CORESMITH_SAVED_PATH", "").strip()
+    if _saved_path:
+        _cur_parts = [p for p in env.get("PATH", "").split(os.pathsep) if p]
+        _missing = [p for p in _saved_path.split(os.pathsep)
+                    if p and p not in _cur_parts]
+        if _missing:
+            env["PATH"] = os.pathsep.join(_missing + _cur_parts)
+            print(f"restored {len(_missing)} launch-env PATH entr"
+                  f"{'y' if len(_missing) == 1 else 'ies'} from "
+                  f"CORESMITH_SAVED_PATH")
+
+    # Auto-persist the run's WORKER SELECTORS so a later restart is self-
+    # sufficient. Footgun this closes: a `daemon start` that did NOT re-source
+    # the run's launch env instantiated the WRONG LLM (e.g. ClaudeLLM instead of
+    # the pinned codex/gpt-5.6-sol worker) -- silently swapping the model mid-
+    # run. We snapshot the effective non-secret provider/model selectors from
+    # the ambient env into .coresmith/env when present-and-not-already-recorded,
+    # so every subsequent restart reconstructs the same worker without the
+    # operator having to re-source anything. SECRETS (api keys / tokens) are
+    # deliberately NOT persisted -- they stay in the ambient env / keyring.
+    _persist_keys = (
+        "CORESMITH_LLM_PROVIDER", "CORESMITH_CODEX_MODEL", "CORESMITH_MODEL",
+        "CODEX_CLI_PATH", "CODEX_HOME",
+        "CORESMITH_CODEX_REASONING_EFFORT", "CORESMITH_CODEX_REASONING_EFFORT_ARCH",
+    )
+    try:
+        _recorded = set()
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                s = line.strip()
+                if s and not s.startswith("#") and "=" in s:
+                    _recorded.add(s.split("=", 1)[0].strip())
+        _to_add = []
+        for k in _persist_keys:
+            v = os.environ.get(k)
+            if v and k not in _recorded:
+                if any(tok in k for tok in ("KEY", "TOKEN", "SECRET", "PASSWORD")):
+                    continue  # never persist secrets
+                _to_add.append(f"{k}={v}")
+        # Snapshot the launch PATH once (first properly-sourced start) so later
+        # bare-shell restarts can restore the run's toolchain dirs (see the
+        # CORESMITH_SAVED_PATH merge above). Recorded once, never overwritten.
+        if "CORESMITH_SAVED_PATH" not in _recorded and os.environ.get("PATH"):
+            _to_add.append(f"CORESMITH_SAVED_PATH={os.environ['PATH']}")
+        if _to_add:
+            env_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(env_file, "a", encoding="utf-8") as _ef:
+                if _recorded:
+                    _ef.write("\n")
+                _ef.write("# auto-persisted worker selectors (restart-safe)\n")
+                _ef.write("\n".join(_to_add) + "\n")
+            print(f"persisted worker selectors to {env_file}: "
+                  f"{[a.split('=',1)[0] for a in _to_add]}")
+    except Exception as e:  # noqa: BLE001 -- persistence is best-effort
+        print(f"note: worker-selector persist skipped: {e}")
+
     log_path = project_root / ".coresmith" / "daemon.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -176,6 +241,35 @@ def _daemon_start(args):
     if venv_bin.is_dir():
         env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
         env["VIRTUAL_ENV"] = str(repo_root / "venv")
+
+    # B3: prepend the repo bin/ so every agent the daemon spawns resolves the
+    # `coresmith` verify-as-tool CLI on PATH (agents inherit the daemon env).
+    repo_bin = repo_root / "bin"
+    if repo_bin.is_dir():
+        env["PATH"] = f"{repo_bin}:{env.get('PATH', '')}"
+
+    # Defect 1 (rung1): codex runs agent commands via `/bin/bash -lc`, where
+    # /etc/profile unconditionally reassigns PATH and drops the repo bin/ prefix
+    # injected above (RTL agents hit `coresmith verify ... -> exit 127`). Export
+    # an ABSOLUTE handle to the CLI so agents can invoke `"$CORESMITH_CLI"
+    # <subcommand>` (falling back to plain `coresmith` if unset) regardless of
+    # what /etc/profile does to PATH. Agents inherit this daemon env.
+    cli_path = repo_bin / "coresmith"
+    if cli_path.exists():
+        env["CORESMITH_CLI"] = str(cli_path)
+        # Belt-and-suspenders: also refresh a /usr/local/bin/coresmith symlink so
+        # a bare `coresmith` resolves even in a profile-reset shell. Best-effort;
+        # never fatal (no-op if the dir is unwritable or holds a real file).
+        try:
+            sys.path.insert(0, str(repo_root))
+            from orchestrator.harness.env import ensure_cli_symlink
+            if ensure_cli_symlink(cli_path) is None:
+                print(
+                    "note: /usr/local/bin/coresmith symlink not refreshed "
+                    "(agents use $CORESMITH_CLI or the repo bin/ on PATH)"
+                )
+        except Exception as e:  # noqa: BLE001 -- symlink is optional
+            print(f"note: coresmith symlink refresh skipped: {e}")
 
     # cocotb 2.x requires PYTHONHOME so the Verilator-embedded Python
     # interpreter can find pygpi (a separate package introduced in
@@ -263,6 +357,7 @@ def _run_start(args):
         "max_attempts": args.max_attempts,
         "target_clock_mhz": args.target_clock_mhz,
         "blocks_file": args.blocks_file or "",
+        "force": bool(getattr(args, "force", False)),
     }
     response = _post(project_root, "/run/start", body)
     for w in response.get("warnings", []) or []:
@@ -273,6 +368,15 @@ def _run_start(args):
 def _run_pause(args):
     project_root = _project_root(args.project_root)
     print(json.dumps(_post(project_root, "/run/pause", {}), indent=2))
+
+
+def _run_restart_node(args):
+    project_root = _project_root(args.project_root)
+    print(json.dumps(
+        _post(project_root, "/run/restart-node",
+              {"node": args.node,
+               "refresh_sidecars": bool(getattr(args, "refresh_sidecars", False))}),
+        indent=2))
 
 
 def _run_state(args):
@@ -350,6 +454,17 @@ def _add_project_root(p: argparse.ArgumentParser):
 
 
 def main():
+    # A-Fix 1: seed profile flag defaults (strict by default) so the CLI and any
+    # daemon it spawns share the same gate posture. Best-effort: the CLI still
+    # works if the engine package isn't importable in this interpreter.
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(_REPO_ROOT))
+        from orchestrator.profile import apply as _apply_profile
+        _apply_profile()
+    except Exception:
+        pass
+
     ap = argparse.ArgumentParser(prog="coresmith")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -375,10 +490,24 @@ def main():
     r1.add_argument("--blocks-file", default="")
     r1.add_argument("--max-attempts", type=int, default=5)
     r1.add_argument("--target-clock-mhz", type=float, default=50.0)
+    r1.add_argument("--force", action="store_true",
+                    help="discard an existing run and start fresh (default: "
+                         "refuse if a run already exists -- resume it instead)")
     r1.set_defaults(func=_run_start)
     r2 = rsub.add_parser("pause", help="cancel the current task")
     _add_project_root(r2)
     r2.set_defaults(func=_run_pause)
+    r3 = rsub.add_parser("restart-node",
+                         help="re-run from a specific node (reuses on-disk "
+                              "RTL; targeted alternative to `run start --force`)")
+    _add_project_root(r3)
+    r3.add_argument("node", help="node to restart from, e.g. integration_check, "
+                                 "integration_dv, validation_dv, process_block")
+    r3.add_argument("--refresh-sidecars", action="store_true",
+                    help="re-sync intact-RTL blocks' contract sidecars to live "
+                         "first, so the integration staleness preflight does "
+                         "not force a mass-regen of already-passing blocks")
+    r3.set_defaults(func=_run_restart_node)
 
     # architecture (PRD/SAD/FRD/ERS/block_diagram). Use BEFORE `run start`
     # when validation_dv needs an ERS to verify against.
@@ -437,6 +566,15 @@ def main():
     _add_project_root(lg)
     lg.add_argument("-n", "--tail", type=int, default=50)
     lg.set_defaults(func=_run_logs)
+
+    # harness: verify-as-tool + read-only state queries (engine-owned; direct
+    # in-process calls, no daemon HTTP). Deferred import so the daemon-only
+    # subcommands above still work if the engine package can't be imported.
+    try:
+        from orchestrator.harness.cli import register_subcommands
+        register_subcommands(sub)
+    except Exception:  # noqa: BLE001
+        pass
 
     args = ap.parse_args()
     args.func(args)

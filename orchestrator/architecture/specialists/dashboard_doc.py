@@ -25,7 +25,6 @@ import re
 from html import escape as _esc
 from pathlib import Path
 
-
 _TMPL_DIR = Path(__file__).resolve().parents[2] / "langchain" / "prompts"
 _TMPL_FILE = "dashboard.html.j2"
 

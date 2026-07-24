@@ -44,4 +44,12 @@ jobs:
         run: ruff check orchestrator/
 
       - name: Run tests
+        # T0: every PR. Fault/replay/failclosed/provider + stage-fixture unit
+        # tests carry no excluding marker, so they run here automatically.
         run: pytest orchestrator/tests/ -v -m "not live_llm and not requires_nix and not e2e"
+
+      - name: T1 stage-fixture gate
+        # Resume-from-checkpoint stage fixtures (seconds; PR mode = skip on
+        # schema drift so a stale fixture never reddens an unrelated PR). The
+        # nightly job re-runs this with CORESMITH_STAGE_STRICT=1 to catch drift.
+        run: pytest orchestrator/tests/ -v -m stage_fixture

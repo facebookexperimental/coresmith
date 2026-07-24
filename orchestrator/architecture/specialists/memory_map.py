@@ -17,9 +17,8 @@ while making intelligent decisions about sizing and layout.
 from __future__ import annotations
 
 import json
-from typing import Any
-
 from pathlib import Path
+from typing import Any
 
 _PROMPT_FILE = Path(__file__).resolve().parents[2] / "langchain" / "prompts" / "memory_map.md"
 SYSTEM_PROMPT = _PROMPT_FILE.read_text()

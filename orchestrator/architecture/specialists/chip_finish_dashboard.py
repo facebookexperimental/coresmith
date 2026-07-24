@@ -27,7 +27,6 @@ from orchestrator.architecture.specialists.dashboard_doc import (
     _blocks_to_mermaid,
 )
 
-
 _TEMPLATE_FILE = (
     Path(__file__).resolve().parents[2]
     / "langchain"
@@ -66,8 +65,7 @@ async def generate_chip_finish_dashboard(
 
     Returns the raw HTML string.
     """
-    from jinja2 import Environment, BaseLoader
-
+    from jinja2 import BaseLoader, Environment
     from opentelemetry import trace as _trace
 
     tracer = _trace.get_tracer("coresmith.backend.chip_finish_dashboard")
@@ -1077,8 +1075,8 @@ _TYPE_KEYWORDS: list[tuple[str, list[str], str]] = [
     (
         "codec",
         [
-            "codec", "jpeg", "encoder",
-            "decoder", "video", "image",
+            "codec", "video_codec", "video_codec", "video_codec", "video_codec", "jpeg",
+            "encoder", "decoder", "video", "image",
         ],
         "Create a before/after visualization with two side-by-side 8x8 pixel "
         "grids using CSS grid cells. Left grid: 'Input Block' with a smooth "

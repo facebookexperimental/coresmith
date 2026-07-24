@@ -30,19 +30,21 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
 from orchestrator.langgraph.architecture_graph import (
+    _DOC_FIX_MAX_ATTEMPTS,
     ArchGraphState,
+    _partition_constraint_violations,
     _persist_intermediate_state,
     build_architecture_graph,
+    doc_fix_node,
+    review_diagram,
+    route_after_constraint_escalation,
+    route_after_constraints,
+    route_after_diagram_escalation,
+    route_after_exhausted_escalation,
+    route_after_increment,
     route_after_prd,
     route_after_prd_escalation,
-    review_diagram,
-    route_after_diagram_escalation,
-    route_after_constraints,
-    route_after_constraint_escalation,
-    route_after_increment,
-    route_after_exhausted_escalation,
 )
-
 from orchestrator.tests.fft16_fixtures import (
     FFT16_BLOCK_DIAGRAM,
     FFT16_CLOCK_TREE,
@@ -55,7 +57,6 @@ from orchestrator.tests.fft16_fixtures import (
     FFT16_REQUIREMENTS,
     FFT16_SAD_DOCUMENT,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -114,7 +115,7 @@ def _patch_all_specialists(
         new_callable=AsyncMock,
         return_value=prd_result,
     ))
-    from orchestrator.tests.fft16_fixtures import FFT16_SAD_MARKDOWN, FFT16_FRD_MARKDOWN
+    from orchestrator.tests.fft16_fixtures import FFT16_FRD_MARKDOWN, FFT16_SAD_MARKDOWN
     stack.enter_context(patch(
         "orchestrator.architecture.specialists.sad_spec.generate_sad",
         new_callable=AsyncMock,
@@ -201,6 +202,7 @@ class TestGraphConstruction:
             "System Architecture",
             "Functional Requirements",
             "Block Diagram",
+            "Complexity Review",
             "Escalate Diagram",
             "Memory Map",
             "Clock Tree",
@@ -276,13 +278,23 @@ class TestReviewDiagram:
         state = {"block_diagram": {"blocks": [{"name": "a"}], "questions": [{"q": "?"}]}}
         assert review_diagram(state) == "Escalate Diagram"
 
-    def test_clean_goes_to_interface_definition(self):
-        # Interface Definition is the new stage between a clean block
-        # diagram and Memory Map (PR #45). Memory Map runs immediately
-        # after Interface Definition; the route here advances to the
-        # interface contract stage first.
+    def test_clean_goes_to_interface_definition(self, monkeypatch):
+        # With BOTH the complexity gate and the output-contract gate disabled,
+        # a clean block diagram routes straight to Interface Definition (the
+        # PR #45 stage before Memory Map). The two gates (default ON) each slot
+        # a review node in front of this edge; their routing is covered in
+        # test_block_complexity_gate.py / test_output_contract_gate.py.
+        monkeypatch.setenv("CORESMITH_COMPLEXITY_GATE", "0")
+        monkeypatch.setenv("CORESMITH_OUTPUT_CONTRACT_GATE", "0")
         state = {"block_diagram": {"blocks": [{"name": "a"}], "questions": []}}
         assert review_diagram(state) == "Interface Definition"
+
+    def test_clean_default_goes_to_complexity_review(self, monkeypatch):
+        # Default (both gates ON): the complexity gate runs first on a clean
+        # diagram (A-Fix 3b).
+        monkeypatch.delenv("CORESMITH_COMPLEXITY_GATE", raising=False)
+        state = {"block_diagram": {"blocks": [{"name": "a"}], "questions": []}}
+        assert review_diagram(state) == "Complexity Review"
 
     def test_no_blocks_goes_to_escalate(self):
         state = {"block_diagram": {"blocks": [], "questions": []}}
@@ -294,9 +306,23 @@ class TestReviewDiagram:
 
 
 class TestRouteAfterDiagramEscalation:
-    def test_continue_goes_to_interface_definition(self):
-        # After the diagram escalation continues, route through the new
-        # Interface Definition stage before Memory Map (PR #45).
+    def test_continue_goes_to_complexity_review_by_default(self, monkeypatch):
+        # C17: 'continue' (diagram accepted after a clarifying question) must
+        # run the SAME post-diagram gates as the clean-first-try path
+        # (review_diagram) -- default (both gates ON) means the complexity
+        # gate runs first. Hard-wiring 'Interface Definition' here used to let
+        # any design whose diagram asked a question skip the
+        # complexity/decomposition gate entirely.
+        monkeypatch.delenv("CORESMITH_COMPLEXITY_GATE", raising=False)
+        state = {"human_response": {"action": "continue"}}
+        assert route_after_diagram_escalation(state) == "Complexity Review"
+
+    def test_continue_goes_to_interface_definition_when_gates_disabled(self, monkeypatch):
+        # With BOTH the complexity gate and the output-contract gate disabled,
+        # 'continue' routes straight to Interface Definition (the PR #45
+        # stage before Memory Map), mirroring review_diagram's clean path.
+        monkeypatch.setenv("CORESMITH_COMPLEXITY_GATE", "0")
+        monkeypatch.setenv("CORESMITH_OUTPUT_CONTRACT_GATE", "0")
         state = {"human_response": {"action": "continue"}}
         assert route_after_diagram_escalation(state) == "Interface Definition"
 
@@ -383,6 +409,246 @@ class TestRouteAfterExhaustedEscalation:
     def test_missing_action_fails_closed_to_abort(self):
         state = {}
         assert route_after_exhausted_escalation(state) == "Abort"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Doc-fix repair path (constraint-repair routing gap)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestPartitionConstraintViolations:
+    def test_doc_sourced_auto_fixable_partitioned(self):
+        vs = [
+            {"category": "auto_fixable", "source_doc": "sad", "violation": "sad bug"},
+            {"category": "auto_fixable", "source_doc": "frd", "violation": "frd bug"},
+        ]
+        doc_sourced, other = _partition_constraint_violations(vs)
+        assert len(doc_sourced) == 2
+        assert other == []
+
+    def test_diagram_sourced_auto_fixable_is_other(self):
+        vs = [
+            {"category": "auto_fixable", "source_doc": "block_diagram", "violation": "bd"},
+        ]
+        doc_sourced, other = _partition_constraint_violations(vs)
+        assert doc_sourced == []
+        assert len(other) == 1
+
+    def test_structural_never_doc_sourced_even_if_sad(self):
+        # Only auto_fixable violations are eligible for the doc-fix path.
+        vs = [{"category": "structural", "source_doc": "sad", "violation": "x"}]
+        doc_sourced, other = _partition_constraint_violations(vs)
+        assert doc_sourced == []
+        assert len(other) == 1
+
+    def test_unknown_source_is_other(self):
+        vs = [{"category": "auto_fixable", "source_doc": "", "violation": "x"}]
+        doc_sourced, other = _partition_constraint_violations(vs)
+        assert doc_sourced == []
+        assert len(other) == 1
+
+    def test_none_and_empty(self):
+        assert _partition_constraint_violations(None) == ([], [])
+        assert _partition_constraint_violations([]) == ([], [])
+
+
+class TestRouteAfterConstraintsDocFix:
+    def _cr(self, violations):
+        return {"constraint_result": {
+            "all_pass": False, "has_structural": False, "violations": violations,
+        }, "round": 1}
+
+    def test_doc_sourced_routes_to_doc_fix(self):
+        state = self._cr([
+            {"category": "auto_fixable", "source_doc": "sad", "violation": "sad bug"},
+        ])
+        assert route_after_constraints(state) == "Doc Fix"
+
+    def test_diagram_sourced_routes_to_iteration(self):
+        # Non-doc auto_fixable (diagram/etc.) still uses the Block Diagram path.
+        state = self._cr([
+            {"category": "auto_fixable", "source_doc": "block_diagram", "violation": "bd"},
+        ])
+        assert route_after_constraints(state) == "Constraint Iteration"
+
+    def test_doc_fix_cap_falls_through_to_iteration(self):
+        # Once the doc-fix attempts are exhausted, a still-flagged doc-sourced
+        # violation falls back to the diagram loop (which owns exhaustion).
+        state = self._cr([
+            {"category": "auto_fixable", "source_doc": "sad", "violation": "sad bug"},
+        ])
+        state["doc_fix_attempts"] = _DOC_FIX_MAX_ATTEMPTS
+        assert route_after_constraints(state) == "Constraint Iteration"
+
+    def test_structural_still_escalates(self):
+        state = {"constraint_result": {
+            "all_pass": False, "has_structural": True,
+            "violations": [{"category": "structural", "source_doc": "sad"}],
+        }, "round": 1}
+        assert route_after_constraints(state) == "Escalate Constraints"
+
+    def test_no_source_doc_key_still_iterates(self):
+        # Legacy violation dicts without source_doc must not crash the router.
+        state = self._cr([{"category": "auto_fixable", "violation": "legacy"}])
+        assert route_after_constraints(state) == "Constraint Iteration"
+
+
+class TestDocFixNode:
+    @pytest.mark.asyncio
+    async def test_doc_fix_regenerates_sad_and_doc_changes(self, isolated_project):
+        """A SAD-sourced auto_fixable violation -> Doc Fix regenerates the SAD
+        and the on-disk sad_spec.md actually changes."""
+        from pathlib import Path
+
+        arch = Path(isolated_project) / "arch"
+        arch.mkdir(parents=True, exist_ok=True)
+        (arch / "sad_spec.md").write_text(
+            "# SAD\n\nPinout summary: 18 signal bits, 9 inputs.\n"
+        )
+
+        corrected = {
+            "sad_text": "# SAD\n\nPinout summary: 26 signal bits, 17 inputs.\n",
+            "phase": "sad_complete",
+        }
+
+        state = {
+            "project_root": isolated_project,
+            "requirements": FFT16_REQUIREMENTS,
+            "pdk_summary": "sky130 | 130nm",
+            "prd_spec": FFT16_PRD_DOCUMENT,
+            "round": 1,
+            "constraint_result": {
+                "all_pass": False,
+                "has_structural": False,
+                "violations": [{
+                    "category": "auto_fixable",
+                    "source_doc": "sad",
+                    "check": "derived_arithmetic_consistency",
+                    "violation": "SAD pinout summary says 18/9; port table implies 26/17.",
+                    "suggested_fix": "Change the summary sentence to 26 signal bits, 17 inputs.",
+                }],
+            },
+        }
+
+        captured = {}
+
+        async def _fake_generate_sad(*args, **kwargs):
+            captured["feedback"] = kwargs.get("constraint_feedback")
+            return corrected
+
+        with patch(
+            "orchestrator.architecture.specialists.sad_spec.generate_sad",
+            new=_fake_generate_sad,
+        ):
+            result = await doc_fix_node(state)
+
+        assert result["doc_fix_attempts"] == 1
+        assert result["sad_spec"] == corrected
+        # The generator received the violation + suggested_fix as feedback.
+        assert "26 signal bits" in (captured["feedback"] or "")
+        # The document on disk actually changed.
+        md = (arch / "sad_spec.md").read_text()
+        assert "26 signal bits, 17 inputs" in md
+        assert "18 signal bits" not in md
+
+    @pytest.mark.asyncio
+    async def test_doc_fix_only_regenerates_flagged_doc(self, isolated_project):
+        """When only the FRD is flagged, the SAD generator is not invoked."""
+        state = {
+            "project_root": isolated_project,
+            "requirements": FFT16_REQUIREMENTS,
+            "pdk_summary": "sky130 | 130nm",
+            "prd_spec": FFT16_PRD_DOCUMENT,
+            "sad_spec": {"sad_text": "# SAD\n"},
+            "round": 1,
+            "constraint_result": {
+                "all_pass": False,
+                "has_structural": False,
+                "violations": [{
+                    "category": "auto_fixable",
+                    "source_doc": "frd",
+                    "violation": "FRD KPI arithmetic wrong.",
+                    "suggested_fix": "Recompute cycles_per_transaction.",
+                }],
+            },
+        }
+
+        sad_called = {"n": 0}
+
+        async def _fake_sad(*a, **k):
+            sad_called["n"] += 1
+            return {"sad_text": "x"}
+
+        async def _fake_frd(*a, **k):
+            return {"frd_text": "# FRD corrected\n", "phase": "frd_complete"}
+
+        with patch(
+            "orchestrator.architecture.specialists.sad_spec.generate_sad", new=_fake_sad,
+        ), patch(
+            "orchestrator.architecture.specialists.frd_spec.generate_frd", new=_fake_frd,
+        ):
+            result = await doc_fix_node(state)
+
+        assert sad_called["n"] == 0
+        assert result["frd_spec"]["frd_text"] == "# FRD corrected\n"
+        assert result["doc_fix_attempts"] == 1
+
+
+class TestDocFixFullFlow:
+    @pytest.mark.asyncio
+    async def test_doc_sourced_violation_regenerates_sad_then_finalizes(
+        self, arch_graph, fft16_initial_state
+    ):
+        """Full graph: a SAD-sourced auto_fixable violation on the first
+        constraint pass routes to Doc Fix (regenerating the SAD), and the
+        second constraint pass (clean) finalizes -- the SAD generator is
+        re-invoked, which the old Block-Diagram-only path never did."""
+        config = {"configurable": {"thread_id": "test-docfix-flow-1"}}
+
+        doc_violation = [{
+            "category": "auto_fixable",
+            "source_doc": "sad",
+            "check": "derived_arithmetic_consistency",
+            "violation": "SAD pinout summary arithmetic is wrong.",
+            "suggested_fix": "Fix the summary sentence.",
+        }]
+
+        constraint_calls = {"n": 0}
+
+        async def _constraint_side_effect(*a, **k):
+            constraint_calls["n"] += 1
+            return doc_violation if constraint_calls["n"] == 1 else []
+
+        sad_regen = {"n": 0}
+        from orchestrator.tests.fft16_fixtures import FFT16_SAD_MARKDOWN
+
+        async def _sad_side_effect(*a, **k):
+            # Count only doc-fix re-invocations (they carry feedback).
+            if k.get("constraint_feedback"):
+                sad_regen["n"] += 1
+            return FFT16_SAD_MARKDOWN
+
+        with _patch_all_specialists(prd_result=FFT16_PRD_QUESTIONS):
+            await arch_graph.ainvoke(fft16_initial_state, config)
+
+        with _patch_all_specialists(prd_result=FFT16_PRD_DOCUMENT) as stack:
+            stack.enter_context(patch(
+                "orchestrator.architecture.constraints.check_constraints",
+                new=_constraint_side_effect,
+            ))
+            stack.enter_context(patch(
+                "orchestrator.architecture.specialists.sad_spec.generate_sad",
+                new=_sad_side_effect,
+            ))
+            await arch_graph.ainvoke(
+                Command(resume={"action": "continue", "answers": FFT16_PRD_ANSWERS}),
+                config,
+            )
+            result = await _accept_final_review(arch_graph, config)
+
+        assert result["success"] is True
+        # The doc-fix path re-invoked the SAD generator with feedback at least
+        # once -- proof the doc-sourced violation was routed to Doc Fix.
+        assert sad_regen["n"] >= 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -857,8 +1123,8 @@ class TestHappyPath:
         assert result["error"] == ""
 
         # Verify block specs written
-        from pathlib import Path
         import json
+        from pathlib import Path
         specs_path = Path(result["block_specs_path"])
         assert specs_path.exists()
         specs = json.loads(specs_path.read_text())
@@ -946,9 +1212,9 @@ class TestBlockDiagramVizIntermediateSync:
 
     Previously, block_diagram_viz.json was only written by
     create_documentation_node at the end of the pipeline. This caused the
-    block diagram canvas to show stale block names (e.g. "stage_a_block")
+    block diagram canvas to show stale block names (e.g. "entropy_encoder")
     while the memory map sidebar (sourced from architecture_state.json)
-    already showed the updated name (e.g. "stage_b_block").
+    already showed the updated name (e.g. "ue_coder_encoder").
     """
 
     def test_viz_written_on_block_diagram_update(self, isolated_project):
@@ -983,7 +1249,7 @@ class TestBlockDiagramVizIntermediateSync:
         assert "fft_controller" in node_names
 
     def test_viz_updated_when_block_renamed(self, isolated_project):
-        """Simulates the stage_a_block -> stage_b_block rename bug.
+        """Simulates the entropy_encoder -> ue_coder_encoder rename bug.
 
         After the first persist with "old_block", a second persist with
         "new_block" must update block_diagram_viz.json to contain only
@@ -1000,31 +1266,31 @@ class TestBlockDiagramVizIntermediateSync:
 
         old_diagram = {
             "blocks": [
-                {"name": "stage_a_block", "description": "First-stage entropy encoder", "tier": 1},
+                {"name": "entropy_encoder", "description": "entropy coding entropy encoder", "tier": 1},
                 {"name": "pixel_buffer", "description": "Pixel line buffer", "tier": 1},
             ],
             "connections": [
-                {"from": "pixel_buffer", "to": "stage_a_block", "interface": "data", "data_width": 16},
+                {"from": "pixel_buffer", "to": "entropy_encoder", "interface": "data", "data_width": 16},
             ],
             "questions": [],
         }
 
-        # First persist: write initial viz with stage_a_block
+        # First persist: write initial viz with entropy_encoder
         _persist_intermediate_state(state, {"block_diagram": old_diagram, "phase": "block_diagram"})
 
         viz_path = Path(isolated_project) / ".coresmith" / "block_diagram_viz.json"
         viz_v1 = json.loads(viz_path.read_text())
         v1_names = [n["data"]["device_name"] for n in viz_v1["architecture"]["systemNodes"]]
-        assert "stage_a_block" in v1_names
+        assert "entropy_encoder" in v1_names
 
-        # Second persist: rename stage_a_block -> stage_b_block
+        # Second persist: rename entropy_encoder -> ue_coder_encoder
         new_diagram = {
             "blocks": [
-                {"name": "stage_b_block", "description": "Second-stage entropy encoder", "tier": 1},
+                {"name": "ue_coder_encoder", "description": "Unary/exp coding entropy encoder", "tier": 1},
                 {"name": "pixel_buffer", "description": "Pixel line buffer", "tier": 1},
             ],
             "connections": [
-                {"from": "pixel_buffer", "to": "stage_b_block", "interface": "data", "data_width": 16},
+                {"from": "pixel_buffer", "to": "ue_coder_encoder", "interface": "data", "data_width": 16},
             ],
             "questions": [],
         }
@@ -1033,11 +1299,11 @@ class TestBlockDiagramVizIntermediateSync:
 
         viz_v2 = json.loads(viz_path.read_text())
         v2_names = [n["data"]["device_name"] for n in viz_v2["architecture"]["systemNodes"]]
-        assert "stage_b_block" in v2_names, (
+        assert "ue_coder_encoder" in v2_names, (
             f"block_diagram_viz.json still has old block names: {v2_names}"
         )
-        assert "stage_a_block" not in v2_names, (
-            "stage_a_block should no longer appear after rename"
+        assert "entropy_encoder" not in v2_names, (
+            "entropy_encoder should no longer appear after rename"
         )
 
     def test_viz_includes_memory_map_annotations(self, isolated_project):

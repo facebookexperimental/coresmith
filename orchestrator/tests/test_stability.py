@@ -29,7 +29,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
 from orchestrator.langgraph.architecture_graph import build_architecture_graph
-
+from orchestrator.tests.conftest import assert_doc_files
 from orchestrator.tests.fft16_fixtures import (
     FFT16_BLOCK_DIAGRAM,
     FFT16_CLOCK_TREE,
@@ -41,8 +41,15 @@ from orchestrator.tests.fft16_fixtures import (
     FFT16_REGISTER_SPEC,
     FFT16_SAD_MARKDOWN,
 )
-from orchestrator.tests.conftest import assert_doc_files
 
+# These node-level stability tests construct REAL LLM agents whose patch set
+# does not cover every call site (integration_dv triage, the block-diagram
+# output-contract ownership review, ...) -- unmarked, they shell out to the
+# live claude CLI from the "fast" suite (observed: a 50-turn Opus
+# ownership-review call mid-suite; the run sat for 72+ minutes and burned
+# real quota). Mark the whole module live_llm until their patches are
+# extended to cover the newer agent call sites.
+pytestmark = pytest.mark.live_llm
 
 # ---------------------------------------------------------------------------
 # Helpers

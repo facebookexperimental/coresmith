@@ -29,7 +29,7 @@ def sample_contracts():
     return {
         "design_summary": "two-edge codec test design",
         "default_packing_convention": "msb_first_by_field_list",
-        "default_endianness_rationale": "matches big-endian byte serialization",
+        "default_endianness_rationale": "matches the video codec byte serialization",
         "contracts": [
             {
                 "edge_id": "alpha__m_axis_pix__to__beta__s_axis_pix",
@@ -45,7 +45,7 @@ def sample_contracts():
                     "required": True,
                     "policy_type": "reset_seed",
                     "seed_value_hex": "0x0",
-                    "rationale": "corner-block boundary; intra prediction has zero neighbors",
+                    "rationale": "corner-MB boundary; the video codec intra has zero neighbors",
                 },
             },
             {

@@ -30,8 +30,29 @@ A numbered list of performance requirements.  Each entry MUST include:
 - **Acceptance criteria**: measurable pass/fail criterion
 - **Priority**: must_have | should_have | nice_to_have
 
+THROUGHPUT REQUIREMENT (mandatory): at least ONE PERF-NNN MUST be a THROUGHPUT
+requirement carrying a CONCRETE cycles-per-unit-of-work number (or an equivalent
+ops/second), and it MUST be `must_have`. Its acceptance criterion is a measured
+cycles/op ceiling — e.g. "cyc/block <= N at the target clock", verifiable from
+a cycle-accurate simulation of the RTL. Derive N from the PRD
+`throughput_cyc_per_op` when present; otherwise derive it from the block's
+throughput roofline (modulo-scheduling peak cyc/op) and set the cap no looser
+than 2x that peak. FORBIDDEN: the phrases "no hard pass/fail latency cap is
+imposed", "best effort", "throughput is not gated", or any wording that leaves
+cycles/op unmeasured. "No customer cap" is expressed as a SELF-IMPOSED PERF-NNN
+(peak x derate), never as the absence of a throughput requirement. A design that
+runs a fixed-N loop on a single reusable datapath must be measured against this
+cap, not waved through because it closed timing.
+
 ## Interface Requirements
 Same format as above with IDs: IFACE-NNN.
+
+PIN/PORT DISCIPLINE: interface requirements TRANSCRIBE the PRD interface
+contract -- never add, rename, or "improve" pins/ports, and never introduce
+DFT/scan/test ports (`scan_en`, `scan_in`, JTAG, `test_mode`, etc.) unless the
+PRD interface contract explicitly lists them (DFT is a backend activity, not an
+architecture one). Any pin-count arithmetic must be recomputed from the actual
+port list, not carried as a summary that disagrees with it.
 
 ## Semantic Invariants
 Cross-block correctness invariants with IDs: INV-NNN. Each entry MUST include:
@@ -107,6 +128,40 @@ verified in simulation or on silicon.  Must also cover:
   criterion
 - How each INV-NNN semantic invariant is verified by integration/validation DV,
   including the first-divergence trace point and VCD-visible evidence
+
+## Mission-Scale Acceptance Test (MANDATORY)
+Exactly one subsection defining THE acceptance test for the whole IP — the
+test that answers "does this chip do its job on real inputs", not "does one
+sub-unit match on one tile". Three axes, all REQUIRED:
+
+1. **Scale**: a COMPLETE unit of the IP's mission — a full frame (max
+   supported geometry) for image/video IPs, a full audio segment spanning
+   multiple transform windows for audio IPs, a complete representative file
+   for compression IPs, a full benchmark program (e.g. Dhrystone/CoreMark
+   class) for CPUs, a full packet/burst sequence for interface IPs. ONE
+   tile / block / macroblock / instruction is NEVER acceptance scale — a
+   sub-unit stimulus has no state-feedback cascade depth and certifies
+   nothing about the mission.
+2. **Content class**: real-world or boundary-exercising content (textured
+   image regions, audio transients, mixed-entropy data, branchy code) — NOT
+   flat/constant/synthetic-uniform input, which decision-based datapaths
+   encode trivially and identically even when broken.
+3. **Criterion**: the measurable pass bar ON THAT STIMULUS (byte-exact vs the
+   golden, a fidelity floor via the declared metric, a benchmark score) plus
+   an estimated runtime budget for the model-level run.
+
+The section MUST reference a machine-readable stimulus artifact
+(``inputs/acceptance_stimulus.py`` exposing module-level ``stimulus`` or
+``cases = [(name, stimulus), ...]``) and, when the content is external data,
+pin it by content hash so every gate and revise round compares like-for-like.
+This artifact is executed by the Full Model DV gate (uarch stage) and the
+RTL Acceptance DV gate — an FRD without it leaves the mission unverified by
+construction.
+
+If the PRD/human answers do not determine a mission-scale acceptance test,
+DO NOT invent a degenerate one — state explicitly that acceptance is
+undefined and that this must be escalated to the human (the PRD stage should
+already have asked; flag the gap).
 
 GUIDELINES:
 - Every requirement MUST have a measurable acceptance criterion

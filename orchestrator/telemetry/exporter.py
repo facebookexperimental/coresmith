@@ -18,7 +18,7 @@ import json
 import re
 import sqlite3
 import threading
-from typing import Sequence
+from collections.abc import Sequence
 
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult

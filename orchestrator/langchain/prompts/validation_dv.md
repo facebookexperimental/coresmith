@@ -105,6 +105,32 @@ COCOTB RULES:
   watchdog for "first item appears" and "all items complete". If the ERS has a
   "first output" latency KPI, keep that as a separate assertion from the
   all-items completion watchdog.
+- Cadence, initiation-interval (II), and sustained-throughput are STEADY-STATE
+  WITHIN-UNIT properties, NOT global adjacent-sample invariants. A design
+  processes work in natural units -- a block, frame, macroblock, packet, burst,
+  stripe, or token group. Inside one unit, consecutive outputs may be required to
+  arrive every `<= II` cycles; BETWEEN units there is a LEGAL, generally UNBOUNDED
+  refill/setup/drain gap (fetch the next unit, reload a table, flush a pipeline).
+  The throughput budget already prices that gap SEPARATELY as drain/io-framing
+  overhead (`cyc/op = iterations*II + (depth-1) + drain + io_framing`), NOT as
+  part of II. Therefore:
+  * NEVER assert a fixed maximum inter-output gap (`gap <= II`) across a unit
+    boundary. A single legal refill gap will fail a correct design at every unit
+    seam -- this is the most common false-fail in throughput validation.
+  * RESET the cadence baseline at each unit start. Detect the boundary from the
+    design's OWN signal: `tlast`/frame-start on the previous beat, a
+    frame/packet/block index change, a start strobe, or an in-band position field
+    returning to its origin (for example a decoded `natural_index == 0`, a column
+    counter wrapping to 0, a new-tile flag). Apply the `gap <= II` assertion ONLY
+    between two consecutive outputs of the SAME unit; skip it on the first output
+    of a new unit.
+  * To check sustained throughput, prefer the AMORTIZED measure --
+    `items / total_active_cycles` over a window, or `cyc/op` including the
+    documented drain/framing -- against the ERS `PERF-NNN` cap, rather than a
+    per-adjacent-sample max-gap that one boundary refill would violate.
+  * If the ERS states II/throughput only as a within-unit steady-state number
+    (the usual case), the gap BETWEEN units is not a validation failure; measure
+    it and log it as measurement-only, do not assert on it.
 - If full-frame exhaustive RTL simulation would exceed a practical bounded
   runtime and the ERS does not explicitly require full-frame RTL simulation,
   verify geometry/lifecycle with a directed prefix plus terminal-coordinate
@@ -128,6 +154,68 @@ REQUIREMENT COVERAGE RULES:
 - Every generated test should log the requirement IDs it covers.
 - Add one final cocotb test that asserts no RTL/application requirement remains
   unverified.
+
+FUNCTIONAL CORRECTNESS IS NON-DEFERRABLE (critical):
+- The testbench MUST drive a concrete, bounded, NON-TRIVIAL stimulus into the
+  RTL and ASSERT the RTL's PRIMARY output equals the REFERENCE / golden output
+  bit-exactly (or within the explicit ERS-stated tolerance). The oracle is the
+  functional model: the design's reference implementation (when provided), else
+  the value computed inline from the requirement's mathematical definition
+  (objective-math designs: adder/CRC/MCU compute `expected_*` directly). This
+  requirement's coverage status MUST be `checked_by_test`.
+- A structural / trace / existence / latency / byte-count / handshake check does
+  NOT satisfy a functional requirement. Observing that signals exist, that bytes
+  flow, or that latency is in range is NOT comparing the computed VALUE. A
+  datapath that emits a constant, flat, or structurally-correct-but-WRONG result
+  must FAIL here -- if your "bounded prefix" check would pass such a design, it
+  is not a functional check.
+- You may mark ONLY the exhaustive / random / full-dataset extension of a
+  functional requirement (e.g. full-frame PSNR sweep, all-macroblock iteration,
+  multi-frame bitrate ranges, fuzzing) as `deferred_to_golden_sweep`. You may
+  NEVER defer the bounded directed output-equals-reference equivalence itself.
+  If the design has no external reference, compute the expected output inline
+  from the requirement's definition and assert against it -- it is not
+  deferrable.
+- The final manifest cocotb test MUST additionally assert that AT LEAST ONE
+  output-equals-reference/golden functional-correctness requirement has status
+  `checked_by_test`. A manifest in which every functional requirement is
+  deferred MUST fail. "No unclassified requirements" is necessary but NOT
+  sufficient -- "all functional checks deferred" is a verification hole, not a
+  pass.
+
+MAX-GEOMETRY STIMULUS -- MANDATORY WHEN THE DESIGN DECLARES DIMENSIONS:
+The ERS/PRD/constraints often declare dimensional maxima -- a maximum frame
+width/height, a maximum burst length, an address range, a table/FIFO depth, a
+maximum transaction count, etc. These maxima set the WIDTH of internal index,
+address, and counter registers. A directed small-geometry prefix (which the
+runtime-bound rules above correctly prefer for CONTENT coverage) exercises only
+the low-order index bits, so a truncated index/address width ships verified:
+the wrap happens at a 2^n boundary BELOW the maximum, not at the maximum.
+- The declared dimensional maxima come from the ERS `parameters` block. When it
+  is present it is provided VERBATIM above as `DIMENSIONAL PARAMETERS` -- use it
+  directly (drive each `dimension`/`range` at its `max`; exercise each `mode`
+  across its `boundary_values`). When no such table is provided, fall back to
+  reading the maxima from the ERS/PRD/constraints context. Dimension names are
+  the design's OWN (do NOT assume video): a FIFO depth, a max burst length, or
+  an address range is a dimension exactly like a frame width.
+- Include AT LEAST ONE validation test that drives every declared dimension at
+  its DECLARED MAXIMUM. This is a DIMENSIONAL-EXTENT test, not an exhaustive
+  full-workload run: if the full maximum-size workload is too slow, use SPARSE
+  or SHORT content at the MAXIMUM dimensions (e.g. one active row/beat at
+  maximum width, a short burst that still addresses the maximum index). Running
+  at the maximum inherently crosses every 2^n index boundary below it, which is
+  where a truncated width wraps.
+- This max-geometry dimensional-extent case is NON-DEFERRABLE whenever
+  dimensions are declared; it is NOT the exhaustive-content coverage you may
+  mark `deferred_to_golden_sweep`.
+- Advertise the case with a marker comment on its own line, ONE entry per
+  declared dimension:
+      `# MAXGEO: <dim_name>=<max_value> <dim_name>=<max_value> ...`
+  e.g. `# MAXGEO: frame_width=640 frame_height=352`, or for a non-video design
+  `# MAXGEO: cmd_fifo_depth=512 addr_range=1024`. Use the design's OWN
+  dimension names and declared maxima.
+- If the ERS declares NO dimensional maxima, no max-geometry case or marker is
+  needed.
 
 VCD/WAVEKIT AUDIT -- MANDATORY:
 - The validation DV node runs Verilator with tracing enabled, expects

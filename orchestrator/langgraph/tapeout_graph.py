@@ -34,7 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Annotated, Optional, TypedDict
+from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
@@ -42,12 +42,12 @@ from opentelemetry import trace
 
 from orchestrator.langgraph.event_stream import write_graph_event
 from orchestrator.langgraph.pipeline_helpers import (
-    PROJECT_ROOT,
-    log,
     CYAN,
     GREEN,
+    PROJECT_ROOT,
     RED,
     YELLOW,
+    log,
 )
 
 _tracer = trace.get_tracer("coresmith.langgraph.tapeout_graph")
@@ -70,7 +70,7 @@ class TapeoutState(TypedDict):
     target_clock_mhz: float
     blocks: list[dict]
     completed_backend_blocks: list[dict]
-    gpio_mapping: Optional[dict]
+    gpio_mapping: dict | None
 
     # Phase tracking ────────────────────────────────────────────────────────
     phase: str  # "init" | "wrapper" | "pnr" | "drc" | "lvs" | "precheck" | "done"
@@ -79,12 +79,12 @@ class TapeoutState(TypedDict):
     previous_error: str
 
     # Results ───────────────────────────────────────────────────────────────
-    wrapper_result: Optional[dict]
-    wrapper_pnr_result: Optional[dict]
-    wrapper_drc_result: Optional[dict]
-    wrapper_lvs_result: Optional[dict]
-    precheck_result: Optional[dict]
-    submission_result: Optional[dict]
+    wrapper_result: dict | None
+    wrapper_pnr_result: dict | None
+    wrapper_drc_result: dict | None
+    wrapper_lvs_result: dict | None
+    precheck_result: dict | None
+    submission_result: dict | None
 
     # Artifact paths ────────────────────────────────────────────────────────
     wrapper_rtl_path: Annotated[str, _last]
@@ -98,10 +98,10 @@ class TapeoutState(TypedDict):
     step_log_paths: Annotated[dict, _last]
 
     # Diagnosis agent ───────────────────────────────────────────────────────
-    diagnosis_result: Optional[dict]
+    diagnosis_result: dict | None
 
     # Human interaction ─────────────────────────────────────────────────────
-    human_response: Optional[dict]
+    human_response: dict | None
 
     # Terminal ──────────────────────────────────────────────────────────────
     tapeout_done: bool
@@ -207,8 +207,8 @@ async def generate_wrapper_node(state: TapeoutState) -> dict:
     to the template generator only when the backend didn't produce one.
     """
     from orchestrator.langgraph.tapeout_helpers import (
-        generate_wrapper_rtl,
         generate_submission_structure,
+        generate_wrapper_rtl,
     )
 
     pr = _pr(state)
@@ -366,14 +366,17 @@ async def synthesize_wrapper_node(state: TapeoutState) -> dict:
 
 async def wrapper_pnr_node(state: TapeoutState) -> dict:
     """Run wrapper-level PnR via LLM agent (OpenROAD)."""
-    from orchestrator.langgraph.tapeout_helpers import (
-        generate_wrapper_pnr_tcl,
-        OPENFRAME_DIE_WIDTH_UM,
-        OPENFRAME_DIE_HEIGHT_UM,
-        OPENFRAME_CORE_MARGIN_UM,
-    )
     from orchestrator.langgraph.backend_helpers import (
-        TECH_LEF, CELL_LEF, LIBERTY, OPENROAD_BIN,
+        CELL_LEF,
+        LIBERTY,
+        OPENROAD_BIN,
+        TECH_LEF,
+    )
+    from orchestrator.langgraph.tapeout_helpers import (
+        OPENFRAME_CORE_MARGIN_UM,
+        OPENFRAME_DIE_HEIGHT_UM,
+        OPENFRAME_DIE_WIDTH_UM,
+        generate_wrapper_pnr_tcl,
     )
 
     pr = _pr(state)
@@ -460,7 +463,11 @@ async def wrapper_pnr_node(state: TapeoutState) -> dict:
 async def wrapper_drc_node(state: TapeoutState) -> dict:
     """Run Magic DRC + GDS generation via LLM agent."""
     from orchestrator.langgraph.backend_helpers import (
-        MAGIC_RC, CELL_GDS, TECH_LEF, CELL_LEF, MAGIC_BIN,
+        CELL_GDS,
+        CELL_LEF,
+        MAGIC_BIN,
+        MAGIC_RC,
+        TECH_LEF,
     )
 
     pr = _pr(state)
@@ -539,7 +546,7 @@ async def wrapper_drc_node(state: TapeoutState) -> dict:
 
 async def wrapper_lvs_node(state: TapeoutState) -> dict:
     """Run Netgen LVS on the wrapper via LLM agent."""
-    from orchestrator.langgraph.backend_helpers import NETGEN_SETUP, NETGEN_BIN
+    from orchestrator.langgraph.backend_helpers import NETGEN_BIN, NETGEN_SETUP
 
     pr = _pr(state)
 

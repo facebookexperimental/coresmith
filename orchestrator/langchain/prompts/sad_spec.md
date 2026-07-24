@@ -53,6 +53,13 @@ state, reconstruction loop, or cross-block recurrence. For each item state:
 - What golden-model trace point defines correctness
 - Whether the contract requires exact equality or a numeric tolerance
 - What must be verified in integration/validation DV
+- **If the state is a bulk (SRAM-scale, >= ~2 Kbit) persistent store whose
+  WRITER block differs from its READER block(s)** -- e.g. runtime codebooks,
+  quant/dequant banks, parsed table sets, reference frame buffers -- explicitly
+  flag it as a **candidate dedicated memory block**: it should live in its own
+  memory subsystem with its own area budget and req/resp access, NOT be embedded
+  in the writer/parser block. This gives the block-diagram stage the signal to
+  hoist it (it must either factor it out or justify embedding).
 
 If the design has no such loops, explicitly state why the datapath is purely
 feed-forward and why final-output validation is sufficient.
@@ -71,7 +78,21 @@ Key technical risks.  For each risk include severity (low/medium/high)
 and a mitigation strategy.
 
 ## Pinout
-Package and pin planning for the chip.  Include:
+Package and pin planning for the chip.
+
+PIN DISCIPLINE (MANDATORY): The pin/port list is a TRANSCRIPTION of the PRD
+interface contract, not a design activity. NEVER add, rename, or "improve"
+pins. Do NOT invent DFT/scan/test/debug pins (no `scan_en`, `scan_in`,
+`scan_out`, `test_mode`, JTAG, etc.) unless the PRD interface contract
+explicitly lists them -- DFT insertion happens in the backend flow, not the
+architecture SAD. The functional signal pins MUST match the PRD's declared
+interface exactly (name, direction, width); only add the power/ground and the
+clk/rst pins the PRD or shuttle contract already require. The pin-count
+arithmetic (input count, output count, total signal bits) MUST be RECOMPUTED
+from the table you actually emit -- never carry a summary number that
+disagrees with your own table.
+
+Include:
 - Package type (QFN, BGA, QFP, etc.) and total I/O count
 - A table of ALL top-level pins with columns:
   Name | Direction | Signal Type | Voltage Domain | Ball/Pin | Description
@@ -82,7 +103,8 @@ Package and pin planning for the chip.  Include:
 - I/O standards and ESD rating
 - Pin-muxing or dedicated-pad constraints from the PDK
 - Prefer QFN/QFP over BGA for small designs
-- Include at least one test/debug pin (JTAG or scan_en)
+- Include test/debug pins (JTAG, scan_en, etc.) ONLY when the PRD interface
+  contract explicitly lists them -- otherwise omit them entirely
 
 ## Shuttle Integration
 Physical design planning for the target MPW shuttle.  Include:

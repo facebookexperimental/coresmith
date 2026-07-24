@@ -20,23 +20,29 @@ from pathlib import Path
 import pytest
 
 from orchestrator.langgraph.backend_helpers import (
-    generate_pnr_tcl,
-    generate_drc_tcl,
-    generate_rcx_tcl,
-    parse_openroad_reports,
-    parse_drc_report,
-    parse_pnr_stdout,
-    _parse_magic_drc_count,
-    _parse_lvs_deltas,
-    TECH_LEF,
     CELL_LEF,
     LIBERTY,
-    OPENROAD_BIN,
     MAGIC_BIN,
+    MAGIC_DRC_UM_PER_INTERNAL_UNIT,
     NETGEN_BIN,
+    OPENROAD_BIN,
     PROJECT_ROOT,
+    TECH_LEF,
+    _count_drc_report_violations,
+    _drc_rule_layer,
+    _parse_lvs_deltas,
+    _parse_magic_drc_count,
+    drc_macro_interior_exclude_enabled,
+    drc_report_fallback_enabled,
+    generate_drc_tcl,
+    generate_pnr_tcl,
+    generate_rcx_tcl,
+    macro_bboxes_from_def,
+    parse_drc_report,
+    parse_openroad_reports,
+    parse_pnr_stdout,
+    placed_macro_bboxes,
 )
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Tcl Generation
@@ -193,7 +199,9 @@ class TestParseOpenroadReports:
     def test_empty_dir(self, tmp_path):
         m = parse_openroad_reports(str(tmp_path))
         assert m["wns_ns"] == 0.0
-        assert m["timing_met"] is True
+        # No timing_wns.rpt -> timing is unmeasured -> None (fail-closed,
+        # A-Fix 2g), NOT an implicit pass.
+        assert m["timing_met"] is None
 
 
 class TestParsePnrStdout:
@@ -248,6 +256,418 @@ class TestParseDrcReport:
         r = parse_drc_report("/nonexistent/file.rpt")
         assert r["clean"] is False
         assert r["violation_count"] == -1
+
+    def test_native_listall_format_no_macros(self, tmp_path):
+        # Magic native `drc listall why <file>` shape: "<cell> <count>",
+        # dashed separators, why-string headers, bare "x1 y1 x2 y2" tiles.
+        rpt = tmp_path / "drc.rpt"
+        rpt.write_text(
+            "synth_top 2\n"
+            "----------------------------------------\n"
+            "Metal4 minimum area < 0.24um^2 (met4.4a)\n"
+            "----------------------------------------\n"
+            " 25000 25000 25076 25076\n"
+            " 80000 80000 80076 80076\n"
+        )
+        r = parse_drc_report(str(rpt))
+        assert r["clean"] is False
+        assert r["violation_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Signed-off hard-macro interior exclusion (DRC gate)
+# ---------------------------------------------------------------------------
+
+# All fixtures are GENERIC synthetic collateral -- no benchmark/design/golden
+# names. Coordinate convention (VERIFIED against a real routed report): the
+# Magic native report emits tiles in INTERNAL units of 0.005 um each, so a macro
+# bbox at [100,150] x [100,150] um occupies internal [20000,30000] on each axis.
+_MACRO_LAYERS = frozenset({"met1", "met2", "met3", "met4"})
+
+
+def _macro_bbox_100_150(tag="generic_macro_a"):
+    return placed_macro_bboxes(
+        [{"x": 100.0, "y": 100.0, "w": 50.0, "h": 50.0, "orient": "N", "tag": tag}]
+    )
+
+
+def _synthetic_native_report(tmp_path):
+    """A native report with: (a) a met4 tile INSIDE the macro, (b) a met4 tile
+    OUTSIDE any macro, (c) a met5 tile INSIDE the macro."""
+    rpt = tmp_path / "drc.rpt"
+    rpt.write_text(
+        "synth_top 3\n"
+        "----------------------------------------\n"
+        "Metal4 minimum area < 0.24um^2 (met4.4a)\n"
+        "----------------------------------------\n"
+        " 25000 25000 25076 25076\n"   # center ~125um -> INSIDE [100,150]
+        " 80000 80000 80076 80076\n"   # center ~400um -> OUTSIDE
+        "----------------------------------------\n"
+        "Metal5 minimum spacing (met5.2)\n"
+        "----------------------------------------\n"
+        " 25000 25000 25076 25076\n"   # INSIDE, but met5 is not obstructed
+    )
+    return rpt
+
+
+class TestDrcMacroInteriorExclusion:
+    def test_default_flag_on(self, monkeypatch):
+        monkeypatch.delenv("CORESMITH_DRC_MACRO_INTERIOR_EXCLUDE", raising=False)
+        assert drc_macro_interior_exclude_enabled() is True
+
+    def test_flag_off(self, monkeypatch):
+        monkeypatch.setenv("CORESMITH_DRC_MACRO_INTERIOR_EXCLUDE", "0")
+        assert drc_macro_interior_exclude_enabled() is False
+
+    def test_in_macro_met4_excluded_outside_and_met5_kept(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CORESMITH_DRC_MACRO_INTERIOR_EXCLUDE", "1")
+        rpt = _synthetic_native_report(tmp_path)
+        r = parse_drc_report(str(rpt), macro_bboxes=_macro_bbox_100_150())
+        # (a) the in-macro met4 tile is excluded ...
+        assert r["excluded_count"] == 1
+        assert r["excluded_detail"] == {"generic_macro_a": 1}
+        # ... while (b) the outside-macro met4 tile and (c) the in-macro met5
+        # tile both survive -> 2 counted, gate still dirty (honest).
+        assert r["violation_count"] == 2
+        assert r["clean"] is False
+
+    def test_env_off_counts_everything(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CORESMITH_DRC_MACRO_INTERIOR_EXCLUDE", "0")
+        rpt = _synthetic_native_report(tmp_path)
+        r = parse_drc_report(str(rpt), macro_bboxes=_macro_bbox_100_150())
+        assert r["violation_count"] == 3
+        assert "excluded_count" not in r
+        assert r["clean"] is False
+
+    def test_no_bboxes_no_exclusion(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CORESMITH_DRC_MACRO_INTERIOR_EXCLUDE", "1")
+        rpt = _synthetic_native_report(tmp_path)
+        r = parse_drc_report(str(rpt), macro_bboxes=None)
+        assert r["violation_count"] == 3
+        assert "excluded_count" not in r
+
+    def test_all_in_macro_becomes_clean(self, tmp_path, monkeypatch):
+        # Every met4 tile inside the macro -> post-exclusion count 0 -> clean.
+        monkeypatch.setenv("CORESMITH_DRC_MACRO_INTERIOR_EXCLUDE", "1")
+        rpt = tmp_path / "drc.rpt"
+        rpt.write_text(
+            "synth_top 2\n"
+            "----------------------------------------\n"
+            "Metal4 minimum area < 0.24um^2 (met4.4a)\n"
+            "----------------------------------------\n"
+            " 25000 25000 25076 25076\n"
+            " 26000 26000 26076 26076\n"
+        )
+        r = parse_drc_report(str(rpt), macro_bboxes=_macro_bbox_100_150())
+        assert r["excluded_count"] == 2
+        assert r["violation_count"] == 0
+        assert r["clean"] is True
+
+    def test_unknown_layer_never_excluded(self, tmp_path, monkeypatch):
+        # A rule with no identifiable metal layer is fail-closed (kept).
+        monkeypatch.setenv("CORESMITH_DRC_MACRO_INTERIOR_EXCLUDE", "1")
+        rpt = tmp_path / "drc.rpt"
+        rpt.write_text(
+            "synth_top 1\n"
+            "----------------------------------------\n"
+            "Nwell spacing rule\n"
+            "----------------------------------------\n"
+            " 25000 25000 25076 25076\n"
+        )
+        r = parse_drc_report(str(rpt), macro_bboxes=_macro_bbox_100_150())
+        assert r["violation_count"] == 1
+        assert r.get("excluded_count", 0) == 0
+
+
+class TestDrcCoordUnitConversion:
+    def test_constant_is_internal_unit(self):
+        # Magic internal unit = 0.005 um (um x 200), not um/1000.
+        assert MAGIC_DRC_UM_PER_INTERNAL_UNIT == 0.005
+
+    def test_internal_units_place_tile_at_correct_um(self, tmp_path, monkeypatch):
+        # A tile centered at internal-coord 25000 is at 125 um under the correct
+        # x0.005 conversion (inside macro [100,150] -> excluded). Under the WRONG
+        # um/1000 rule it would be 25 um -- outside [100,150] -> kept. So the
+        # tile being excluded proves x0.005 is used.
+        monkeypatch.setenv("CORESMITH_DRC_MACRO_INTERIOR_EXCLUDE", "1")
+        rpt = tmp_path / "drc.rpt"
+        rpt.write_text(
+            "synth_top 1\n"
+            "----------------------------------------\n"
+            "Metal4 minimum area < 0.24um^2 (met4.4a)\n"
+            "----------------------------------------\n"
+            " 25000 25000 25076 25076\n"
+        )
+        # Macro at the x0.005 position -> excluded.
+        r_correct = parse_drc_report(str(rpt), macro_bboxes=_macro_bbox_100_150())
+        assert r_correct["excluded_count"] == 1
+        # Macro at the (wrong) um/1000 position [24,26] -> NOT excluded, proving
+        # the parser does not use um/1000.
+        wrong = placed_macro_bboxes(
+            [{"x": 24.0, "y": 24.0, "w": 2.0, "h": 2.0, "orient": "N", "tag": "m"}]
+        )
+        r_wrong = parse_drc_report(str(rpt), macro_bboxes=wrong)
+        assert r_wrong.get("excluded_count", 0) == 0
+
+
+class TestDrcMicronReport:
+    """The `drc listall why` script is LLM-authored per run, so some runs emit
+    tiles in already-scaled MICRONS (decimals, via `cif scale out`) instead of
+    Magic INTERNAL units (integers). The parser must read BOTH: an integer-only
+    tile regex silently dropped every micron tile and returned a FALSE CLEAN
+    (count 0), so the macro-interior exclusion never ran. Fixtures are generic
+    synthetic collateral -- no design/benchmark names.
+    """
+
+    def _micron_report(self, tmp_path):
+        """A micron (decimal) report with (a) a met4 tile at the BOTTOM EDGE
+        band of a macro placed at [100,150]x[100,150] um -- center 100.19 um,
+        just inside the y1=100 boundary; (b) a met4 tile far OUTSIDE; (c) a met5
+        tile inside the macro (met5 is never obstructed)."""
+        rpt = tmp_path / "drc_um.rpt"
+        rpt.write_text(
+            "DRC errors for cell synth_top\n"
+            "----------------------------------------\n"
+            "Metal4 minimum area < 0.24um^2 (met4.4a)\n"
+            "----------------------------------------\n"
+            " 120.000 100.000 120.380 100.380\n"   # center (120.19,100.19) INSIDE, bottom-edge band
+            " 400.000 400.000 400.380 400.380\n"   # center ~400 um OUTSIDE
+            "----------------------------------------\n"
+            "Metal5 minimum spacing (met5.2)\n"
+            "----------------------------------------\n"
+            " 120.000 100.000 120.380 100.380\n"   # INSIDE, but met5 not obstructed
+        )
+        return rpt
+
+    def test_micron_tiles_are_parsed_not_false_clean(self, tmp_path, monkeypatch):
+        # With NO bboxes the parser must count all 3 micron tiles -- the old
+        # integer-only regex returned 0/clean here (the jpeg false-clean bug).
+        monkeypatch.setenv("CORESMITH_DRC_MACRO_INTERIOR_EXCLUDE", "1")
+        rpt = self._micron_report(tmp_path)
+        r = parse_drc_report(str(rpt), macro_bboxes=None)
+        assert r["violation_count"] == 3
+        assert r["clean"] is False
+
+    def test_micron_edge_band_excluded_outside_and_met5_kept(self, tmp_path, monkeypatch):
+        # Micron path scales by 1.0 (not x0.005): the in-macro met4 edge-band
+        # tile is dropped; the outside met4 and the in-macro met5 both survive.
+        monkeypatch.setenv("CORESMITH_DRC_MACRO_INTERIOR_EXCLUDE", "1")
+        rpt = self._micron_report(tmp_path)
+        r = parse_drc_report(str(rpt), macro_bboxes=_macro_bbox_100_150())
+        assert r["excluded_count"] == 1
+        assert r["excluded_detail"] == {"generic_macro_a": 1}
+        assert r["violation_count"] == 2      # outside met4 + in-macro met5
+        assert r["clean"] is False
+
+    def test_micron_all_in_macro_becomes_clean(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CORESMITH_DRC_MACRO_INTERIOR_EXCLUDE", "1")
+        rpt = tmp_path / "drc_um.rpt"
+        rpt.write_text(
+            "DRC errors for cell synth_top\n"
+            "----------------------------------------\n"
+            "Metal4 minimum area < 0.24um^2 (met4.4a)\n"
+            "----------------------------------------\n"
+            " 120.000 100.000 120.380 100.380\n"
+            " 130.000 140.000 130.380 140.380\n"
+        )
+        r = parse_drc_report(str(rpt), macro_bboxes=_macro_bbox_100_150())
+        assert r["excluded_count"] == 2
+        assert r["violation_count"] == 0
+        assert r["clean"] is True
+
+    def test_micron_env_off_counts_everything(self, tmp_path, monkeypatch):
+        # Both-branch: gate OFF -> every micron tile counted, no exclusion.
+        monkeypatch.setenv("CORESMITH_DRC_MACRO_INTERIOR_EXCLUDE", "0")
+        rpt = self._micron_report(tmp_path)
+        r = parse_drc_report(str(rpt), macro_bboxes=_macro_bbox_100_150())
+        assert r["violation_count"] == 3
+        assert "excluded_count" not in r
+
+    def test_micron_scale_not_confused_with_internal(self, tmp_path, monkeypatch):
+        # A micron tile at 120 um must NOT be scaled by 0.005 (which would put it
+        # at 0.6 um, outside the macro). Proven by it being excluded from a macro
+        # at [100,150] um only under the correct x1.0 micron scale.
+        monkeypatch.setenv("CORESMITH_DRC_MACRO_INTERIOR_EXCLUDE", "1")
+        rpt = tmp_path / "drc_um.rpt"
+        rpt.write_text(
+            "DRC errors for cell synth_top\n"
+            "----------------------------------------\n"
+            "Metal4 minimum area < 0.24um^2 (met4.4a)\n"
+            "----------------------------------------\n"
+            " 124.810 124.810 125.190 125.190\n"   # center 125 um -> inside [100,150]
+        )
+        r = parse_drc_report(str(rpt), macro_bboxes=_macro_bbox_100_150())
+        assert r["excluded_count"] == 1
+        assert r["violation_count"] == 0
+
+
+class TestPlacedMacroBboxes:
+    def test_north_orientation_uses_size(self):
+        b = placed_macro_bboxes([{"x": 10.0, "y": 20.0, "w": 30.0, "h": 40.0, "orient": "N"}])
+        assert (b[0]["x1"], b[0]["y1"], b[0]["x2"], b[0]["y2"]) == (10.0, 20.0, 40.0, 60.0)
+        assert b[0]["layers"] == _MACRO_LAYERS  # default obstructed set
+
+    def test_rotated_orientation_swaps_wh(self):
+        # R90 (and E/W/FE/FW) swap w<->h.
+        b = placed_macro_bboxes([(10.0, 20.0, "R90", 30.0, 40.0)])
+        assert (b[0]["x1"], b[0]["y1"], b[0]["x2"], b[0]["y2"]) == (10.0, 20.0, 50.0, 50.0)
+
+    def test_flipped_orientation_keeps_wh(self):
+        # FS / S / MX are mirror/180 -- footprint dims unchanged.
+        b = placed_macro_bboxes([(10.0, 20.0, "FS", 30.0, 40.0)])
+        assert (b[0]["x2"], b[0]["y2"]) == (40.0, 60.0)
+
+    def test_sequence_and_custom_layers(self):
+        b = placed_macro_bboxes([(0.0, 0.0, "N", 5.0, 5.0, {"met2"}, "tagX")])
+        assert b[0]["layers"] == frozenset({"met2"})
+        assert b[0]["tag"] == "tagX"
+
+
+class TestMacroBboxesFromDef:
+    def _make_lef(self, tmp_path, obs_layers):
+        lef = tmp_path / "generic_macro_a.lef"
+        obs = "\n".join(f"      LAYER {lyr} ;\n        RECT 0 0 1 1 ;" for lyr in obs_layers)
+        lef.write_text(
+            "MACRO generic_macro_a\n"
+            "  SIZE 50 BY 50 ;\n"
+            "  PIN foo\n    USE SIGNAL ;\n  END foo\n"
+            f"  OBS\n{obs}\n  END\n"
+            "END generic_macro_a\n"
+        )
+        return lef
+
+    def _registry(self, lef):
+        from orchestrator.langgraph.macro_registry import MacroInfo
+        return {
+            "generic_macro_a": MacroInfo(
+                name="generic_macro_a", lef=str(lef),
+                width_um=50.0, height_um=50.0,
+            )
+        }
+
+    def _def(self, tmp_path):
+        d = tmp_path / "routed.def"
+        d.write_text(
+            "VERSION 5.8 ;\n"
+            "UNITS DISTANCE MICRONS 1000 ;\n"
+            "DIEAREA ( 0 0 ) ( 500000 500000 ) ;\n"
+            "COMPONENTS 2 ;\n"
+            "    - u_std/cell_1 sky130_fd_sc_hd__inv_2 + PLACED ( 5000 5000 ) N ;\n"
+            "    - u_mem/u_macro generic_macro_a + FIXED ( 100000 100000 ) N ;\n"
+            "END COMPONENTS\n"
+            "END DESIGN\n"
+        )
+        return d
+
+    def test_reads_placed_macro_bbox_in_um(self, tmp_path):
+        lef = self._make_lef(tmp_path, ["met1", "met2", "met3", "met4"])
+        d = self._def(tmp_path)
+        boxes = macro_bboxes_from_def(str(d), registry=self._registry(lef))
+        assert len(boxes) == 1  # the std cell (unknown master) is ignored
+        b = boxes[0]
+        # 100000 dbu / 1000 = 100 um origin, SIZE 50 -> [100,150]
+        assert (b["x1"], b["y1"], b["x2"], b["y2"]) == (100.0, 100.0, 150.0, 150.0)
+        assert b["tag"] == "generic_macro_a"
+        assert b["layers"] == _MACRO_LAYERS
+
+    def test_obs_met5_is_capped_out(self, tmp_path):
+        # Even if the LEF OBS lists met5, exclusion caps at met1-met4 (a real
+        # met5-over-macro violation must still be counted).
+        lef = self._make_lef(tmp_path, ["met1", "met2", "met3", "met4", "met5"])
+        d = self._def(tmp_path)
+        boxes = macro_bboxes_from_def(str(d), registry=self._registry(lef))
+        assert "met5" not in boxes[0]["layers"]
+        assert boxes[0]["layers"] == _MACRO_LAYERS
+
+    def test_missing_def_returns_empty(self, tmp_path):
+        assert macro_bboxes_from_def("/nonexistent/x.def", registry={}) == []
+
+    def test_no_registry_returns_empty(self, tmp_path):
+        d = self._def(tmp_path)
+        assert macro_bboxes_from_def(str(d), registry={}) == []
+
+
+class TestDrcReportFallback:
+    """Magic emits a BLANK ``DRC violations:`` line (and blank ``DRC count:`` in
+    the report header) when ``drc listall count`` returns nothing, even though
+    ``drc listall why`` still writes every violation rect to magic_drc.rpt. The
+    stdout-only parser then returns a FALSE-CLEAN 0 over a report holding
+    thousands of real violations (live proof: jpeg std_signoff printed
+    ``DRC violations:`` blank while magic_drc.rpt held 26,695 rects). The
+    fallback recounts from the report. Fixtures mirror the real
+    ``drc listall why`` Tcl-brace format ``{rule} {{x1 y1 x2 y2} ...}``.
+    """
+
+    # Blank count header + Tcl-brace rects (the real jpeg magic_drc.rpt shape).
+    _BLANK_STDOUT = "Total DRC errors found: 0\nDRC violations: \n"
+    _REPORT_3 = (
+        "Design: synth_top\n"
+        "DRC count: \n"
+        "{Local interconnect spacing < 0.17um (li.3)} "
+        "{{10961 96611 10977 96627} {10961 96611 10981 96627} "
+        "{28515 242879 28529 242899}}\n"
+    )
+    _REPORT_CLEAN = "Design: synth_top\nDRC count: 0\n\n"
+
+    def test_count_report_violations_brace_form(self):
+        assert _count_drc_report_violations(self._REPORT_3) == 3
+
+    def test_count_report_violations_clean(self):
+        assert _count_drc_report_violations(self._REPORT_CLEAN) == 0
+
+    def test_count_report_violations_bare_tiles(self):
+        rpt = (
+            "cellname 2\n----------\nrule why\n----------\n"
+            " 10 20 30 40\n 50 60 70 80\n"
+        )
+        assert _count_drc_report_violations(rpt) == 2
+
+    def test_blank_stdout_falls_back_to_report_count(self, monkeypatch):
+        # Gate ON (default): blank stdout + report with 3 rects -> 3, not 0.
+        monkeypatch.delenv("CORESMITH_DRC_REPORT_FALLBACK", raising=False)
+        assert _parse_magic_drc_count(self._BLANK_STDOUT, self._REPORT_3) == 3
+
+    def test_blank_stdout_no_report_is_legacy_zero(self):
+        # No report text -> unchanged legacy behavior (0 from blank count line).
+        assert _parse_magic_drc_count(self._BLANK_STDOUT) == 0
+        assert _parse_magic_drc_count(self._BLANK_STDOUT, "") == 0
+
+    def test_gate_off_preserves_false_clean(self, monkeypatch):
+        # Gate OFF: raw stdout-only count (the legacy false-clean 0) preserved.
+        monkeypatch.setenv("CORESMITH_DRC_REPORT_FALLBACK", "0")
+        assert _parse_magic_drc_count(self._BLANK_STDOUT, self._REPORT_3) == 0
+
+    def test_clean_report_stays_zero(self, monkeypatch):
+        monkeypatch.delenv("CORESMITH_DRC_REPORT_FALLBACK", raising=False)
+        assert _parse_magic_drc_count(self._BLANK_STDOUT, self._REPORT_CLEAN) == 0
+
+    def test_explicit_stdout_count_wins(self, monkeypatch):
+        # A real numeric stdout count is authoritative; no fallback override.
+        monkeypatch.delenv("CORESMITH_DRC_REPORT_FALLBACK", raising=False)
+        assert _parse_magic_drc_count("DRC violations: 5\n", self._REPORT_3) == 5
+
+    def test_gate_helper_default_on(self, monkeypatch):
+        monkeypatch.delenv("CORESMITH_DRC_REPORT_FALLBACK", raising=False)
+        assert drc_report_fallback_enabled() is True
+
+    def test_gate_helper_explicit_off(self, monkeypatch):
+        monkeypatch.setenv("CORESMITH_DRC_REPORT_FALLBACK", "0")
+        assert drc_report_fallback_enabled() is False
+
+
+class TestDrcRuleLayer:
+    def test_magic_layer_name(self):
+        assert _drc_rule_layer("Metal4 minimum area < 0.24um^2 (met4.4a)") == "met4"
+
+    def test_met5(self):
+        assert _drc_rule_layer("Metal5 minimum spacing (met5.2)") == "met5"
+
+    def test_human_name_only(self):
+        assert _drc_rule_layer("Metal3 width") == "met3"
+
+    def test_no_layer(self):
+        assert _drc_rule_layer("Nwell spacing rule") is None
+        assert _drc_rule_layer("") is None
 
 
 class TestParseMagicDrcCount:
@@ -363,7 +783,7 @@ class TestDrcIntegration:
 
     @pytest.mark.slow
     def test_run_drc_flow(self, tmp_path):
-        from orchestrator.langgraph.backend_helpers import run_pnr_flow, run_drc_flow
+        from orchestrator.langgraph.backend_helpers import run_drc_flow, run_pnr_flow
 
         out_dir = str(tmp_path / "pnr")
         pnr = run_pnr_flow(
@@ -393,7 +813,9 @@ class TestLvsIntegration:
     @pytest.mark.slow
     def test_run_lvs_flow(self, tmp_path):
         from orchestrator.langgraph.backend_helpers import (
-            run_pnr_flow, run_drc_flow, run_lvs_flow,
+            run_drc_flow,
+            run_lvs_flow,
+            run_pnr_flow,
         )
 
         out_dir = str(tmp_path / "pnr")

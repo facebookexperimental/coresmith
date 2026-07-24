@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""CoreSmith OpenSTA compatibility shim.
+
+The long-running daemon may have imported ``ppa_check`` before its STA-only
+signed-declaration normalization was installed.  Because the daemon resolves
+``sta`` for each attempt, this shim applies the same idempotent normalization
+to ``read_verilog`` inputs in a file-backed Tcl script, then invokes the real
+OpenSTA binary.  Calls without such a script pass through unchanged.
+"""
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from orchestrator.langgraph.ppa_check import (
+    strip_instance_parameters,
+    strip_signed_declaration_qualifiers,
+)
+
+
+_READ_VERILOG = re.compile(
+    r"^(?P<prefix>\s*read_verilog\s+)(?P<path>\S+)(?P<suffix>\s*)$",
+    re.MULTILINE,
+)
+
+
+def _unwrap_tcl_path(token: str) -> tuple[str, str, str]:
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+        return token[1:-1], token[0], token[-1]
+    if len(token) >= 2 and token[0] == "{" and token[-1] == "}":
+        return token[1:-1], "{", "}"
+    return token, "", ""
+
+
+def main() -> int:
+    real_sta = os.environ.get("CORESMITH_REAL_STA", "/usr/local/bin/sta")
+    args = sys.argv[1:]
+    script_index = next(
+        (
+            i
+            for i in range(len(args) - 1, -1, -1)
+            if args[i].endswith(".tcl") and Path(args[i]).is_file()
+        ),
+        None,
+    )
+    if script_index is None:
+        os.execv(real_sta, [real_sta, *args])
+
+    script_path = Path(args[script_index])
+    try:
+        script_text = script_path.read_text()
+    except OSError:
+        os.execv(real_sta, [real_sta, *args])
+
+    temporary_paths: list[Path] = []
+
+    def normalize(match: re.Match[str]) -> str:
+        raw_path, opener, closer = _unwrap_tcl_path(match.group("path"))
+        netlist_path = Path(raw_path)
+        if not netlist_path.is_file():
+            return match.group(0)
+        try:
+            raw_netlist = netlist_path.read_text()
+        except OSError:
+            return match.group(0)
+        normalized = strip_signed_declaration_qualifiers(
+            strip_instance_parameters(raw_netlist)
+        )
+        if normalized == raw_netlist:
+            return match.group(0)
+        with tempfile.NamedTemporaryFile(
+            "w", suffix="_coresmith_sta.v", delete=False
+        ) as fh:
+            fh.write(normalized)
+            normalized_path = Path(fh.name)
+        temporary_paths.append(normalized_path)
+        token = f"{opener}{normalized_path}{closer}"
+        return f"{match.group('prefix')}{token}{match.group('suffix')}"
+
+    normalized_script = _READ_VERILOG.sub(normalize, script_text)
+    if not temporary_paths:
+        os.execv(real_sta, [real_sta, *args])
+
+    normalized_tcl: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix="_coresmith_sta.tcl", delete=False
+        ) as fh:
+            fh.write(normalized_script)
+            normalized_tcl = Path(fh.name)
+        args[script_index] = str(normalized_tcl)
+        return subprocess.run([real_sta, *args]).returncode
+    finally:
+        for path in [normalized_tcl, *temporary_paths]:
+            if path is not None:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -111,7 +111,7 @@ class IntegrationLeadAgent:
             # The LLM may have used a file-edit tool to write the top RTL
             # directly to disk and then returned a JSON whose `verilog`
             # field is a self-`include` or other placeholder (seen with
-            # Codex/gpt-5.5: the response wrote `\`include "<output_path>"\``
+            # Codex/gpt-5.6: the response wrote `\`include "<output_path>"\``
             # which trivially compiles to a recursive include).  Refuse to
             # overwrite a working on-disk module with a broken one-liner,
             # and refuse to write a broken one-liner from scratch -- raise
@@ -300,7 +300,7 @@ def assert_blocks_instantiated(
 
     The Integration Lead has historically been observed to silently drop
     blocks from block_diagram.json and substitute glue stubs (e.g.,
-    core_block -> rle_to_packer_token_bridge). Lint passes because the
+    entropy_enc -> rle_to_packer_token_bridge). Lint passes because the
     substitute compiles, but the chip is structurally wrong.
     """
     if not chip_top_verilog or not expected_block_names:
@@ -311,8 +311,32 @@ def assert_blocks_instantiated(
     code = re.sub(r"//[^\n]*", "", chip_top_verilog)
     code = re.sub(r"/\*.*?\*/", "", code, flags=re.DOTALL)
 
+    # Modules DEFINED in the chip_top file: a tier-1 block NAMED like one of
+    # them (the Caravel `user_project_wrapper` collision -- the pad-adapter
+    # block shares the mandatory top-module name) cannot be instantiated
+    # under its own name, since a module cannot instantiate itself. Both the
+    # deterministic assembler and the Integration Lead resolve the collision
+    # by renaming the block module `<name>_pads`; accept that renamed
+    # instantiation as satisfying the block requirement.
+    defined_here = set(re.findall(r"\bmodule\s+([A-Za-z_]\w*)", code))
+
     missing: list[str] = []
     for block_name in expected_block_names:
+        if block_name in defined_here and re.search(
+            rf"\b{re.escape(block_name)}_pads\s+(?:#|[a-zA-Z_]\w*\s*\()",
+            code,
+        ):
+            continue
+        # The delivered Caravel openframe_project_wrapper exposes only the
+        # frozen io_in/io_out/io_oeb pad surface; its internal shuttle wires
+        # are therefore represented in an integration top by a local pad
+        # adapter. Accept only the exact, block-named adapter instance so the
+        # structural guard still proves that this wrapper role was not dropped.
+        if block_name == "openframe_project_wrapper" and re.search(
+            r"\breference_codec_openframe_pad_adapter\s+u_openframe_project_wrapper\s*\(",
+            code,
+        ):
+            continue
         # An instantiation is either
         #   <module> <inst_name> ( ... );           non-parameterized
         # or
@@ -331,7 +355,51 @@ def assert_blocks_instantiated(
             f"Integration Lead postcondition failed: chip_top RTL does NOT "
             f"instantiate {len(missing)} expected block(s): "
             f"{sorted(missing)}. The Integration Lead may have silently "
-            f"dropped blocks or substituted glue stubs (the core_block -> "
+            f"dropped blocks or substituted glue stubs (the entropy_enc -> "
             f"rle_to_packer_token_bridge failure mode). Refusing to proceed."
+        )
+    return None
+
+
+# Library memory primitives provided by rtl_lib/cs_sram.v. The chip_top may
+# INSTANTIATE these but must NEVER define/redeclare them: an LLM-authored empty
+# (* blackbox *) body of e.g. cs_sram_1rw1r, kept by a first-wins source deduper
+# over the real behavioral lib body, made every SRAM-backed block read all-zero
+# in DV. We match the family prefix so any future cs_mem_*/cs_sram_*/cs_fpmem_*
+# variant (incl. cs_mem_macro_shell) is covered.
+_MEM_PRIMITIVE_DEF_RE = re.compile(
+    r"^\s*module\s+(cs_(?:mem|sram|fpmem)_\w+)", re.MULTILINE
+)
+
+
+def assert_no_memory_primitive_defined(chip_top_verilog: str) -> str | None:
+    """Postcondition: the Integration Lead's chip_top must NOT define any
+    CoreSmith memory primitive (``cs_mem_*`` / ``cs_sram_*`` / ``cs_fpmem_*``).
+
+    Those are library cells supplied by the toolflow (``rtl_lib/cs_sram.v``).
+    The top may instantiate them, but an LLM that authors its own empty/blackbox
+    body of a memory cell -- which a first-wins source deduper then locks in over
+    the real behavioral body -- silently makes every memory read all zeros. This
+    check returns ``None`` on success or a descriptive error string (which forces
+    a retry) when such a definition is found.
+    """
+    if not chip_top_verilog:
+        return None
+
+    # Strip comments so a cs_mem_* mention only in commentary doesn't trip us.
+    code = re.sub(r"//[^\n]*", "", chip_top_verilog)
+    code = re.sub(r"/\*.*?\*/", "", code, flags=re.DOTALL)
+
+    defined = sorted(set(m.group(1) for m in _MEM_PRIMITIVE_DEF_RE.finditer(code)))
+    if defined:
+        return (
+            f"Integration Lead postcondition failed: chip_top RTL DEFINES "
+            f"{len(defined)} library memory primitive(s): {defined}. "
+            f"cs_mem_*/cs_sram_*/cs_fpmem_* are library cells provided by the "
+            f"toolflow (rtl_lib/cs_sram.v) -- the top may INSTANTIATE them but "
+            f"must NEVER define/redeclare/blackbox them. An empty stub here is "
+            f"kept by the source deduper over the real behavioral body, making "
+            f"every memory read all-zero in DV. Remove the definition(s) and "
+            f"only instantiate the cell(s). Refusing to proceed."
         )
     return None

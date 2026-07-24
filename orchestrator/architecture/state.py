@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -64,14 +64,14 @@ class ArchitectureQuestion:
         if not self.id:
             self.id = str(uuid.uuid4())
         if not self.timestamp:
-            self.timestamp = datetime.now(timezone.utc).isoformat()
+            self.timestamp = datetime.now(UTC).isoformat()
 
     def is_answered(self) -> bool:
         return self.answer is not None
 
     def provide_answer(self, answer: str) -> None:
         self.answer = answer
-        self.answered_at = datetime.now(timezone.utc).isoformat()
+        self.answered_at = datetime.now(UTC).isoformat()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -143,7 +143,7 @@ class ArchitectureState:
         for i, q in enumerate(self.pending_questions):
             if q.get("id") == question_id:
                 q["answer"] = answer
-                q["answered_at"] = datetime.now(timezone.utc).isoformat()
+                q["answered_at"] = datetime.now(UTC).isoformat()
                 self.answered_questions.append(q)
                 self.pending_questions.pop(i)
                 return True

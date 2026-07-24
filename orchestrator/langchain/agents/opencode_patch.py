@@ -3,13 +3,14 @@
 # wherever you'd normally import ClaudeLLM (or use sitecustomize.py to auto-load it).
 
 from __future__ import annotations
-from orchestrator._timeouts import scaled
+
 import logging
 import os
 import shutil
 import subprocess
 import time
 
+from orchestrator._timeouts import scaled
 from orchestrator.langchain.agents import coresmith_llm as _slm
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ _OPENCODE_PATH = shutil.which("opencode") or "/usr/local/bin/opencode"
 # Examples assume a "local" provider pointing at a vLLM endpoint with
 # Qwen/Qwen3.6-27B registered.
 _MODEL_MAP = {
+    "claude-opus-4-8":            "local/Qwen/Qwen3.6-27B",
     "claude-opus-4-7":            "local/Qwen/Qwen3.6-27B",
     "claude-sonnet-4-6":          "local/Qwen/Qwen3.6-27B",
     "claude-haiku-4-5-20251001":  "local/Qwen/Qwen3.6-27B",

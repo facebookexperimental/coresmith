@@ -224,8 +224,8 @@ class TestConstraintChecker:
         """Build an AsyncMock for ClaudeLLM.call that returns the configured
         response per constraint id. Maps from constraint id (looked up via
         run_name) to a {pass, violation_text, ...} dict."""
-        from unittest.mock import AsyncMock
         import json as _json
+        from unittest.mock import AsyncMock
 
         async def _fake_call(*args, **kwargs):
             run_name = kwargs.get("run_name", "")
@@ -238,6 +238,7 @@ class TestConstraintChecker:
     @pytest.mark.asyncio
     async def test_all_subagents_pass_returns_no_violations(self, sample_block_diagram):
         from unittest.mock import patch
+
         from orchestrator.architecture.constraints import check_constraints
 
         # Every subagent returns PASS
@@ -255,6 +256,7 @@ class TestConstraintChecker:
     @pytest.mark.asyncio
     async def test_one_subagent_failure_surfaces_as_violation(self, sample_block_diagram):
         from unittest.mock import patch
+
         from orchestrator.architecture.constraints import check_constraints
 
         # gate_budget subagent fails; others pass
@@ -293,6 +295,7 @@ class TestConstraintChecker:
         at all. CDC presence requires multiple clock domains; with an empty
         clock_tree it must be skipped."""
         from unittest.mock import patch
+
         from orchestrator.architecture.constraints import check_constraints
 
         called_ids: list[str] = []
@@ -324,6 +327,7 @@ class TestConstraintChecker:
         """If a subagent returns unparseable output, the check is reported as
         a warning-severity violation rather than silently passing."""
         from unittest.mock import AsyncMock, patch
+
         from orchestrator.architecture.constraints import check_constraints
 
         with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
@@ -346,6 +350,7 @@ class TestConstraintChecker:
         """A subagent that raises (timeout, API error) becomes a warning-severity
         violation tagged with `_subagent_error`."""
         from unittest.mock import AsyncMock, patch
+
         from orchestrator.architecture.constraints import check_constraints
 
         with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
@@ -398,6 +403,7 @@ class TestConstraintChecker:
         producer and consumer of a connection, the violation flows through
         with the right check id."""
         from unittest.mock import patch
+
         from orchestrator.architecture.constraints import check_constraints
 
         mock_call = self._make_subagent_mock(per_check_response={
@@ -690,11 +696,12 @@ class TestEndToEndStateFlow:
         All specialists now use LLMs; mock them to keep this as a unit test.
         """
         from unittest.mock import AsyncMock, patch
-        from orchestrator.architecture.state import ArchitectureState, load_state, save_state
-        from orchestrator.architecture.specialists.memory_map import analyze_memory_map
-        from orchestrator.architecture.specialists.clock_tree import analyze_clock_tree
-        from orchestrator.architecture.specialists.register_spec import analyze_register_spec
+
         from orchestrator.architecture.constraints import check_constraints
+        from orchestrator.architecture.specialists.clock_tree import analyze_clock_tree
+        from orchestrator.architecture.specialists.memory_map import analyze_memory_map
+        from orchestrator.architecture.specialists.register_spec import analyze_register_spec
+        from orchestrator.architecture.state import ArchitectureState, load_state, save_state
 
         ct_response = json.dumps({
             "domains": [{"name": "clk_sys", "frequency_mhz": 50.0, "source": "PLL"}],
@@ -800,6 +807,7 @@ class TestInterfaceDefinition:
         canonical schema. We mock the LLM to return a known good response."""
         from pathlib import Path
         from unittest.mock import AsyncMock, patch
+
         from orchestrator.architecture.specialists.interface_definition import (
             analyze_interface_definition,
         )
@@ -807,7 +815,7 @@ class TestInterfaceDefinition:
         contracts_payload = {
             "design_summary": "Two-block AXI-Stream pipeline.",
             "default_packing_convention": "msb_first_by_field_list",
-            "default_endianness_rationale": "Matches big-endian (network) byte serialization.",
+            "default_endianness_rationale": "Matches the video codec byte serialization.",
             "contracts": [
                 {
                     "edge_id": "a__m_axis_data__to__b__s_axis_data",
@@ -853,12 +861,152 @@ class TestInterfaceDefinition:
         assert len(ir["contracts"]) == 1
         assert ir["contracts"][0]["data_width_bits"] == 16
 
+    @staticmethod
+    def _completion_mislabel_bundle(target):
+        """A block diagram + LLM contract payload where the specialist wrongly
+        froze request_response + feedback_cycle=true on a valid_only strobe, a
+        static bundle, and a mem_write port (it inferred a response because a
+        separate completion event exists), a legitimately request_response
+        req_resp read, and a genuine srdy_drdy stream carrying elastic_fifo."""
+        import json as _json
+
+        diagram = {
+            "blocks": [{"name": n} for n in ("ctrl", "core", "store", "sa", "sb")],
+            "connections": [
+                {"from": "ctrl", "to": "core", "handshake_protocol": "valid_only"},
+                {"from": "core", "to": "ctrl", "handshake_protocol": "static"},
+                {"from": "core", "to": "store", "handshake_protocol": "mem_write"},
+                {"from": "ctrl", "to": "store", "handshake_protocol": "req_resp"},
+                {"from": "sa", "to": "sb", "handshake_protocol": "srdy_drdy"},
+            ],
+        }
+
+        def _c(prod, cons, fam, fc):
+            return {
+                "producer_block": prod, "consumer_block": cons,
+                "handshake_protocol": fam, "data_width_bits": 8,
+                "fields": [{"name": "d", "width": 8, "msb": 7, "lsb": 0}],
+                "flow_control_policy": fc,
+            }
+
+        rr = {"semantics": "request_response", "feedback_cycle": True,
+              "consumer_can_stall": True, "min_buffer_depth_beats": 4}
+        payload = {
+            "design_summary": "generic completion-event mislabel demo",
+            "default_packing_convention": "msb_first_by_field_list",
+            "contracts": [
+                _c("ctrl", "core", "valid_only", dict(rr)),
+                _c("core", "ctrl", "static", dict(rr)),
+                _c("core", "store", "mem_write", dict(rr)),
+                _c("ctrl", "store", "req_resp",
+                   {"semantics": "request_response", "feedback_cycle": False}),
+                _c("sa", "sb", "srdy_drdy",
+                   {"semantics": "elastic_fifo", "min_buffer_depth_beats": 4,
+                    "feedback_cycle": True, "consumer_can_stall": True}),
+            ],
+            "open_questions": [],
+        }
+
+        async def _fake_call(*args, **kwargs):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(_json.dumps(payload, indent=2))
+            return f"wrote {target}"
+
+        return diagram, _fake_call
+
+    @pytest.mark.asyncio
+    async def test_neutralized_policy_persisted_to_disk(self, tmp_project, monkeypatch):
+        """The neutralized (free_running) flow_control_policy for the
+        no-backpressure families must be written BACK to interface_contracts.json
+        -- the coherence gate and per-block spec generators read the DISK file,
+        so an in-memory-only fix does not stick."""
+        import json as _json
+        from pathlib import Path
+        from unittest.mock import AsyncMock, patch
+
+        from orchestrator.architecture.constraints import (
+            _check_interface_family_coherence,
+        )
+        from orchestrator.architecture.specialists.interface_definition import (
+            analyze_interface_definition,
+        )
+
+        monkeypatch.delenv("CORESMITH_INTERFACE_FAMILY_PROPAGATION", raising=False)
+        monkeypatch.delenv("CORESMITH_INTERFACE_FAMILY_GATE", raising=False)
+        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+        diagram, fake_call = self._completion_mislabel_bundle(target)
+
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
+            MockLLM.return_value.call = AsyncMock(side_effect=fake_call)
+            await analyze_interface_definition(
+                block_diagram=diagram, project_root=tmp_project,
+            )
+
+        # Re-read the DISK artifact -- this is what downstream actually consumes.
+        on_disk = _json.loads(target.read_text())
+        by_fam = {c["handshake_protocol"]: c for c in on_disk["contracts"]}
+
+        for fam in ("valid_only", "static", "mem_write"):
+            fc = by_fam[fam].get("flow_control_policy") or {}
+            assert fc["semantics"] == "free_running", (fam, fc)
+            assert fc.get("feedback_cycle") is False, (fam, fc)
+            assert int(fc.get("min_buffer_depth_beats") or 0) == 0, (fam, fc)
+            assert not fc.get("consumer_can_stall"), (fam, fc)
+            assert not fc.get("producer_can_stall"), (fam, fc)
+
+        # req_resp + the genuine streaming edge are UNTOUCHED on disk.
+        assert (by_fam["req_resp"]["flow_control_policy"]["semantics"]
+                == "request_response")
+        sfc = by_fam["srdy_drdy"]["flow_control_policy"]
+        assert sfc["semantics"] == "elastic_fifo"
+        assert int(sfc.get("min_buffer_depth_beats") or 0) == 4
+
+        # The honest coherence gate (which reloads from disk) now passes clean.
+        assert _check_interface_family_coherence(diagram, on_disk) == []
+
+    @pytest.mark.asyncio
+    async def test_neutralized_policy_writeback_gate_off(self, tmp_project, monkeypatch):
+        """Gate OFF -> the raw LLM policy is left on disk verbatim (pre-fix
+        behavior); the honest gate still catches it."""
+        import json as _json
+        from pathlib import Path
+        from unittest.mock import AsyncMock, patch
+
+        from orchestrator.architecture.constraints import (
+            _check_interface_family_coherence,
+        )
+        from orchestrator.architecture.specialists.interface_definition import (
+            analyze_interface_definition,
+        )
+
+        monkeypatch.setenv("CORESMITH_INTERFACE_FAMILY_PROPAGATION", "0")
+        monkeypatch.delenv("CORESMITH_INTERFACE_FAMILY_GATE", raising=False)
+        target = Path(tmp_project) / ".coresmith" / "interface_contracts.json"
+        diagram, fake_call = self._completion_mislabel_bundle(target)
+
+        with patch("orchestrator.langchain.agents.coresmith_llm.ClaudeLLM") as MockLLM:
+            MockLLM.return_value.call = AsyncMock(side_effect=fake_call)
+            await analyze_interface_definition(
+                block_diagram=diagram, project_root=tmp_project,
+            )
+
+        on_disk = _json.loads(target.read_text())
+        by_fam = {c["handshake_protocol"]: c for c in on_disk["contracts"]}
+        # Untouched: still request_response on the no-backpressure families.
+        for fam in ("valid_only", "static", "mem_write"):
+            assert (by_fam[fam]["flow_control_policy"]["semantics"]
+                    == "request_response")
+        # And the honest gate still catches them (fix is the generator, not the
+        # gate; the gate default-ON is orthogonal to the propagation gate).
+        assert _check_interface_family_coherence(diagram, on_disk)
+
     @pytest.mark.asyncio
     async def test_validator_flags_field_width_sum_mismatch(self, tmp_project):
         """The structural validator should note when declared
         data_width_bits doesn't equal the sum of field widths."""
         from pathlib import Path
         from unittest.mock import AsyncMock, patch
+
         from orchestrator.architecture.specialists.interface_definition import (
             analyze_interface_definition,
         )
@@ -912,6 +1060,7 @@ class TestInterfaceDefinition:
         exactly one contract entry. Validator should flag missing ones."""
         from pathlib import Path
         from unittest.mock import AsyncMock, patch
+
         from orchestrator.architecture.specialists.interface_definition import (
             analyze_interface_definition,
         )
@@ -963,6 +1112,7 @@ class TestInterfaceDefinition:
         flow_control_policy.semantics == free_running (or skid)."""
         from pathlib import Path
         from unittest.mock import AsyncMock, patch
+
         from orchestrator.architecture.specialists.interface_definition import (
             analyze_interface_definition,
         )
@@ -1036,6 +1186,7 @@ class TestInterfaceDefinition:
         """elastic_fifo with min_buffer_depth_beats < 2 should be flagged."""
         from pathlib import Path
         from unittest.mock import AsyncMock, patch
+
         from orchestrator.architecture.specialists.interface_definition import (
             analyze_interface_definition,
         )
@@ -1118,8 +1269,8 @@ class TestCrossSpecContractAdherence:
 
     def _stub_call(self, per_check_response):
         """Same pattern as TestConstraintChecker._make_subagent_mock."""
-        from unittest.mock import AsyncMock
         import json as _json
+        from unittest.mock import AsyncMock
 
         async def _fake_call(*args, **kwargs):
             run_name = kwargs.get("run_name", "")
@@ -1151,6 +1302,7 @@ class TestCrossSpecContractAdherence:
         """When interface_contracts.json exists with non-empty contracts,
         the cross_spec_contract_adherence subagent must be invoked."""
         from unittest.mock import patch
+
         from orchestrator.architecture.constraints import check_constraints
 
         contracts = {
@@ -1190,6 +1342,7 @@ class TestCrossSpecContractAdherence:
     @pytest.mark.asyncio
     async def test_subagent_skipped_when_no_contracts(self, tmp_project):
         from unittest.mock import patch
+
         from orchestrator.architecture.constraints import check_constraints
 
         called: list[str] = []
@@ -1267,8 +1420,9 @@ class TestCrossSpecFifoDepthAdherence:
     def test_artifact_bundle_includes_rtl_heads(self, tmp_project):
         """The audit must see the per-block RTL heads in the bundle so it
         can grep for `localparam DEPTH = N` declarations."""
-        from orchestrator.architecture.constraints import _build_artifact_bundle
         from pathlib import Path
+
+        from orchestrator.architecture.constraints import _build_artifact_bundle
 
         rtl_dir = Path(tmp_project) / "rtl" / "design"
         rtl_dir.mkdir(parents=True)

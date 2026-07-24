@@ -1,0 +1,12 @@
+{
+  "name": "uarch_spec_summary_response",
+  "source": "/home/ubuntu/project/.coresmith.stopped-ue_coder-after-entropy-20260513-071007/.coresmith/llm_calls.jsonl",
+  "original_root": "/home/ubuntu/project",
+  "keep_prompts": false,
+  "engine_note": "Codex uarch-spec call: response is a markdown-link SUMMARY (the .md was written via file tools), i.e. the response body carries no artifact. Replay must serve the exact recorded response for the matched (run_name, site_index).",
+  "n_calls": 1,
+  "run_names": [
+    "Generate Uarch Spec [Intra Predict]"
+  ],
+  "total_writes": 0
+}
