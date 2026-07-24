@@ -668,7 +668,13 @@ class TestRegressionGuard:
         }
 
         result = await generate_rtl_node(state)
-        assert result.get("force_regen_tb") is True
+        # Default (CORESMITH_FORCE_TB_REGEN unset) is REUSE the passing TB, not
+        # force-regenerate it: force-regenerating a passing block's TB produced
+        # a worse TB that re-failed, and since best_result stays
+        # sim_passed=True it re-triggered on every restart -- an infinite
+        # regen/fail loop that wedged whole runs. Force-regen is opt-in via
+        # CORESMITH_FORCE_TB_REGEN=1 (see generate_rtl_node's skip-regen path).
+        assert result.get("force_regen_tb") is False
         assert result["rtl_path"] == str(rtl_dir / f"{block_name}.v")
 
     @pytest.mark.asyncio

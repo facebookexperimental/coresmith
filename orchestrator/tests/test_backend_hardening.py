@@ -129,7 +129,7 @@ class TestExhaustionReopen:
 
         from orchestrator.langgraph.backend_graph import increment_attempt_node
         # re-entering with attempt already past the budget -> reset to 1
-        out = asyncio.get_event_loop().run_until_complete(
+        out = asyncio.run(
             increment_attempt_node(
                 {"attempt": 4, "max_attempts": 3,
                  "current_block": {"name": "top"}}))
@@ -139,7 +139,7 @@ class TestExhaustionReopen:
         import asyncio
 
         from orchestrator.langgraph.backend_graph import increment_attempt_node
-        out = asyncio.get_event_loop().run_until_complete(
+        out = asyncio.run(
             increment_attempt_node(
                 {"attempt": 1, "max_attempts": 3,
                  "current_block": {"name": "top"}}))

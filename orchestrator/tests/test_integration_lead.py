@@ -1159,9 +1159,14 @@ class TestIntegrationCheckWarningTriage:
         assert ir.get("aborted") is None
         assert ir["lint_clean"] is True
         # route_after_integration will see lint_clean=True, error_count=0,
-        # no aborted -> routes to integration_dv.
+        # no aborted -> routes to model_integration (the two-pass restructure's
+        # flag-gated node -- a no-op pass-through to integration_dv when
+        # CORESMITH_BLOCK_GOLDENS is off, which is the default/legacy test
+        # profile pinned in conftest.py). See
+        # TestRouteAfterIntegration::test_clean_integration_goes_to_model_integration
+        # in test_pipeline_graph.py for the same expectation.
         from orchestrator.langgraph.pipeline_graph import route_after_integration
-        assert route_after_integration(result) == "integration_dv"
+        assert route_after_integration(result) == "model_integration"
 
     @pytest.mark.asyncio
     async def test_warning_triage_abort_ends_pipeline(self, monkeypatch):

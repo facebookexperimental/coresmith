@@ -184,7 +184,11 @@ class TestRtlRegressionGuard:
         }
 
         result = await generate_rtl_node(state)
-        assert result["force_regen_tb"] is True
+        # Default (CORESMITH_FORCE_TB_REGEN unset) is REUSE the passing TB, not
+        # force-regenerate it -- see test_flow_fixes.py::TestRegressionGuard for
+        # the full rationale (force-regen produced a worse TB that re-failed,
+        # wedging whole runs in an infinite regen/fail loop).
+        assert result["force_regen_tb"] is False
         assert result["rtl_path"] == str(rtl_file)
 
     @pytest.mark.asyncio

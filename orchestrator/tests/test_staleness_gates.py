@@ -196,13 +196,26 @@ class TestClockPortValidation:
     """C11: the model validator must accept the design's ACTUAL clock name
     (wb_clk_i on Caravel), not demand a literal 'clk' -- the literal check
     failed every model generation on such designs and discarded substantive
-    models before gap detection could run."""
+    models before gap detection could run.
+
+    _validate_block_model_text is pure Amaranth-contract AST validation (looks
+    for ``class <block>(Elaboratable)`` + __init__/elaborate) -- it never
+    imports myhdl, so it does not share _VALID_MODEL_TMPL (still MyHDL-style,
+    used elsewhere in this file by TestArbitrateDiskFirst, which exercises a
+    different code path). This class builds its own minimal Amaranth-shaped
+    fixture so it validates against the ACTUAL current contract."""
 
     def _model(self, clk: str, rst: str) -> str:
-        return _VALID_MODEL_TMPL.format(header="", name="myblk").replace(
-            "def myblk(clk, rst):", f"def myblk({clk}, {rst}):").replace(
-            "always_seq(clk.posedge", f"always_seq({clk}.posedge").replace(
-            "reset=rst)", f"reset={rst})")
+        return (
+            "from amaranth import Elaboratable, Module\n\n"
+            f"class myblk(Elaboratable):\n"
+            f"    def __init__(self, {clk}, {rst}):\n"
+            f"        self.{clk} = {clk}\n"
+            f"        self.{rst} = {rst}\n\n"
+            "    def elaborate(self, platform):\n"
+            "        m = Module()\n"
+            "        return m\n"
+        )
 
     def test_wb_clk_i_accepted(self):
         from orchestrator.langchain.agents.block_golden_generator import (

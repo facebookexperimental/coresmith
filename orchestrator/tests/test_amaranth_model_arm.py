@@ -1,5 +1,9 @@
 """Focused contract tests for the experimental Amaranth behavioral arm."""
 
+import shutil
+
+import pytest
+
 from orchestrator.architecture.composition_audit import audit_chip_model
 from orchestrator.langgraph.microarch_exp import elaborate_block_model
 
@@ -45,6 +49,9 @@ def simulate(stimulus):
 '''
 
 
+@pytest.mark.skipif(
+    shutil.which("yosys") is None, reason="yosys binary not available"
+)
 def test_elaborate_and_system_yosys_codegen(tmp_path, monkeypatch):
     model = tmp_path / "inc.py"
     model.write_text(BLOCK, encoding="utf-8")

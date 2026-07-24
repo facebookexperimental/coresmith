@@ -294,7 +294,12 @@ class TestRouteAfterIncrement:
         assert route_after_increment({"attempt": 3, "max_attempts": 3}) == "run_pnr"
 
     def test_exhausted(self):
-        assert route_after_increment({"attempt": 4, "max_attempts": 3}) == "advance_block"
+        # Exhaustion now PARKS on ask_human instead of silently advancing to
+        # backend_complete with success=false, so a recoverable stall (e.g. a
+        # false DRC timeout) surfaces as an actionable interrupt and a retry
+        # can reopen the block with a fresh budget. See
+        # test_backend_hardening.py::TestExhaustionReopen for the reopen path.
+        assert route_after_increment({"attempt": 4, "max_attempts": 3}) == "ask_human"
 
 
 class TestRouteAfterAdvanceLead:

@@ -82,7 +82,12 @@ port: active-high examples use `if self.rst`; active-low contracts use
    one module comment exactly:
    `# MEM <name>: <width>x<depth> ports=<...> impl=<flop|fpmem|sram> justification=<...>`
    and implement it as an `Array` of `Signal`s for this behavioral arm. Do not
-   instantiate technology SRAM macros here.
+   instantiate technology SRAM macros here. The `justification` must defend the
+   DEPTH against the algorithm's true dependency window: state WHY the memory
+   cannot be shallower (e.g. a line buffer is a few rows deep, not a
+   whole-dimension store). Carry the depth frozen in the uArch spec's own `#
+   MEM` manifest through unchanged -- do not silently widen a shallow
+   dependency window into a full store here.
 
 7. Declare non-trivial latency with module-level `STAGE_BUDGET` and
    `DECLARED_LATENCY_CYCLES`; the sum of `latency_cycles * iters` must reconcile.

@@ -192,12 +192,19 @@ def test_integration_pre_run_hygiene_clears_agent_debris(tmp_path, monkeypatch):
 
     seen = {}
 
-    def _fake_run(cmd, *a, **k):
-        # Capture whether the stale binary survived until make was invoked.
-        seen["stale_obj_present_at_make"] = stale_obj.exists()
-        return subprocess.CompletedProcess(cmd, 0, "** TESTS=1 PASS=1 FAIL=0 **", "")
+    class _FakePopen:
+        # run_integration_simulation now launches make via subprocess.Popen (own
+        # process group, so a timeout kills the whole compiler/sim tree instead
+        # of orphaning it) + .communicate(), not subprocess.run -- mock that.
+        def __init__(self, cmd, *a, **k):
+            # Capture whether the stale binary survived until make was invoked.
+            seen["stale_obj_present_at_make"] = stale_obj.exists()
+            self.returncode = 0
 
-    monkeypatch.setattr(ih.subprocess, "run", _fake_run)
+        def communicate(self, timeout=None):
+            return "** TESTS=1 PASS=1 FAIL=0 **", ""
+
+    monkeypatch.setattr(ih.subprocess, "Popen", _FakePopen)
     monkeypatch.setattr(ih, "run_wavekit_vcd_audit", lambda *a, **k: {"ok": True})
 
     ih.run_integration_simulation("chip", str(top), {}, str(tb))

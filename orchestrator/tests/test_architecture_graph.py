@@ -306,9 +306,23 @@ class TestReviewDiagram:
 
 
 class TestRouteAfterDiagramEscalation:
-    def test_continue_goes_to_interface_definition(self):
-        # After the diagram escalation continues, route through the new
-        # Interface Definition stage before Memory Map (PR #45).
+    def test_continue_goes_to_complexity_review_by_default(self, monkeypatch):
+        # C17: 'continue' (diagram accepted after a clarifying question) must
+        # run the SAME post-diagram gates as the clean-first-try path
+        # (review_diagram) -- default (both gates ON) means the complexity
+        # gate runs first. Hard-wiring 'Interface Definition' here used to let
+        # any design whose diagram asked a question skip the
+        # complexity/decomposition gate entirely.
+        monkeypatch.delenv("CORESMITH_COMPLEXITY_GATE", raising=False)
+        state = {"human_response": {"action": "continue"}}
+        assert route_after_diagram_escalation(state) == "Complexity Review"
+
+    def test_continue_goes_to_interface_definition_when_gates_disabled(self, monkeypatch):
+        # With BOTH the complexity gate and the output-contract gate disabled,
+        # 'continue' routes straight to Interface Definition (the PR #45
+        # stage before Memory Map), mirroring review_diagram's clean path.
+        monkeypatch.setenv("CORESMITH_COMPLEXITY_GATE", "0")
+        monkeypatch.setenv("CORESMITH_OUTPUT_CONTRACT_GATE", "0")
         state = {"human_response": {"action": "continue"}}
         assert route_after_diagram_escalation(state) == "Interface Definition"
 

@@ -16,7 +16,19 @@ from pathlib import Path
 
 from orchestrator.langgraph import architecture_graph as ag
 
-_FAT_GOLDEN = '''
+# C16 added a modeling-complexity LOC floor (MODELING_ALGO_LOC_FLOOR = 150 in
+# block_complexity.py): the distinct-algorithms axis only fires above that
+# floor now (a small block legitimately touching many algorithms' data is not
+# an intractable fusion). The original compact literal fixture below summed to
+# ~31 LOC across its slice, so it stopped tripping ANY axis once the floor
+# landed. Pad with a plain accumulation stage that adds ZERO new
+# distinct-algorithm classes (no dct/quant/recon/pred/rd/chroma keyword
+# matches in its name, calls, or signature) so this synthetic golden stays
+# unambiguously "fat" -- it now clears the LOC threshold (250) outright, not
+# just the algo floor.
+_BULK_STAGES = "\n".join(f"    p{i} = p{i - 1} + {i}" for i in range(1, 230))
+
+_FAT_GOLDEN = f'''
 import numpy as np
 
 def _fdct4(a, b, qp):
@@ -66,13 +78,19 @@ def decide_chroma_mode(a, b, qp):
 def chroma_dc_quant(a, b, qp):
     return (a + b) >> qp
 
+def _bulk_accumulate(a, b, qp):
+    p0 = a + b
+{_BULK_STAGES}
+    return p229 + qp
+
 def _encode_mb(a, b, qp):
     t = fdct_quant(a, b, qp)
     r = reconstruct(t, b, qp)
     p = pred_4x4(r, b, qp)
     c = _rd_cost(p, b, qp)
     ch = decide_chroma_mode(a, b, qp)
-    return c + ch
+    bulk = _bulk_accumulate(a, b, qp)
+    return c + ch + bulk
 '''
 
 
