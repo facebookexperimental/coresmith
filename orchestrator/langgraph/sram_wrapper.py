@@ -53,9 +53,52 @@ from pathlib import Path
 # Aggressive on purpose: the previous bits-AND-depth gate let 8Kbit / 256-deep
 # comb-read arrays slip through. The OR closes the width-only and depth-only leaks
 # while ``cs_fpmem`` keeps every flagged-but-legitimate memory un-blocked.
+#
+# --- MEASURED CALIBRATION (2026-07, sky130, 50 MHz target) -------------------
+#
+# These three triggers were originally set by judgement. A 152-point
+# characterization sweep (``mem_characterize``, corrected STA) plus a real
+# signed-off OpenRAM macro now put numbers behind them.
+#
+# The flop-vs-macro CROSSOVER sits at ~2 Kbit. Comparing like for like at
+# 2048 bits, 1rw1r:
+#
+#     real macro  sram_1rw1r_16_128_8_sky130   227.3 MHz   94,990 um^2
+#     registered flops        8x256            189.4 MHz   94,761 um^2
+#
+# i.e. at 2 Kbit the macro is already ~20% FASTER at essentially identical
+# area. Below that, flops win on area (a macro carries fixed periphery
+# overhead); above it the macro wins outright, because flop Fmax collapses
+# with size while the macro's does not. ``DEFAULT_MIN_BITS = 2000`` therefore
+# lands within ~2% of the measured crossover -- keep it.
+#
+# Measured registered-flop Fmax, showing why the total-bits trigger is the
+# load-bearing one:
+#
+#     8x64   495.0 MHz     8x1024   59.3 MHz     32x1024  15.9 MHz
+#     8x256  223.7 MHz     8x2048   30.5 MHz     64x1024   8.0 MHz
+#     32x256  63.7 MHz     8x4096   16.1 MHz
+#
+# 43 of 76 registered-flop geometries cannot reach 50 MHz at all. The fitted
+# model's feature importances are bits=0.76, impl=0.12, log_depth=0.06,
+# depth=0.05 -- TOTAL BITS DOMINATES. Neither width nor depth alone predicts
+# the cliff: 32x256 (8 Kbit) makes 63.7 MHz while 8x1024 (8 Kbit) makes
+# 59.3 MHz, but 8x256 (2 Kbit) makes 223.7 MHz. Equal bits, comparable Fmax;
+# equal depth, wildly different Fmax.
+#
+# So MIN_BITS is the calibrated trigger and should track the crossover. The
+# width and depth triggers are NOT redundant, but they are catching a
+# different failure: an unregistered N:1 combinational read mux, which
+# congests routing and blows up fanout regardless of total size. Keep them,
+# but understand them as structural guards rather than Fmax predictions.
 DEFAULT_MIN_BITS = 2000      # env CORESMITH_SRAM_MIN_BITS   -- total-bits trigger
+                             #   ~= the measured 2 Kbit flop/macro crossover
 DEFAULT_MIN_WIDTH = 128      # env CORESMITH_SRAM_MIN_WIDTH  -- word-width trigger
+                             #   structural: wide comb read mux / sense-amp cost
 DEFAULT_MACRO_DEPTH = 256    # env CORESMITH_SRAM_MACRO_DEPTH -- depth trigger
+                             #   structural: decode fanout. 8x256 still makes
+                             #   223.7 MHz, so this is deliberately conservative
+                             #   -- it fires before Fmax degrades, not after.
 
 
 def min_bits() -> int:
