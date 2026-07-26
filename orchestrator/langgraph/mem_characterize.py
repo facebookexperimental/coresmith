@@ -372,9 +372,17 @@ def _worst_path_delay_ns(netlist: str, top: str, liberty: str,
 
     The critical path for a flop memory is the combinational read mux
     (addr -> N:1 mux -> rdata), an input->output path; for a registered read it
-    is reg->reg / reg->out. To time BOTH path classes in one report we:
-      * define a slow real clock (so reg->reg never bounds the result), and
-      * ``set_max_delay`` on input->output paths (so the comb read mux IS timed).
+    is input->reg (addr -> N:1 mux -> output-flop D). To time ALL path classes
+    in one report we:
+      * define a slow real clock (so reg->reg never bounds the result),
+      * ``set_max_delay`` on input->output paths (so the comb read mux IS
+        timed), and
+      * ``set_input_delay`` on the data inputs, so input->REGISTER paths are
+        timed too. Without this the address decode of a *registered* read is
+        unconstrained and STA silently reports a reg->reg path that starts at a
+        memory-bit Q and skips the decode entirely -- which understates the
+        real delay by up to 6.4x (8x1024 registered: 2.62 ns reported vs
+        16.87 ns actual).
     ``report_checks -path_delay max`` then prints the single worst path's
     ``data arrival time`` = the worst delay through the design. Fmax = 1/delay.
 
@@ -390,9 +398,26 @@ def _worst_path_delay_ns(netlist: str, top: str, liberty: str,
         f"read_verilog {netlist}\n"
         f"link_design {top}\n"
         f"create_clock -name clk -period {big} [get_ports clk]\n"
+        # Constrain input->register paths too (a registered read mux ends at a
+        # flop D, not at a port). ``all_inputs -no_clocks`` excludes the clock;
+        # older OpenSTA lacks the flag, so fall back to the full input set -- a
+        # data delay on the clock port is inert there, since it drives only CLK
+        # pins and so starts no data path.
+        "if {[catch {set_input_delay 0 -clock clk "
+        "[all_inputs -no_clocks]}]} {\n"
+        "  set_input_delay 0 -clock clk [all_inputs]\n"
+        "}\n"
         f"set_max_delay {big} -from [all_inputs] -to [all_outputs]\n"
-        "report_checks -path_delay max -group_path_count 1 "
+        # -group_path_count is the modern spelling; older OpenSTA (e.g.
+        # OpenROAD v2.0-17598) only knows -group_count and errors with
+        # STA-0563, which would make this function return None for every
+        # geometry -- a silent total absence of timing data, not just an
+        # optimistic one.
+        "if {[catch {report_checks -path_delay max -group_path_count 1 "
+        "-fields {} -no_line_splits}]} {\n"
+        "  report_checks -path_delay max -group_count 1 "
         "-fields {} -no_line_splits\n"
+        "}\n"
         "exit\n"
     )
     with tempfile.NamedTemporaryFile("w", suffix=".tcl", delete=False) as fh:
@@ -442,27 +467,103 @@ def _lef_area_um2(lef_path: str) -> float | None:
     return float(m.group(1)) * float(m.group(2))
 
 
-def _lib_access_time_ns(lib_path: str) -> float | None:
-    """Worst clk->dout access time (ns) from the macro's .lib timing arcs.
+def _lib_time_scale_ns(text: str) -> float:
+    """Return the declared Liberty ``time_unit`` multiplier in nanoseconds."""
+    match = re.search(
+        r"\btime_unit\s*:\s*[\"']?([\d.]+)\s*(fs|ps|ns|us)[\"']?\s*;",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return 1.0
+    factors = {"fs": 1e-6, "ps": 1e-3, "ns": 1.0, "us": 1e3}
+    return float(match.group(1)) * factors[match.group(2).lower()]
 
-    Reads the largest ``cell_rise``/``cell_fall`` value among the data-out pin
-    arcs related to the clock (rising_edge/falling_edge). This is the real
-    registered-read access time the SRAM achieves -- typically ~0.3-0.6 ns,
-    vs the hundreds of ns a deep flop comb-read mux takes.
+
+def _lib_timing_blocks(text: str) -> list[str]:
+    """Extract balanced ``timing(...) { ... }`` blocks from Liberty text."""
+    blocks: list[str] = []
+    for match in re.finditer(r"\btiming\s*\([^)]*\)\s*\{", text):
+        start = match.start()
+        brace = text.find("{", match.start(), match.end())
+        depth = 0
+        for pos in range(brace, len(text)):
+            if text[pos] == "{":
+                depth += 1
+            elif text[pos] == "}":
+                depth -= 1
+                if depth == 0:
+                    blocks.append(text[start:pos + 1])
+                    break
+    return blocks
+
+
+def _lib_constraint_values(block: str, constraint: str = "") -> list[float]:
+    """Read numeric ``values(...)`` entries, optionally under one constraint."""
+    scope = block
+    if constraint:
+        match = re.search(
+            rf"\b{re.escape(constraint)}\s*\([^)]*\)\s*\{{(.*?)\}}",
+            block,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if not match:
+            return []
+        scope = match.group(1)
+    values: list[float] = []
+    for match in re.finditer(r"\bvalues\s*\((.*?)\)", scope, re.DOTALL):
+        values.extend(float(token) for token in re.findall(
+            r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?",
+            match.group(1),
+        ))
+    return values
+
+
+def _lib_min_cycle_time_ns(lib_path: str) -> float | None:
+    """Return the limiting legal clock period (ns) from a macro Liberty.
+
+    Clock-to-output access latency is NOT a legal clock period. The previous
+    implementation took the file-wide max ``cell_rise``/``cell_fall`` and
+    treated it as one, which reported e.g. 1000/0.484 = 2066 MHz for
+    ``sky130_sram_1kbyte_1rw1r_32x256_8`` whose own ``minimum_period`` is
+    1.791 ns = 558 MHz -- a 3.70x over-claim, uniform across the family.
+
+    Use both the ``minimum_period`` constraint and the sum of the minimum
+    high/low pulse widths, scaled by the Liberty's declared ``time_unit``
+    (previously never parsed, so a lib in ps would have been off by 1000x).
+    Missing cycle evidence returns ``None`` so exact macros fail closed rather
+    than inheriting an invented frequency.
     """
     try:
         text = Path(lib_path).read_text(errors="ignore")
     except OSError:
         return None
-    # Pull all cell_rise/cell_fall value tuples in the file; the data-out arcs
-    # dominate the max. (Setup/hold are in separate constraint tables with
-    # rise_constraint/fall_constraint keys, so they don't pollute this.)
-    worst = 0.0
-    for m in re.finditer(r"cell_(?:rise|fall)\s*\([^)]*\)\s*\{\s*values\(([^)]*)\)",
-                         text, re.DOTALL):
-        for tok in re.findall(r"-?\d+\.\d+", m.group(1)):
-            worst = max(worst, abs(float(tok)))
-    return worst if worst > 0 else None
+
+    min_periods: list[float] = []
+    pulse_periods: list[float] = []
+    for block in _lib_timing_blocks(text):
+        timing_type = re.search(
+            r"\btiming_type\s*:\s*[\"']?([A-Za-z0-9_]+)",
+            block,
+            re.IGNORECASE,
+        )
+        if not timing_type:
+            continue
+        kind = timing_type.group(1).lower()
+        if kind == "minimum_period":
+            values = _lib_constraint_values(block)
+            if values:
+                min_periods.append(max(values))
+        elif kind == "min_pulse_width":
+            rise = _lib_constraint_values(block, "rise_constraint")
+            fall = _lib_constraint_values(block, "fall_constraint")
+            if rise and fall:
+                pulse_periods.append(max(rise) + max(fall))
+
+    candidates = min_periods + pulse_periods
+    if not candidates:
+        return None
+    return max(candidates) * _lib_time_scale_ns(text)
 
 
 def _resolve_macro(ports: str, width: int, depth: int) -> MemPoint:
@@ -503,24 +604,24 @@ def _resolve_macro(ports: str, width: int, depth: int) -> MemPoint:
         base = res.base
         tiles = res.tiles_wide * res.tiles_deep
         area = (_lef_area_um2(base.lef) or base.area_um2 or 0.0) * tiles
-        acc = _lib_access_time_ns(base.lib)
+        cyc = _lib_min_cycle_time_ns(base.lib)
         pt.macro_feasible = True
         pt.macro_impl = "compose"
         pt.area_um2 = area if area > 0 else None
-        if acc:
+        if cyc:
             # bank select mux adds ~one extra mux level; small penalty
-            pt.fmax_mhz = 1000.0 / (acc + 0.10)
+            pt.fmax_mhz = 1000.0 / (cyc + 0.10)
         pt.notes = res.describe()
         return pt
 
     if isinstance(res, MacroInfo):
         area = _lef_area_um2(res.lef) or res.area_um2 or None
-        acc = _lib_access_time_ns(res.lib)
+        cyc = _lib_min_cycle_time_ns(res.lib)
         pt.macro_feasible = True
         pt.macro_impl = "openram" if res.name.startswith("sram_") else "exact"
         pt.area_um2 = area
-        if acc:
-            pt.fmax_mhz = 1000.0 / acc
+        if cyc:
+            pt.fmax_mhz = 1000.0 / cyc
         pt.notes = f"macro {res.name} ({res.words}x{res.data_bits})"
         if pt.fmax_mhz is None:
             pt.error = "macro resolved but .lib access-time unreadable"
