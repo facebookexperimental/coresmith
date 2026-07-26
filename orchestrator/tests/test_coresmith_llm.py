@@ -26,11 +26,11 @@ from orchestrator.langchain.agents import coresmith_llm
 from orchestrator.langchain.agents.coresmith_llm import (
     _CLI_MODEL_MAP,
     _CODEX_MODEL_MAP,
+    _KIMI_MODEL_MAP,
     _RESUME_FLAGS_CACHE,
     DEFAULT_CODEX_MODEL,
     DEFAULT_KIMI_MODEL,
     DEFAULT_MODEL,
-    _KIMI_MODEL_MAP,
     ClaudeLLM,
     _active_processes,
     _active_processes_lock,
