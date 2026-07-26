@@ -109,9 +109,9 @@ SRAM macros, so read-mux symmetry defeats a unique match), not a proven-benign t
 > backend signoffs.
 
 ## LLM Cost
-You must have a Claude Code Max or OpenAI Codex Pro subscription. Codex is recommended and GPT 5.6 is superior at silicon design.
+You must have a Claude Code Max or OpenAI Codex Pro subscription. Codex is recommended and GPT 5.6 Sol is superior at silicon design.
 
-| Design  | Opus 4.8 | GPT 5.6 | 
+| Design  | Opus 5 | GPT 5.6 Sol |
 |------|---------|---------|
 | MCU | OK | OK |
 | JPEG | Exceeds 5hr limit on Max 5x | OK |

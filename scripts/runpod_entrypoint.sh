@@ -21,7 +21,7 @@
 #     a RunPod hour on a misconfigured pod.
 #
 # Optional overrides:
-#   CORESMITH_MODEL=sonnet-4.6   Pin a specific model (short name or full ID)
+#   CORESMITH_MODEL=sonnet-5   Pin a specific model (short name or full ID)
 #   CORESMITH_REQUIREMENTS_FILE  Path to a text file with architecture requirements
 #                              (used in mcp / pipeline modes that need a starter prompt)
 #   PUBLIC_KEY                 SSH public key to install for root. If set, the

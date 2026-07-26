@@ -17,13 +17,13 @@ Default tiers (`coresmith_llm.py:405-434`):
 
 | Tier | Default | Env override |
 |---|---|---|
-| `DEFAULT_MODEL` | `opus-4.8` | `CORESMITH_MODEL` |
-| `BLOCK_MODEL` | `sonnet-4.6` | `CORESMITH_BLOCK_MODEL` |
-| Codex model | `gpt-5.6` | `CORESMITH_CODEX_MODEL` |
+| `DEFAULT_MODEL` | `opus-5` | `CORESMITH_MODEL` |
+| `BLOCK_MODEL` | `sonnet-5` | `CORESMITH_BLOCK_MODEL` |
+| Codex model | `gpt-5.6-sol` | `CORESMITH_CODEX_MODEL` |
 
 The choice between `DEFAULT_MODEL` and `BLOCK_MODEL` is made *per agent* in its `__init__`. Integration / review / audit agents always pick `DEFAULT_MODEL`; per-block RTL/TB/uArch/debug agents pick `BLOCK_MODEL`.
 
-Short names (`opus-4.8`, `sonnet-4.6`, `haiku-4.5`) are mapped to full Claude model IDs via `_CLI_MODEL_MAP`. For Codex, `_CODEX_MODEL_MAP` does the equivalent.
+Short names (`opus-5`, `sonnet-5`, `haiku-4.5`) are mapped to full Claude model IDs via `_CLI_MODEL_MAP`. For Codex, `_CODEX_MODEL_MAP` does the equivalent.
 
 ## Constructor
 
@@ -84,7 +84,7 @@ Every call writes a JSONL row to `<project_root>/.coresmith/llm_calls.jsonl` (`c
 {
   "ts": "...",
   "run_name": "rtl_gen:foo",
-  "model": "opus-4.8",
+  "model": "opus-5",
   "provider": "claude_cli",
   "duration_s": 47.2,
   "input_tokens": 12000,

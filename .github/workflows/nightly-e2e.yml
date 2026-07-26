@@ -124,7 +124,7 @@ jobs:
         run: |
           docker run --rm \
               -e CLAUDE_CODE_OAUTH_TOKEN \
-              -e CORESMITH_MODEL=sonnet-4.6 \
+              -e CORESMITH_MODEL=sonnet-5 \
               -e CORESMITH_PROFILE=strict \
               -v "${{ github.workspace }}/.coresmith:/coresmith/.coresmith" \
               coresmith:nightly bash -lc 'cd /coresmith && \

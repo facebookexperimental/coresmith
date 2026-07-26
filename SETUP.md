@@ -49,7 +49,7 @@ pip install -e orchestrator/
 cp .env.example .env  # then edit and add ANTHROPIC_API_KEY
 
 # Optional: pin a non-default model without code edits
-# export CORESMITH_MODEL=sonnet-4.6   # (cheaper than opus-4.8 default)
+# export CORESMITH_MODEL=sonnet-5   # (cheaper than opus-5 default)
 
 # Start the MCP server (for interactive use with Claude Code)
 make mcp
@@ -163,7 +163,7 @@ export CORESMITH_TB_TIMEOUT=1800         # Testbench agent LLM timeout (s)
 export CORESMITH_TB_FIX_TIMEOUT=600      # Local TB-fix loop timeout (s)
 export CORESMITH_LINT_FIX_TIMEOUT=600    # Local lint-fix loop timeout (s)
 export CORESMITH_SYNTH_FIX_TIMEOUT=600   # Local synth-fix loop timeout (s)
-export CORESMITH_MODEL=opus-4.8          # default; sonnet-4.6 is cheaper
+export CORESMITH_MODEL=opus-5          # default; sonnet-5 is cheaper
 
 make preflight
 bin/coresmith daemon start --project-root $(pwd)

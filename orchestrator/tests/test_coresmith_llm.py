@@ -29,9 +29,10 @@ from orchestrator.langchain.agents.coresmith_llm import (
     _CODEX_MODEL_MAP,
     _OPENCODE_MODEL_MAP,
     _RESUME_FLAGS_CACHE,
+    BLOCK_MODEL,
     DEFAULT_CODEX_MODEL,
-    DEFAULT_OPENCODE_MODEL,
     DEFAULT_MODEL,
+    DEFAULT_OPENCODE_MODEL,
     ClaudeLLM,
     _active_processes,
     _active_processes_lock,
@@ -72,6 +73,12 @@ def _clear_provider_env(monkeypatch):
 
 
 class TestModelNameMapping:
+    def test_opus_5_maps_to_latest_cli_alias(self):
+        assert _resolve_model("opus-5") == "opus"
+
+    def test_sonnet_5_maps_to_latest_cli_alias(self):
+        assert _resolve_model("sonnet-5") == "sonnet"
+
     def test_opus_48_maps_correctly(self):
         assert _resolve_model("opus-4.8") == "claude-opus-4-8"
 
@@ -93,11 +100,23 @@ class TestModelNameMapping:
         assert _resolve_model("custom-model-123") == "custom-model-123"
 
     def test_all_cli_models_have_mappings(self):
-        expected_shorts = ["opus-4.8", "opus-4.7", "opus-4.6", "sonnet-4.6", "sonnet-4.5", "haiku-4.5", "haiku-3.5"]
+        expected_shorts = [
+            "opus-5",
+            "sonnet-5",
+            "opus-4.8",
+            "opus-4.7",
+            "opus-4.6",
+            "sonnet-4.6",
+            "sonnet-4.5",
+            "haiku-4.5",
+            "haiku-3.5",
+        ]
         for short in expected_shorts:
             assert short in _CLI_MODEL_MAP, f"Missing CLI mapping: {short}"
 
     def test_default_model_constant(self):
+        assert DEFAULT_MODEL == "opus-5"
+        assert BLOCK_MODEL == "sonnet-5"
         assert DEFAULT_MODEL in _CLI_MODEL_MAP
 
     def test_empty_model_falls_back_to_default(self, monkeypatch):
@@ -116,12 +135,13 @@ class TestModelNameMapping:
         monkeypatch.setenv("CORESMITH_MODEL", "")
         assert _resolve_model("opus-4.7") == "claude-opus-4-8"
 
-    def test_codex_opus_maps_to_gpt_56(self):
-        assert _resolve_model("opus-4.8", "codex_cli") == "gpt-5.6"
+    def test_codex_default_tiers_map_to_gpt_56_family(self):
+        assert _resolve_model("opus-5", "codex_cli") == "gpt-5.6-sol"
+        assert _resolve_model("sonnet-5", "codex_cli") == "gpt-5.6-terra"
 
     def test_codex_default_model_constant(self):
-        assert DEFAULT_CODEX_MODEL == "gpt-5.6"
-        assert _CODEX_MODEL_MAP["opus-4.8"] == DEFAULT_CODEX_MODEL
+        assert DEFAULT_CODEX_MODEL == "gpt-5.6-sol"
+        assert _CODEX_MODEL_MAP["opus-5"] == DEFAULT_CODEX_MODEL
 
     def test_coresmith_codex_model_env_overrides_passed_value(self, monkeypatch):
         monkeypatch.setenv("CORESMITH_CODEX_MODEL", "gpt-5.5")
@@ -131,8 +151,8 @@ class TestModelNameMapping:
         expected = "openrouter/moonshotai/kimi-k3"
         assert DEFAULT_OPENCODE_MODEL == expected
         assert set(_OPENCODE_MODEL_MAP.values()) == {expected}
-        assert _resolve_model("opus-4.8", "opencode_cli") == expected
-        assert _resolve_model("sonnet-4.6", "opencode_cli") == expected
+        assert _resolve_model(DEFAULT_MODEL, "opencode_cli") == expected
+        assert _resolve_model(BLOCK_MODEL, "opencode_cli") == expected
 
     def test_opencode_model_env_overrides_passed_value(self, monkeypatch):
         custom = "openrouter/moonshotai/kimi-k3:exacto"
@@ -490,7 +510,7 @@ class TestCommandConstruction:
         monkeypatch.delenv("CORESMITH_MODEL", raising=False)
         mock_find.return_value = "/usr/bin/codex"
 
-        model = ClaudeLLM(model="opus-4.8", timeout=10)
+        model = ClaudeLLM(model="opus-5", timeout=10)
 
         with patch.object(model, "_run_cli_with_watchdog") as mock_watchdog:
             mock_watchdog.return_value = ("test output", "", 0, 1.0, False, False, {})
@@ -500,7 +520,7 @@ class TestCommandConstruction:
             assert cmd[:2] == ["/usr/bin/codex", "exec"]
             assert "--json" in cmd
             assert "-m" in cmd
-            assert cmd[cmd.index("-m") + 1] == "gpt-5.6"
+            assert cmd[cmd.index("-m") + 1] == "gpt-5.6-sol"
             assert "--dangerously-bypass-approvals-and-sandbox" in cmd
 
 

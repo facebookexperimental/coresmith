@@ -86,7 +86,7 @@ temporal:
 # LangChain agent configuration
 # Provider: Claude CLI (install: npm install -g @anthropic-ai/claude-code)
 langchain:
-  model: "opus-4.8"
+  model: "opus-5"
   temperature: 0.1
   max_tokens: 16000
 

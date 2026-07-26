@@ -625,7 +625,9 @@ def _log_opencode_turns(stdout: str, project_root: str, pid: int, wall_start: fl
 # ---------------------------------------------------------------------------
 
 _CLI_MODEL_MAP = {
-    "opus-4.8":  "claude-opus-4-8",          # current Opus
+    "opus-5":    "opus",                       # latest Claude Opus 5
+    "sonnet-5":  "sonnet",                     # latest Claude Sonnet 5
+    "opus-4.8":  "claude-opus-4-8",          # pinned previous Opus
     "opus-4.7":  "claude-opus-4-8",          # legacy alias -> current Opus
     "opus-4.6":  "claude-opus-4-8",          # legacy alias -> current Opus
     "sonnet-4.6": "claude-sonnet-4-6",
@@ -636,6 +638,8 @@ _CLI_MODEL_MAP = {
 
 _CODEX_MODEL_MAP = {
     # Preserve existing CoreSmith model tiers when switching providers.
+    "opus-5": "gpt-5.6-sol",
+    "sonnet-5": "gpt-5.6-terra",
     "opus-4.8": "gpt-5.6",
     "opus-4.7": "gpt-5.6",                    # legacy alias -> current Codex tier
     "opus-4.6": "gpt-5.6",                    # legacy alias -> current Codex tier
@@ -650,6 +654,8 @@ _CODEX_MODEL_MAP = {
 # so "high effort" is selected by choosing the "(High)" variant, not a flag.
 # Maps the CoreSmith opus/sonnet/haiku tiers onto Gemini tiers.
 _AGY_MODEL_MAP = {
+    "opus-5": "Gemini 3.1 Pro (High)",
+    "sonnet-5": "Gemini 3.1 Pro (High)",
     "opus-4.8": "Gemini 3.1 Pro (High)",
     "opus-4.7": "Gemini 3.1 Pro (High)",
     "opus-4.6": "Gemini 3.1 Pro (High)",
@@ -661,6 +667,8 @@ _AGY_MODEL_MAP = {
 
 _OPENCODE_MODEL_MAP = {
     # OpenRouter's hosted Kimi K3 for every CoreSmith tier.
+    "opus-5": "openrouter/moonshotai/kimi-k3",
+    "sonnet-5": "openrouter/moonshotai/kimi-k3",
     "opus-4.8": "openrouter/moonshotai/kimi-k3",
     "opus-4.7": "openrouter/moonshotai/kimi-k3",
     "opus-4.6": "openrouter/moonshotai/kimi-k3",
@@ -675,15 +683,15 @@ _OPENCODE_MODEL_MAP = {
 # environment variable (to either a short name above or a full Claude CLI
 # model ID) to override at runtime without code changes -- useful when the
 # default version is unavailable on a fresh CLI install.
-DEFAULT_MODEL = "opus-4.8"
-DEFAULT_CODEX_MODEL = "gpt-5.6"
+DEFAULT_MODEL = "opus-5"
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_AGY_MODEL = "Gemini 3.1 Pro (High)"
 
 DEFAULT_OPENCODE_MODEL = "openrouter/moonshotai/kimi-k3"
 # Cheaper model for per-block agents (uarch, rtl, testbench, diagnose, lint
 # fix, tb fix).  Integration and review agents still call DEFAULT_MODEL.
 # Override with CORESMITH_BLOCK_MODEL env var.
-BLOCK_MODEL = "sonnet-4.6"
+BLOCK_MODEL = "sonnet-5"
 
 
 def _resolve_model(model: str, provider: str = "claude_cli") -> str:

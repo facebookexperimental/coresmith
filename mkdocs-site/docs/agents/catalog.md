@@ -18,7 +18,7 @@ Returns `{"spec_text": str, "spec_summary": dict, "block_name": str}`.
 
 - **File:** `orchestrator/langchain/agents/rtl_generator.py`
 - **Entry:** `async def generate(*, block_name, description, attempt, rtl_target, python_source_path, project_root, ...)`
-- **Model / timeout:** `DEFAULT_MODEL` (Opus 4.8) / `CORESMITH_RTL_TIMEOUT` (default 1800s)
+- **Model / timeout:** `DEFAULT_MODEL` (Opus 5) / `CORESMITH_RTL_TIMEOUT` (default 1800s)
 - **Prompt:** `prompts/rtl_generator.md` (with a strong inline fallback covering Verilog-2005, AXI-Stream, synchronous reset, fixed-point, Sky130 rules)
 - **Invoked by:** `pipeline_graph.generate_rtl_node:488`
 
@@ -44,7 +44,7 @@ Writes a cocotb testbench that exercises the RTL against the Python golden model
 
 - **File:** `orchestrator/langchain/agents/integration_lead.py`
 - **Entry:** `async def integrate(*, design_name, block_rtl_sources, block_port_summaries, connections, prd_summary, output_path)`
-- **Model / timeout:** `DEFAULT_MODEL` (Opus 4.8) / `CORESMITH_INTEGRATION_LEAD_TIMEOUT` (default 2700s)
+- **Model / timeout:** `DEFAULT_MODEL` (Opus 5) / `CORESMITH_INTEGRATION_LEAD_TIMEOUT` (default 2700s)
 - **Prompt:** `prompts/integration_lead.md`
 - **Invoked by:** `pipeline_graph.integration_check_node:2139`
 
@@ -58,7 +58,7 @@ Returns `{"rtl_path", "mismatches", "module_name", "wire_count", "skipped_connec
 
 - **File:** `orchestrator/langchain/agents/integration_review_agent.py`
 - **Entry:** `async def review(*, block_names, project_root)`
-- **Model / timeout:** `DEFAULT_MODEL` (Opus 4.8) / `CORESMITH_INTEGRATION_REVIEW_TIMEOUT` (default 2700s)
+- **Model / timeout:** `DEFAULT_MODEL` (Opus 5) / `CORESMITH_INTEGRATION_REVIEW_TIMEOUT` (default 2700s)
 - **Prompt:** `prompts/integration_review.md`
 - **Invoked by:** `pipeline_graph.integration_review_node:1784` (once per tier)
 
@@ -72,7 +72,7 @@ Per-tier filtering (lines 54–85): cross-tier and future-tier connections are e
 
 - **File:** `orchestrator/langchain/agents/integration_testbench_generator.py`
 - **Entry:** `async def generate(*, design_name, top_rtl_source, block_summaries, connections, prd_summary, block_rtl_paths, output_path, prior_failure)`
-- **Model / timeout:** `DEFAULT_MODEL` (Opus 4.8) / `CORESMITH_INTEGRATION_TB_TIMEOUT` (default 2700s)
+- **Model / timeout:** `DEFAULT_MODEL` (Opus 5) / `CORESMITH_INTEGRATION_TB_TIMEOUT` (default 2700s)
 - **Prompt:** `prompts/integration_testbench.md`
 - **Invoked by:** `pipeline_graph.integration_dv_node:2589`
 
@@ -84,7 +84,7 @@ Has a disk-fallback (`lines 154-161`): if the agent doesn't write a testbench bu
 
 - **File:** `orchestrator/langchain/agents/validation_dv_generator.py`
 - **Entry:** `async def generate(*, design_name, top_rtl_path, top_rtl_source, block_summaries, connections, ers_context, block_rtl_paths, output_path, prior_failure)`
-- **Model / timeout:** `DEFAULT_MODEL` (Opus 4.8) / `CORESMITH_VALIDATION_DV_TIMEOUT` (default 2700s)
+- **Model / timeout:** `DEFAULT_MODEL` (Opus 5) / `CORESMITH_VALIDATION_DV_TIMEOUT` (default 2700s)
 - **Prompt:** `prompts/validation_dv.md`
 - **Invoked by:** `pipeline_graph.validation_dv_node:3084`
 
@@ -115,7 +115,7 @@ The agent can append new constraints to `.coresmith/blocks/<block>/constraints.j
 
 - **File:** `orchestrator/langchain/agents/contract_audit_agent.py`
 - **Entry:** `async def analyze(*, stage, project_root, context_path, output_path)`
-- **Model / timeout:** `DEFAULT_MODEL` (Opus 4.8) / 900s
+- **Model / timeout:** `DEFAULT_MODEL` (Opus 5) / 900s
 - **Prompt:** `prompts/contract_audit.md`
 - **Invoked by:** `pipeline_graph._run_top_level_contract_audit:2984`
 
@@ -155,7 +155,7 @@ Writes to `.coresmith/contract_audit/<stage>_contract_audit.json`. Normalization
 - **Entry:** two:
     - `async def adapt_script(*, baseline_script, context)` — adapt a template TCL/shell script
     - `async def analyze(*, context)` — analyze a tool's output
-- **Model / timeout:** `DEFAULT_MODEL` (Opus 4.8) / 180s default
+- **Model / timeout:** `DEFAULT_MODEL` (Opus 5) / 180s default
 - **Prompt:** one per step — `prompts/backend_{synthesis,pnr,drc,lvs,timing_signoff,mpw_precheck}.md` (the `_llm` variants are for analysis turns)
 - **Invoked by:** every node in `backend_graph.py` and `tapeout_graph.py` that runs an EDA tool
 
@@ -167,7 +167,7 @@ Falls back to the unmodified baseline script on LLM failure rather than raising 
 
 - **File:** `orchestrator/langchain/agents/timing_closure.py`
 - **Entry:** `async def fix_timing(*, block_name, rtl_source, sta_report, target_clock_mhz, worst_slack_ns)`
-- **Model / timeout:** `DEFAULT_MODEL` (Opus 4.8) / `CORESMITH_TIMING_CLOSURE_TIMEOUT` (default 2700s)
+- **Model / timeout:** `DEFAULT_MODEL` (Opus 5) / `CORESMITH_TIMING_CLOSURE_TIMEOUT` (default 2700s)
 - **Prompt:** `prompts/timing_closure.md`
 - **Invoked by:** backend / tapeout diagnosis paths when STA reports a violation that looks repairable
 

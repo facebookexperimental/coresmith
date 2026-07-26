@@ -62,7 +62,7 @@ Secrets are never copied into CoreSmith logs or configuration.
 ## Acceptance criteria
 
 - `CORESMITH_LLM_PROVIDER=opencode` constructs a hosted Kimi K3 call;
-- the default `opus-4.8` and block-tier aliases all resolve to Kimi K3;
+- the default `opus-5` and block-tier aliases all resolve to Kimi K3;
 - missing OpenCode binaries and credentials fail with actionable messages;
 - no API key appears in argv, logs, docs examples, or committed files;
 - Claude, Codex, agy, fault, and replay behavior remains unchanged.
