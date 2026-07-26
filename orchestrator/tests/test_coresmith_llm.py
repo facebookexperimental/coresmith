@@ -41,6 +41,7 @@ from orchestrator.langchain.agents.coresmith_llm import (
     _llm_breakers,
     _llm_breakers_lock,
     _log_llm_call,
+    _log_opencode_turns,
     _parse_codex_json,
     _parse_opencode_json,
     _register_process,
@@ -176,6 +177,24 @@ class TestOpenCodeJsonParsing:
         }
 
 
+class TestOpenCodeTrajectoryLogging:
+    def test_persists_reasoning_and_text_events(self, tmp_path):
+        stdout = (
+            '{"type":"reasoning","part":{"type":"reasoning","text":"consider"}}\n'
+            'not-json\n'
+            '{"type":"text","part":{"type":"text","text":"ready"}}\n'
+        )
+        count = _log_opencode_turns(stdout, str(tmp_path), 123, 456.0)
+
+        assert count == 2
+        path = tmp_path / ".coresmith" / "opencode_turns.jsonl"
+        records = [json.loads(line) for line in path.read_text().splitlines()]
+        assert [record["event"]["type"] for record in records] == ["reasoning", "text"]
+        assert records[0]["pid"] == 123
+        assert records[0]["wall_start"] == 456.0
+        assert records[0]["event"]["part"]["text"] == "consider"
+
+
 class TestOpenCodeInvocation:
     @patch(
         "orchestrator.langchain.agents.coresmith_llm._find_opencode_binary",
@@ -197,7 +216,7 @@ class TestOpenCodeInvocation:
         cmd = watchdog.call_args.args[0]
         assert cmd == [
             "/usr/bin/opencode", "--pure", "run", "--format", "json",
-            "--model", "openrouter/moonshotai/kimi-k3",
+            "--thinking", "--model", "openrouter/moonshotai/kimi-k3",
             "--dir", str(tmp_path), "--auto",
         ]
         assert "<system>\nsystem\n</system>" in watchdog.call_args.args[1]

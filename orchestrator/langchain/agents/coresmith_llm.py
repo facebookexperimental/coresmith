@@ -584,6 +584,42 @@ def _log_codex_turns(stdout: str, project_root: str, pid: int, wall_start: float
         return 0
 
 
+def _log_opencode_turns(stdout: str, project_root: str, pid: int, wall_start: float) -> int:
+    """Append OpenCode NDJSON events to ``.coresmith/opencode_turns.jsonl``.
+
+    ``opencode run --thinking --format json`` emits exposed reasoning, text,
+    tool, and step events. Persist the complete valid-JSON event stream so a
+    run can be audited or replayed without mixing reasoning into the final
+    response returned to agents. Malformed lines and all logging failures are
+    deliberately non-fatal.
+    """
+    try:
+        log = Path(project_root) / ".coresmith" / "opencode_turns.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        n = 0
+        with log.open("a", encoding="utf-8") as f:
+            for raw in stdout.splitlines():
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    obj = _json.loads(raw)
+                except _json.JSONDecodeError:
+                    continue
+                rec = {
+                    "ts": _time_mod.time(),
+                    "wall_start": wall_start,
+                    "pid": pid,
+                    "event": obj,
+                }
+                f.write(_json.dumps(rec, default=str))
+                f.write("\n")
+                n += 1
+        return n
+    except Exception:
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Model name mapping: short names -> Claude CLI model IDs
 # ---------------------------------------------------------------------------
@@ -1758,6 +1794,7 @@ class ClaudeLLM:
             "--pure",
             "run",
             "--format", "json",
+            "--thinking",
             "--model", resolved_model,
             "--dir", workdir,
             "--auto",
@@ -2279,6 +2316,18 @@ class ClaudeLLM:
                 pass
         elif self._provider == "opencode_cli":
             response_text, usage = _parse_opencode_json(stdout_text)
+            # OpenCode stores sessions internally, but CoreSmith also keeps a
+            # project-local raw trajectory so exposed reasoning remains with
+            # the run artifacts and can be correlated by pid/run_name.
+            try:
+                _log_opencode_turns(
+                    stdout_text,
+                    project_root,
+                    process.pid if process.pid else 0,
+                    wall_start,
+                )
+            except Exception:
+                pass
         elif self._provider == "agy_cli":
             # agy --print emits the final answer as plain text (no JSON event
             # stream); the whole stdout IS the response. No token/cost usage is

@@ -36,9 +36,10 @@ Secrets are never copied into CoreSmith logs or configuration.
 1. Add `opencode`, `opencode_cli`, and `openrouter` provider aliases.
 2. Resolve every CoreSmith model tier to hosted Kimi K3 by default, with
    `CORESMITH_OPENCODE_MODEL` as an explicit override.
-3. Invoke `opencode --pure run --format json --model ... --dir ... --auto` and
-   pipe prompts through stdin.
-4. Parse text, token, cache, reasoning, and cost fields from OpenCode NDJSON.
+3. Invoke `opencode run` with `--pure`, `--thinking`, `--format json`, the
+   selected model and work directory, and `--auto`; pipe prompts through stdin.
+4. Parse text, token, cache, reasoning, and cost fields from OpenCode NDJSON,
+   and persist every valid raw event to `.coresmith/opencode_turns.jsonl`.
 5. Preserve `OPENCODE_CONFIG_CONTENT`; when tools are disabled, merge
    `permission: "deny"` into that JSON object.
 6. Reuse CoreSmith's timeout, stall detection, process-group cleanup,
@@ -51,7 +52,7 @@ Secrets are never copied into CoreSmith logs or configuration.
 ## Validation
 
 - model mapping and provider aliases;
-- captured OpenCode NDJSON parsing;
+- captured OpenCode NDJSON parsing and raw reasoning-event persistence;
 - exact command construction and stdin prompt transport;
 - tool-deny config merging without dropping existing config;
 - existing LLM provider regression suite;

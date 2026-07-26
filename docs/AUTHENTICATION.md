@@ -32,8 +32,12 @@ printf 'Reply with exactly: ready' | opencode --pure run --format json \
   --model openrouter/moonshotai/kimi-k3
 ```
 
-CoreSmith passes prompts on stdin, consumes OpenCode's NDJSON event stream, and
-uses `permission: "deny"` when an agent is configured with tools disabled.
+CoreSmith passes prompts on stdin, adds OpenCode's `--thinking` flag, and
+consumes the NDJSON event stream. Every valid event—including model-exposed
+`reasoning` parts—is appended to `.coresmith/opencode_turns.jsonl`; final answers
+and usage remain in `.coresmith/llm_calls.jsonl`. The trajectory file can contain
+sensitive prompt, reasoning, and tool content, so protect it like other run
+artifacts. CoreSmith uses `permission: "deny"` when tools are disabled.
 
 ## Claude Code
 
