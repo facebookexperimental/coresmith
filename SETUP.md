@@ -101,11 +101,14 @@ sudo tar --no-same-owner -C /opt -xzf /tmp/oss-cad.tgz
 echo 'export PATH="/opt/oss-cad-suite/bin:$PATH"' | sudo tee /etc/profile.d/oss-cad-suite.sh
 export PATH="/opt/oss-cad-suite/bin:$PATH"
 
-# 2. Node + Claude Code CLI (apt nodejs is too old; use NodeSource)
+# 2. Node + agent CLIs (apt nodejs is too old; use NodeSource)
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
 sudo apt-get install -y nodejs
-sudo npm install -g @anthropic-ai/claude-code
-claude auth login   # interactive
+sudo npm install -g @anthropic-ai/claude-code opencode-ai
+claude auth login   # default provider, interactive
+# Hosted Kimi K3 alternative:
+# opencode auth login   # select OpenRouter
+# export CORESMITH_LLM_PROVIDER=opencode
 
 # 3. Python venv + orchestrator
 python3.11 -m venv venv
@@ -142,6 +145,7 @@ otherwise the latest of each works for most blocks.
 | Python | 3.11.x | `python3.11 -m venv venv` |
 | Node.js | 20.20.x | NodeSource repo, *not* apt's 12.x |
 | Claude Code CLI | 2.x | `npm install -g @anthropic-ai/claude-code` |
+| OpenCode CLI | 1.18+ | `npm install -g opencode-ai`; optional OpenRouter/Kimi K3 provider |
 | OSS-CAD-Suite | 2026-04-29 nightly | Bundles Yosys 0.64+, Verilator 5.049, OpenROAD, Magic, netgen, KLayout |
 | Sky130 PDK | volare commit pinned in [`scripts/pdk-version.env`](scripts/pdk-version.env) | `volare ls-remote --pdk sky130` for current pins |
 | Python deps | see `requirements-lock.txt` | `pip install -r requirements-lock.txt` for an exact replay |

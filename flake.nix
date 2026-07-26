@@ -60,7 +60,7 @@
           py.pkgs.virtualenv
           gnumake
           git
-          nodejs_20      # for the Claude Code CLI (`npm install -g @anthropic-ai/claude-code`)
+          nodejs_20      # for Claude Code and OpenCode (`npm install -g opencode-ai`)
         ];
       in {
         # Default devShell: `nix develop`
@@ -94,7 +94,8 @@
             echo
             echo "Next: python -m venv venv && source venv/bin/activate &&"
             echo "      pip install -r requirements.txt && pip install -e orchestrator/"
-            echo "      claude login   # if not already authenticated"
+            echo "      claude login   # default provider; if not already authenticated"
+            echo "      npm install -g opencode-ai  # for CORESMITH_LLM_PROVIDER=opencode"
             echo "      make pipeline  # or: make mcp"
           '';
         };

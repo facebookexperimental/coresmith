@@ -245,7 +245,7 @@ pytest orchestrator/tests/ -v -m "not requires_nix and not e2e"
 
 ## Further reading
 
-- [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) — wiring up the Claude CLI (OAuth token, API key, GitHub Codespaces secret)
+- [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) — Claude Code or OpenCode/OpenRouter (hosted Kimi K3) credentials
 - [docs/LOCAL-DEV.md](docs/LOCAL-DEV.md) — running and iterating without containers
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — common failures (Yosys version, missing PDK, OpenROAD OOM, …)
 - [docs/RUNPOD.md](docs/RUNPOD.md) — hosted runs with a ready-to-paste pod template

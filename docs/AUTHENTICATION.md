@@ -1,6 +1,44 @@
 # Authentication
 
-coresmith's pipeline calls Anthropic's API through the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code/overview). The CLI accepts three credential sources, checked in this order:
+coresmith supports Claude Code by default and OpenCode with OpenRouter's hosted
+Kimi K3. Select the latter with `CORESMITH_LLM_PROVIDER=opencode`.
+
+## OpenCode + OpenRouter (Kimi K3)
+
+Install the official OpenCode CLI and authenticate OpenRouter locally:
+
+```bash
+npm install -g opencode-ai
+opencode auth login     # select OpenRouter and enter the key locally
+export CORESMITH_LLM_PROVIDER=opencode
+```
+
+For CI, Docker, or RunPod, use an environment secret instead of the interactive
+credential store:
+
+```bash
+export OPENROUTER_API_KEY=...
+export CORESMITH_LLM_PROVIDER=opencode
+export CORESMITH_OPENCODE_MODEL=openrouter/moonshotai/kimi-k3  # optional; default
+```
+
+OpenCode stores interactive credentials at
+`${XDG_DATA_HOME:-~/.local/share}/opencode/auth.json`. Never commit this file or
+paste the API key into CoreSmith configuration. Verify the route with:
+
+```bash
+opencode --version
+printf 'Reply with exactly: ready' | opencode --pure run --format json \
+  --model openrouter/moonshotai/kimi-k3
+```
+
+CoreSmith passes prompts on stdin, consumes OpenCode's NDJSON event stream, and
+uses `permission: "deny"` when an agent is configured with tools disabled.
+
+## Claude Code
+
+The [Claude Code CLI](https://docs.claude.com/en/docs/claude-code/overview)
+accepts three credential sources, checked in this order:
 
 1. **`CLAUDE_CODE_OAUTH_TOKEN`** — long-lived OAuth token from `claude setup-token`. Recommended for CI, Docker, RunPod, GitHub Codespaces.
 2. **`ANTHROPIC_API_KEY`** — raw API key from <https://console.anthropic.com/>. Bills your console workspace; *not* your Claude.ai/Pro subscription.
