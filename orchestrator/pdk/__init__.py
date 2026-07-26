@@ -4,6 +4,6 @@
 
 """PDK configuration abstraction layer."""
 
-from .pdk_config import PDKConfig, CornerConfig
+from .pdk_config import CornerConfig, PDKConfig
 
-__all__ = ["PDKConfig", "CornerConfig"]
+__all__ = ["CornerConfig", "PDKConfig"]

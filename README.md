@@ -7,7 +7,7 @@ Coresmith converts prompts to silicon. It uses LangGraph to drive the full RTL-t
 > **Try it:** click the Codespaces badge above for a pre-built sandbox with the full EDA toolchain (Yosys, OpenROAD, Magic, Sky130 PDK) and Claude CLI ready to go. Note that it takes up to ten minutes to boot. Once it boots, launch Claude or Codex in the terminal. You will need to log in to your Claude or Codex account within the codespace.  For your first time, keep it simple: ask for a 32 bit adder.
 
 > \[!NOTE]
-> Agentic silicon design is expensive. Every agent needs to reference the chip specification to accurately architect their block. The practical complexity ceiling is a MJPEG-class IP in the OpenFrame/Caravel chassis (MPW). Codex Pro (100$/month) is the recommended minimum viable inference provider. Claude Max (100$) is usable until June 15th, after which you will have to pay API rates. Codex is superior at prompt caching and a prerequisite for designs exceeding in-order MCU complexity. You can use local LLMs (unquantized only) to reduce cost, with severely degraded performance: https://coresmith.ai/blog/qwen-vs-gemma
+> Agentic silicon design is expensive. Every agent needs to reference the chip specification to accurately architect their block. Codex Pro (100$/month) is the recommended minimum viable inference provider. Claude Max (100$) is usable until June 15th, after which you will have to pay API rates. Codex is superior at prompt caching and a prerequisite for designs exceeding in-order MCU complexity. You can use local LLMs (unquantized only) to reduce cost, with severely degraded performance: https://coresmith.ai/blog/qwen-vs-gemma
 
 
 ## What It Does
@@ -41,185 +41,98 @@ Post-synthesis, LLM agents drive place-and-route, DRC, GDS export, and LVS — e
 
 ![Backend pipeline](docs/images/backend-pnr.gif)
 
-## LLM Cost
-You must have a Claude Code Max or OpenAI Codex Pro subscription. Codex is recommended and GPT 5.5 is superior at silicon design.
+## What's New
 
-| Design  | Opus 4.7 | GPT 5.5 | 
+**Architecture → micro-architecture stage.** The architecture graph decomposes a
+design into per-block *micro-architecture* specs before any RTL is written: each
+block gets its own uArch spec (interfaces, latency/throughput intent, and a
+byte-exact reference model) that the frontend pipeline then implements and verifies
+block-by-block. An Amaranth block-model + composition methodology
+(`CORESMITH_BLOCK_GOLDENS`) elaborates each per-block reference model and the
+integrated chip model as `Elaboratable`s; pysim carries their real
+clock/handshake/latency semantics and the composition gate compares the composed
+output bit-exactly against the software reference.
+
+**Complexity-aware decomposition into memory vs compute.** A deterministic,
+AST-based pass scores each block's reference slice on four axes (flop count, latency,
+data-locality, modeling complexity) and min-cut partitions an over-budget block along
+function boundaries -- separating storage-heavy sub-blocks from compute so each stays
+inside its per-block area / FF / SRAM budget. Storage that should be a macro is
+mapped to an **SRAM macro** (with LEF/GDS/lib injection) rather than synthesized as a
+flop array.
+
+**Proxy / coverage metrics + honest signoff gates.** DV is functional- and
+coverage-driven, and the backend signoff gates are deterministic and *fail closed on
+blank or proxy signals* rather than trusting a tool's summary line:
+
+- **PnR route-DRC** and a **DRC-count** gate (guards against a parser reading an
+  empty tool line as "0 violations").
+- **LVS** with a **benign-tie classifier** that reconciles constant-tie / replicated
+  top-pin and physical-only (tap/fill/decap) device-count deltas, and fails closed
+  when a delta is *not* provably benign.
+- **Synth cell-budget**, **memory-price**, and **aggressive flop-vs-SRAM thresholds**
+  (a three-way bits|width|depth policy) that push storage over budget onto macros.
+
+These gates are the difference between "a tool printed success" and "the evidence
+actually supports signoff."
+
+## PPABench Results
+
+Five designs were driven from architecture through backend signoff on the SkyWater
+Sky130 130nm PDK. **Four of five signed off** (DRC 0, LVS benign-tie match, timing
+MET at 50 MHz); one (JPEG) is backend-blocked. Timing is post-route STA setup slack
+at the 50 MHz target.
+
+| Design | Coverage | DRC | LVS | Area (util) | Power | Timing @50 MHz |
+|--------|----------|-----|-----|-------------|-------|----------------|
+| GEMM   | 94.2%      | 0        | match       | 1.06 mm² (41%) | 12.9 mW       | +5.52 ns MET |
+| AES    | 98-99% ¹   | 0 †      | match ‡     | 0.31 mm² (26%) | 16.6 mW       | +11.32 ns MET |
+| Raster | 96.6%      | 0 †      | match ‡     | 2.32 mm² (39%) | *invalid* §   | +6.42 ns MET |
+| FFT    | 95.7%      | 0        | match ‡     | 1.37 mm² (30%) | 31.4 mW       | +7.23 ns MET |
+| JPEG   | 84.6% (min)| *blocked*| *not proven*| —              | —             | routed 50 MHz only |
+
+- **¹** AES functional cores are 98-99% (round-core 98.35%, QSPI frontend 98.99%); the small structural wrapper block is 86.7%. FFT aggregate 95.7% (min applicable 90.9%); GEMM/JPEG shown as minimum applicable coverage.
+- **†** DRC 0 after documented macro-interior exclusion -- raw Magic tiles fall inside a signed-off standard-cell / SRAM-macro interior.
+- **‡** LVS match under benign-tie classification -- constant-tie / replicated top-pins plus zero-transistor tap/fill/decap device-count deltas, each explicitly identified (no unexplained residue).
+- **§** Raster power is invalid: an OpenRAM macro-power table returned a nonphysical value; the finite non-macro + leakage subtotal is ~2.26 mW.
+
+**JPEG is not signed off.** DRC genuinely does not close -- a from-scratch Magic run
+finds 4166 real `li.*` violations that the engine's stdout parser mis-reported as 0
+(an empty-string bug in `_parse_magic_drc_count()`, fix in progress) -- and its LVS
+net-delta is architectural (the DCT row/column caches are flop arrays rather than
+SRAM macros, so read-mux symmetry defeats a unique match), not a proven-benign tie.
+
+> **Broader exercise coverage (not backend signoffs):** a Theora-style video encode
+> was functionally verified clean-room (Verilator + PSNR ~35-44 dB) but its backend
+> was not run; the matching decode path has an open setup-header bug; an AX.25 framer
+> is in progress. These are functional-verification results only -- explicitly **not**
+> backend signoffs.
+
+## LLM Cost
+You must have a Claude Code Max or OpenAI Codex Pro subscription. Codex is recommended and GPT 5.6 is superior at silicon design.
+
+| Design  | Opus 4.8 | GPT 5.6 |
 |------|---------|---------|
 | MCU | OK | OK |
 | JPEG | Exceeds 5hr limit on Max 5x | OK |
 
 You can use an API key, but it will be expensive.
 
-## Quick Start
+## Setup
 
-> After any install path below, run `make preflight` first — it checks
-> the Sky130 PDK files and the `yosys` / `verilator` binaries on `$PATH`
-> and prints exactly what's missing. Don't burn a real run on a broken
-> toolchain.
+Three install paths -- see **[SETUP.md](SETUP.md)** for the full commands and a
+reproducible Ubuntu 22.04 reference setup:
 
-### Option A -- Docker / RunPod / Codespace (recommended for first-time users)
+- **Option A -- Docker / RunPod / Codespace** (recommended for first-time users): a
+  pre-built image with the full EDA toolchain (Yosys, OpenROAD, Magic, Sky130 PDK) +
+  the Claude/Codex CLI. Click the Codespaces badge above, or pull the container.
+- **Option B -- Local install (Nix-based backend)**: `nix develop` pins every EDA
+  tool; run the MCP server or the `coresmithd` daemon + `bin/coresmith` CLI.
+- **Option C -- Linux without Nix or Docker (OSS-CAD-Suite)**: install the frontend
+  EDA toolchain, Node + Claude CLI, a Python venv, and the Sky130 PDK by hand.
 
-The repo ships a `Dockerfile` that bundles the full EDA toolchain
-(Yosys, OpenROAD, Magic, netgen, KLayout, Sky130 PDK, Verilator,
-cocotb) plus the orchestrator and the Claude CLI. No Nix or local
-EDA install needed.
-
-```bash
-git clone https://github.com/facebookexperimental/coresmith.git
-cd coresmith
-docker build -t coresmith:latest .
-
-docker run --rm -it \
-    -e ANTHROPIC_API_KEY=sk-ant-... \
-    -e CORESMITH_MODE=shell \
-    -v "$(pwd)/.coresmith:/coresmith/.coresmith" \
-    coresmith:latest
-# inside the container:
-bin/coresmith daemon start --project-root /coresmith
-bin/coresmith run start --project-root /coresmith
-```
-
-For a hosted run, see [docs/RUNPOD.md](docs/RUNPOD.md) for a
-ready-to-paste pod template.
-
-### Option B -- Local install (Nix-based backend)
-
-```bash
-git clone https://github.com/facebookexperimental/coresmith.git
-cd coresmith
-
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-pip install -e orchestrator/
-
-cp .env.example .env  # then edit and add ANTHROPIC_API_KEY
-
-# Optional: pin a non-default model without code edits
-# export CORESMITH_MODEL=sonnet-4.6   # (cheaper than opus-4.7 default)
-
-# Start the MCP server (for interactive use with Claude Code)
-make mcp
-
-# Or drive the pipeline via the coresmithd daemon + bin/coresmith CLI
-bin/coresmith daemon start --project-root $(pwd)
-bin/coresmith run start --project-root $(pwd)
-# Then `bin/coresmith state` / `bin/coresmith resume --action approve`,
-# or wire up the cron-Claude autochecker described in CLAUDE.md.
-```
-
-Backend (post-synthesis) steps need Nix with flakes on `$PATH`. The
-cleanest setup is `nix develop` — the repo's `flake.nix` pins every EDA
-tool plus Verilator and Node/Claude CLI to one nixpkgs commit and drops
-them on `$PATH`, replacing the per-call `nix shell "nixpkgs#openroad"`
-re-entry in `scripts/*-nix.sh`. (Option A's container image avoids Nix
-entirely.)
-
-```bash
-nix develop
-# then, inside the dev shell:
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt && pip install -e orchestrator/
-bin/coresmith daemon start --project-root $(pwd)
-bin/coresmith run start --project-root $(pwd)
-```
-
-### Option C -- Linux without Nix or Docker (OSS-CAD-Suite)
-
-If you're on a plain Linux box without Nix and don't want to use Docker,
-the [OSS-CAD-Suite](https://github.com/YosysHQ/oss-cad-suite-build)
-nightly tarball bundles Yosys, Verilator, OpenROAD, Magic, netgen, and
-KLayout at modern, known-good versions. A single `tar xzf` gives you the
-full frontend toolchain — apt's `yosys` (0.9) and `verilator` (4.038) on
-Ubuntu 22.04 are *below* this README's stated minimums and will silently
-break the pipeline.
-
-```bash
-git clone https://github.com/facebookexperimental/coresmith.git
-cd coresmith
-
-# 1. Frontend EDA toolchain (~2 GB extracted)
-curl -L -o /tmp/oss-cad.tgz \
-  https://github.com/YosysHQ/oss-cad-suite-build/releases/latest/download/oss-cad-suite-linux-x64-$(date -u +%Y%m%d).tgz \
-  || curl -L -o /tmp/oss-cad.tgz \
-       "$(curl -s https://api.github.com/repos/YosysHQ/oss-cad-suite-build/releases/latest \
-          | grep -oP '"browser_download_url": "\K[^"]+linux-x64[^"]+')"
-sudo tar --no-same-owner -C /opt -xzf /tmp/oss-cad.tgz
-echo 'export PATH="/opt/oss-cad-suite/bin:$PATH"' | sudo tee /etc/profile.d/oss-cad-suite.sh
-export PATH="/opt/oss-cad-suite/bin:$PATH"
-
-# 2. Node + agent CLIs (Kimi Code requires Node 22.19+)
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -
-sudo apt-get install -y nodejs
-sudo npm install -g @anthropic-ai/claude-code
-sudo npm install -g @moonshot-ai/kimi-code
-claude auth login   # interactive
-# Or: kimi login && export CORESMITH_LLM_PROVIDER=kimi
-
-# 3. Python venv + orchestrator
-python3.11 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-pip install -e orchestrator/
-cp .env.example .env   # then edit and add ANTHROPIC_API_KEY
-
-# 4. Sky130 PDK (~2 GB; check `volare ls-remote --pdk sky130` for a current commit)
-pip install volare
-source scripts/pdk-version.env   # pins SKY130_PDK_COMMIT (single source of truth)
-volare enable --pdk sky130 --pdk-root .pdk "$SKY130_PDK_COMMIT"
-
-# 5. Verify before burning a real run
-make preflight   # should print {"ok": true}
-bin/coresmith daemon start --project-root $(pwd)
-bin/coresmith run start --project-root $(pwd)
-```
-
-> The orchestrator drives the Claude CLI in headless mode via
-> `--permission-mode auto`, which auto-approves tool use without prompting
-> and works under any UID. (Older revisions used `--dangerously-skip-permissions`,
-> which Claude Code refuses to honour when run as `root`.)
-
-### Reproducible setup (Ubuntu 22.04 reference)
-
-The exact stack used to validate this guide end-to-end on `adder8` and
-`mcu3`. Pin the same versions if you want bit-identical reproduction;
-otherwise the latest of each works for most blocks.
-
-| Component | Version | Notes |
-|---|---|---|
-| OS | Ubuntu 22.04 LTS (jammy) | Any glibc >= 2.31 distro works |
-| Python | 3.11.x | `python3.11 -m venv venv` |
-| Node.js | 20.20.x | NodeSource repo, *not* apt's 12.x |
-| Claude Code CLI | 2.x | `npm install -g @anthropic-ai/claude-code` |
-| OSS-CAD-Suite | 2026-04-29 nightly | Bundles Yosys 0.64+, Verilator 5.049, OpenROAD, Magic, netgen, KLayout |
-| Sky130 PDK | volare commit pinned in [`scripts/pdk-version.env`](scripts/pdk-version.env) | `volare ls-remote --pdk sky130` for current pins |
-| Python deps | see `requirements-lock.txt` | `pip install -r requirements-lock.txt` for an exact replay |
-
-To replicate the exact dev environment:
-
-```bash
-# 1-4 from "Option C" above, then:
-pip install -r requirements-lock.txt   # exact wheels used during validation
-pip install -e orchestrator/
-
-# Optional knobs (defaults are sane; bump for very large blocks):
-export CORESMITH_RTL_TIMEOUT=1800        # RTL agent LLM timeout (s)
-export CORESMITH_TB_TIMEOUT=1800         # Testbench agent LLM timeout (s)
-export CORESMITH_TB_FIX_TIMEOUT=600      # Local TB-fix loop timeout (s)
-export CORESMITH_LINT_FIX_TIMEOUT=600    # Local lint-fix loop timeout (s)
-export CORESMITH_SYNTH_FIX_TIMEOUT=600   # Local synth-fix loop timeout (s)
-export CORESMITH_MODEL=opus-4.7          # default; sonnet-4.6 is cheaper
-
-make preflight
-bin/coresmith daemon start --project-root $(pwd)
-bin/coresmith run start --project-root $(pwd)
-make traces      # inspect OTel spans in .coresmith/traces.db
-```
-
-The daemon initialises OpenTelemetry at startup, so a SQLite span database
-is written to `.coresmith/traces.db` for every run. `make traces` prints
-span counts and the slowest 10 spans.
+After any path, run `make preflight` -- it checks the Sky130 PDK files and the
+`yosys` / `verilator` binaries on `$PATH` and prints exactly what's missing.
 
 ## Architecture
 

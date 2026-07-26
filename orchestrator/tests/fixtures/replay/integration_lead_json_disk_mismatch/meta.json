@@ -1,0 +1,12 @@
+{
+  "name": "integration_lead_json_disk_mismatch",
+  "source": "/home/ubuntu/project/.cleared-before-video_codec-fresh-20260518-061046/.coresmith/llm_calls.jsonl",
+  "original_root": "/home/ubuntu/project",
+  "keep_prompts": false,
+  "engine_note": "Integration Lead returns {verilog: prose 'written to disk'} with no on-disk module -> integration_lead.generate must RAISE (JSON-vs-disk mismatch), not write a recursive-include stub.",
+  "n_calls": 1,
+  "run_names": [
+    "Integration Lead [chip_top]"
+  ],
+  "total_writes": 0
+}

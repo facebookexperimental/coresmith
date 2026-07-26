@@ -26,8 +26,8 @@ That regex pipeline produced two real problems and one structural one:
   rows") as if they were claims, then disagreed with the (correct)
   structured artifact field and reported a violation.
 
-* No coverage outside macroblock-based image processing: the regex
-  whitelisted ``frame``/``image``/``video``/``pixel``/``macroblock``/
+* No coverage outside pixel_block-based image processing: the regex
+  whitelisted ``frame``/``image``/``video``/``pixel``/``pixel_block``/
   ``tile`` vocabulary. FFTs, audio codecs, packet processors, CPU cores,
   sensor frontends, etc. got *no* coverage at all.
 
@@ -45,6 +45,12 @@ Each violation dict has:
   - severity: "error" or "warning"
   - evidence: (optional) subagent citation from the artifact bundle
   - suggested_fix: (optional) subagent's concrete repair proposal
+  - source_doc: which artifact the violated claim lives in -- one of
+    "sad", "frd", "prd", "ers", "block_diagram", "requirements",
+    "memory_map", "clock_tree", "register_spec", or "" (unknown/multiple).
+    Used by the architecture graph's Doc Fix repair path: an ``auto_fixable``
+    violation sourced from a generated *document* (SAD/FRD prose) is fixed by
+    re-generating that document, NOT by re-running the Block Diagram node.
 """
 
 from __future__ import annotations
@@ -54,6 +60,41 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+
+# Canonical artifact identifiers a constraint violation can be attributed to.
+# Kept flat + lowercase so the graph's Doc Fix router can partition on them.
+_KNOWN_SOURCE_DOCS = frozenset({
+    "sad", "frd", "prd", "ers", "block_diagram", "requirements",
+    "memory_map", "clock_tree", "register_spec",
+})
+
+
+def normalize_source_doc(value: Any) -> str:
+    """Map a subagent-reported ``source_doc`` onto a canonical identifier.
+
+    Tolerant of the aliases an LLM tends to emit ("sad_spec.md", "block
+    diagram", "PRD/ERS", ...). Returns "" when the source is unknown or spans
+    multiple documents, which the Doc Fix router treats as non-doc-sourced.
+    """
+    if not isinstance(value, str):
+        return ""
+    v = value.strip().lower()
+    if not v:
+        return ""
+    if v in _KNOWN_SOURCE_DOCS:
+        return v
+    # Strip common suffixes/paths ("arch/sad_spec.md" -> "sad").
+    stem = v.replace("\\", "/").split("/")[-1]
+    for suffix in ("_spec.md", "_spec", "_doc.md", "_doc", ".json", ".md"):
+        stem = stem.removesuffix(suffix)
+    if stem in _KNOWN_SOURCE_DOCS:
+        return stem
+    # Word-boundary alias search ("block diagram" -> "block_diagram").
+    collapsed = v.replace(" ", "_").replace("-", "_")
+    for doc in _KNOWN_SOURCE_DOCS:
+        if doc in collapsed:
+            return doc
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +276,252 @@ def _check_shuttle_constraints(
                 "check": "shuttle_area_fit",
                 "severity": "warning",
             })
+
+    return violations
+
+
+# Tracks project roots we've already warned about (no die cap), so the loud
+# "design is un-capped" notice fires at most once per run.
+_DIE_ROLLUP_NOCAP_WARNED: set[str] = set()
+
+
+def _check_die_rollup(
+    block_diagram: dict,
+    ers_spec: dict | None,
+    requirements: str,
+    project_root: str,
+) -> list[dict]:
+    """Deterministic arch-time DIE-AREA rollup gate (Tier-2, Deliverable 2).
+
+    Resolves a machine-readable die cap (env / PRD ``max_die_area_mm2`` /
+    shuttle default), sums per-block estimated area (declared ``area_budget_um2``
+    or ``estimated_gates`` + any existing priced-memory ledger) with a 15%
+    interconnect margin, and flags an over-cap design with an itemized rollup.
+    No-ops (never a violation) when no cap is resolvable -- but LOGS that loudly,
+    once per run. Env ``CORESMITH_DIE_ROLLUP_GATE`` (default ON). Fail-open.
+    """
+    try:
+        from orchestrator.langgraph import mem_price as mprice
+    except Exception:  # noqa: BLE001
+        return []
+    if not mprice.die_rollup_gate_enabled():
+        return []
+    prd = None
+    if isinstance(ers_spec, dict):
+        prd = ers_spec.get("prd") or ers_spec.get("ers") or ers_spec
+    ers_tech = ""
+    try:
+        ers_tech = json.dumps((prd or {}).get("technology", {}))
+    except (TypeError, ValueError):
+        ers_tech = ""
+    cap_mm2, source = mprice.resolve_die_budget_mm2(
+        prd=prd, requirements=requirements or "", ers_technology_text=ers_tech)
+    items = mprice.arch_rollup_items(block_diagram or {}, project_root or "")
+    if cap_mm2 is None:
+        if items and project_root not in _DIE_ROLLUP_NOCAP_WARNED:
+            _DIE_ROLLUP_NOCAP_WARNED.add(project_root)
+            import logging
+            logging.getLogger("coresmith.constraints").warning(
+                "DIE-AREA ROLLUP: no die-area budget resolvable (no "
+                "CORESMITH_DIE_BUDGET_MM2, no PRD max_die_area_mm2, no shuttle "
+                "named) -- the design is UN-CAPPED; total silicon area is "
+                "unbounded. Set a die budget to enable the physical-feasibility "
+                "rollup.")
+        return []
+    verdict = mprice.evaluate_die_rollup(
+        items, die_budget_mm2=cap_mm2, budget_source=source)
+    if verdict.ok:
+        return []
+    return [{
+        "violation": verdict.reason,
+        "category": "structural",
+        "check": "die_area_rollup",
+        "severity": "error",
+        "source_doc": "prd",
+    }]
+
+
+# ---------------------------------------------------------------------------
+# Deterministic interface-family coherence gate
+# ---------------------------------------------------------------------------
+#
+# The LLM-driven ``inter_block_payload_protocol_coherence`` reviewer can pass a
+# self-consistent-but-wrong contract (producer and consumer both agree on a
+# bogus srdy_drdy + elastic_fifo for a write-only-memory port), so the gate
+# FALSELY reports all_pass. These deterministic rejections make the same gate
+# HONEST: a write-only-memory / strobe / pin edge structurally CANNOT carry
+# ready / FIFO / response backpressure. Env-gated (default ON) so
+# ``CORESMITH_INTERFACE_FAMILY_GATE=0`` restores the pre-fix (advisory-only,
+# LLM-only) behavior. Checked deterministically so a mislabeled family cannot
+# pass regardless of the LLM subagent's verdict.
+
+_FAMILY_STREAMING = frozenset({"axi_stream", "srdy_drdy"})
+_FAMILY_NO_BACKPRESSURE = frozenset({"mem_write", "valid_only", "static"})
+_FAMILY_BACKPRESSURE_SEMANTICS = frozenset(
+    {"elastic_fifo", "credit", "request_response", "skid"}
+)
+_FAMILY_READY_TOKENS = ("tready", "drdy", "ready")
+_FAMILY_RESPONSE_TOKENS = ("rvalid", "rdata", "rresp", "response")
+
+
+def _interface_family_gate_enabled() -> bool:
+    """Default-ON gate for the deterministic interface-family coherence checks."""
+    return (os.environ.get("CORESMITH_INTERFACE_FAMILY_GATE", "1") or "1") != "0"
+
+
+def _family_signal_names(contract: dict) -> list[str]:
+    names: list[str] = []
+    for f in contract.get("fields") or []:
+        names.append(str((f or {}).get("name", "")).lower())
+    for s in contract.get("sideband_signals") or []:
+        names.append(str((s or {}).get("name", "")).lower())
+    names.append(str(contract.get("producer_port", "")).lower())
+    names.append(str(contract.get("consumer_port", "")).lower())
+    return [n for n in names if n]
+
+
+def _family_has_ready(contract: dict) -> bool:
+    fc = contract.get("flow_control_policy") or {}
+    if fc.get("consumer_can_stall") or fc.get("producer_can_stall"):
+        return True
+    if str(fc.get("semantics") or "").strip() in _FAMILY_BACKPRESSURE_SEMANTICS:
+        return True
+    return any(
+        any(tok in n for tok in _FAMILY_READY_TOKENS)
+        for n in _family_signal_names(contract)
+    )
+
+
+def _family_has_response(contract: dict) -> bool:
+    fc = contract.get("flow_control_policy") or {}
+    if str(fc.get("semantics") or "").strip() == "request_response":
+        return True
+    return any(
+        any(tok in n for tok in _FAMILY_RESPONSE_TOKENS)
+        for n in _family_signal_names(contract)
+    )
+
+
+def _family_has_fifo(contract: dict) -> bool:
+    fc = contract.get("flow_control_policy") or {}
+    if str(fc.get("semantics") or "").strip() == "elastic_fifo":
+        return True
+    try:
+        return int(fc.get("min_buffer_depth_beats") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _check_interface_family_coherence(
+    block_diagram: dict,
+    interface_contracts: dict | None,
+) -> list[dict]:
+    """Deterministic family-coherence rejections (part of the
+    ``inter_block_payload_protocol_coherence`` gate). Structural, error-severity.
+
+    1. Reject ``srdy_drdy`` / ``axi_stream`` on an edge whose declared
+       block-diagram intent is write-only-memory / valid-only / static
+       (ready/backpressure where the family forbids it).
+    2. Reject a ``mem_write`` edge carrying a ready, a response, or an
+       elastic-FIFO / backpressure flow-control policy.
+    3. Reject a ``valid_only`` / ``static`` edge carrying a ready or a response.
+
+    No-op when the gate is disabled or no contracts exist.
+    """
+    if not _interface_family_gate_enabled():
+        return []
+    contracts = (interface_contracts or {}).get("contracts") or []
+    if not contracts:
+        return []
+    # PORT-AWARE resolution of each edge's declared family. Keying the intent by
+    # (producer, consumer) block-pair ALONE let PARALLEL edges between the same
+    # pair overwrite each other (a mem_write write clobbering a req_resp read's
+    # declared family), so this gate would then falsely reject the correctly-
+    # relabeled read as "mem_write carrying a response". Resolving port-awarely
+    # keeps each parallel edge's own family.
+    from orchestrator.architecture.specialists.interface_definition import (
+        build_edge_family_index,
+    )
+
+    edges = (block_diagram or {}).get("connections") or (
+        block_diagram or {}
+    ).get("edges") or []
+    family_index = build_edge_family_index(edges)
+    violations: list[dict] = []
+
+    def _v(pair: tuple[str, str], text: str) -> None:
+        violations.append({
+            "violation": text,
+            "category": "structural",
+            "check": "inter_block_payload_protocol_coherence",
+            "severity": "error",
+            "source_doc": "block_diagram",
+        })
+
+    for c in contracts:
+        pair = (
+            str(c.get("producer_block", "")),
+            str(c.get("consumer_block", "")),
+        )
+        edge = f"{pair[0]}->{pair[1]}"
+        contract_family = str(c.get("handshake_protocol") or "").strip()
+        declared_intent = family_index.resolve(
+            pair[0],
+            pair[1],
+            str(c.get("producer_port", "")),
+            str(c.get("consumer_port", "")),
+            str(c.get("edge_id", "")),
+        )
+        # Authoritative family = the block-diagram declared intent when present,
+        # else the contract's own family label.
+        family = declared_intent or contract_family
+
+        # (1) A streaming label on a no-backpressure intent edge is a mislabel:
+        # the diagram says this edge is always-accepted memory/strobe/pin, but
+        # the contract froze it as a backpressure stream.
+        if declared_intent in _FAMILY_NO_BACKPRESSURE and contract_family in _FAMILY_STREAMING:
+            _v(
+                pair,
+                f"{edge}: block-diagram declares handshake_protocol="
+                f"'{declared_intent}' (always-accepted, no backpressure) but the "
+                f"frozen contract labels the edge streaming '{contract_family}'. A "
+                f"'{declared_intent}' edge must not carry ready/valid backpressure "
+                "or an elastic FIFO. Relabel the contract to the declared family "
+                "and drop the ready/FIFO.",
+            )
+
+        # (2) mem_write must not carry ready / response / FIFO backpressure.
+        if family == "mem_write":
+            offenders = []
+            if _family_has_ready(c):
+                offenders.append("a ready/backpressure signal")
+            if _family_has_response(c):
+                offenders.append("a response channel")
+            if _family_has_fifo(c):
+                offenders.append("an elastic-FIFO / buffered flow-control policy")
+            if offenders:
+                _v(
+                    pair,
+                    f"{edge}: 'mem_write' write edge carries "
+                    f"{', '.join(offenders)}; a direct memory/FIFO write is ALWAYS "
+                    "ACCEPTED -- no ready, no response, no elastic FIFO. Remove the "
+                    "backpressure from the contract.",
+                )
+
+        # (3) valid_only / static must not carry ready or response.
+        elif family in ("valid_only", "static"):
+            offenders = []
+            if _family_has_ready(c):
+                offenders.append("a ready/backpressure signal")
+            if _family_has_response(c):
+                offenders.append("a response channel")
+            if offenders:
+                _v(
+                    pair,
+                    f"{edge}: '{family}' edge carries {', '.join(offenders)}; a "
+                    f"'{family}' edge is a strobe/level with no ready and no "
+                    "response. Remove the backpressure from the contract.",
+                )
 
     return violations
 
@@ -453,7 +740,7 @@ _CONSTRAINT_CATALOG: list[dict] = [
             "the connection lacks it.\n"
             "   - For sized FIFOs, verify the declared depth is at least "
             "the burst-length × any expected stall window. If the producer "
-            "spec says \"emits 64 words per macroblock\" but the inter-"
+            "spec says \"emits 64 words per pixel_block\" but the inter-"
             "block FIFO is 8 entries deep, flag it.\n\n"
             "Cite the producer-side and consumer-side spec evidence for "
             "each violation. Pass if every connection has consistent ledger "
@@ -483,10 +770,30 @@ _CONSTRAINT_CATALOG: list[dict] = [
             "2. **Consumer side.** Same check against "
             "`arch/uarch_specs/<consumer_block>.md` for `consumer_port`.\n\n"
             "3. **Handshake protocol agreement.** The contract names "
-            "`handshake_protocol` (axi_stream or srdy_drdy). Both the "
-            "producer and consumer specs must use the same protocol "
-            "family and the sidebands the contract declares (no extra, no "
-            "missing).\n\n"
+            "`handshake_protocol`, one of: `axi_stream` / `srdy_drdy` "
+            "(streaming, WITH backpressure), or the non-streaming families "
+            "`req_resp` / `mem_write` / `valid_only` / `static`. Both the "
+            "producer and consumer specs must expose the signals that "
+            "family implies, and no others:\n"
+            "   * `axi_stream`: tvalid + tready (+ tdata, tlast/tuser).\n"
+            "   * `srdy_drdy`: <name>_srdy + <name>_drdy + <name>_data.\n"
+            "   * `req_resp`: an addressed request (address + wdata/we or "
+            "read_enable) and a response carrying rdata + a valid qualifier "
+            "(rvalid, optional fault); fixed/bounded latency, NO ready. This "
+            "is the MEMORY-READ / CSR family.\n"
+            "   * `mem_write`: address + wdata (+ wmask) + a write "
+            "enable/commit strobe; always accepted, no ready, no response.\n"
+            "   * `valid_only`: payload + a single valid/strobe, NO ready "
+            "(done/irq pulses, latched param+start bundles, standalone "
+            "fixed-latency data).\n"
+            "   * `static`: a fixed wire bundle with no timing qualifier "
+            "(chip GPIO, source-synchronous off-chip pins like QSPI "
+            "csn/sck/io, level/status lines).\n"
+            "   A non-streaming edge labelled `srdy_drdy`/`axi_stream` while "
+            "neither spec exposes ready signals is a violation; so is a "
+            "`req_resp` edge with no response, or a `mem_write` with no write "
+            "strobe. Match the label to the real signals -- do NOT force "
+            "everything to a streaming handshake.\n\n"
             "4. **Bootstrap policy.** If the contract has "
             "`bootstrap_policy.required = true`, verify the producer's "
             "spec describes how it generates the seeded packet on reset "
@@ -511,7 +818,7 @@ _CONSTRAINT_CATALOG: list[dict] = [
             "generation only after a request.\n"
             "   * `feedback_cycle = true`: BOTH sides must agree the edge "
             "is in a closed loop and reference the elasticity by name.\n\n"
-            "   This catches the v7/v8 codec deadlock class where "
+            "   This catches the v7/v8 codec-of-video_codec deadlock class where "
             "scheduler/residual/history disagreed on backpressure ownership.\n\n"
             "Pass if every contract has a matching producer-side and "
             "consumer-side spec entry and no drift. Skip individual edges "
@@ -537,7 +844,7 @@ _CONSTRAINT_CATALOG: list[dict] = [
             "`semantics == \"elastic_fifo\"`. Those depths were chosen "
             "from the worst-case stall window of the feedback graph; "
             "the RTL author MUST size the FIFO to at least the declared "
-            "depth. The v9 codec_v3 chip_top deadlocked at 3.3% of "
+            "depth. The v9 video_codec codec_v3 chip_top deadlocked at 3.3% of "
             "frame input because the frame_block_scheduler FIFO was "
             "sized 256 against a contract that needed deeper buffering; "
             "this constraint catches that class of bug before DV.\n\n"
@@ -715,6 +1022,14 @@ constraint, and respond with JSON only.
 Rules of engagement:
 - Be conservative. Only FAIL when you can cite specific evidence in the
   artifacts that the constraint is violated.
+- Report EVERY distinct violation of THIS constraint, not just the first.
+  If the same rule is broken in several places (e.g. several different
+  derived quantities are each arithmetically inconsistent, or several
+  connections have mismatched widths), list ONE entry per distinct
+  violation in the ``violations`` array below. Do NOT collapse multiple
+  independent breaches into a single entry, and do NOT stop after finding
+  one -- a downstream repair step fixes each entry, so a missed entry is a
+  bug that survives to the next round.
 - A line that is itself a *forbidden pattern warning* in the requirements
   doc ("do not transpose it to 45 columns by 80 rows", "incorrect: ...",
   "avoid using X") is NOT a claim to verify. The architecture is being
@@ -729,12 +1044,32 @@ Response format (JSON only, no surrounding prose):
 
   {
     "pass": <true | false>,
-    "evidence": "<short citation from the artifacts; quote the relevant
-                  field path or snippet that justifies your verdict>",
-    "violation_text": "<required only when pass=false; one-sentence
-                        human-readable description of what's wrong>",
-    "suggested_fix": "<required only when pass=false; concrete change>"
+    "evidence": "<short citation that justifies a PASS; omit when pass=false>",
+    "violations": [
+      {
+        "violation_text": "<one-sentence human-readable description of ONE
+                            distinct breach of this constraint>",
+        "evidence": "<short citation from the artifacts; quote the relevant
+                      field path or snippet that justifies this entry>",
+        "suggested_fix": "<concrete change that fixes THIS entry>",
+        "source_doc": "<which artifact the WRONG claim lives in. Use exactly
+                        one of: sad, frd, prd, ers, block_diagram,
+                        requirements, memory_map, clock_tree, register_spec.
+                        If the wrong text is prose inside the SAD/FRD (e.g. an
+                        arithmetic summary sentence), name that document -- do
+                        NOT name block_diagram just because the numbers also
+                        appear there. Use \\"\\" only if the source genuinely
+                        spans multiple documents.>"
+      }
+      /* ... one object per DISTINCT violation; required (non-empty) when
+         pass=false ... */
+    ]
   }
+
+When pass=true, ``violations`` MUST be empty (or omitted). For back-compat a
+single violation MAY instead be reported with top-level ``violation_text`` /
+``evidence`` / ``suggested_fix`` / ``source_doc`` fields, but prefer the
+``violations`` array so multiple breaches all surface.
 """
 
 
@@ -787,16 +1122,54 @@ async def _run_constraint_subagent(
     if parsed.get("pass"):
         return []
 
+    # rung2 defect 3(b): a single subagent pass may find MORE THAN ONE breach
+    # of its constraint (e.g. several derived quantities are each arithmetically
+    # inconsistent). Surface EVERY entry so each reaches a repair step, instead
+    # of collapsing to only the first (which re-parked max_rounds_exhausted --
+    # only one of the mcu3 arithmetic mismatches surfaced per round).
+    fallback = f"Constraint '{constraint['id']}' failed (no description supplied)."
+    return [
+        {
+            "violation": (e.get("violation_text") or fallback),
+            "category": constraint["category"],
+            "check": constraint["id"],
+            "severity": constraint["severity"],
+            "evidence": (e.get("evidence") or "")[:1000],
+            "suggested_fix": (e.get("suggested_fix") or "")[:600],
+            "source_doc": normalize_source_doc(e.get("source_doc")),
+        }
+        for e in _extract_violation_entries(parsed)
+    ]
+
+
+def _extract_violation_entries(parsed: dict) -> list[dict]:
+    """Normalize a failed subagent verdict into a list of violation entries.
+
+    Prefers the ``violations`` array (one object -- or bare string -- per
+    distinct breach; rung2 defect 3b). Falls back to the legacy single flat
+    ``violation_text`` / ``evidence`` / ``suggested_fix`` / ``source_doc``
+    shape so pre-existing subagent responses (and tests) keep working. Always
+    returns at least one entry for a non-pass verdict."""
+    raw = parsed.get("violations")
+    entries: list[dict] = []
+    if isinstance(raw, list):
+        for e in raw:
+            if isinstance(e, dict) and (
+                str(e.get("violation_text", "")).strip()
+                or str(e.get("evidence", "")).strip()
+                or str(e.get("suggested_fix", "")).strip()
+            ):
+                entries.append(e)
+            elif isinstance(e, str) and e.strip():
+                entries.append({"violation_text": e})
+    if entries:
+        return entries
+    # Legacy flat single-violation shape.
     return [{
-        "violation": parsed.get(
-            "violation_text",
-            f"Constraint '{constraint['id']}' failed (no description supplied)."
-        ),
-        "category": constraint["category"],
-        "check": constraint["id"],
-        "severity": constraint["severity"],
-        "evidence": (parsed.get("evidence") or "")[:1000],
-        "suggested_fix": (parsed.get("suggested_fix") or "")[:600],
+        "violation_text": parsed.get("violation_text", ""),
+        "evidence": parsed.get("evidence", ""),
+        "suggested_fix": parsed.get("suggested_fix", ""),
+        "source_doc": parsed.get("source_doc", ""),
     }]
 
 
@@ -806,7 +1179,10 @@ def _parse_subagent_response(content: str) -> dict:
     unparseable subagent is treated as a failure, not a silent pass."""
     from orchestrator.utils import parse_llm_json
 
-    default = {"pass": False, "evidence": "", "violation_text": "", "suggested_fix": ""}
+    default = {
+        "pass": False, "evidence": "", "violation_text": "",
+        "suggested_fix": "", "source_doc": "", "violations": [],
+    }
     result, ok = parse_llm_json(content, default, context="constraint_subagent")
     if not ok:
         result["violation_text"] = (
@@ -843,7 +1219,9 @@ async def check_constraints(
 
     Returns a list of violation dicts (empty list = all constraints pass).
     Each dict has at least: `violation`, `category`, `check`, `severity`,
-    and optionally `evidence` + `suggested_fix` from the subagent.
+    and optionally `evidence` + `suggested_fix` + `source_doc` from the
+    subagent (LLM violations carry `source_doc`; deterministic shuttle
+    violations do not).
     """
     from opentelemetry import trace as _trace
 
@@ -856,6 +1234,15 @@ async def check_constraints(
             if shuttle_enabled
             else []
         )
+
+        # Tier-2 arch-time die-area rollup (deterministic; env-gated default ON;
+        # no-ops without a resolvable die cap). Fail-open so a rollup error
+        # never breaks the constraint pass.
+        try:
+            die_rollup_violations = _check_die_rollup(
+                block_diagram, ers_spec, requirements or "", project_root)
+        except Exception:  # noqa: BLE001
+            die_rollup_violations = []
 
         artifact_bundle = _build_artifact_bundle(
             block_diagram=block_diagram or {},
@@ -882,6 +1269,19 @@ async def check_constraints(
                     loaded_contracts = {}
             else:
                 loaded_contracts = {}
+
+        # Deterministic interface-family coherence (part of the
+        # inter_block_payload_protocol_coherence gate; env-gated default ON;
+        # no-op without contracts). Makes the gate HONEST: a self-consistent-
+        # but-wrong write-only-memory / strobe / pin contract that carries
+        # ready/FIFO/response is rejected structurally, regardless of the LLM
+        # subagent's verdict. Fail-open so a bug here never breaks the check.
+        try:
+            family_violations = _check_interface_family_coherence(
+                block_diagram or {}, loaded_contracts or {}
+            )
+        except Exception:  # noqa: BLE001
+            family_violations = []
 
         applicability_ctx = {
             "block_diagram": block_diagram or {},
@@ -918,7 +1318,12 @@ async def check_constraints(
         )
 
         llm_violations: list[dict] = [v for batch in subagent_results for v in batch]
-        violations = shuttle_violations + llm_violations
+        violations = (
+            shuttle_violations
+            + die_rollup_violations
+            + family_violations
+            + llm_violations
+        )
 
         span.set_attribute("llm_violation_count", len(llm_violations))
         span.set_attribute("violation_count", len(violations))

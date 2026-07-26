@@ -19,8 +19,8 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ def write_graph_event(
     project_root: str,
     node_name: str,
     event_type: str,
-    data: Optional[dict] = None,
+    data: dict | None = None,
 ) -> None:
     """Write a graph-level event (node enter/exit, routing decisions) to the
     pipeline events JSONL log.
@@ -102,9 +102,8 @@ def write_graph_event(
         **payload,
     }
     line = json.dumps(record, default=str) + "\n"
-    with _write_lock:
-        with open(log_path, "a", encoding="utf-8") as fh:
-            fh.write(line)
+    with _write_lock, open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(line)
 
     # Dispatch exit hooks as fire-and-forget async tasks
     if event_type == "graph_node_exit" and _exit_hooks:

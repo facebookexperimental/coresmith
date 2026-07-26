@@ -29,6 +29,13 @@ For EVERY connection in the block diagram:
    exist.
 5. **Stub coherence**: The Section 9 Verilog Interface Stub of each block
    must match its own Section 2 port table exactly.
+6. **Memory feasibility**: When a block carries a priced memory ledger
+   (`.coresmith/blocks/<block>/mem_price.json`), surface it — each declared
+   `# MEM` element's priced area (mm²) and its dependency-window justification.
+   Flag any storage element whose justification does not defend its depth
+   against the algorithm's true dependency window (the line-buffer-vs-frame-store
+   question): a whole-dimension store priced at multiple mm² where a shallow
+   window would suffice is an oversized-memory issue to raise, not silently pass.
 
 ## How to Work
 

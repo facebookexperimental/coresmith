@@ -47,8 +47,18 @@ class ValidationDVGenerator:
         block_rtl_paths: dict[str, str] | None = None,
         output_path: str = "",
         prior_failure: str = "",
+        reference_path: str = "",
+        reference_entry: str = "",
+        parameter_table: str = "",
     ) -> dict[str, Any]:
-        """Generate a cocotb validation DV testbench."""
+        """Generate a cocotb validation DV testbench.
+
+        ``reference_path`` / ``reference_entry`` (both default ``""``) point at
+        the design's reference implementation and its entry-point name. When
+        ``reference_path`` is non-empty the prompt instructs the TB to assert
+        the RTL's primary output equals the reference's output for the same
+        stimulus. Empty (flag-off) leaves prompt + output byte-identical.
+        """
         with _tracer.start_as_current_span(f"Validation DV [{design_name}]") as span:
             span.set_attribute("design_name", design_name)
             span.set_attribute("block_count", len(block_summaries))
@@ -70,6 +80,14 @@ class ValidationDVGenerator:
 
             parts.append("\n--- ERS JSON / REQUIREMENTS CONTEXT ---")
             parts.append(ers_context)
+
+            # param-schema-1: surface the typed ERS `parameters` block verbatim
+            # (it is also embedded in the ERS JSON above, but the DV agent must
+            # not have to dig it out of prose). AUTHORITATIVE source of the
+            # dimensional maxima for the non-deferrable MAX-GEOMETRY case +
+            # `# MAXGEO` marker. Empty (design declares none) -> byte-identical.
+            if parameter_table:
+                parts.append(f"\n{parameter_table}")
 
             parts.append("\n--- BLOCK SUMMARIES ---")
             for bs in block_summaries:
@@ -104,6 +122,31 @@ class ValidationDVGenerator:
                 "payload movement, KPI counters, and final outputs."
             )
 
+            if reference_path:
+                parts.append(
+                    "\n--- REFERENCE-EQUIVALENCE REQUIREMENT ---\n"
+                    "The design's reference implementation is the functional "
+                    f"oracle at:\n  {reference_path}\n"
+                    + (
+                        f"Its entry point is ``{reference_entry}``.\n"
+                        if reference_entry
+                        else ""
+                    )
+                    + "Your testbench MUST drive the RTL top-level with a "
+                    "stimulus, run the reference implementation on the SAME "
+                    "stimulus, and assert the RTL's primary output equals the "
+                    "reference's output bit-exactly. Import it by adding its "
+                    "parent directory to sys.path, e.g.:\n"
+                    "  import sys; sys.path.insert(0, "
+                    f"'{Path(reference_path).parent}')\n"
+                    "  from "
+                    f"{Path(reference_path).stem} import {reference_entry or '<entry>'}"
+                    " as _reference\n"
+                    "  expected = _reference(stimulus)\n"
+                    "This is the non-deferrable functional check "
+                    "(status 'checked_by_test')."
+                )
+
             if prior_failure:
                 parts.append(
                     "\n--- PRIOR ATTEMPT FAILURE / CONTRACT AUDIT ---\n"
@@ -125,12 +168,12 @@ class ValidationDVGenerator:
                 if disk_path.exists():
                     disk_content = disk_path.read_text(encoding="utf-8")
                     disk_test_count = len(
-                        re.findall(r"@cocotb\.test\(\)", disk_content)
+                        re.findall(r"@cocotb\.test\s*\(", disk_content)
                     )
                     if disk_test_count > 0 and "REQUIREMENT_COVERAGE" in disk_content:
                         testbench = disk_content
             testbench = self._sanitize_testbench(testbench)
-            test_count = len(re.findall(r"@cocotb\.test\(\)", testbench))
+            test_count = len(re.findall(r"@cocotb\.test\s*\(", testbench))
 
             if not testbench or test_count == 0:
                 raise RuntimeError(
@@ -141,6 +184,33 @@ class ValidationDVGenerator:
                 raise RuntimeError(
                     "Validation DV generation failed: testbench did not define "
                     "REQUIREMENT_COVERAGE"
+                )
+            # Functional correctness is non-deferrable: the manifest must verify
+            # at least one output-equals-reference/golden requirement. The
+            # functional model (reference implementation + per-block models) is
+            # the oracle, so the testbench MUST assert the RTL's PRIMARY output ==
+            # the reference / golden / inline-computed expected value. A testbench
+            # that defers every functional check (the `deferred_to_golden_sweep`
+            # hole that let a flat-output encoder pass) must be rejected.
+            # Structural/latency/trace checks do not count. (FUNC-NNN vectors are
+            # retired -- the functional model is the oracle now.)
+            _golden_output_assert = bool(
+                re.search(
+                    r"assert[^\n]*(golden|reference|expected_(?:output|bytes|"
+                    r"bits|value|result|word|state|crc))",
+                    testbench,
+                    re.IGNORECASE,
+                )
+            )
+            if not _golden_output_assert:
+                raise RuntimeError(
+                    "Validation DV generation failed: NO non-deferrable functional "
+                    "check. The testbench MUST assert the RTL's primary output == "
+                    "the reference / golden output (or an inline-computed "
+                    "expected_* value for objective-math designs) bit-exactly, "
+                    "with status 'checked_by_test'. All-deferred / structural-only "
+                    "manifests are rejected (see validation_dv.md FUNCTIONAL "
+                    "CORRECTNESS IS NON-DEFERRABLE)."
                 )
             if not output_path:
                 raise RuntimeError(

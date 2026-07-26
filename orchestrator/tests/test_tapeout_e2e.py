@@ -30,8 +30,8 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
 from orchestrator.langgraph.backend_graph import build_backend_graph
-from orchestrator.langgraph.tapeout_graph import build_tapeout_graph
 from orchestrator.langgraph.backend_helpers import LIBERTY
+from orchestrator.langgraph.tapeout_graph import build_tapeout_graph
 
 _DASHBOARD_PATCH = (
     "orchestrator.architecture.specialists.chip_finish_dashboard"

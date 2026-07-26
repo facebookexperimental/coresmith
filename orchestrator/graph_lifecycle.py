@@ -16,8 +16,11 @@ import importlib
 import json
 import logging
 import os
+import time
 import traceback
-from typing import Any, Optional
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class GraphLifecycle:
@@ -56,13 +59,16 @@ class GraphLifecycle:
 
         self.graph: Any = None
         self.checkpointer: Any = None
-        self.task: Optional[asyncio.Task] = None
+        self.task: asyncio.Task | None = None
         self.thread_id: str = name
         self.status: str = "idle"
         self.error_message: str = ""
 
         self._checkpointer_cm: Any = None
         self._lock = asyncio.Lock()
+        self._last_config: dict | None = None
+        self._watchdog: asyncio.Task | None = None
+        self._watchdog_heals: int = 0
 
     # -- Recovery helpers ---------------------------------------------------
 
@@ -207,16 +213,197 @@ class GraphLifecycle:
             self.status = "error"
             self.error_message = traceback.format_exc()[:10000]
 
+    # -- Wedge watchdog [dv-hardening-17] ------------------------------------
+    #
+    # Observed 3x live on armD (arch nodes: Escalate Constraints, interface
+    # regen, Final Review): the runner task's ``await graph.ainvoke(...)``
+    # parks FOREVER after the node's work has completed and checkpointed --
+    # py-spy shows the event loop alive/idle, zero graph work on any thread,
+    # no LLM subprocess, no exception anywhere. In-memory status stays
+    # "running" (state polls lie) until a daemon restart re-reads the
+    # checkpoint, which surfaces the pending interrupt cleanly. Root cause is
+    # somewhere in the langgraph/aiosqlite await plumbing (dumps archived);
+    # until it is found, this watchdog performs the SAME recovery in-process:
+    # detect the wedge signature, cancel the zombie runner, resume from the
+    # checkpoint (ainvoke(None) re-surfaces the interrupt).
+    #
+    # Wedge signature (ALL must hold, conservatively):
+    #   - status == "running" and the runner task is alive
+    #   - the events file has not been touched for CORESMITH_WEDGE_TIMEOUT_S
+    #     (default 900s; heartbeats/graph events reset it)
+    #   - the daemon process has NO live children (no codex/claude CLI, no
+    #     make/verilator/yosys sims -- anything doing real work is a child)
+    # Max 3 self-heals per handle, then status=error with a loud message.
+    # CORESMITH_WEDGE_WATCHDOG=0 disables.
+
+    @staticmethod
+    def _wedge_watchdog_enabled() -> bool:
+        return os.environ.get(
+            "CORESMITH_WEDGE_WATCHDOG", "1"
+        ).strip().lower() not in ("0", "false", "no", "off")
+
+    @staticmethod
+    def _daemon_has_children() -> bool:
+        """True when this process has any live (non-zombie) direct child."""
+        me = str(os.getpid())
+        try:
+            for pid in os.listdir("/proc"):
+                if not pid.isdigit():
+                    continue
+                try:
+                    with open(f"/proc/{pid}/stat") as fh:
+                        parts = fh.read().split()
+                    # stat: pid (comm) state ppid ...  -- comm may contain
+                    # spaces but is parenthesised; find state after ')'
+                    ridx = " ".join(parts).rindex(")")
+                    tail = " ".join(parts)[ridx + 1:].split()
+                    state, ppid = tail[0], tail[1]
+                    if ppid == me and state != "Z":
+                        return True
+                except (OSError, ValueError, IndexError):
+                    continue
+        except OSError:
+            return True  # cannot scan -> assume busy (never false-positive)
+        return False
+
+    def _wedge_suspected(self) -> bool:
+        """Pure decision: does the current state match the wedge signature?"""
+        if self.status != "running":
+            return False
+        if self.task is None or self.task.done():
+            return False
+        try:
+            threshold = float(os.environ.get(
+                "CORESMITH_WEDGE_TIMEOUT_S", "900") or 900)
+        except ValueError:
+            threshold = 900.0
+        ev = os.path.join(self.project_root, ".coresmith",
+                          "pipeline_events.jsonl")
+        try:
+            age = time.time() - os.path.getmtime(ev)
+        except OSError:
+            return False  # no events file yet -> too early to judge
+        if age < threshold:
+            return False
+        if self._daemon_has_children():
+            return False
+        return True
+
+    async def _watchdog_heal_once(self) -> str:
+        """Cancel the zombie runner and resume from the checkpoint.
+
+        Returns the action taken ("healed" | "gave_up" | "noop")."""
+        if not self._wedge_suspected():
+            return "noop"
+        self._watchdog_heals += 1
+        logger.error(
+            "[WEDGE-WATCHDOG] %s: runner task wedged (status=running, no "
+            "events, no children) -- self-heal %d/3: cancelling zombie "
+            "runner and resuming from checkpoint",
+            self.name, self._watchdog_heals,
+        )
+        task = self.task
+        if self._watchdog_heals > 3:
+            self.status = "error"
+            self.error_message = (
+                "wedge watchdog: runner task wedged 4x (langgraph await "
+                "plumbing); self-heal limit reached -- restart the daemon "
+                "and see /tmp/daemon_hang_*.txt py-spy dumps"
+            )
+            if task is not None:
+                task.cancel()
+            return "gave_up"
+        if task is not None:
+            task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=10)
+            except (TimeoutError, asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        cfg = self._last_config or {
+            "configurable": {"thread_id": self.thread_id}}
+        async with self._lock:
+            if self.task is not None and not self.task.done():
+                return "noop"  # someone else resumed meanwhile
+            self.task = asyncio.create_task(self.run_task(None, cfg))
+        return "healed"
+
+    async def _wedge_watchdog_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(60)
+                t = self.task
+                if t is None or t.done():
+                    # runner finished normally; watchdog retires until the
+                    # next safe_start/safe_resume re-arms it
+                    return
+                action = await self._watchdog_heal_once()
+                if action == "gave_up":
+                    return
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("[WEDGE-WATCHDOG] %s: watchdog crashed", self.name)
+
+    def _arm_watchdog(self) -> None:
+        if not self._wedge_watchdog_enabled():
+            return
+        if self._watchdog is not None and not self._watchdog.done():
+            return
+        self._watchdog = asyncio.create_task(self._wedge_watchdog_loop())
+
     async def safe_start(self, initial_input: Any, config: dict) -> None:
         """Spawn a fresh run_task (raises if one is already in flight)."""
         async with self._lock:
             if self.task is not None and not self.task.done():
                 raise RuntimeError(f"{self.name} graph is already running")
+            self._last_config = config
             self.task = asyncio.create_task(self.run_task(initial_input, config))
+        self._arm_watchdog()
 
     async def safe_resume(self, resume_input: Any, config: dict) -> None:
         """Resume after an interrupt (raises if a task is already running)."""
         async with self._lock:
             if self.task is not None and not self.task.done():
                 raise RuntimeError(f"{self.name} graph is already running")
+            self._last_config = config
             self.task = asyncio.create_task(self.run_task(resume_input, config))
+        self._arm_watchdog()
+
+    async def restart_from_node(self, node_name: str) -> dict:
+        """Re-run the graph from the checkpoint where ``node_name`` is next.
+
+        The targeted counterpart of ``run start --force`` (engine follow-up
+        #8/#10). ``--force`` restarts the WHOLE pipeline and pass-1 regenerates
+        every uarch spec unconditionally, so a late-stage re-entry (e.g. re-run
+        a skipped ``integration_check``, or re-drive ``validation_dv`` after a
+        hand-patch) forces a full block-regen gauntlet that re-opens resolved
+        feasibility/interface battles. This forks from the historical
+        checkpoint whose ``next`` includes ``node_name`` and re-invokes from
+        there, so every block's already-on-disk RTL/TB is reused verbatim --
+        only ``node_name`` onward re-runs.
+
+        Returns ``{restarted, node, checkpoint_id}`` or ``{error, ...}``.
+        Requires the graph to be idle (not currently running).
+        """
+        if self.task is not None and not self.task.done():
+            return {"error": "graph is already running -- pause first"}
+        await self.ensure_graph()
+        config = {"configurable": {"thread_id": self.thread_id}}
+        found = None
+        async for snap in self.graph.aget_state_history(config):
+            if snap.next and node_name in snap.next:
+                found = snap.config
+                break
+        if not found:
+            return {
+                "error": f"no checkpoint found with '{node_name}' as the next "
+                         "node",
+                "hint": "inspect the pipeline_events.jsonl timeline for the "
+                        "exact node name (e.g. integration_check, "
+                        "integration_dv, validation_dv, process_block).",
+            }
+        ckpt_id = found["configurable"].get("checkpoint_id")
+        fork = {"configurable": {"thread_id": self.thread_id,
+                                 "checkpoint_id": ckpt_id}}
+        await self.safe_start(None, fork)
+        return {"restarted": True, "node": node_name, "checkpoint_id": ckpt_id}

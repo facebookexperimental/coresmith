@@ -23,12 +23,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from orchestrator.langchain.agents.integration_lead import (
-    IntegrationLeadAgent,
-    SYSTEM_PROMPT,
     _PROMPT_FILE,
+    SYSTEM_PROMPT,
+    IntegrationLeadAgent,
     assert_blocks_instantiated,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -469,6 +468,17 @@ class TestPromptLoading:
 class TestIntegrationCheckNode:
     """Test the updated integration_check_node that uses IntegrationLeadAgent."""
 
+    @pytest.fixture(autouse=True)
+    def _disable_deterministic_compat(self, monkeypatch):
+        # These tests exercise the Integration Lead AGENT's mismatch flow with
+        # degenerate port fixtures (a single clk-only module reused for every
+        # block, block names that don't match SAMPLE_CONNECTIONS). The
+        # deterministic compatibility checker (A-Fix 3a, default ON) would
+        # rightly flag those as missing_block/missing_port and pollute the
+        # asserted error/warning counts. Its own behaviour is covered in
+        # test_integration_compat_wiring.py, so disable it here.
+        monkeypatch.setenv("CORESMITH_DETERMINISTIC_INTEGRATION_CHECK", "0")
+
     def _make_completed_blocks(self, names: list[str]) -> list[dict]:
         return [
             {
@@ -532,8 +542,8 @@ class TestIntegrationCheckNode:
 
     @pytest.mark.asyncio
     async def test_skips_when_no_rtl_parsed(self):
-        from orchestrator.langgraph.pipeline_graph import integration_check_node
         from orchestrator.langgraph.integration_helpers import VerilogModule
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
 
         blocks = self._make_completed_blocks(["a", "b"])
         state = self._make_state(blocks)
@@ -560,10 +570,11 @@ class TestIntegrationCheckNode:
 
     @pytest.mark.asyncio
     async def test_calls_integration_lead_agent(self):
-        from orchestrator.langgraph.pipeline_graph import integration_check_node
         from orchestrator.langgraph.integration_helpers import (
-            VerilogModule, VerilogPort,
+            VerilogModule,
+            VerilogPort,
         )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
 
         blocks = self._make_completed_blocks(["block_a", "block_b"])
         state = self._make_state(blocks)
@@ -641,10 +652,11 @@ class TestIntegrationCheckNode:
 
     @pytest.mark.asyncio
     async def test_agent_failure_skips_gracefully(self):
-        from orchestrator.langgraph.pipeline_graph import integration_check_node
         from orchestrator.langgraph.integration_helpers import (
-            VerilogModule, VerilogPort,
+            VerilogModule,
+            VerilogPort,
         )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
 
         blocks = self._make_completed_blocks(["a", "b"])
         state = self._make_state(blocks)
@@ -680,10 +692,11 @@ class TestIntegrationCheckNode:
 
     @pytest.mark.asyncio
     async def test_agent_parse_error_skips(self):
-        from orchestrator.langgraph.pipeline_graph import integration_check_node
         from orchestrator.langgraph.integration_helpers import (
-            VerilogModule, VerilogPort,
+            VerilogModule,
+            VerilogPort,
         )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
 
         blocks = self._make_completed_blocks(["a", "b"])
         state = self._make_state(blocks)
@@ -727,10 +740,11 @@ class TestIntegrationCheckNode:
 
     @pytest.mark.asyncio
     async def test_lint_failure_triggers_interrupt(self):
-        from orchestrator.langgraph.pipeline_graph import integration_check_node
         from orchestrator.langgraph.integration_helpers import (
-            VerilogModule, VerilogPort,
+            VerilogModule,
+            VerilogPort,
         )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
 
         blocks = self._make_completed_blocks(["a", "b"])
         state = self._make_state(blocks)
@@ -788,10 +802,11 @@ class TestIntegrationCheckNode:
 
     @pytest.mark.asyncio
     async def test_mismatch_errors_trigger_interrupt(self):
-        from orchestrator.langgraph.pipeline_graph import integration_check_node
         from orchestrator.langgraph.integration_helpers import (
-            VerilogModule, VerilogPort,
+            VerilogModule,
+            VerilogPort,
         )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
 
         blocks = self._make_completed_blocks(["a", "b"])
         state = self._make_state(blocks)
@@ -856,10 +871,11 @@ class TestIntegrationCheckNode:
 
     @pytest.mark.asyncio
     async def test_clean_integration_passes(self):
-        from orchestrator.langgraph.pipeline_graph import integration_check_node
         from orchestrator.langgraph.integration_helpers import (
-            VerilogModule, VerilogPort,
+            VerilogModule,
+            VerilogPort,
         )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
 
         blocks = self._make_completed_blocks(["a", "b"])
         state = self._make_state(blocks)
@@ -913,10 +929,11 @@ class TestIntegrationCheckNode:
 
     @pytest.mark.asyncio
     async def test_fix_rtl_resume_action(self):
-        from orchestrator.langgraph.pipeline_graph import integration_check_node
         from orchestrator.langgraph.integration_helpers import (
-            VerilogModule, VerilogPort,
+            VerilogModule,
+            VerilogPort,
         )
+        from orchestrator.langgraph.pipeline_graph import integration_check_node
 
         blocks = self._make_completed_blocks(["a", "b"])
         state = self._make_state(blocks)
@@ -950,11 +967,16 @@ class TestIntegrationCheckNode:
             return_value={"clean": False, "errors": "undeclared wire"},
         ), patch(
             "orchestrator.langgraph.pipeline_graph.interrupt",
-            return_value={
-                "action": "fix_rtl",
-                "rtl_fix_description": "Added wire declaration",
-            },
-        ), patch(
+            # rung3-fixes-1 (defect 2): fix_rtl records the on-disk edit but,
+            # because lint is still not clean, the node RE-PARKS (a final
+            # interrupt) instead of silently END'ing. The operator then makes
+            # an explicit terminal choice -- here, abort.
+            side_effect=[
+                {"action": "fix_rtl",
+                 "rtl_fix_description": "Added wire declaration"},
+                {"action": "abort"},
+            ],
+        ) as mock_interrupt, patch(
             "orchestrator.langgraph.pipeline_graph.write_graph_event"
         ), patch(
             "pathlib.Path.read_text",
@@ -967,7 +989,11 @@ class TestIntegrationCheckNode:
             result = await integration_check_node(state)
 
         ir = result["integration_result"]
+        # The fix is recorded AND the node re-parked (2 interrupts) rather than
+        # returning to a silent END; the explicit abort then terminates.
         assert ir["fix_applied"] == "Added wire declaration"
+        assert mock_interrupt.call_count == 2
+        assert ir.get("aborted") is True
 
     @pytest.mark.asyncio
     async def test_only_successful_blocks_used(self):
@@ -999,8 +1025,16 @@ class TestIntegrationCheckNode:
 class TestIntegrationCheckWarningTriage:
     """integration_check_node must triage warning-only mismatches via an
     outer-agent interrupt before letting the run advance to DV. The
-    closed-feedback warning from the v4 run predicted the exact DV
+    closed-feedback warning from the video_codec v4 run predicted the exact DV
     deadlock that followed, so warnings are no longer silently dropped."""
+
+    @pytest.fixture(autouse=True)
+    def _disable_deterministic_compat(self, monkeypatch):
+        # Warning-triage tests assert on an agent WARNING-only scenario; the
+        # deterministic compatibility checker (A-Fix 3a, default ON) would add
+        # error-severity findings on the degenerate fixtures and change the
+        # interrupt path. Covered separately in test_integration_compat_wiring.py.
+        monkeypatch.setenv("CORESMITH_DETERMINISTIC_INTEGRATION_CHECK", "0")
 
     def _state(self):
         return {
@@ -1013,10 +1047,12 @@ class TestIntegrationCheckWarningTriage:
         }
 
     def _common_patches(self, mismatches, interrupt_response):
-        from orchestrator.langgraph.integration_helpers import (
-            VerilogModule, VerilogPort,
-        )
         from contextlib import ExitStack
+
+        from orchestrator.langgraph.integration_helpers import (
+            VerilogModule,
+            VerilogPort,
+        )
 
         stack = ExitStack()
         mod = VerilogModule(name="a", ports=[VerilogPort("clk", "input")])
@@ -1123,9 +1159,14 @@ class TestIntegrationCheckWarningTriage:
         assert ir.get("aborted") is None
         assert ir["lint_clean"] is True
         # route_after_integration will see lint_clean=True, error_count=0,
-        # no aborted -> routes to integration_dv.
+        # no aborted -> routes to model_integration (the two-pass restructure's
+        # flag-gated node -- a no-op pass-through to integration_dv when
+        # CORESMITH_BLOCK_GOLDENS is off, which is the default/legacy test
+        # profile pinned in conftest.py). See
+        # TestRouteAfterIntegration::test_clean_integration_goes_to_model_integration
+        # in test_pipeline_graph.py for the same expectation.
         from orchestrator.langgraph.pipeline_graph import route_after_integration
-        assert route_after_integration(result) == "integration_dv"
+        assert route_after_integration(result) == "model_integration"
 
     @pytest.mark.asyncio
     async def test_warning_triage_abort_ends_pipeline(self, monkeypatch):
@@ -1206,6 +1247,7 @@ class TestIntegrationCheckWarningTriage:
 class TestGraphConstruction:
     def test_pipeline_graph_compiles_with_agent_node(self):
         from langgraph.checkpoint.memory import MemorySaver
+
         from orchestrator.langgraph.pipeline_graph import build_pipeline_graph
 
         graph = build_pipeline_graph(checkpointer=MemorySaver())
@@ -1213,6 +1255,7 @@ class TestGraphConstruction:
 
     def test_integration_check_node_in_graph(self):
         from langgraph.checkpoint.memory import MemorySaver
+
         from orchestrator.langgraph.pipeline_graph import build_pipeline_graph
 
         graph = build_pipeline_graph(checkpointer=MemorySaver())
@@ -1277,7 +1320,7 @@ class TestAssertBlocksInstantiated:
     """Postcondition for Integration Lead's chip_top output.
 
     Catches the silent-block-drop / glue-stub-substitution failure mode
-    that produced the codec stub (core_block -> rle_to_packer_token_bridge).
+    that produced the codec stub (entropy_enc -> rle_to_packer_token_bridge).
     """
 
     def test_all_blocks_present_passes(self):
@@ -1305,16 +1348,16 @@ endmodule
     def test_codec_stub_substitution_caught(self):
         chip_top = """\
 module chip_top (input clk);
-    // core_block replaced with a glue stub
+    // entropy_enc replaced with a glue stub
     rle_to_packer_token_bridge u_bridge (.clk(clk));
     other_block u_other (.clk(clk));
 endmodule
 """
         err = assert_blocks_instantiated(
-            chip_top, {"core_block", "other_block"}
+            chip_top, {"entropy_enc", "other_block"}
         )
         assert err is not None
-        assert "core_block" in err
+        assert "entropy_enc" in err
 
     def test_parameterized_instantiation_recognized(self):
         chip_top = """\
@@ -1326,6 +1369,28 @@ endmodule
 
     def test_empty_chip_top_with_no_blocks_passes(self):
         assert assert_blocks_instantiated("", set()) is None
+
+    def test_accepts_exact_openframe_pad_adapter_instance(self):
+        chip_top = """\
+module chip_top;
+    reference_codec_openframe_pad_adapter u_openframe_project_wrapper ();
+endmodule
+"""
+        assert assert_blocks_instantiated(
+            chip_top, {"openframe_project_wrapper"}
+        ) is None
+
+    def test_rejects_misnamed_openframe_pad_adapter_instance(self):
+        chip_top = """\
+module chip_top;
+    reference_codec_openframe_pad_adapter u_unrelated_adapter ();
+endmodule
+"""
+        err = assert_blocks_instantiated(
+            chip_top, {"openframe_project_wrapper"}
+        )
+        assert err is not None
+        assert "openframe_project_wrapper" in err
 
     def test_block_name_appearing_only_as_substring_fails(self):
         chip_top = """\

@@ -1,0 +1,5 @@
+Created the microarchitecture spec at [arch/uarch_specs/intra_predict.md](/home/ubuntu/project/arch/uarch_specs/intra_predict.md).
+
+It includes the required 1-9 section structure, AXI-Stream port contract, 32-bit candidate payload layout, FSM, datapath widths, reset behavior, output timing declarations with WaveDrom diagrams, Verilog-2005 interface stub, and JSON summary. I also validated the embedded JSON parses correctly.
+
+Note: `arch/` is gitignored in this repo, so `git status` will not show the new spec unless you force-add it.

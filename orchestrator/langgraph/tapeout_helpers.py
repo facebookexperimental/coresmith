@@ -26,22 +26,21 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
 
-from orchestrator.langgraph.pipeline_helpers import (
-    PROJECT_ROOT,
-    _write_step_log,
-    log,
-    GREEN,
-    RED,
-    YELLOW,
-)
 from orchestrator.langgraph.backend_helpers import (
-    TECH_LEF,
+    _STD_CELL,
     CELL_LEF,
     LIBERTY,
-    _STD_CELL,
+    TECH_LEF,
     _resolve_tool,
+)
+from orchestrator.langgraph.pipeline_helpers import (
+    GREEN,
+    PROJECT_ROOT,
+    RED,
+    YELLOW,
+    _write_step_log,
+    log,
 )
 
 # ---------------------------------------------------------------------------
@@ -183,7 +182,7 @@ def _discover_block_ports(blocks: list[dict]) -> list[dict]:
 
 def generate_wrapper_rtl(
     blocks: list[dict],
-    gpio_mapping: Optional[dict] = None,
+    gpio_mapping: dict | None = None,
     output_dir: str = "",
 ) -> dict:
     """Generate openframe_project_wrapper.v and supporting RTL.
@@ -774,7 +773,9 @@ def run_wrapper_pnr(
 ) -> dict:
     """Run wrapper-level PnR and return results."""
     from orchestrator.langgraph.backend_helpers import (
-        run_openroad, parse_openroad_reports, parse_pnr_stdout,
+        parse_openroad_reports,
+        parse_pnr_stdout,
+        run_openroad,
     )
 
     out = Path(output_dir)

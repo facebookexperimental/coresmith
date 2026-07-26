@@ -1,0 +1,90 @@
+site_name: coresmith reference
+site_description: AI-orchestrated ASIC pipeline — LangGraph architecture reference
+site_url: ""
+use_directory_urls: false
+
+docs_dir: docs
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - navigation.top
+    - navigation.tracking
+    - toc.follow
+    - content.code.copy
+    - content.code.annotate
+    - search.suggest
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.keys
+
+nav:
+  - Home: index.md
+  - Overview:
+      - The three graphs: overview/pipeline-overview.md
+      - LangGraph patterns: overview/langgraph-pattern.md
+  - Graphs:
+      - Architecture: graphs/architecture.md
+      - Frontend pipeline: graphs/frontend-pipeline.md
+      - Backend: graphs/backend.md
+      - Tapeout: graphs/tapeout.md
+  - Agents:
+      - How agents are defined: agents/defining-agents.md
+      - LLM abstraction (ClaudeLLM): agents/llm-abstraction.md
+      - Agent catalog: agents/catalog.md
+      - Prompt registry: agents/prompts.md
+  - Inter-agent rules:
+      - Contracts between agents: rules/inter-agent-rules.md
+      - Tiers, integration & DV: rules/tier-and-integration.md
+  - Constraints & architect:
+      - Constraint checking: constraints/constraint-check.md
+      - Architect escalation: constraints/architect-escalation.md
+  - Operations:
+      - Daemon & CLI: operations/daemon-and-cli.md
+      - MCP tools: operations/mcp-tools.md
+      - Project layout: operations/project-layout.md
+      - Config & env vars: operations/config-and-env.md
+  - Reference:
+      - State schemas: reference/state-schemas.md
+      - Interrupts catalog: reference/interrupts.md

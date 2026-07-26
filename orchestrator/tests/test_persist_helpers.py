@@ -27,13 +27,12 @@ from orchestrator.tests.fft16_fixtures import (
     FFT16_CLOCK_TREE,
     FFT16_FRD_MARKDOWN,
     FFT16_MEMORY_MAP,
+    FFT16_PRD_ANSWERS,
     FFT16_PRD_DOCUMENT,
     FFT16_PRD_QUESTIONS,
-    FFT16_PRD_ANSWERS,
     FFT16_REGISTER_SPEC,
     FFT16_SAD_MARKDOWN,
 )
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PRD Persistence

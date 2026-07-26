@@ -111,6 +111,71 @@ Common mistakes that pass lint but fail simulation:
 3. **Producer asserts `tvalid` before reset deasserts.** Some
    downstream blocks latch this as a phantom beat.
 
+4. **Double-registered output + `tready` gated on the INTERNAL valid =
+   silent beat drop under backpressure.** A proven, insidious bug: a block
+   keeps an internal output register (`out_valid`/`out_data`) AND *also*
+   re-registers it onto the bus (`m_axis_tvalid <= out_valid;
+   m_axis_tdata <= out_data;`), then computes its upstream accept as
+   `s_axis_tready = ... and ((not out_valid) or m_axis_tready)`. The
+   `out_valid` gating `s_tready` is **one cycle ahead** of the
+   `m_axis_tvalid` the consumer sees. Under downstream backpressure the
+   block accepts a NEW input and overwrites `out_data` before the previous
+   beat was ever handshaken — beats vanish (an observed 4-in / 2-out,
+   exactly-50%-drop; holding `tready` high hid it entirely). Passes lint
+   and any DV that never stalls the consumer.
+   - **CORRECT PATTERN:** present exactly ONE registered output beat —
+     drive `m_axis_*` combinationally from a single `out_*` reg, or use a
+     proper valid/ready skid buffer — but the valid gating `s_tready` MUST
+     be the SAME valid the consumer sees (`m_axis_tvalid`), never an inner
+     pre-output valid. Do not accept a new input until the current output
+     beat is handshaken (`m_axis_tvalid && m_axis_tready`).
+   - **ANTI-PATTERN:** `m_axis_tvalid <= out_valid` (an extra register
+     stage) while `s_tready = (not out_valid) | m_axis_tready` — accepting
+     input based on a valid the consumer hasn't seen yet.
+
+5. **`tready` HIGH on a cycle the slave will not latch the input (an internal
+   drain/flush/stall branch wins the if/elif) = ACK-AND-DROP.** This is the
+   slave/accept-side dual of rule 4. When a slave's clocked accept logic is a
+   PRIORITY chain — `if drain_byte/flush: …  elif token_valid and tready:
+   accumulate` — its combinational `tready` must be FALSE on exactly the cycles
+   the accept branch will NOT execute, which includes EVERY cycle a
+   higher-priority branch (drain/flush/stall) fires. Deriving `tready` from only
+   part of that arbitration leaves it asserted on a drain cycle: upstream sees
+   `tvalid && tready`, treats the beat as transferred and pops it, but the slave
+   took the drain branch and never accumulated it → the token is **acknowledged
+   and silently dropped**. PROVEN failure: a `block_packer` drove
+   `s_axis_bit_token_tready = (not flushing) and (not byte_valid)` while its
+   sequential body was `if next_count >= 8: drain_byte  elif token_valid and
+   tready: accumulate`; on every byte-drain cycle `byte_valid` was still low so
+   `tready` stayed HIGH, `entropy_enc` popped its token, and the packer dropped it
+   — 455 emitted entropy coding bits retained as ~296 (golden 57 bytes truncated to 37,
+   byte0 0x81 correct then divergence at bit 14). Every block passed its own
+   golden; the loss was entirely in the packer's accept handshake, and because
+   it is deterministic the gate's bounded revise produced byte-identical wrong
+   output every round.
+   - **CORRECT PATTERN:** `tready` must be the EXACT condition under which the
+     latch/accept branch runs THIS cycle — the same guard the accept branch
+     uses, AND-reduced with "no higher-priority branch is active":
+     `s_tready = accept_branch_will_execute` (e.g. `(not draining) and (not
+     flushing) and room_for_token`). A token is consumed IFF it is latched;
+     never let a drain/flush/stall cycle acknowledge an input it won't store.
+   - **ANTI-PATTERN:** `s_tready = (not flushing) and (not byte_valid)` —
+     omitting the in-progress drain term that actually steals the cycle from the
+     accept branch.
+   - **CHECK:** over a known frame, count tokens POPPED by the upstream
+     (`tvalid && tready`) vs tokens ACCUMULATED by the slave — they MUST be
+     equal; any delta is a dropped beat. Also assert the composed bit-length
+     equals the sum of upstream codeword lengths (a short stream = lost beats).
+
+**Mandatory: verify every AXI-Stream producer under RANDOM downstream
+backpressure, not just `tready=1`.** A block whose per-block DV only runs
+with the consumer always-ready will pass while silently dropping beats in
+the real (bursty, back-pressured) chip. Debugging heuristic: if a block is
+byte-exact standalone with `tready=1` but wrong/short in-system, suspect
+this handshake race FIRST (before blaming the arithmetic) — re-run it
+standalone with randomized `tready` and compare beat counts; a delta proves
+the skid bug.
+
 ## Bootstrap and closed-loop dependencies
 
 If block A's `s_axis` waits for data from block B's `m_axis`, and
@@ -129,6 +194,76 @@ interface contract. Options:
 
 Closed loops with no declared bootstrap policy **will deadlock** on
 the first transaction. The contract must call this out.
+
+## Latch the WHOLE beat at the fire edge (payload included)
+
+The tlast-latching rule above generalizes to EVERY field of a beat: consume
+``tdata``/``tuser``/sideband payload ON the cycle ``tvalid && tready`` fires,
+into a register, and compute from the REGISTER afterwards. Sampling any part
+of the beat one cycle later reads whatever the producer legally drives next
+(producers may clear or repurpose ``tdata`` immediately after the beat).
+Proven live (armD RD core): a response payload read one cycle post-handshake
+evaluated every candidate on zeros -- and had previously "passed" only
+because that testbench happened to hold ``tdata`` stable after the beat. A
+consumer that works only when the producer holds data past the fire edge is
+an AXI contract violation waiting for a compliant producer.
+
+## Frame framing across a pipeline (`tlast` must propagate)
+
+When framed data flows through a multi-block pipeline (`tuser` marks the
+first beat of a frame, `tlast` the last), **every block must propagate the
+frame boundary**: when a block consumes an input beat carrying `tlast`, it
+must assert `tlast` on its own LAST output beat for that frame, then return
+to idle and emit nothing until the next frame's first beat. A block that
+drops `tlast` leaves the chip unable to signal end-of-frame — the egress
+free-runs, emits unbounded output, and any consumer or test harness waiting
+on output `tlast` hangs forever. Per-frame output beat count must be
+deterministic and `tlast` must land exactly on the final beat (never one too
+many / one too few).
+
+### LATCH `tlast` at ingress when one input beat expands into a multi-beat burst
+
+> **MANDATORY (most-violated rule).** If your block can emit MORE output beats
+> than it consumed input beats (any 1-to-N expansion), you MUST declare a
+> registered `last_in` (and `tuser_in`) latch and drive output `tlast` from the
+> LATCH. Referencing the live `s_axis_*_tlast` anywhere inside the output-emit /
+> last-beat expression is a BUG, full stop — grep your block: if a live input
+> `*_tlast` port name appears in the assignment to an output `*_tlast`, you have
+> the defect. There is no correct variant of that; the input port is 0 by the
+> time the burst's last beat leaves. Latch at accept, read the latch at emit.
+
+A block that consumes **one** input beat and then emits **many** output beats
+over the following cycles (1-to-N expansion: an entropy/entropy coding coder turning one
+pixel_block word into N bytes, a serializer turning one wide word into N lanes, a
+run-length expander, a packetizer adding a multi-word payload) MUST **latch the
+input's `tlast` (and `tuser`/frame-id) into a register at the cycle the input
+beat is accepted**, and drive its output `tlast` from that LATCHED copy on the
+final emitted beat. The upstream `s_axis_*_tlast` wire is only valid for the one
+cycle the input beat fires; it deasserts on the very next cycle when the producer
+drops `tvalid`. The burst, however, drains over many subsequent cycles. So:
+
+- **CORRECT:** `last_in = Signal(bool(0))`; on input accept
+  `last_in.next = s_axis_tlast`; on the final output beat of the burst
+  (`out_idx + 1 == out_len`) drive `m_axis_tlast.next = (out_len == 1 and
+  last_in) ` for a 1-beat burst, and for beat k>0 drive
+  `m_axis_tlast.next = (k + 1 == out_len) and last_in` — always reading the
+  **registered** `last_in`, never the live upstream port.
+- **ANTI-PATTERN (drops the frame boundary):** re-reading the live
+  `s_axis_*_tlast` while emitting beat k of the burst, e.g.
+  `m_axis_tlast.next = (byte_idx + 2 == byte_len) and s_axis_selected_mb_tlast`.
+  By the time the last byte is emitted, the input beat retired many cycles ago
+  and `s_axis_selected_mb_tlast` reads 0, so the output `tlast` NEVER fires. The
+  egress never signals end-of-frame: the harness's frame-done counter stays 0,
+  recon/stats are never finalized, and the bitstream looks "truncated" only
+  because nothing marks its end.
+
+This is the SAME end-of-frame failure as dropping `tlast` outright, but it hides
+in 1-to-N blocks because the single-beat input case (`out_len == 1`) often
+happens to work — the bug only surfaces when a burst spans >1 cycle. Per-block DV
+MUST drive a producer whose burst length is >1 and assert that the LAST emitted
+beat (and only it) carries `tlast`, with the input `tvalid`/`tlast` deasserted
+during the drain (i.e. the input beat is long gone while the burst is still
+streaming).
 
 ## When NOT to use AXI-Stream
 

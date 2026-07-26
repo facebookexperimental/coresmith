@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Dataclass definitions (previously in orchestrator.temporal)
 # ---------------------------------------------------------------------------

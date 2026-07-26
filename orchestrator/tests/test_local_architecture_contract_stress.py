@@ -16,7 +16,7 @@ They call the configured LLM provider and are skipped unless explicitly enabled:
 
 To run one or a subset:
 
-    CORESMITH_RUN_LOCAL_ARCH_STRESS=1 CORESMITH_ARCH_STRESS_CASES=codec_640x360,gemm_tiles pytest ...
+    CORESMITH_RUN_LOCAL_ARCH_STRESS=1 CORESMITH_ARCH_STRESS_CASES=codec_640x360,matmul_tiles pytest ...
 """
 
 from __future__ import annotations
@@ -31,7 +31,6 @@ import pytest
 
 from orchestrator.tests.conftest import wait_for_status
 from orchestrator.tests.test_live_architecture import _auto_answer_ers
-
 
 RUN_STRESS = os.environ.get("CORESMITH_RUN_LOCAL_ARCH_STRESS", "").lower() in {
     "1",
@@ -70,14 +69,14 @@ tile coordinate, valid-pixel mask semantics, and output transaction count.
         id="padded_video_1080p",
     ),
     pytest.param(
-        "gemm_tiles",
+        "matmul_tiles",
         """
 Design a matrix-multiply accelerator for C[M,N] = A[M,K] * B[K,N] with
 M=96, N=64, K=128. Use 16x8 output tiles and an 8-wide K step. Preserve
 contracts for tile counts, tile coordinates, partial-sum ordering, SRAM banking,
 and final writeback transaction count.
 """,
-        id="gemm_tiles",
+        id="matmul_tiles",
     ),
     pytest.param(
         "transformer_block",

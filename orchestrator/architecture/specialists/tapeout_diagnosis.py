@@ -17,7 +17,6 @@ import json
 import re
 from pathlib import Path
 
-
 _PROMPT_FILE = (
     Path(__file__).resolve().parents[2]
     / "langchain"

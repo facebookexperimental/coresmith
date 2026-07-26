@@ -79,6 +79,27 @@ Pick AXI-Stream when **any** of the following hold:
 - You're at a chip boundary or crossing a subsystem — AXI-Stream's
   larger sideband surface is the right interop default.
 
+## Do NOT handshake a compile-time-enumerable sequence
+
+A per-iteration request/response handshake is for **genuinely data-dependent**
+access — where the address/next-item is not known until the current result is
+in hand. It is the WRONG tool for a sequence that is enumerable at compile time:
+a fixed round order `0..N`, a fixed tap/coefficient sweep, a fixed scan over a
+known address range. Wrapping each of those steps in a `req → wait drdy → resp`
+handshake pays a full round-trip latency **per element** for an order you already
+know — turning an N-element pass into ~N handshake round-trips.
+
+For a compile-time-known sequence:
+- **Pre-stage locally.** Read/prepare element `k+1` in parallel with consuming
+  element `k` (compute one step ahead), so the datapath never stalls waiting on a
+  handshake it did not need. A small local cache / registered look-ahead removes
+  the per-step round-trip.
+- Drive the known sequence from a counter/FSM, not from a request grant per item.
+- **Reserve handshakes for data-dependent access only** — a lookup whose address
+  comes from a just-computed value, a variable-length stream, backpressure from a
+  consumer whose readiness genuinely varies. There, the handshake earns its
+  latency; on an enumerable sequence it is pure overhead.
+
 ## Bootstrap and closed-loop dependencies
 
 Identical concern as AXI-Stream: if a feedback loop exists

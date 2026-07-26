@@ -45,9 +45,9 @@ mkdir -p $RUN_DIR/inputs && cp <spec>.md $RUN_DIR/inputs/requirements.md
 # Export the project root + LLM provider env vars (Codex shown; Claude also works)
 export CORESMITH_PROJECT_ROOT=$RUN_DIR
 export CORESMITH_LLM_PROVIDER=codex
-export CORESMITH_CODEX_MODEL=gpt-5.5
-export CORESMITH_MODEL=gpt-5.5
-export CORESMITH_BLOCK_MODEL=gpt-5.5
+export CORESMITH_CODEX_MODEL=gpt-5.6
+export CORESMITH_MODEL=gpt-5.6
+export CORESMITH_BLOCK_MODEL=gpt-5.6
 export CORESMITH_CODEX_SANDBOX=danger-full-access
 export CORESMITH_SKIP_SYNTH=1            # unless Sky130 PDK is local
 export CORESMITH_ENABLE_MEMORY_MAP=0
@@ -72,7 +72,7 @@ bin/coresmith architecture start --project-root $RUN_DIR \
 #     `integration_review` then can't verify cross-block data_width and
 #     `validation_dv` soft-aborts on missing ERS. Set
 #     CORESMITH_SKIP_ARCH_WARN=1 to silence the warning for rapid
-#     iteration / PPABench-style runs where you only care about the
+#     iteration / batch evaluation runs where you only care about the
 #     per-block frontend loop.
 bin/coresmith run start --project-root $RUN_DIR \
     --blocks-file /home/ubuntu/coresmith/examples/<design>/blocks.yaml
@@ -95,9 +95,19 @@ bin/coresmith logs  --project-root $RUN_DIR -n 100
   rtl/  tb/  arch/           # generated collateral
 ```
 
+## What "done" means (DELIVERABLE vs milestones) — read before declaring success
+
+**The deliverable is a VERIFIED `chip_top` RTL: `integration_check` accepted → `integration_dv` PASS → `validation_dv` PASS (→ backend GDS with clean DRC/LVS + closed timing).** Everything before that is a MILESTONE, not the deliverable:
+
+- The **Amaranth model** (the composition / `uarch_integration_gate` byte-exact pass, `derate_ledger measured=99`) proves the *design intent*. It is **NOT the chip.** A byte-exact model can sit atop RTL that is wrong — the model and the RTL are separate transcriptions (the RTL is lowered/verified separately).
+- **`pipeline_done=True`** and the log line **`PIPELINE COMPLETE: N/N blocks passed`** mean the **PER-BLOCK FRONTEND** is complete (every block passed its *own* DV). They do **NOT** mean the chip is integrated or verified. The run can be `pipeline_done=True` AND `status=interrupted` (parked at `integration_check`/`integration_dv`/`validation_dv`) at the same time — that is NOT done.
+- After per-block completion the run enters **integration**: `integration_check` (assembles `chip_top`, parks for `accept` — lint-clean ≠ functionally-correct) → `integration_dv` (chip_top vs golden) → `validation_dv` (ERS/KPI). The outer agent MUST drive each of these; they do not auto-run.
+
+**Before reporting a design "closed"/"done"/"working", confirm `integration_dv` AND `validation_dv` actually PASSED (not just per-block / not just the model gate), and ideally simulate the real `chip_top` RTL on representative content.** Do not infer the chip from `pipeline_done`, a `PIPELINE COMPLETE` string, or a byte-exact model.
+
 ## Outer-agent decision contract
 
-The pipeline raises interrupts at: `uarch_spec_review`, `uarch_integration_review`, per-block retry/skip choices, `integration_dv` / `validation_dv` failures. **There is no auto-approve.** Every interrupt parks the graph; only an outer-agent `coresmith resume` advances it.
+The pipeline raises interrupts at: `uarch_spec_review`, `uarch_integration_review`, per-block retry/skip choices, `integration_check` accept, `integration_dv` / `validation_dv` failures. **There is no auto-approve.** Every interrupt parks the graph; only an outer-agent `coresmith resume` advances it.
 
 When `coresmith state` shows `pending_interrupt_count > 0`:
 
@@ -114,15 +124,6 @@ When `coresmith state` shows `pending_interrupt_count > 0`:
 | `integration_dv` / `validation_dv` | `approve` if the run is acceptable, `revise` to re-debug, `fix_rtl`/`fix_tb` if you patched, `abort` |
 
 `fix_rtl` / `fix_tb` mean **you already edited the file on disk** — the pipeline re-runs the failing stage trusting your edit, it does *not* call an LLM.
-
-### Do NOT "autopilot" — the outer agent must actually decide
-
-The autochecker is a **reasoning agent**, not a blanket auto-approver. **Do not** write a script/loop that resumes every interrupt with a fixed action (e.g. always `approve`, or `retry`→`skip`). That defeats the entire point of the parking model and produces silent false positives. Two failure modes seen in practice:
-
-- **Wrong verb per gate.** Each interrupt's *valid* actions are in `payload.supported_actions`; they differ by type. The pre-DV integration gates (`integration_failure`, `integration_warning_review`) take **`accept`** — sending `approve` is unknown there and is treated as **abort** (`aborted=True` → END), which **skips DV entirely** and reports a hollow `done`. The DV-failure gates (`integration_dv_failure`, `validation_dv`) take **`approve`/`revise`/`fix_rtl`/`abort`**. Always read `supported_actions` and pick from it; never assume `approve` is universal.
-- **Rubber-stamping failures.** `approve`/`accept` on a *failing* `integration_dv`/`validation_dv` accepts a broken chip and finishes `done`. A real decision reads `.coresmith/contract_audit/*.json` (`first_divergence`, `local_fix_possible`, `recommended_action`) and chooses: `fix_rtl` (apply the suggested fix), `revise` (re-debug), or escalate to the human — not blind accept. `CORESMITH_REQUIRE_DV=1` forces DV to *run*, but it cannot make a dumb autochecker *judge* the result.
-
-If you can't make a genuine per-interrupt decision, **escalate to the human** rather than auto-approving. (Unattended overnight runs should be driven by a Claude subagent that inspects each payload, not a bash/python auto-resumer.)
 
 ## Common pitfalls & how to handle them
 
@@ -145,13 +146,13 @@ If you can't make a genuine per-interrupt decision, **escalate to the human** ra
 - `orchestrator/langchain/prompts/` — system prompts. Edits here change LLM behavior across runs.
 - `orchestrator/architecture/specialists/` — per-architecture-step modules (PRD, block diagram, SAD, FRD, ERS, constraint check, final review).
 - `examples/<design>/{requirements.md,blocks.yaml,...}` — design specs the pipeline consumes. Goldens (Python reference implementations) live next to them.
-- `tb/` is **in `.gitignore`** — generated cocotb TBs, RD harnesses, integration TBs. Design-specific test harnesses do not belong in the coresmith repo; put them in ppabench under `evaluation/sample_collateral/<run>/rd_harness/` instead.
+- `tb/` is **in `.gitignore`** — generated cocotb TBs, RD harnesses, integration TBs. Design-specific test harnesses do not belong in the coresmith repo; keep them in a downstream design-collateral tree instead.
 - `rtl/` — generated Verilog. **Do not hand-edit and commit** — these are pipeline outputs. The repo root only commits canonical reference RTL for examples; per-run RTL lives in the run dir.
 - `tests/` — fast unit + integration tests. `pytest -m "not live_llm and not requires_nix and not e2e"` runs everything that doesn't need an LLM or EDA toolchain.
 
 ## Conventions for AI edits
 
-- **Generic-only in coresmith**: every fix here must work for any codec/design. Codec-specific harnesses or scripts (e.g. RD wrappers tied to a particular top-level port set) go in **ppabench `evaluation/sample_collateral/.../rd_harness/`**, not in coresmith `scripts/` or `tb/rd/`.
+- **Generic-only in coresmith**: every fix here must work for any codec/design. Design-specific harnesses or scripts (e.g. RD wrappers tied to a particular top-level port set) belong in a downstream design-collateral tree, not in coresmith `scripts/` or `tb/rd/`.
 - **Pipeline behavior changes are gated** by env vars when they change observable outputs. Existing example: `CORESMITH_STRICT_INTEGRATION_REVIEW=1` restores pre-fix behavior. Follow this pattern.
 - **Don't commit generated artifacts**. `.coresmith/`, `sim_build/`, and `tb/` are ignored for a reason. If you find yourself running `git add -f` in any of those, stop and put the file somewhere else.
 - **Don't touch other in-flight uncommitted changes**. The repo regularly has 5-10 modified files from prior in-progress work. Use `git add -- <specific files>` to stage only what you authored.

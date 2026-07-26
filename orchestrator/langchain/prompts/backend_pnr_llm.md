@@ -45,7 +45,9 @@ All outputs go in: `{output_dir}/`
 1. Read the reference PnR script at `{tcl_path}`
 2. If prior failures exist, adjust parameters in the script as needed
    (e.g., lower utilization, adjust PDN pitch, change routing layers)
-3. Run `{openroad_bin} {tcl_path}` via Bash
+3. Run `{openroad_bin} -no_init -exit {tcl_path}` via Bash (ALWAYS pass
+   `-exit` so a Tcl error terminates OpenROAD instead of hanging at an
+   interactive `openroad>` prompt)
 4. If OpenROAD fails, read the error, edit the script to fix it, and
    retry (up to 3 internal retries)
 5. Parse timing reports for WNS/TNS
@@ -59,6 +61,12 @@ All outputs go in: `{output_dir}/`
 - Power grid MUST use met1 followpins -- Sky130 HD cells require it
 - Die area must be >= 60µm on each side
 - You are free to edit the TCL script to fix issues -- it is a working copy
+- NEVER drop, comment out, or skip the SRAM macro reads/placement
+  (`read_lef` of the `macro_lefs`, `place_macro`) to work around an error. If a
+  macro LEF is being discarded (ODB-0205/ODB-0292 "LEF data ... is discarded"),
+  the macro LEF's `DATABASE MICRONS` has already been normalized to the tech
+  DBU for you -- do NOT route a macro-less (memory-absent) layout. A layout with
+  bound memories physically absent is a HARD FAILURE, not a success.
 
 ## Result JSON Format
 

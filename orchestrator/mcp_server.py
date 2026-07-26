@@ -64,14 +64,19 @@ _PROJECT_ROOT = os.environ.get(
 os.environ["CORESMITH_PROJECT_ROOT"] = _PROJECT_ROOT
 _TELEMETRY_ROOT = os.environ.get("CORESMITH_TELEMETRY_ROOT", _PROJECT_ROOT)
 
-from orchestrator.architecture.state import ARCH_DOC_DIR  # noqa: E402
-from orchestrator.telemetry import init_telemetry  # noqa: E402
+# A-Fix 1: seed profile flag defaults before importing graph code.
+from orchestrator.profile import apply as _apply_profile
+
+_apply_profile()
+
+from orchestrator.architecture.state import ARCH_DOC_DIR
+from orchestrator.telemetry import init_telemetry
 
 init_telemetry(_TELEMETRY_ROOT)
 
 # Register the observability LLM hook (fires after every graph_node_exit)
-from orchestrator.langgraph.event_stream import register_exit_hook  # noqa: E402
-from orchestrator.langgraph.observer import observer_hook  # noqa: E402
+from orchestrator.langgraph.event_stream import register_exit_hook
+from orchestrator.langgraph.observer import observer_hook
 
 register_exit_hook(observer_hook)
 
@@ -108,7 +113,7 @@ server = FastMCP("coresmith-architecture")
 # the thin subclass below.
 # ---------------------------------------------------------------------------
 
-from orchestrator.graph_lifecycle import GraphLifecycle as _GraphLifecycle  # noqa: E402
+from orchestrator.graph_lifecycle import GraphLifecycle as _GraphLifecycle
 
 
 class GraphLifecycle(_GraphLifecycle):
@@ -703,6 +708,57 @@ def _build_pipeline_ask_question(payload: dict) -> dict:
         out["interrupt_summary"] = (
             f"Chip-level uArch review: {issues_found} issue(s) found, "
             f"{issues_fixed} fixed. Blocks: {', '.join(block_names)}."
+        )
+
+    # ---- uarch_feasibility ----
+    elif payload_type == "uarch_feasibility":
+        block_name = payload.get("block_name", payload.get("block", ""))
+        issues = payload.get("blocking_issues", []) or []
+        guidance = payload.get("outer_agent_guidance", "")
+        issues_txt = "\n".join(f"  - {i}" for i in issues)
+
+        q_text = (
+            f"Block '{block_name}' is INFEASIBLE as budgeted.\n\n"
+            f"The microarchitecture step reports it cannot be built byte-exactly "
+            f"against the golden. Feasibility spans four dimensions and each "
+            f"blocker below LEADS WITH ITS CATEGORY: [interface] a port can't "
+            f"carry data the golden reads, [area] it won't fit the area budget, "
+            f"[timing] it can't hit the clock/throughput budget, or [capability] "
+            f"it's fundamentally not realizable from this golden slice (e.g. needs "
+            f"runtime-built tables like 80 Huffman trees). [area] and [timing] "
+            f"have later dedicated gates; [capability] has NO backstop, so take it "
+            f"seriously here. This is the engine's OWN diagnosis; do NOT have it "
+            f"emit a stub.\n\n"
+            f"Blocking issues:\n{issues_txt}\n\n"
+            f"uArch spec: {payload.get('uarch_spec_path', '')}"
+        )
+        if guidance:
+            q_text += f"\n\n{guidance}"
+
+        out["ask_question"] = {
+            "title": f"uArch Feasibility Block: {block_name}",
+            "questions": [
+                {
+                    "id": "uarch_feasibility_decision",
+                    "question": q_text,
+                    "header": "Feasibility",
+                    "options": [
+                        {"label": "Fix & re-spec", "description": "Fix the root cause per the blocker's category -- widen the interface, repartition/shrink storage (area), pipeline it (timing), or decompose the block (capability) -- then re-spec against the corrected design"},
+                        {"label": "Override", "description": "Proceed to RTL anyway -- ONLY for a verified false alarm; never override a [capability] blocker"},
+                        {"label": "Abort", "description": "End this block without emitting RTL"},
+                    ],
+                    "multiSelect": False,
+                }
+            ],
+        }
+        out["resume_mapping"] = {
+            "Fix & re-spec": {"action": "revise_interface"},
+            "Override": {"action": "override"},
+            "Abort": {"action": "abort"},
+        }
+        out["interrupt_summary"] = (
+            f"Block '{block_name}' reports {len(issues)} feasibility blocker(s) "
+            f"(interface/area/timing/capability); fix the root cause before RTL."
         )
 
     # ---- integration_failure ----
@@ -1345,7 +1401,7 @@ async def get_pipeline_status(last_n: int = 25) -> str:
     Args:
         last_n: Number of recent events to show (default 25).
     """
-    from orchestrator.langgraph.event_stream import read_events, format_event_summary
+    from orchestrator.langgraph.event_stream import format_event_summary, read_events
 
     root = _project_root()
     events = read_events(root)
@@ -1637,8 +1693,8 @@ async def start_pipeline(
     # Priority 3: config.yaml blocks section
     if not block_queue:
         from orchestrator.langgraph.pipeline_helpers import (
-            load_config,
             get_sorted_block_queue,
+            load_config,
         )
         config = load_config()
         block_queue = get_sorted_block_queue(config)
@@ -1729,8 +1785,8 @@ def _aggregate_failure_summary() -> dict:
         Failure summary dict, or empty dict if no events.
     """
     from orchestrator.langgraph.event_stream import (
-        read_events,
         aggregate_failure_categories,
+        read_events,
     )
     events = read_events(_project_root())
     frontend_events = [
@@ -2397,6 +2453,7 @@ async def restart_block(
 
     # ── Build standalone block subgraph ───────────────────────────────
     from langgraph.checkpoint.memory import MemorySaver
+
     from orchestrator.langgraph.pipeline_graph import build_block_subgraph
 
     checkpointer = MemorySaver()
@@ -2580,23 +2637,23 @@ async def _merge_block_into_pipeline_checkpoint(block_result: dict) -> bool:
         if not snap or not snap.values:
             return False
 
-        completed = list(snap.values.get("completed_blocks", []))
         block_name = block_result.get("name", "")
         if not block_name:
             return False
 
-        replaced = False
-        for i, b in enumerate(completed):
-            if b.get("name") == block_name:
-                completed[i] = block_result
-                replaced = True
-                break
-        if not replaced:
-            completed.append(block_result)
-
+        # ``completed_blocks`` uses an ``operator.add`` (append) reducer, and the
+        # downstream gates (pipeline_complete / _current_phase_completed) dedup by
+        # name keeping the LAST entry. So the authoritative way to record a
+        # restart_block result is to APPEND it -- it then becomes the last entry
+        # for that name and last-wins dedup surfaces it. The previous
+        # implementation read the list, replaced the FIRST name-match, and wrote
+        # the whole list back; because the reducer APPENDS, that both duplicated
+        # the list AND left the genuine result at a non-last slot (a later stale
+        # entry for the same block could still win), so a restart_block PASS was
+        # invisible to the gate and the run re-parked at pipeline_incomplete.
         await _pipeline.graph.aupdate_state(
             config,
-            {"completed_blocks": completed},
+            {"completed_blocks": [block_result]},
             as_node="process_block",
         )
         return True
@@ -2737,12 +2794,12 @@ async def run_step(
         })
 
     # ── Run the step ──────────────────────────────────────────────────
+    from orchestrator.langgraph.event_stream import write_graph_event
     from orchestrator.langgraph.pipeline_helpers import (
         lint_rtl,
         run_simulation,
         synthesize_block,
     )
-    from orchestrator.langgraph.event_stream import write_graph_event
 
     # Map step names to the node names the webview timeline expects
     _step_node_names = {
@@ -2932,8 +2989,8 @@ async def start_backend(
         block_queue = json.loads(specs_path.read_text())
     else:
         from orchestrator.langgraph.pipeline_helpers import (
-            load_config,
             get_sorted_block_queue,
+            load_config,
         )
         config = load_config()
         block_queue = get_sorted_block_queue(config)
@@ -3302,9 +3359,7 @@ async def skip_backend_block() -> str:
 
     Convenience wrapper: if interrupted, resumes with action='skip'.
     """
-    if _backend.status == "interrupted":
-        return await resume_backend(action="skip")
-    elif _backend.status == "paused":
+    if _backend.status == "interrupted" or _backend.status == "paused":
         return await resume_backend(action="skip")
     else:
         return json.dumps({
@@ -3375,8 +3430,20 @@ async def run_backend_step(
                 sdc_dir.mkdir(parents=True, exist_ok=True)
                 sdc_path = str(sdc_dir / f"{block_name}.sdc")
                 period_ns = 1000.0 / target_clock_mhz
+                # Discover the netlist's ACTUAL clock port (a hardcoded `clk`
+                # never binds on wb_clk_i-style tops -> CTS finds zero clock
+                # nets and STA is meaningless).
+                _clk_port = "clk"
+                try:
+                    from orchestrator.langgraph.pipeline_helpers import (
+                        _detect_clock_port,
+                    )
+                    _clk_port = (_detect_clock_port(
+                        Path(netlist_path).read_text(errors="ignore")) or "clk")
+                except Exception:
+                    _clk_port = "clk"
                 Path(sdc_path).write_text(
-                    f"create_clock -name clk -period {period_ns} [get_ports clk]\n"
+                    f"create_clock -name clk -period {period_ns} [get_ports {_clk_port}]\n"
                     f"set_input_delay {period_ns * 0.2:.1f} -clock clk [all_inputs]\n"
                     f"set_output_delay {period_ns * 0.2:.1f} -clock clk [all_outputs]\n"
                 )
@@ -4937,8 +5004,8 @@ async def get_node_prompt(graph_name: str, node_id: str) -> str:
 
 
 if __name__ == "__main__":
-    import atexit
     import asyncio
+    import atexit
 
     async def _shutdown():
         await _architecture.cleanup()

@@ -19,7 +19,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Fix #15 -- Atomic file writes
 # ---------------------------------------------------------------------------
@@ -232,3 +231,64 @@ def smart_truncate(
     head = usable * 2 // 5
     tail = usable - head
     return text[:head] + sep + text[-tail:]
+
+
+# ---------------------------------------------------------------------------
+# Engine provenance (Section 7a)
+# ---------------------------------------------------------------------------
+
+_ENGINE_SHA_CACHE: dict[str, str] = {}
+
+
+def engine_git_sha(short: bool = True) -> str:
+    """Best-effort git SHA of the CoreSmith engine checkout (or "" if unknown).
+
+    Resolves the repo that CONTAINS this source tree (not the run's project
+    root), so a run can stamp WHICH engine build produced it -- and detect a
+    mid-run hot-swap when the SHA changes. Reads .git directly (no subprocess
+    dependency); caches per resolved repo root. Never raises.
+    """
+    key = f"{short}"
+    if key in _ENGINE_SHA_CACHE:
+        return _ENGINE_SHA_CACHE[key]
+    sha = ""
+    try:
+        here = Path(__file__).resolve()
+        for parent in [here.parent] + list(here.parents):
+            gitdir = parent / ".git"
+            head = None
+            if gitdir.is_dir():
+                head = gitdir / "HEAD"
+            elif gitdir.is_file():
+                # worktree: .git is a file "gitdir: <path>"
+                try:
+                    real = gitdir.read_text().split("gitdir:", 1)[1].strip()
+                    head = Path(real) / "HEAD"
+                    gitdir = Path(real)
+                except (IndexError, OSError):
+                    head = None
+            if head is None or not head.exists():
+                continue
+            ref = head.read_text().strip()
+            if ref.startswith("ref:"):
+                ref_path = gitdir / ref.split("ref:", 1)[1].strip()
+                if ref_path.exists():
+                    sha = ref_path.read_text().strip()
+                else:
+                    # packed-refs fallback
+                    packed = gitdir / "packed-refs"
+                    want = ref.split("ref:", 1)[1].strip()
+                    if packed.exists():
+                        for line in packed.read_text().splitlines():
+                            if line.endswith(" " + want) or line.endswith("\t" + want):
+                                sha = line.split()[0]
+                                break
+            else:
+                sha = ref  # detached HEAD: HEAD holds the sha directly
+            break
+    except Exception:  # noqa: BLE001 - provenance is best-effort
+        sha = ""
+    if sha and short:
+        sha = sha[:12]
+    _ENGINE_SHA_CACHE[key] = sha
+    return sha

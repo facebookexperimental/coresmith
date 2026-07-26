@@ -20,9 +20,9 @@ from pathlib import Path
 import pytest
 
 from orchestrator.langgraph.event_stream import (
-    write_graph_event,
-    read_events,
     aggregate_failure_categories,
+    read_events,
+    write_graph_event,
 )
 
 

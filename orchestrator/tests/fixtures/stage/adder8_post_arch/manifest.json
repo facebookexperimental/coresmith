@@ -1,0 +1,25 @@
+{
+  "stage": "post-arch",
+  "graph": "pipeline",
+  "thread_id": "",
+  "schema_fingerprint": "c6686d9758dfdd55",
+  "langgraph_version": "1.2.6",
+  "engine_commit": "78c972a",
+  "original_root": "/coresmith-runs/adder8-post-arch",
+  "pending_interrupt": null,
+  "env": {
+    "CORESMITH_PROFILE": "legacy",
+    "CORESMITH_SKIP_SYNTH": "1"
+  },
+  "artifacts": [
+    ".coresmith/block_diagram.json",
+    ".coresmith/block_specs.json",
+    ".coresmith/prd_spec.json",
+    "arch/ers_spec.md",
+    "arch/frd_spec.md",
+    "arch/prd_spec.md",
+    "arch/sad_spec.md",
+    "inputs/requirements.md"
+  ],
+  "has_checkpoint": false
+}

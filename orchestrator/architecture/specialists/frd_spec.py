@@ -18,10 +18,8 @@ The LLM produces Markdown directly (no JSON parsing required).
 from __future__ import annotations
 
 import json
-from typing import Any
-
 from pathlib import Path
-
+from typing import Any
 
 _PROMPT_FILE = Path(__file__).resolve().parents[2] / "langchain" / "prompts" / "frd_spec.md"
 SYSTEM_PROMPT = _PROMPT_FILE.read_text()
@@ -32,6 +30,7 @@ async def generate_frd(
     sad_spec: dict,
     requirements: str,
     project_root: str = ".",
+    constraint_feedback: str | None = None,
 ) -> dict[str, Any]:
     """Generate the Functional Requirements Document from PRD + SAD.
 
@@ -40,6 +39,10 @@ async def generate_frd(
         sad_spec: Full SAD document (contains ``sad_text`` markdown key).
         requirements: Original high-level requirements text.
         project_root: Directory where FRD collateral should be written.
+        constraint_feedback: Optional constraint-repair feedback. When set,
+            the FRD is REGENERATED to fix the cited violation(s) -- used by the
+            architecture graph's Doc Fix path for ``auto_fixable`` violations
+            whose ``source_doc`` is the FRD. Appended to the generation request.
 
     Returns:
         {"frd_text": "<markdown>", "phase": "frd_complete"}
@@ -81,9 +84,27 @@ async def generate_frd(
             f"After writing, respond with only the file path confirmation."
         )
 
-        from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
+        if constraint_feedback:
+            user_message += (
+                "\n\nCONSTRAINT REPAIR FEEDBACK (a prior FRD failed a "
+                "constraint check -- REGENERATE the document with these "
+                "corrections applied; keep everything else consistent with "
+                "the PRD/SAD):\n"
+                f"{constraint_feedback}"
+            )
 
-        llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=1200)
+        import os as _os
+
+        from orchestrator.langchain.agents.coresmith_llm import (
+            DEFAULT_MODEL,
+            ClaudeLLM,
+            arch_reasoning_effort,
+        )
+        _arch_to = int(_os.environ.get("CORESMITH_ARCH_LLM_TIMEOUT_S", "1200") or 1200)
+        # FRD carries the FUNC vectors + perf budgets the gates enforce ->
+        # higher reasoning tier (codex-only; no-op on other providers).
+        llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=_arch_to,
+                        reasoning_effort=arch_reasoning_effort())
 
         try:
             content = await llm.call(
@@ -93,8 +114,27 @@ async def generate_frd(
             )
             from orchestrator.utils import read_back_text
             frd_text = read_back_text(target_path, content.strip())
+            # dv-hardening-15 freeze check: the FRD must define a
+            # MISSION-SCALE acceptance test (see prompt section). This is the
+            # armC lesson made deterministic -- a missing/degenerate
+            # acceptance test silently redefines the whole mission (a 30dB
+            # floor "passed" on one macroblock while real frames were 21dB).
+            # Warning-grade (logged + span attr), never blocking: the human
+            # sees it at final review; Full Model DV honest-skips without the
+            # artifact.
+            _accept_ok = "Mission-Scale Acceptance Test" in (frd_text or "")
+            span.set_attribute("acceptance_test_declared", _accept_ok)
+            if not _accept_ok:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "FRD has NO 'Mission-Scale Acceptance Test' section -- "
+                    "the mission is unverified by construction (Full Model "
+                    "DV and RTL Acceptance DV will honest-skip). Escalate "
+                    "at PRD/final review."
+                )
             span.set_attribute("phase", "frd_complete")
-            return {"frd_text": frd_text, "phase": "frd_complete"}
+            return {"frd_text": frd_text, "phase": "frd_complete",
+                    "acceptance_test_declared": _accept_ok}
 
         except Exception as e:
             span.set_attribute("error", str(e))

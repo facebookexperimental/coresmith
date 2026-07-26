@@ -26,7 +26,11 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.23",
-    "ruff>=0.5",
+    # Pinned to a range known to work with the explicit [tool.ruff.lint]
+    # select below -- an unpinned "ruff>=0.5" let pip grab 0.16.0 in CI,
+    # which more than doubled ruff's *default* rule set out from under us
+    # and turned a clean `ruff check` into ~1500 errors overnight.
+    "ruff>=0.5,<0.17",
 ]
 
 [build-system]
@@ -39,3 +43,31 @@ include = ["temporal*", "langchain*", "langgraph*", "architecture*", "pdk*", "te
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+# Pin the ruleset explicitly instead of inheriting ruff's (drifting) default
+# selection -- ruff 0.16.0 quietly expanded its defaults to include dozens of
+# opinion/style rule families (BLE001, S-family, SIM, PLW, RUF*, ...) that
+# were never part of the standard this code was written to, and turned a
+# clean lint into ~1500 errors with no code change on our side. `E4/E7/E9/F`
+# is ruff's own long-stable default (pyflakes correctness + pycodestyle
+# error-class checks); `W`/`I` (pycodestyle warnings + import sorting) are
+# added on top because this codebase already conforms to them. Keeping this
+# list explicit means a future ruff release can keep expanding its defaults
+# without silently failing CI again.
+select = ["E4", "E7", "E9", "F", "W", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# mcp_server.py / daemon/server.py: project-root + telemetry env vars MUST be
+# set before the graph modules that read them at import time are imported
+# (see the "must run before graph imports" comments in each file) -- the
+# import-order-dependent code is intentional, not sloppy placement.
+"mcp_server.py" = ["E402"]
+"daemon/server.py" = ["E402"]
+# vscode-ext/serve.py: this extension host script inserts the project/code
+# roots onto sys.path before importing the orchestrator package, since it
+# may run outside an installed-package context.
+"vscode-ext/serve.py" = ["E402"]
+# test_patch_openram.py: mirrors the same sys.path-then-import pattern to
+# reach the standalone scripts/patch_openram.py module under test.
+"tests/test_patch_openram.py" = ["E402"]
