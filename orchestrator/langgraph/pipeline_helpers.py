@@ -94,6 +94,17 @@ def preflight_check(phases: list[str] | None = None) -> dict:
     }
 
     if "pipeline" in phases:
+        provider = os.environ.get("CORESMITH_LLM_PROVIDER", "").strip().lower()
+        if provider in {"kimi", "kimi_cli"}:
+            configured_kimi = os.environ.get("KIMI_CLI_PATH", "").strip()
+            kimi_ok = (
+                bool(configured_kimi)
+                and Path(configured_kimi).is_file()
+                and os.access(configured_kimi, os.X_OK)
+            ) or bool(shutil.which("kimi"))
+            if not kimi_ok:
+                errors.append("Kimi Code CLI not found; install @moonshot-ai/kimi-code or set KIMI_CLI_PATH")
+
         if not shutil.which("verilator"):
             errors.append("verilator not found on PATH")
         if skip_synth:

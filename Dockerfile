@@ -49,7 +49,7 @@ RUN nix-channel --add https://nixos.org/channels/nixos-24.05 nixpkgs \
  && nix-channel --add https://nixos.org/channels/nixos-unstable nixos-unstable \
  && nix-channel --update \
  && nix-env -iA \
-        nixpkgs.nodejs_20 \
+        nixos-unstable.nodejs_22 \
         nixpkgs.gnumake \
         nixpkgs.openssh \
         nixpkgs.musl \
@@ -204,6 +204,7 @@ ENV PATH="/opt/npm-global/bin:${PATH}"
 # RUN below replaces that with a symlink to the musl binary.
 RUN mkdir -p /opt/npm-global \
  && npm install -g --force --libc=musl \
+        @moonshot-ai/kimi-code \
         @anthropic-ai/claude-code \
         @anthropic-ai/claude-code-linux-x64-musl
 
@@ -216,15 +217,17 @@ RUN set -eux \
  && test -x "${MUSL_BIN}" \
  && ln -sf "${MUSL_BIN}" /opt/npm-global/bin/claude
 
-# Capture the resolved Claude CLI path at build time and bake it as
-# CLAUDE_CLI_PATH so runtime resolution can't drift if PATH changes
-# under us. Also fail the build loud if `claude --version` fails -- the
-# runtime "PermissionError: ''" failure mode is much harder to debug.
+# Capture the resolved agent CLI paths at build time so PATH changes cannot
+# break runtime discovery. Fail the build loudly if either CLI is unusable.
 RUN set -eux \
  && CLAUDE_BIN="$(command -v claude)" \
+ && KIMI_BIN="$(command -v kimi)" \
  && test -x "${CLAUDE_BIN}" \
+ && test -x "${KIMI_BIN}" \
  && claude --version \
- && printf 'CLAUDE_CLI_PATH=%s\n' "${CLAUDE_BIN}" > /etc/coresmith.env
+ && kimi --version \
+ && printf 'CLAUDE_CLI_PATH=%s\nKIMI_CLI_PATH=%s\n' \
+        "${CLAUDE_BIN}" "${KIMI_BIN}" > /etc/coresmith.env
 
 # sshd setup so RunPod / interactive users can ssh in (and the web
 # terminal works because PID 1 stays alive even after the pipeline

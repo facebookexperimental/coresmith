@@ -26,6 +26,7 @@ import contextvars
 import json as _json
 import logging
 import os
+import queue
 import subprocess
 import shutil
 import tempfile
@@ -356,6 +357,54 @@ def _parse_codex_json(stdout: str) -> tuple[str, dict]:
     return final_text, usage
 
 
+
+def _parse_kimi_acp_json(stdout: str) -> tuple[str, dict]:
+    """Parse a captured Kimi Code ACP JSON-RPC transcript.
+
+    Kimi streams assistant text through ``session/update`` notifications and
+    returns token usage on the terminating ``session/prompt`` response. Text
+    chunks are concatenated in arrival order. Unknown notifications and
+    malformed lines are deliberately ignored so an upstream additive schema
+    change does not break a running pipeline.
+    """
+    chunks: list[str] = []
+    usage: dict = {}
+    for raw in stdout.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            obj = _json.loads(raw)
+        except _json.JSONDecodeError:
+            continue
+
+        if obj.get("method") == "session/update":
+            update = (obj.get("params") or {}).get("update") or {}
+            if update.get("sessionUpdate") != "agent_message_chunk":
+                continue
+            content = update.get("content") or {}
+            if content.get("type") == "text":
+                chunks.append(content.get("text", "") or "")
+            continue
+
+        result = obj.get("result") or {}
+        raw_usage = result.get("usage") or {}
+        if raw_usage:
+            usage = {
+                "input_tokens": raw_usage.get("inputTokens", 0),
+                "output_tokens": raw_usage.get("outputTokens", 0),
+                "total_tokens": raw_usage.get("totalTokens", 0),
+            }
+            if raw_usage.get("cachedReadTokens") is not None:
+                usage["cache_read_input_tokens"] = raw_usage["cachedReadTokens"]
+            if raw_usage.get("cachedWriteTokens") is not None:
+                usage["cache_creation_input_tokens"] = raw_usage["cachedWriteTokens"]
+            if raw_usage.get("thoughtTokens") is not None:
+                usage["reasoning_output_tokens"] = raw_usage["thoughtTokens"]
+
+    return "".join(chunks), usage
+
+
 def _log_codex_turns(stdout: str, project_root: str, pid: int, wall_start: float) -> int:
     """Append every Codex CLI turn to ``.coresmith/codex_turns.jsonl``.
 
@@ -421,12 +470,24 @@ _CODEX_MODEL_MAP = {
     "haiku-3.5": "gpt-5.4-mini",
 }
 
+_KIMI_MODEL_MAP = {
+    # Kimi Code catalog aliases (not raw API model IDs).
+    "opus-4.7": "kimi-code/k3",
+    "opus-4.6": "kimi-code/k3",
+    "sonnet-4.6": "kimi-code/kimi-for-coding",
+    "sonnet-4.5": "kimi-code/kimi-for-coding",
+    "haiku-4.5": "kimi-code/kimi-for-coding",
+    "haiku-3.5": "kimi-code/kimi-for-coding",
+}
+
+
 # Default model used by every agent unless overridden. Set the CORESMITH_MODEL
 # environment variable (to either a short name above or a full Claude CLI
 # model ID) to override at runtime without code changes -- useful when the
 # default version is unavailable on a fresh CLI install.
 DEFAULT_MODEL = "opus-4.7"
 DEFAULT_CODEX_MODEL = "gpt-5.5"
+DEFAULT_KIMI_MODEL = "kimi-code/k3"
 
 # Cheaper model for per-block agents (uarch, rtl, testbench, diagnose, lint
 # fix, tb fix).  Integration and review agents still call DEFAULT_MODEL.
@@ -451,6 +512,22 @@ def _resolve_model(model: str, provider: str = "claude_cli") -> str:
         if not model:
             return DEFAULT_CODEX_MODEL
         return _CODEX_MODEL_MAP.get(model, model)
+
+
+    if provider == "kimi_cli":
+        # The KIMI_MODEL_* provider is exposed under a reserved runtime alias.
+        if os.environ.get("KIMI_MODEL_NAME", "").strip():
+            return "__kimi_env_model__"
+
+        env_override = (
+            os.environ.get("CORESMITH_KIMI_MODEL", "").strip()
+            or os.environ.get("CORESMITH_MODEL", "").strip()
+        )
+        if env_override:
+            return _KIMI_MODEL_MAP.get(env_override, env_override)
+        if not model:
+            return DEFAULT_KIMI_MODEL
+        return _KIMI_MODEL_MAP.get(model, model)
 
     env_override = os.environ.get("CORESMITH_MODEL", "").strip()
     if env_override:
@@ -480,10 +557,12 @@ def _detect_provider() -> str:
     provider = os.environ.get("CORESMITH_LLM_PROVIDER", "").strip().lower()
     if provider in {"codex", "codex_cli"}:
         return "codex_cli"
+    if provider in {"kimi", "kimi_cli"}:
+        return "kimi_cli"
     if provider in {"claude", "claude_cli", ""}:
         return "claude_cli"
     raise ValueError(
-        "Unsupported CORESMITH_LLM_PROVIDER={!r}. Use 'claude' or 'codex'.".format(provider)
+        "Unsupported CORESMITH_LLM_PROVIDER={!r}. Use 'claude', 'codex', or 'kimi'.".format(provider)
     )
     return "claude_cli"
 
@@ -548,6 +627,33 @@ def _find_codex_binary() -> str:
     )
 
 
+
+def _find_kimi_binary() -> str:
+    """Locate the current Kimi Code CLI binary."""
+    env_path = os.environ.get("KIMI_CLI_PATH", "")
+    if env_path and os.path.isfile(env_path) and os.access(env_path, os.X_OK):
+        return env_path
+
+    which_path = shutil.which("kimi")
+    if which_path:
+        return which_path
+
+    candidates = [
+        os.path.expanduser("~/.local/bin/kimi"),
+        os.path.expanduser("~/.npm-global/bin/kimi"),
+        os.path.expanduser("~/.npm/bin/kimi"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+
+    raise FileNotFoundError(
+        "Kimi Code CLI not found. Install it with: "
+        "npm install -g @moonshot-ai/kimi-code\n"
+        "Or set KIMI_CLI_PATH to the binary location."
+    )
+
+
 # ---------------------------------------------------------------------------
 # ClaudeLLM -- plain Python class (no LangChain)
 # ---------------------------------------------------------------------------
@@ -574,6 +680,7 @@ class ClaudeLLM:
         self,
         model: str = DEFAULT_MODEL,
         claude_path: str = "",
+        kimi_path: str = "",
         codex_path: str = "",
         timeout: int = 1200,
         max_turns: int = 50,
@@ -581,6 +688,7 @@ class ClaudeLLM:
     ) -> None:
         self.model = model or DEFAULT_MODEL
         self.claude_path = claude_path
+        self.kimi_path = kimi_path
         self.codex_path = codex_path
         self.timeout = timeout
         self.max_turns = max_turns
@@ -601,7 +709,10 @@ class ClaudeLLM:
             self.codex_path = os.environ.get("CODEX_CLI_PATH", "")
             if not self.codex_path:
                 self.codex_path = _find_codex_binary()
-                logger.info(f"Found Codex CLI at: {self.codex_path}")
+                logger.info("Found Codex CLI at: %s", self.codex_path)
+        elif self._provider == "kimi_cli" and not self.kimi_path:
+            self.kimi_path = _find_kimi_binary()
+            logger.info("Found Kimi Code CLI at: %s", self.kimi_path)
 
     async def call(
         self,
@@ -686,6 +797,8 @@ class ClaudeLLM:
         if self._provider == "codex_cli":
             return self._generate_via_codex_cli(system_prompt, user_prompt)
 
+        if self._provider == "kimi_cli":
+            return self._generate_via_kimi_cli(system_prompt, user_prompt)
         return self._generate_via_claude_cli(system_prompt, user_prompt)
 
     def _generate_via_claude_cli(
@@ -1008,6 +1121,317 @@ class ClaudeLLM:
         )
 
         return output
+    def _generate_via_kimi_cli(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        """Call Kimi Code through its stdin/stdout ACP server.
+
+        ACP keeps large prompts off the process argument list and provides a
+        stable JSON-RPC stream for assistant text, usage, and tool permission
+        requests. Authentication remains owned by the installed ``kimi`` CLI.
+        """
+        resolved_model = _resolve_model(self.model, self._provider)
+        combined_prompt = self._build_kimi_prompt(system_prompt, user_prompt)
+        project_root = _llm_log_root()
+        workdir = (
+            os.environ.get("CORESMITH_KIMI_WORKDIR", "").strip()
+            or os.environ.get("CORESMITH_PROJECT_ROOT", "").strip()
+            or _default_project_root()
+        )
+        Path(workdir).mkdir(parents=True, exist_ok=True)
+
+        t0 = _time_mod.monotonic()
+        span_start_ns = _time_mod.time_ns()
+        try:
+            output, stderr_text, returncode, elapsed, timed_out, stalled, usage = (
+                self._run_kimi_acp_with_watchdog(
+                    combined_prompt, workdir, project_root, resolved_model, t0,
+                )
+            )
+        except FileNotFoundError:
+            elapsed = _time_mod.monotonic() - t0
+            error_msg = "kimi CLI binary not found"
+            output = (
+                "[ClaudeLLM error: Kimi Code CLI binary not found. Install: "
+                "npm install -g @moonshot-ai/kimi-code]"
+            )
+            _log_llm_call(
+                model=resolved_model,
+                provider="kimi_cli",
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response=output,
+                duration_s=elapsed,
+                timeout=self.timeout,
+                error=error_msg,
+                start_ts_ns=span_start_ns,
+            )
+            return output
+
+        if timed_out or stalled:
+            reason = "stalled" if stalled else "timed out"
+            error_msg = f"kimi CLI {reason} after {elapsed:.0f}s"
+            if stderr_text:
+                error_msg += f" | stderr: {stderr_text[:300]}"
+            if output:
+                error_msg += f" | partial stdout: {output[:300]}"
+            output = f"[ClaudeLLM error: {error_msg}]"
+            _log_llm_call(
+                model=resolved_model,
+                provider="kimi_cli",
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response=output,
+                duration_s=elapsed,
+                timeout=self.timeout,
+                error=error_msg,
+                timed_out=True,
+                usage=usage,
+                start_ts_ns=span_start_ns,
+            )
+            return output
+
+        if not output:
+            detail = stderr_text[:500] or f"ACP exited with code {returncode}"
+            output = f"[ClaudeLLM error: kimi CLI returned empty response. {detail}]"
+
+        _log_llm_call(
+            model=resolved_model,
+            provider="kimi_cli",
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response=output,
+            duration_s=elapsed,
+            timeout=self.timeout,
+            error=stderr_text if returncode != 0 else "",
+            usage=usage,
+            start_ts_ns=span_start_ns,
+        )
+        return output
+
+    @staticmethod
+    def _build_kimi_prompt(system_prompt: str, user_prompt: str) -> str:
+        """Build a single ACP text block while preserving prompt roles."""
+        if not system_prompt:
+            return user_prompt
+        return (
+            "<system>\n"
+            f"{system_prompt}\n"
+            "</system>\n\n"
+            "<user>\n"
+            f"{user_prompt}\n"
+            "</user>\n"
+        )
+
+    def _run_kimi_acp_with_watchdog(
+        self,
+        prompt: str,
+        workdir: str,
+        project_root: str,
+        resolved_model: str,
+        t0: float,
+    ) -> tuple[str, str, int, float, bool, bool, dict]:
+        """Run one Kimi ACP session and capture its JSON-RPC transcript."""
+        process = subprocess.Popen(
+            [self.kimi_path, "acp"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=workdir,
+            bufsize=1,
+        )
+        _register_process(process)
+        self._write_llm_event(project_root, "llm_call_start", {
+            "model": resolved_model,
+            "provider": "kimi_cli",
+            "timeout_s": self.timeout,
+            "prompt_len": len(prompt),
+            "pid": process.pid,
+        })
+
+        messages: queue.Queue[str] = queue.Queue()
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+        last_activity = _time_mod.monotonic()
+        timed_out = False
+        stalled = False
+        complete = False
+        protocol_error = ""
+        session_id = ""
+        prompt_request_id = 4
+
+        def _read_stdout() -> None:
+            nonlocal last_activity
+            try:
+                for line in process.stdout:
+                    stdout_chunks.append(line)
+                    messages.put(line)
+                    last_activity = _time_mod.monotonic()
+            except (ValueError, OSError):
+                pass
+
+        def _read_stderr() -> None:
+            nonlocal last_activity
+            try:
+                for line in process.stderr:
+                    stderr_chunks.append(line)
+                    last_activity = _time_mod.monotonic()
+            except (ValueError, OSError):
+                pass
+
+        def _send(payload: dict) -> None:
+            raw = _json.dumps(payload, separators=(",", ":")) + "\n"
+            process.stdin.write(raw)
+            process.stdin.flush()
+
+        def _request(request_id: int, method: str, params: dict) -> None:
+            _send({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": params,
+            })
+
+        t_out = threading.Thread(target=_read_stdout, daemon=True)
+        t_err = threading.Thread(target=_read_stderr, daemon=True)
+        t_out.start()
+        t_err.start()
+
+        try:
+            _request(1, "initialize", {
+                "protocolVersion": 1,
+                "clientCapabilities": {},
+                "clientInfo": {"name": "coresmith", "version": "0.1"},
+            })
+            poll_count = 0
+            while not complete:
+                elapsed = _time_mod.monotonic() - t0
+                if elapsed > self.timeout:
+                    timed_out = True
+                    break
+                if _time_mod.monotonic() - last_activity > scaled(self._STALL_THRESHOLD_S):
+                    stalled = True
+                    break
+                if process.poll() is not None and messages.empty():
+                    protocol_error = protocol_error or "Kimi ACP process exited before completing the prompt"
+                    break
+
+                try:
+                    raw = messages.get(timeout=self._POLL_INTERVAL_S)
+                except queue.Empty:
+                    poll_count += 1
+                    if poll_count % self._HEARTBEAT_EVERY_N == 0:
+                        self._write_llm_event(project_root, "llm_call_heartbeat", {
+                            "model": resolved_model,
+                            "provider": "kimi_cli",
+                            "elapsed_s": round(elapsed, 1),
+                            "stdout_bytes": sum(len(c) for c in stdout_chunks),
+                            "stderr_bytes": sum(len(c) for c in stderr_chunks),
+                            "pid": process.pid,
+                        })
+                    continue
+
+                try:
+                    message = _json.loads(raw)
+                except _json.JSONDecodeError:
+                    continue
+
+                # ACP servers may ask the client to approve a tool call. CoreSmith
+                # is intentionally non-interactive, so choose a deterministic
+                # one-shot answer rather than hanging on a terminal prompt.
+                if message.get("method") == "session/request_permission":
+                    params = message.get("params") or {}
+                    options = params.get("options") or []
+                    wanted = (
+                        ("reject_once", "reject_always")
+                        if self.disable_tools
+                        else ("allow_once", "allow_always")
+                    )
+                    selected = next(
+                        (o for kind in wanted for o in options if o.get("kind") == kind),
+                        None,
+                    )
+                    outcome = (
+                        {"outcome": "selected", "optionId": selected["optionId"]}
+                        if selected
+                        else {"outcome": "cancelled"}
+                    )
+                    _send({"jsonrpc": "2.0", "id": message.get("id"), "result": {"outcome": outcome}})
+                    continue
+
+                response_id = message.get("id")
+                if response_id not in {1, 2, 3, prompt_request_id}:
+                    continue
+                if message.get("error"):
+                    error = message["error"]
+                    protocol_error = str(error.get("message") or error)
+                    break
+
+                if response_id == 1:
+                    _request(2, "session/new", {"cwd": workdir, "mcpServers": []})
+                elif response_id == 2:
+                    session_id = (message.get("result") or {}).get("sessionId", "")
+                    if not session_id:
+                        protocol_error = "Kimi ACP session/new returned no sessionId"
+                        break
+                    _request(3, "session/set_config_option", {
+                        "sessionId": session_id,
+                        "configId": "model",
+                        "value": resolved_model,
+                    })
+                elif response_id == 3:
+                    effective_prompt = prompt
+                    if self.disable_tools:
+                        effective_prompt = (
+                            "Do not use tools or modify files. Answer using only the supplied context.\n\n"
+                            + prompt
+                        )
+                    _request(prompt_request_id, "session/prompt", {
+                        "sessionId": session_id,
+                        "prompt": [{"type": "text", "text": effective_prompt}],
+                    })
+                elif response_id == prompt_request_id:
+                    complete = True
+        except (BrokenPipeError, OSError) as exc:
+            protocol_error = f"Kimi ACP transport error: {exc}"
+        finally:
+            if (timed_out or stalled) and session_id and process.poll() is None:
+                try:
+                    _request(5, "session/cancel", {"sessionId": session_id})
+                except (BrokenPipeError, OSError):
+                    pass
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+            t_out.join(timeout=5)
+            t_err.join(timeout=5)
+            _unregister_process()
+
+        elapsed = _time_mod.monotonic() - t0
+        stdout_text = "".join(stdout_chunks).strip()
+        stderr_text = "".join(stderr_chunks).strip()
+        if protocol_error:
+            stderr_text = f"{protocol_error}\n{stderr_text}".strip()
+        response_text, usage = _parse_kimi_acp_json(stdout_text)
+        return (
+            response_text,
+            stderr_text,
+            0 if complete else (
+                process.returncode if process.returncode is not None else -1
+            ),
+            elapsed,
+            timed_out,
+            stalled,
+            usage,
+        )
+
 
     @staticmethod
     def _build_codex_prompt(system_prompt: str, user_prompt: str) -> str:

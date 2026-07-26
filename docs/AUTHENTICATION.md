@@ -1,5 +1,51 @@
 # Authentication
 
+coresmith supports Claude Code (default), Codex CLI, and Kimi Code CLI. Select
+Kimi with `CORESMITH_LLM_PROVIDER=kimi`.
+
+## Kimi Code
+
+Install the official CLI (Node.js 22.19 or newer is required):
+
+```bash
+npm install -g @moonshot-ai/kimi-code
+kimi --version
+```
+
+For a developer machine or persistent worker, use Kimi's device-code login:
+
+```bash
+kimi login
+export CORESMITH_LLM_PROVIDER=kimi
+```
+
+The CLI stores config, sessions, and OAuth credentials in `~/.kimi-code`. Set
+`KIMI_CODE_HOME` to relocate that directory; mount it on persistent storage in
+a container or ephemeral worker.
+
+For headless API-key deployments, Kimi Code's explicit temporary-model channel
+requires both variables (an ordinary exported `KIMI_API_KEY` is not read):
+
+```bash
+export KIMI_MODEL_NAME=kimi-for-coding
+export KIMI_MODEL_API_KEY=...
+export CORESMITH_LLM_PROVIDER=kimi
+```
+
+Optional coresmith overrides:
+
+```bash
+export CORESMITH_KIMI_MODEL=kimi-code/k3
+export KIMI_CLI_PATH=/usr/local/bin/kimi
+export CORESMITH_KIMI_WORKDIR=/path/to/project
+```
+
+coresmith communicates with `kimi acp` over stdin/stdout JSON-RPC. This avoids
+command-line length limits for large RTL prompts and preserves streaming token
+usage. Run a quick integration check with:
+
+```bash
+
 coresmith's pipeline calls Anthropic's API through the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code/overview). The CLI accepts three credential sources, checked in this order:
 
 1. **`CLAUDE_CODE_OAUTH_TOKEN`** — long-lived OAuth token from `claude setup-token`. Recommended for CI, Docker, RunPod, GitHub Codespaces.

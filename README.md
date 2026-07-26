@@ -149,11 +149,13 @@ sudo tar --no-same-owner -C /opt -xzf /tmp/oss-cad.tgz
 echo 'export PATH="/opt/oss-cad-suite/bin:$PATH"' | sudo tee /etc/profile.d/oss-cad-suite.sh
 export PATH="/opt/oss-cad-suite/bin:$PATH"
 
-# 2. Node + Claude Code CLI (apt nodejs is too old; use NodeSource)
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
+# 2. Node + agent CLIs (Kimi Code requires Node 22.19+)
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -
 sudo apt-get install -y nodejs
 sudo npm install -g @anthropic-ai/claude-code
+sudo npm install -g @moonshot-ai/kimi-code
 claude auth login   # interactive
+# Or: kimi login && export CORESMITH_LLM_PROVIDER=kimi
 
 # 3. Python venv + orchestrator
 python3.11 -m venv venv
