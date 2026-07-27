@@ -111,6 +111,36 @@ def preflight_check(phases: list[str] | None = None) -> dict:
     if "pipeline" in phases:
         if not shutil.which("verilator"):
             errors.append("verilator not found on PATH")
+        # With macro tiling disabled (the default), OpenRAM is the ONLY route to
+        # a memory geometry the PDK does not ship. A broken generator therefore
+        # fails the run in the same class as a missing PDK -- surface it here
+        # rather than letting every non-exact memory die deep in the pipeline.
+        # Skipped when synth is skipped (no macros are built in that mode) and
+        # when tiling is explicitly re-enabled.
+        if not skip_synth:
+            try:
+                from orchestrator.langgraph.openram_gen import (
+                    openram_available,
+                    tiling_allowed,
+                )
+            except ImportError:
+                openram_available = tiling_allowed = None  # type: ignore[assignment]
+            if openram_available is not None and not openram_available():
+                if tiling_allowed():
+                    warnings.append(
+                        "OpenRAM is not runnable; CORESMITH_ALLOW_MACRO_TILING "
+                        "is set, so non-exact geometries will be TILED from "
+                        "prebuilt macros -- their timing is not modelled "
+                        "honestly (composition Fmax ignores tile count)."
+                    )
+                else:
+                    errors.append(
+                        "OpenRAM is not runnable. Tiling is disabled, so any "
+                        "memory geometry the PDK does not ship exactly CANNOT "
+                        "be built. Repair it (`bin/gen_ram --check-only`), or "
+                        "set CORESMITH_ALLOW_MACRO_TILING=1 to accept tiled "
+                        "memories with unmodelled timing."
+                    )
         if skip_synth:
             _loud = (
                 "!!! CORESMITH_SKIP_SYNTH=1 -- SYNTHESIS GATE DISABLED. "

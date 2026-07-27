@@ -39,6 +39,28 @@ from orchestrator.langgraph.macro_registry import (
 _INSTALL_VARIANT = "sky130B"
 
 
+def tiling_allowed() -> bool:
+    """True when a logical memory may be built from MULTIPLE prebuilt macros.
+
+    Default OFF. Tiling (composition + over-provisioning) existed as a
+    workaround for a broken OpenRAM; with the generator repaired the exact
+    geometry should be built instead. Two concrete reasons to keep it off:
+
+    * A tiled memory's timing is not modelled honestly -- composition Fmax is
+      computed from the base macro alone and ignores tile count, so a 16-tile
+      memory reports the same frequency as a 1-tile one. Deep tiling in
+      particular adds ``ceil(log2(tiles))`` output-mux levels that nothing
+      accounts for.
+    * An over-provisioned tile is larger than a purpose-built macro and carries
+      collateral that was signed off for a different geometry.
+
+    ``CORESMITH_ALLOW_MACRO_TILING=1`` restores the previous behaviour.
+    """
+    return os.environ.get(
+        "CORESMITH_ALLOW_MACRO_TILING", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass
 class CompositionPlan:
     """A way to build the requested memory by tiling pre-built macros."""
@@ -417,11 +439,25 @@ def ensure_macro(
     exact = find_exact(words, data_bits, registry)
     if exact:
         return exact
-    comp = plan_composition(words, data_bits, registry)
-    if comp:
-        return comp
-    # Try OpenRAM generation for the exact geometry BEFORE over-provisioning:
-    # a purpose-built macro is tighter than an over-provisioned prebuilt tile.
+
+    # TILING IS OFF BY DEFAULT. Composition and over-provisioning both build a
+    # logical memory out of several prebuilt macros. They existed because
+    # OpenRAM generation was failing (an audit found 20 launches across 11
+    # geometries: 17 failed, 2 timed out, 1 interrupted -- zero successes), so
+    # tiling was the only way to get a real macro instead of a flop array.
+    #
+    # That premise no longer holds: the OpenRAM repairs in
+    # ``scripts/patch_openram.py`` produce macros that pass DRC, LVS and
+    # characterization, so the exact geometry can simply be BUILT. A
+    # purpose-built macro is tighter than an over-provisioned tile and carries
+    # its own signed-off collateral, and a tiled memory's timing is not
+    # modelled honestly (composition Fmax ignores tile count entirely).
+    #
+    # Set ``CORESMITH_ALLOW_MACRO_TILING=1`` to restore the old behaviour.
+    if tiling_allowed():
+        comp = plan_composition(words, data_bits, registry)
+        if comp:
+            return comp
     if allow_generate:
         gen = generate_openram_macro(words, data_bits, write_size=write_size)
         if gen and macro_pin_clean(gen):
@@ -436,16 +472,28 @@ def ensure_macro(
                 f"{gen.pin_shorts[:3]} -- discarding; over-provisioning from "
                 "clean prebuilt macros instead."
             )
-    # Last resort before flopping the whole memory: OVER-PROVISION from
-    # prebuilt macros (depth/width rounded up, surplus tied off). This exists
-    # because the previous chain returned None here for any non-exact geometry
-    # when OpenRAM was unavailable/broken, and the caller then silently flopped
-    # EVERY memory in the design (observed: a 32x64 store made a whole design's
-    # route intractable). A real macro, even over-provisioned, is always the
-    # better answer than flops.
-    over = plan_over_provisioned(words, data_bits, registry)
-    if over:
-        return over
+    # Over-provisioning (depth/width rounded up from prebuilt macros, surplus
+    # tied off) is tiling by another name and is gated with it. Its original
+    # justification was explicitly "OpenRAM was unavailable/broken" -- with the
+    # generator repaired, building the exact geometry is the better answer.
+    if tiling_allowed():
+        over = plan_over_provisioned(words, data_bits, registry)
+        if over:
+            return over
+
+    # No path. Return None so the caller ESCALATES TO A HUMAN. Do not fall back
+    # to flops (that is what produced multi-mm^2, single-digit-MHz memories) and
+    # do not tile silently. A memory geometry that OpenRAM cannot build is a
+    # design-level decision, not something to paper over.
+    print(
+        f"[OPENRAM] no macro for {words}x{data_bits}: no exact prebuilt part, "
+        f"and OpenRAM generation "
+        f"{'failed' if allow_generate else 'was not attempted'}. "
+        "Tiling is disabled (set CORESMITH_ALLOW_MACRO_TILING=1 to re-enable). "
+        "ESCALATE: this geometry needs a human decision -- regenerate the macro "
+        "with bin/gen_ram, choose a buildable geometry, or explicitly accept a "
+        "flop array with its measured Fmax cost."
+    )
     return None
 
 

@@ -116,10 +116,34 @@ read-only port (port B).
 
 Pick the organization whose native word width / depth matches the
 access pattern (e.g. a byte-addressed buffer favors the ×8 part; a
-32-bit datapath favors a ×32 part). Compose multiple macros for memories
-that are wider (tile horizontally, concatenate `rdata`) or deeper (tile
-vertically, decode the high address bits to select a bank) than a single
-macro provides.
+32-bit datapath favors a ×32 part).
+
+### DO NOT TILE. Build the exact geometry instead.
+
+If no listed part matches your geometry, **do not compose several macros**
+into one logical memory — neither horizontally (concatenating `rdata`) nor
+vertically (decoding high address bits to select a bank). Tiling is disabled
+in the engine by default and `ensure_macro` will not return a tiled plan.
+
+Ask for the geometry you actually need and let OpenRAM build it
+(`bin/gen_ram --width W --depth D --ports 1rw1r`). A purpose-built macro is
+smaller than an over-provisioned tile and arrives with its own signed-off
+DRC/LVS/Liberty collateral.
+
+Two reasons this matters, both measured:
+
+- **Tiled timing is not modelled.** Composition Fmax is taken from the base
+  macro and ignores tile count, so a 16-tile memory reports the same frequency
+  as a 1-tile one. Deep tiling adds `ceil(log2(tiles))` output-mux levels that
+  nothing accounts for.
+- **Tiling existed only because the generator was broken.** An audit found 20
+  OpenRAM launches across 11 geometries with zero successes, so tiling was the
+  only way to avoid a flop array. The generator is now repaired.
+
+**If the geometry genuinely cannot be built, that is a human decision, not a
+fallback.** The engine returns no macro and escalates. Do not silently
+substitute a flop array — a large one costs multiple mm² at single-digit MHz
+(see the measured table above).
 
 ## uArch-spec implications you MUST record
 
