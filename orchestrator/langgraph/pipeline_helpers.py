@@ -111,36 +111,6 @@ def preflight_check(phases: list[str] | None = None) -> dict:
     if "pipeline" in phases:
         if not shutil.which("verilator"):
             errors.append("verilator not found on PATH")
-        # With macro tiling disabled (the default), OpenRAM is the ONLY route to
-        # a memory geometry the PDK does not ship. A broken generator therefore
-        # fails the run in the same class as a missing PDK -- surface it here
-        # rather than letting every non-exact memory die deep in the pipeline.
-        # Skipped when synth is skipped (no macros are built in that mode) and
-        # when tiling is explicitly re-enabled.
-        if not skip_synth:
-            try:
-                from orchestrator.langgraph.openram_gen import (
-                    openram_available,
-                    tiling_allowed,
-                )
-            except ImportError:
-                openram_available = tiling_allowed = None  # type: ignore[assignment]
-            if openram_available is not None and not openram_available():
-                if tiling_allowed():
-                    warnings.append(
-                        "OpenRAM is not runnable; CORESMITH_ALLOW_MACRO_TILING "
-                        "is set, so non-exact geometries will be TILED from "
-                        "prebuilt macros -- their timing is not modelled "
-                        "honestly (composition Fmax ignores tile count)."
-                    )
-                else:
-                    errors.append(
-                        "OpenRAM is not runnable. Tiling is disabled, so any "
-                        "memory geometry the PDK does not ship exactly CANNOT "
-                        "be built. Repair it (`bin/gen_ram --check-only`), or "
-                        "set CORESMITH_ALLOW_MACRO_TILING=1 to accept tiled "
-                        "memories with unmodelled timing."
-                    )
         if skip_synth:
             _loud = (
                 "!!! CORESMITH_SKIP_SYNTH=1 -- SYNTHESIS GATE DISABLED. "
@@ -176,6 +146,12 @@ def preflight_check(phases: list[str] | None = None) -> dict:
         # a run that cannot realize its memories. Opt out with
         # CORESMITH_ALLOW_NO_OPENRAM=1 ONLY for a design that provably needs no
         # generated macros (every store fits a pre-built macro).
+        #
+        # This matters MORE now that macro tiling is off by default: generation
+        # is the only route to a geometry the PDK does not ship exactly, so the
+        # exemption's precondition ("every store fits a pre-built macro") is
+        # strictly narrower than it used to be -- composing or over-provisioning
+        # from prebuilt parts no longer counts as a fit.
         if os.environ.get("CORESMITH_ALLOW_NO_OPENRAM", "").strip().lower() not in {
             "1", "true", "yes", "on",
         }:
@@ -187,10 +163,27 @@ def preflight_check(phases: list[str] | None = None) -> dict:
                         "OPENRAM_HOME) -- SRAM macro generation is impossible, so a "
                         "block needing a non-pre-built macro cannot be realized. "
                         "Install OpenRAM, or set CORESMITH_ALLOW_NO_OPENRAM=1 if "
-                        "this design provably needs no generated macros."
+                        "this design provably needs no generated macros. NOTE: "
+                        "with macro tiling disabled (the default), 'fits a "
+                        "pre-built macro' means an EXACT geometry match -- a "
+                        "geometry that used to be satisfied by composition or "
+                        "over-provisioning now requires generation."
                     )
             except Exception as _oe:  # noqa: BLE001 - import failure == not available
                 errors.append(f"OpenRAM availability probe failed: {_oe}")
+        else:
+            try:
+                from orchestrator.langgraph.openram_gen import tiling_allowed
+                _tiling = tiling_allowed()
+            except ImportError:
+                _tiling = False
+            if not _tiling:
+                warnings.append(
+                    "CORESMITH_ALLOW_NO_OPENRAM=1 with macro tiling disabled: "
+                    "this design must satisfy EVERY store with an exact "
+                    "pre-built macro or an explicitly-accepted flop tier. Any "
+                    "other geometry will escalate rather than being tiled."
+                )
 
     if "backend" in phases:
         from orchestrator.langgraph.backend_helpers import (
