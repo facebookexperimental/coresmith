@@ -13,13 +13,24 @@ rediscover them.
 
 The pipeline is:
 
-    patch -> generate -> DRC -> LVS -> Liberty check -> emit
+    patch -> generate -> Liberty check -> emit
 
-and it **fails closed** at every stage: a missing artifact, an unparsed tool
-verdict, or a blank result is a FAILURE, never a pass. That posture is
-deliberate -- the defect that motivated this tool was a characterization run
-whose measurements silently went missing and were misread as "slow macro"
-rather than "no data".
+and it **fails closed**: a missing artifact, an unparsed verdict, or a blank
+result is a FAILURE, never a pass. That posture is deliberate -- the defect
+that motivated this tool was a characterization run whose measurements
+silently went missing and were misread as "slow macro" rather than "no data".
+
+**What this tool does NOT do.** ``openram_gen``'s generated config sets
+``check_lvs = False`` and never sets ``analytical_delay``, so OpenRAM reports
+"Characterization is disabled (using analytical delay models)" and "DRC/LVS/PEX
+is disabled". Therefore:
+
+* **No DRC and no LVS run during generation.** Those verdicts are reported as
+  ``not run`` (never as a pass) and must come from the backend flow.
+* **Liberty timing is an ANALYTICAL ESTIMATE, not a SPICE measurement.** This
+  is why generated macros report 600-700 MHz while the one macro that was
+  fully characterized end-to-end (``sram_1rw1r_16_128_8_sky130``) measures
+  227 MHz. Do not read a generated ``minimum_period`` as signoff timing.
 
 Usage
 -----
@@ -46,6 +57,8 @@ sys.path.insert(0, str(REPO_ROOT))
 # outside this window is not a plausible result -- it is a units or parse error.
 # Reference point: sram_1rw1r_16_128_8_sky130 characterizes at 4.4 ns (227 MHz),
 # while the stock 1kbyte/2kbyte macros sit at 1.79-1.96 ns (511-558 MHz).
+_SUPPORTED_PORTS = {"1rw", "1rw1r"}
+
 MIN_PLAUSIBLE_PERIOD_NS = 0.5
 MAX_PLAUSIBLE_PERIOD_NS = 200.0
 
@@ -119,19 +132,40 @@ def stage_patch(check_only: bool) -> tuple[bool, str]:
 
 def stage_generate(width: int, depth: int, ports: str, out: Path,
                    timeout: int) -> tuple[bool, str, dict]:
-    """Generate the macro through the engine's own OpenRAM path."""
+    """Generate the macro through the engine's own OpenRAM path.
+
+    ``ensure_macro``'s signature is ``(words, data_bits, *, ...)`` -- DEPTH
+    first, then WIDTH, and everything after them keyword-only. The original
+    call here passed ``(ports, width, depth)``: three positionals into a
+    two-positional function, in the wrong order, with a string where an int
+    belongs. It raised TypeError on every invocation, so this tool could never
+    generate anything.
+    """
     try:
         from orchestrator.langgraph.openram_gen import ensure_macro
     except ImportError as exc:
         return False, f"cannot import openram_gen: {exc}", {}
+    if ports not in _SUPPORTED_PORTS:
+        return False, (
+            f"unsupported --ports {ports!r}; ensure_macro generates "
+            f"{'/'.join(sorted(_SUPPORTED_PORTS))} geometries"
+        ), {}
     try:
-        res = ensure_macro(ports, width, depth)
+        res = ensure_macro(depth, width)  # (words, data_bits)
     except Exception as exc:  # noqa: BLE001
-        return False, f"ensure_macro raised: {exc}", {}
+        return False, f"ensure_macro raised: {type(exc).__name__}: {exc}", {}
     if res is None:
-        return False, f"no macro resolved for {ports} {width}x{depth}", {}
-    info = {"resolved": type(res).__name__, "detail": str(res)[:400]}
-    return True, f"resolved {ports} {width}x{depth}", info
+        return False, (
+            f"no macro resolved for {ports} {width}x{depth} -- no exact "
+            "pre-built part and OpenRAM generation did not produce one"
+        ), {}
+    info = {
+        "resolved": type(res).__name__,
+        "name": getattr(res, "name", ""),
+        "lib": str(getattr(res, "lib", "") or ""),
+        "detail": str(res)[:400],
+    }
+    return True, f"resolved {ports} {width}x{depth} -> {info['name'] or res}", info
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +289,31 @@ def main(argv: list[str] | None = None) -> int:
                                       args.out, args.timeout)
     report["stages"]["generate"] = {"ok": ok, "detail": detail, **info}
     _log(f"[generate] {detail}")
+    if ok:
+        # Liberty check. This is the ONLY downstream gate gen_ram can honestly
+        # run today: openram_gen's config sets `check_lvs = False` and never
+        # sets `analytical_delay`, so OpenRAM logs "Characterization is
+        # disabled (using analytical delay models)" and "DRC/LVS/PEX is
+        # disabled". The minimum_period below is therefore an ANALYTICAL MODEL
+        # ESTIMATE, not a SPICE measurement -- which is why generated macros
+        # report 600-700 MHz while the one macro that WAS fully characterized
+        # (sram_1rw1r_16_128_8_sky130) measures 227 MHz. Do not read these as
+        # signoff timing.
+        lok, ldetail, cyc = check_liberty(Path(info.get("lib") or ""))
+        report["stages"]["liberty"] = {
+            "ok": lok, "detail": ldetail, "min_period_ns": cyc,
+            "characterized": False,
+            "note": "analytical delay model, NOT SPICE-characterized",
+        }
+        _log(f"[liberty] {ldetail} (analytical model, not characterized)")
+        if not lok:
+            ok, detail = False, f"liberty check failed: {ldetail}"
+        report["stages"]["drc"] = {"ok": None, "detail": "not run by OpenRAM "
+                                   "(check_lvs=False); use the backend DRC flow"}
+        report["stages"]["lvs"] = {"ok": None, "detail": "not run by OpenRAM "
+                                   "(check_lvs=False); use the backend LVS flow"}
+        _log("[drc] not run -- OpenRAM generation has DRC/LVS disabled")
+        _log("[lvs] not run -- OpenRAM generation has DRC/LVS disabled")
     if not ok:
         report["verdict"] = "FAIL"
         _emit(report, args.out)

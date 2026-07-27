@@ -223,8 +223,17 @@ def openram_available() -> bool:
     the real invocation path (cached; OPENRAM_HOME's sram_compiler.py counts).
     """
     global _OPENRAM_RUNNABLE
-    if os.environ.get("OPENRAM_HOME"):
-        return bool(Path(os.environ["OPENRAM_HOME"], "sram_compiler.py").exists())
+    # OPENRAM_HOME means "a source checkout with sram_compiler.py at its root".
+    # It is NOT safe to trust the env var alone: importing the pip package
+    # EXPORTS ``OPENRAM_HOME=<site-packages>/openram/compiler`` into os.environ,
+    # which has no sram_compiler.py -- so once anything imported openram (the
+    # patcher does, on every gen_ram invocation) this probe returned a false
+    # NEGATIVE and generation became unreachable. Only honor the var when it
+    # actually looks like a checkout; otherwise fall through to the real
+    # `python -m openram` invocation check below.
+    _home = os.environ.get("OPENRAM_HOME")
+    if _home and Path(_home, "sram_compiler.py").exists():
+        return True
     if _OPENRAM_RUNNABLE is not None:
         return _OPENRAM_RUNNABLE
     try:
