@@ -2145,14 +2145,18 @@ def _normalize_cocotb_timing_keywords(tb_file: Path) -> None:
 
 def run_simulation(block: dict, rtl_path: str, tb_path: str, attempt: int = 1,
                    extra_defines: list | None = None,
-                   sim_subdir: str | None = None) -> dict:
+                   sim_subdir: str | None = None,
+                   extra_args: list | None = None) -> dict:
     """Run cocotb simulation with Verilator.
 
     ``extra_defines`` (e.g. ``["SYNTHESIS"]``) are added as Verilator ``-D``
     preprocessor defines, and ``sim_subdir`` overrides the ``sim_build/<name>``
     directory -- both used by the branch-parity smoke (harness.branch_parity) to
-    build the SAME RTL under the synth-side macro world in an isolated dir. With
-    both omitted the Makefile and build dir are byte-identical to the default.
+    build the SAME RTL under the synth-side macro world in an isolated dir.
+    ``extra_args`` appends raw Verilator flags (e.g. ``["--trace-depth 1"]``),
+    used by the gate-sim harness (harness.gate_sim) to record a PORT-ONLY
+    waveform for post-synthesis vector replay. With all three omitted the
+    Makefile and build dir are byte-identical to the default.
     """
     block_name = block["name"]
     sim_dir = PROJECT_ROOT / "sim_build" / (sim_subdir or block_name)
@@ -2202,6 +2206,13 @@ def run_simulation(block: dict, rtl_path: str, tb_path: str, attempt: int = 1,
         _dn = str(_d).strip()
         if _dn:
             _def_line += f"EXTRA_ARGS += -D{_dn}\n"
+    # Raw Verilator flags (gate-sim reference run uses --trace-depth 1 so the
+    # recorded waveform holds the top-level PORTS and little else). Empty by
+    # default -> no line emitted -> byte-identical build.
+    for _a in (extra_args or []):
+        _an = str(_a).strip()
+        if _an:
+            _def_line += f"EXTRA_ARGS += {_an}\n"
 
     makefile_content = f"""
 SIM = verilator

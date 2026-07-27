@@ -3435,3 +3435,191 @@ def test_route_uarch_patch_disabled(tmp_path, monkeypatch):
     monkeypatch.setenv("CORESMITH_UARCH_PATCH_ON_RETRY", "0")
     _seed_uarch_patch_block(tmp_path, "blk_off", 0.99)
     assert pipeline_graph._route_uarch_patch_on_retry(str(tmp_path), ["blk_off"]) == []
+
+
+# ---------------------------------------------------------------------------
+# Post-synthesis gate-level simulation gate (CORESMITH_GATE_SIM)
+# ---------------------------------------------------------------------------
+
+class TestRouteAfterSynthGateSim:
+    """``route_after_synth`` must send a block whose SYNTHESIZED NETLIST does
+    not reproduce the verified RTL back to diagnose -- clean synthesis is not
+    'done' when DV and PPA were measured on different hardware.
+
+    Both env-var branches are covered: with the gate ON the harness produces
+    ``gate_sim_ok=False`` and routing diverts; with it OFF the harness never
+    runs, ``gate_sim_ok`` stays None, and routing is byte-identical to before.
+    """
+
+    _BASE = {"synth_success": True, "ppa_ok": None, "ppa_reasons": []}
+
+    def test_gate_sim_pass_reaches_block_done(self):
+        state = dict(self._BASE, gate_sim_ok=True, gate_sim_status="pass")
+        assert pipeline_graph.route_after_synth(state) == "block_done"
+
+    def test_gate_sim_fail_routes_to_diagnose(self):
+        state = dict(self._BASE, gate_sim_ok=False, gate_sim_status="fail")
+        assert pipeline_graph.route_after_synth(state) == "diagnose"
+
+    def test_gate_sim_not_run_never_blocks(self):
+        """None = the gate did not apply (disabled / no netlist / no toolchain).
+        It must never block, exactly like ``ppa_ok`` of None."""
+        state = dict(self._BASE, gate_sim_ok=None, gate_sim_status="not_run")
+        assert pipeline_graph.route_after_synth(state) == "block_done"
+
+    def test_absent_key_is_legacy_behaviour(self):
+        assert pipeline_graph.route_after_synth(dict(self._BASE)) == "block_done"
+
+    def test_synth_failure_still_wins(self):
+        state = {"synth_success": False, "gate_sim_ok": True}
+        assert pipeline_graph.route_after_synth(state) == "diagnose"
+
+
+class TestGateSimNodeWiring:
+    """``_run_gate_sim_gate`` is the synth node's adapter onto the harness."""
+
+    _BLOCK = {"name": "blk"}
+
+    def _state(self, tmp_path, **over):
+        state = {"project_root": str(tmp_path), "attempt": 1,
+                 "tb_path": str(tmp_path / "tb.py"), "current_block": self._BLOCK}
+        state.update(over)
+        return state
+
+    def test_env_off_returns_disabled_and_never_calls_harness(self, tmp_path, monkeypatch):
+        """OFF branch: the harness is not invoked and the verdict is an explicit
+        'disabled', never a silent pass."""
+        from orchestrator.harness import gate_sim as gs
+
+        monkeypatch.setenv("CORESMITH_GATE_SIM", "0")
+        called = []
+        monkeypatch.setattr(gs, "check_gate_sim",
+                            lambda **kw: called.append(kw))
+        ok, status, reason = pipeline_graph._run_gate_sim_gate(
+            self._state(tmp_path), self._BLOCK, "blk",
+            {"netlist_path": str(tmp_path / "n.v")}, "rtl.v",
+        )
+        assert called == []
+        assert ok is None and status == "disabled"
+        assert "CORESMITH_GATE_SIM" in reason
+
+    def test_env_on_runs_harness_and_propagates_failure(self, tmp_path, monkeypatch):
+        """ON branch: the harness runs, a FAIL propagates, and the actionable
+        report is written where the RTL fixer reads it."""
+        from orchestrator.harness import gate_sim as gs
+
+        monkeypatch.setenv("CORESMITH_GATE_SIM", "1")
+        res = gs.GateSimResult(
+            ran=True, ok=False, status=gs.STATUS_FAIL,
+            reason="the gate netlist diverges from the verified RTL",
+            cycles_compared=42,
+            first_divergence={"cycle": 7, "port": "q", "expected": "1",
+                              "actual": "0"},
+        )
+        monkeypatch.setattr(gs, "check_gate_sim", lambda **kw: res)
+        ok, status, reason = pipeline_graph._run_gate_sim_gate(
+            self._state(tmp_path), self._BLOCK, "blk",
+            {"netlist_path": str(tmp_path / "n.v")}, "rtl.v",
+        )
+        assert ok is False and status == "fail"
+        bd = tmp_path / ".coresmith" / "blocks" / "blk"
+        assert json.loads((bd / "gate_sim_report.json").read_text())["status"] == "fail"
+        prev = (bd / "previous_error.txt").read_text()
+        assert "GATE-LEVEL SIMULATION FAILURE" in prev
+        assert "FIRST DIVERGENCE at cycle 7" in prev
+
+    def test_env_on_pass_returns_true(self, tmp_path, monkeypatch):
+        from orchestrator.harness import gate_sim as gs
+
+        monkeypatch.setenv("CORESMITH_GATE_SIM", "1")
+        monkeypatch.setattr(
+            gs, "check_gate_sim",
+            lambda **kw: gs.GateSimResult(ran=True, ok=True,
+                                          status=gs.STATUS_PASS,
+                                          reason="matched", cycles_compared=9),
+        )
+        ok, status, _ = pipeline_graph._run_gate_sim_gate(
+            self._state(tmp_path), self._BLOCK, "blk",
+            {"netlist_path": str(tmp_path / "n.v")}, "rtl.v",
+        )
+        assert ok is True and status == "pass"
+
+    def test_no_netlist_is_not_run_not_pass(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CORESMITH_GATE_SIM", "1")
+        ok, status, reason = pipeline_graph._run_gate_sim_gate(
+            self._state(tmp_path), self._BLOCK, "blk", None, "rtl.v",
+        )
+        assert ok is None and status == "not_run"
+        assert "netlist" in reason
+
+    def test_harness_crash_is_non_blocking_by_default(self, tmp_path, monkeypatch):
+        from orchestrator.harness import gate_sim as gs
+
+        monkeypatch.setenv("CORESMITH_GATE_SIM", "1")
+        monkeypatch.delenv("CORESMITH_GATE_SIM_STRICT", raising=False)
+
+        def boom(**_kw):
+            raise RuntimeError("plumbing")
+
+        monkeypatch.setattr(gs, "check_gate_sim", boom)
+        ok, status, _ = pipeline_graph._run_gate_sim_gate(
+            self._state(tmp_path), self._BLOCK, "blk",
+            {"netlist_path": str(tmp_path / "n.v")}, "rtl.v",
+        )
+        assert ok is None and status == "not_run"
+
+    def test_harness_crash_under_strict_blocks(self, tmp_path, monkeypatch):
+        from orchestrator.harness import gate_sim as gs
+
+        monkeypatch.setenv("CORESMITH_GATE_SIM", "1")
+        monkeypatch.setenv("CORESMITH_GATE_SIM_STRICT", "1")
+
+        def boom(**_kw):
+            raise RuntimeError("plumbing")
+
+        monkeypatch.setattr(gs, "check_gate_sim", boom)
+        ok, _status, _ = pipeline_graph._run_gate_sim_gate(
+            self._state(tmp_path), self._BLOCK, "blk",
+            {"netlist_path": str(tmp_path / "n.v")}, "rtl.v",
+        )
+        assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_gate_sim_skipped_when_synthesis_failed(tmp_path, monkeypatch):
+    """A failed synth already wrote its own actionable ``previous_error.txt``.
+    The gate-level sim must NOT run (there is no current netlist -- only a stale
+    one) and must NOT overwrite that error."""
+    from orchestrator.harness import gate_sim as gs
+
+    monkeypatch.setenv("CORESMITH_GATE_SIM", "1")
+    monkeypatch.setenv("CORESMITH_SKIP_SYNTH", "0")
+    called = []
+    monkeypatch.setattr(gs, "check_gate_sim", lambda **kw: called.append(kw))
+
+    rtl = tmp_path / "blk.v"
+    rtl.write_text("module blk(input clk); endmodule\n")
+    tb = tmp_path / "tb.py"
+    tb.write_text("# tb\n")
+
+    def fake_synth(block, rtl_path, **kwargs):
+        return {"success": False, "gate_count": 0, "log": "SYNTH BOOM",
+                "netlist_path": str(tmp_path / "stale_netlist.v")}
+
+    monkeypatch.setattr(pipeline_graph, "synthesize_block", fake_synth)
+    monkeypatch.setattr(pipeline_graph, "fix_synth_errors",
+                        AsyncMock(return_value=None))
+
+    out = await pipeline_graph.synthesize_node({
+        "project_root": str(tmp_path), "current_block": {"name": "blk"},
+        "attempt": 1, "rtl_path": str(rtl), "tb_path": str(tb),
+        "target_clock_mhz": 50.0,
+    })
+
+    assert called == []                      # harness never invoked
+    assert out["synth_success"] is False
+    assert out["gate_sim_ok"] is None
+    assert out["gate_sim_status"] == "not_run"
+    prev = (tmp_path / ".coresmith" / "blocks" / "blk" / "previous_error.txt")
+    assert "SYNTH BOOM" in prev.read_text()  # synth error preserved
+    assert pipeline_graph.route_after_synth(out) == "diagnose"
