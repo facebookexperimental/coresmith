@@ -104,6 +104,11 @@ class BackendState(TypedDict):
     glue_blocks: list[dict]              # detected glue block needs
     integration_top_path: str            # rtl/integration/<design>_top.v
     flat_netlist_path: str               # syn/output/<design>/<design>_netlist.v
+    # chip_top gate-sim: the flat netlist replayed against the integration-DV
+    # vectors. None = did not apply (recorded with a reason, never silent).
+    chip_gate_sim_ok: bool | None
+    chip_gate_sim_status: str
+    chip_gate_sim_reason: str
     flat_sdc_path: str                   # syn/output/<design>/<design>.sdc
     synth_gate_count: int
     synth_area_um2: float
@@ -529,6 +534,76 @@ def _format_constraints(state: BackendState) -> str:
 # Node: flat_top_synthesis  (LLM-driven Yosys synthesis)
 # ---------------------------------------------------------------------------
 
+def _run_chip_top_gate_sim(state: "BackendState", netlist: str) -> tuple:
+    """Replay the integration-DV vectors through the FLAT CHIP NETLIST.
+
+    This is the artifact that becomes silicon. Every functional gate upstream
+    reads RTL; every PPA gate reads a netlist; until now nothing simulated the
+    flat top. A per-block gate-sim cannot close that: a block netlist is an
+    intermediate, and its stimulus is that block's own testbench rather than
+    real chip traffic.
+
+    Runs here -- after ``flat_top_synthesis``, before ``run_pnr`` -- because
+    this is the first point a flat chip netlist exists, and there is no reason
+    to spend P&R on a netlist that does not reproduce the verified RTL.
+
+    Returns ``(ok, status, reason)``. ``None`` ok means the gate did not apply
+    (disabled, no integration testbench, toolchain absent) and is ALWAYS
+    recorded with a reason, so absence never reads as success. Never raises:
+    gate plumbing must not crash the backend.
+    """
+    from orchestrator.harness import gate_sim as _gs
+
+    design = state.get("design_name", "chip_top")
+    root = Path(state.get("project_root", "."))
+
+    if not _gs.gate_sim_enabled():
+        log(f"  [CHIP-GATE-SIM] not run -- {_gs.GATE_SIM_ENV}=0. The FLAT CHIP "
+            f"NETLIST is never simulated; a synthesis-side divergence in the "
+            f"assembled design cannot be caught.", YELLOW)
+        return (None, _gs.STATUS_DISABLED, f"{_gs.GATE_SIM_ENV}=0")
+
+    # Integration DV is the reference stimulus: real traffic through the
+    # assembled chip, and the run that already matched the golden.
+    tb = ""
+    for cand in (root / "sim_build" / "integration" / f"test_{design}.py",
+                 root / "tb" / "integration" / f"test_{design}.py"):
+        if cand.is_file():
+            tb = str(cand)
+            break
+    if not tb:
+        reason = ("no integration-DV testbench found -- chip_top gate-sim needs "
+                  "the integration vectors as its reference stimulus")
+        log(f"  [CHIP-GATE-SIM] not run -- {reason}", YELLOW)
+        return (None, _gs.STATUS_NOT_RUN, reason)
+
+    top_rtl = state.get("top_rtl_path", "") or ""
+    log("  [CHIP-GATE-SIM] Replaying integration-DV vectors through the FLAT "
+        "chip netlist...", YELLOW)
+    try:
+        res = _gs.check_gate_sim(
+            block={"name": design, "is_chip_top": True},
+            netlist_path=netlist,
+            rtl_path=top_rtl,
+            tb_path=tb,
+        )
+    except Exception as exc:  # noqa: BLE001 - never crash the backend
+        reason = f"chip_top gate-sim plumbing error: {type(exc).__name__}: {exc}"
+        log(f"  [CHIP-GATE-SIM] {reason}", RED)
+        return (None, _gs.STATUS_NOT_RUN, reason)
+
+    if res.status == _gs.STATUS_PASS:
+        log(f"  [CHIP-GATE-SIM] PASS -- flat netlist reproduced the verified "
+            f"chip RTL ({res.cycles_compared} cycles, "
+            f"{res.output_bits_compared} output bits)", GREEN)
+        return (True, res.status, res.reason)
+    if res.status == _gs.STATUS_FAIL:
+        log(f"  [CHIP-GATE-SIM] FAIL -- {res.reason}", RED)
+        return (False, res.status, res.reason)
+    log(f"  [CHIP-GATE-SIM] not run -- {res.reason}", YELLOW)
+    return (None, res.status, res.reason)
+
+
 async def flat_top_synthesis_node(state: BackendState) -> dict:
     """Run Yosys synthesis entirely within the inner Claude LLM.
 
@@ -686,6 +761,7 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
                 "flat_netlist_path": "",
                 "flat_sdc_path": "",
             }
+        _gs_ok, _gs_status, _gs_reason = _run_chip_top_gate_sim(state, _netlist)
         return {
             "phase": "synth",
             "flat_netlist_path": _netlist,
@@ -693,6 +769,9 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
             "synth_gate_count": result.get("gate_count", 0),
             "synth_area_um2": result.get("area_um2", 0.0),
             "macro_bindings": _bindings,
+            "chip_gate_sim_ok": _gs_ok,
+            "chip_gate_sim_status": _gs_status,
+            "chip_gate_sim_reason": _gs_reason,
         }
     else:
         return {
