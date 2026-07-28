@@ -12,8 +12,9 @@ testbench rather than real chip traffic.
 """
 from __future__ import annotations
 
-import orchestrator.harness.gate_sim as gs
 import pytest
+
+import orchestrator.harness.gate_sim as gs
 from orchestrator.langgraph.backend_graph import _run_chip_top_gate_sim
 
 
