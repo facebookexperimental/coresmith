@@ -183,12 +183,27 @@ class TestSelectionGuard:
 
     def test_guard_on_resolves_to_clean_composition(self, tmp_path, monkeypatch):
         monkeypatch.delenv(_GUARD, raising=False)
+        # Tiling is OFF by default, so the composition fallback needs the
+        # explicit opt-in; the default path is asserted separately below.
+        monkeypatch.setenv("CORESMITH_ALLOW_MACRO_TILING", "1")
         reg = self._reg(tmp_path)
         # allow_generate=False so we exercise the prebuilt fallback deterministically
         res = og.ensure_macro(words=4, data_bits=8, allow_generate=False, registry=reg)
         assert isinstance(res, og.CompositionPlan)
         assert res.base.name == "sram_1rw1r_4_4_8_sky130"
         assert res.base.lvs_clean_pins is True
+
+    def test_guard_on_escalates_when_tiling_disabled(self, tmp_path, monkeypatch):
+        """Default path: a shorted exact macro is still never selected.
+
+        With tiling off there is no composition to fall back to, so the
+        resolution escalates (None) rather than placing the shorted part.
+        """
+        monkeypatch.delenv(_GUARD, raising=False)
+        monkeypatch.delenv("CORESMITH_ALLOW_MACRO_TILING", raising=False)
+        reg = self._reg(tmp_path)
+        res = og.ensure_macro(words=4, data_bits=8, allow_generate=False, registry=reg)
+        assert res is None
 
     def test_guard_off_resolves_to_shorted_exact(self, tmp_path, monkeypatch):
         monkeypatch.setenv(_GUARD, "0")
