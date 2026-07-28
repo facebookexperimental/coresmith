@@ -77,8 +77,21 @@ _STALL_THRESHOLD_S = float(os.environ.get("CORESMITH_INTERRUPT_STALL_S", "1800")
 _STALL_POLL_S = float(os.environ.get("CORESMITH_INTERRUPT_STALL_POLL_S", "300"))
 
 
-async def _count_pending_interrupts() -> int:
-    """Best-effort count of parked interrupts on the pipeline (0 on any error)."""
+async def _count_pending_interrupts() -> int | None:
+    """Count parked interrupts. ``None`` means COULD NOT DETERMINE, not zero.
+
+    This previously returned 0 on any exception, so a failed graph/state probe
+    was indistinguishable from "nothing is waiting". Observed consequence: the
+    graph sat on ``[HUMAN] Intervention needed`` while ``/run/state`` reported
+    ``pending_interrupt_count: 0`` and ``interrupts: []``; a subsequent
+    ``POST /run/resume`` then returned ``{"resumed": true, "interrupts": 1}``.
+    An outer agent polling state concludes there is nothing to drive and the
+    run parks indefinitely -- in one session that cost ~70 minutes before the
+    daemon's own ``STALLED_INTERRUPT`` log line gave it away.
+
+    Absence of evidence is not evidence of absence: callers must treat ``None``
+    as "unknown, go look" rather than as "clear".
+    """
     try:
         await _pipeline.ensure_graph()
         snap = await _pipeline.graph.aget_state(
@@ -89,8 +102,11 @@ async def _count_pending_interrupts() -> int:
             for t in snap.tasks:
                 n += len(t.interrupts)
         return n
-    except Exception:  # noqa: BLE001
-        return 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "interrupt probe FAILED (%s: %s) -- reporting UNKNOWN, not 0. "
+            "Treat as 'go look', never as 'clear'.", type(exc).__name__, exc)
+        return None
 
 
 async def _driver_liveness_watch() -> None:
@@ -100,6 +116,12 @@ async def _driver_liveness_watch() -> None:
         try:
             await asyncio.sleep(_STALL_POLL_S)
             pending = await _count_pending_interrupts()
+            if pending is None:
+                log.warning(
+                    "STALLED_INTERRUPT probe UNKNOWN (project_root=%s): the "
+                    "interrupt count could not be determined. Not treating as "
+                    "zero -- inspect the run.", _PROJECT_ROOT)
+                continue
             if pending > 0:
                 idle = time.time() - _last_resume_ts
                 if idle >= _STALL_THRESHOLD_S:
@@ -167,6 +189,13 @@ class ResumeRequest(BaseModel):
     rtl_fix_description: str = ""
     block_actions: dict | None = None
     rationale: str = ""
+
+
+class RestartBlockRequest(BaseModel):
+    block_name: str
+    from_node: str = "generate_rtl"
+    uarch_feedback: str = ""
+    max_attempts: int = 3
 
 
 class RestartNodeRequest(BaseModel):
@@ -520,6 +549,44 @@ async def run_continue():
     return {"continued": True, "next_nodes": list(snap.next), "status": _pipeline.status}
 
 
+@app.post("/run/restart-block")
+async def run_restart_block(req: RestartBlockRequest):
+    """Regenerate ONE block from a specific node in its lifecycle.
+
+    The daemon previously had no way to do this. ``/run/restart-node`` forks
+    the graph but explicitly REUSES every block's on-disk RTL/TB, and
+    ``run start --force`` regenerates the whole design. So after revising a
+    uArch spec -- exactly what ``revise_interface`` and an architecture
+    revision ask for -- the only HTTP-reachable options were "change nothing"
+    or "rebuild everything", and the per-block path existed solely as an MCP
+    tool. Observed cost: a spec fix that needed two blocks rebuilt had no way
+    to be applied without discarding six good ones.
+
+    ``from_node`` is ``generate_uarch_spec`` or ``generate_rtl``. The block
+    runs in a standalone subgraph on its own thread, so the main pipeline
+    checkpoint is untouched; re-enter it afterwards with ``/run/restart-node``.
+    Requires the pipeline to be idle (pause first).
+    """
+    if _pipeline.task is not None and not _pipeline.task.done():
+        raise HTTPException(409, "pipeline already running -- pause first")
+    try:
+        # Shared with the MCP tool of the same name: one implementation, two
+        # transports. It reads CORESMITH_PROJECT_ROOT, which this daemon sets.
+        from orchestrator.mcp_server import restart_block as _restart_block
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"restart_block unavailable: {exc}") from exc
+    raw = await _restart_block(
+        block_name=req.block_name,
+        from_node=req.from_node,
+        uarch_feedback=req.uarch_feedback,
+        max_attempts=req.max_attempts,
+    )
+    try:
+        return json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return {"result": raw}
+
+
 @app.post("/run/restart-node")
 async def run_restart_node(req: RestartNodeRequest):
     """Re-run the pipeline from the checkpoint where ``node`` is next, reusing
@@ -868,16 +935,36 @@ def _shape_state(state_snapshot) -> dict:
             latest_by_name[name] = b
     completed_names = set(latest_by_name)
 
+    # An interrupt whose block ALSO appears in completed_blocks used to be
+    # dropped here as "stale". That silently hid LIVE interrupts: completed_blocks
+    # is append-only across attempts, so a block that completed once and was
+    # later re-entered (revise_interface, fix_rtl, a re-spec) is in the set
+    # forever. The graph parks on `[HUMAN] Intervention needed`, /run/state
+    # reports `pending_interrupt_count: 0` and `interrupts: []`, and the very
+    # next POST /run/resume returns `{"resumed": true, "interrupts": 1}`.
+    #
+    # An outer agent polling state cannot tell "nothing to do" from "something
+    # is waiting and I am hiding it", so the run parks until a human notices.
+    # Surface every interrupt and LABEL the suspicion instead of acting on it --
+    # a driver can then skip suspected-stale ones deliberately, which is a
+    # different thing from never being told.
     interrupts: list[dict] = []
+    suspected_stale = 0
     if state_snapshot.tasks:
         for task in state_snapshot.tasks:
             for intr in task.interrupts:
                 payload = intr.value
+                stale = False
                 if isinstance(payload, dict):
                     blk = payload.get("block", payload.get("block_name", ""))
-                    if blk and blk in completed_names:
-                        continue  # stale
-                interrupts.append({"id": intr.id, "payload": payload})
+                    stale = bool(blk) and blk in completed_names
+                if stale:
+                    suspected_stale += 1
+                interrupts.append({
+                    "id": intr.id,
+                    "payload": payload,
+                    "stale_suspected": stale,
+                })
 
     base.update({
         "completed_count": len(latest_by_name),
@@ -892,6 +979,10 @@ def _shape_state(state_snapshot) -> dict:
         "next_nodes": list(state_snapshot.next) if state_snapshot.next else [],
         "interrupts": interrupts,
         "pending_interrupt_count": len(interrupts),
+        # Split out so a driver can choose to skip suspected-stale ones
+        # DELIBERATELY, rather than never being told they exist.
+        "suspected_stale_interrupt_count": suspected_stale,
+        "live_interrupt_count": len(interrupts) - suspected_stale,
         "interrupt_type": (
             interrupts[0]["payload"].get("type", "")
             if interrupts and isinstance(interrupts[0]["payload"], dict)
