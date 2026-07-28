@@ -191,6 +191,13 @@ class ResumeRequest(BaseModel):
     rationale: str = ""
 
 
+class RestartBlockRequest(BaseModel):
+    block_name: str
+    from_node: str = "generate_rtl"
+    uarch_feedback: str = ""
+    max_attempts: int = 3
+
+
 class RestartNodeRequest(BaseModel):
     node: str
     refresh_sidecars: bool = False
@@ -540,6 +547,44 @@ async def run_continue():
     config = {"configurable": {"thread_id": _pipeline.thread_id}}
     await _pipeline.safe_start(None, config)
     return {"continued": True, "next_nodes": list(snap.next), "status": _pipeline.status}
+
+
+@app.post("/run/restart-block")
+async def run_restart_block(req: RestartBlockRequest):
+    """Regenerate ONE block from a specific node in its lifecycle.
+
+    The daemon previously had no way to do this. ``/run/restart-node`` forks
+    the graph but explicitly REUSES every block's on-disk RTL/TB, and
+    ``run start --force`` regenerates the whole design. So after revising a
+    uArch spec -- exactly what ``revise_interface`` and an architecture
+    revision ask for -- the only HTTP-reachable options were "change nothing"
+    or "rebuild everything", and the per-block path existed solely as an MCP
+    tool. Observed cost: a spec fix that needed two blocks rebuilt had no way
+    to be applied without discarding six good ones.
+
+    ``from_node`` is ``generate_uarch_spec`` or ``generate_rtl``. The block
+    runs in a standalone subgraph on its own thread, so the main pipeline
+    checkpoint is untouched; re-enter it afterwards with ``/run/restart-node``.
+    Requires the pipeline to be idle (pause first).
+    """
+    if _pipeline.task is not None and not _pipeline.task.done():
+        raise HTTPException(409, "pipeline already running -- pause first")
+    try:
+        # Shared with the MCP tool of the same name: one implementation, two
+        # transports. It reads CORESMITH_PROJECT_ROOT, which this daemon sets.
+        from orchestrator.mcp_server import restart_block as _restart_block
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"restart_block unavailable: {exc}") from exc
+    raw = await _restart_block(
+        block_name=req.block_name,
+        from_node=req.from_node,
+        uarch_feedback=req.uarch_feedback,
+        max_attempts=req.max_attempts,
+    )
+    try:
+        return json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return {"result": raw}
 
 
 @app.post("/run/restart-node")
