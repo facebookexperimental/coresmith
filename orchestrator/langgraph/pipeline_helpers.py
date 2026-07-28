@@ -1615,14 +1615,64 @@ async def generate_rtl(
     return result
 
 
+def rtl_module_name(rtl_path: str | Path, block_name: str) -> str:
+    """Resolve the Verilog module name to drive for ``block_name``.
+
+    **A block's architectural name is not always its RTL module name.** When a
+    module name is fixed by an external contract -- a Caravel
+    ``user_project_wrapper``, a vendor-locked top, a pad ring -- the
+    architecture keeps its own block identifier while ``rtl_target`` carries
+    the mandated name. Every ordinary block has
+    ``rtl_target == <...>/<block_name>.v``, so the two coincide and this
+    returns ``block_name`` unchanged.
+
+    Resolution is evidence-based: whichever candidate the file actually
+    declares wins. Preferring ``block_name`` keeps existing behaviour intact
+    for every normal block; falling back to the ``rtl_target`` stem is safe
+    because that path comes from the block spec, which the engine controls --
+    an agent cannot use it to smuggle in an arbitrarily-named module.
+
+    Conflating the two caused a correct, lint-clean block to fail twice in one
+    run: first the RTL-generation postcondition rejected it, then the cocotb
+    Makefile set ``TOPLEVEL`` to the block name and Verilator's
+    ``--top-module`` found no such module, so simulation never elaborated and
+    produced no VCD -- reported as a simulation failure rather than a
+    configuration error.
+    """
+    p = Path(rtl_path)
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return block_name
+    if f"module {block_name}" in text:
+        return block_name
+    if p.stem != block_name and f"module {p.stem}" in text:
+        return p.stem
+    return block_name
+
+
 def _assert_rtl_materialized(rtl_path: Path, block_name: str) -> str | None:
-    """Return None if rtl_path contains a real `module <block_name>` Verilog
-    file; otherwise return a one-line diagnostic explaining what's wrong.
+    """Return None if rtl_path contains a real Verilog module; otherwise
+    return a one-line diagnostic explaining what's wrong.
 
     Three checks: file exists; file is non-trivially-sized (manylinux empty
     file is 0 bytes, an `include "<path>"` redirect stub is typically
-    < 200 bytes); file contains `module <block_name>` literal so we know
-    the LLM didn't write the wrong module or a placeholder.
+    < 200 bytes); and the file declares a module whose name is one we expect,
+    so we know the LLM didn't write the wrong block's RTL or a placeholder.
+
+    **An architectural block name is not always its Verilog module name.** A
+    block whose RTL module name is fixed by an external contract -- a Caravel
+    ``user_project_wrapper``, a vendor-locked top, a pad ring -- is declared in
+    the architecture with its own block name while ``rtl_target`` carries the
+    mandated file/module name. Requiring ``module <block_name>`` rejected such
+    a block even though its RTL was correct and lint-clean, stopping the flow
+    before testbench generation.
+
+    So the expected name is ``block_name`` OR the stem of ``rtl_target``. That
+    keeps the check strong: ``rtl_target`` comes from the block spec, which the
+    engine controls, not from the agent -- so this cannot be used to smuggle in
+    an arbitrarily-named module. Every ordinary block has
+    ``rtl_target == <...>/<block_name>.v``, making the two identical.
     """
     if not rtl_path.exists():
         return (
@@ -1641,12 +1691,16 @@ def _assert_rtl_materialized(rtl_path: Path, block_name: str) -> str | None:
         text = rtl_path.read_text(encoding="utf-8")
     except OSError as e:
         return f"{rtl_path}: read failed ({e})"
-    if f"module {block_name}" not in text:
+    expected = {block_name, rtl_path.stem}  # see rtl_module_name()
+    if not any(f"module {name}" in text for name in expected):
+        want = "` or `module ".join(sorted(expected))
         return (
-            f"{rtl_path} ({size} bytes) does not contain `module "
-            f"{block_name}`. The agent likely wrote the wrong module name "
-            f"or a different block's RTL. The module declaration must use "
-            f"exactly the block name."
+            f"{rtl_path} ({size} bytes) does not contain `module {want}`. "
+            f"The agent likely wrote the wrong module name or a different "
+            f"block's RTL. The module declaration must use either the block "
+            f"name ({block_name}) or the rtl_target file stem "
+            f"({rtl_path.stem}) when the module name is fixed by an external "
+            f"contract."
         )
     return None
 
@@ -1679,7 +1733,8 @@ def lint_rtl(rtl_path: str, block_name: str, attempt: int = 1) -> dict:
             wrapper_lib_path as _wrapper_lib_path,
         )
         if _uses_wrapper(rtl_text):
-            cmd += ["--top-module", block_name, _wrapper_lib_path()]
+            cmd += ["--top-module", rtl_module_name(rtl_path, block_name),
+                    _wrapper_lib_path()]
     except Exception:
         pass
     cmd.append(rtl_path)
@@ -2214,11 +2269,18 @@ def run_simulation(block: dict, rtl_path: str, tb_path: str, attempt: int = 1,
         if _an:
             _def_line += f"EXTRA_ARGS += {_an}\n"
 
+    # TOPLEVEL must be the module Verilator will find with --top-module, which
+    # is not always the architectural block name (locked Caravel/vendor tops).
+    _toplevel = rtl_module_name(rtl_path, block_name)
+    if _toplevel != block_name:
+        log(f"  [SIM] TOPLEVEL={_toplevel} (block {block_name} declares an "
+            f"externally-mandated module name)", CYAN)
+
     makefile_content = f"""
 SIM = verilator
 TOPLEVEL_LANG = verilog
 VERILOG_SOURCES = {_verilog_sources}
-TOPLEVEL = {block_name}
+TOPLEVEL = {_toplevel}
 MODULE = test_{block_name}
 WAVES = 1
 EXTRA_ARGS += --trace --trace-structs
