@@ -59,3 +59,49 @@ def test_single_pass_run_unchanged():
     assert out["completed_count"] == 1
     assert out["completion_events"] == 1
     assert out["remaining_count"] == 1
+
+
+def _snap_with_interrupt(completed, queue, block_name):
+    """Snapshot with one PARKED interrupt for ``block_name``."""
+    intr = SimpleNamespace(id="i0", value={"type": "ask_human",
+                                           "block_name": block_name})
+    task = SimpleNamespace(interrupts=[intr])
+    snap = _snap(completed, queue)
+    return SimpleNamespace(values=snap.values, next=snap.next, tasks=[task])
+
+
+def test_live_interrupt_for_a_previously_completed_block_is_not_hidden():
+    """Regression: a re-entered block's LIVE interrupt was silently dropped.
+
+    ``completed_blocks`` is append-only across attempts, so a block that
+    completed once and was later re-entered (revise_interface, fix_rtl, a
+    re-spec) stays in the set forever. The old filter treated any interrupt
+    whose block was in that set as stale and removed it, so /run/state
+    reported ``pending_interrupt_count: 0`` and ``interrupts: []`` while the
+    graph was parked on it -- and the next POST /run/resume returned
+    ``{"resumed": true, "interrupts": 1}``.
+    """
+    snap = _snap_with_interrupt(
+        completed=[{"name": "blk_a", "success": True}],
+        queue=["blk_a", "blk_b"],
+        block_name="blk_a",           # same block, now parked again
+    )
+    out = _shape_state(snap)
+    assert out["pending_interrupt_count"] == 1, "live interrupt was hidden"
+    assert len(out["interrupts"]) == 1
+    assert out["interrupts"][0]["stale_suspected"] is True
+    assert out["suspected_stale_interrupt_count"] == 1
+    assert out["live_interrupt_count"] == 0
+
+
+def test_interrupt_for_an_uncompleted_block_is_not_flagged_stale():
+    snap = _snap_with_interrupt(
+        completed=[{"name": "blk_a", "success": True}],
+        queue=["blk_a", "blk_b"],
+        block_name="blk_b",
+    )
+    out = _shape_state(snap)
+    assert out["pending_interrupt_count"] == 1
+    assert out["interrupts"][0]["stale_suspected"] is False
+    assert out["live_interrupt_count"] == 1
+    assert out["suspected_stale_interrupt_count"] == 0
