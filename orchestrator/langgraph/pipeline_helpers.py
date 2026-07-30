@@ -2221,7 +2221,7 @@ def _normalize_cocotb_timing_keywords(tb_file: Path) -> None:
         tb_file.write_text(normalized, encoding="utf-8")
 
 
-def run_simulation(block: dict, rtl_path: str, tb_path: str, attempt: int = 1,
+def run_simulation(block: dict, rtl_path, tb_path: str, attempt: int = 1,
                    extra_defines: list | None = None,
                    sim_subdir: str | None = None,
                    extra_args: list | None = None) -> dict:
@@ -2250,9 +2250,21 @@ def run_simulation(block: dict, rtl_path: str, tb_path: str, attempt: int = 1,
         _build_jobs = max(1, int(os.environ.get("CORESMITH_SIM_BUILD_JOBS", "2") or "2"))
     except ValueError:
         _build_jobs = 2
-    # Include the generic SRAM wrapper lib (behavioral view) when the block
+    # ``rtl_path`` may be a single file OR a sequence of sources. An ASSEMBLED
+    # top is not one file: it needs the integration top plus every block's RTL
+    # plus the wrapper lib, and a lone path yields an empty/partial source list
+    # ("No input Verilog file specified") and therefore NO waveform -- which is
+    # why the chip_top gate-sim could only ever report not_run. A plain string
+    # is normalized to a 1-element list, so " ".join() reproduces it exactly and
+    # every existing caller's Makefile is byte-identical.
+    _srcs = [rtl_path] if isinstance(rtl_path, str) else [str(p) for p in rtl_path]
+    _srcs = [p for p in _srcs if p]
+    # The FIRST source is the primary: it is the file whose declared module the
+    # TOPLEVEL is resolved from. Callers passing a list must put the top first.
+    _primary = _srcs[0] if _srcs else ""
+    # Include the generic SRAM wrapper lib (behavioral view) when the design
     # instantiates it, so cocotb/verilator has the cs_sram_* modules.
-    _verilog_sources = rtl_path
+    _verilog_sources = " ".join(_srcs)
     try:
         from orchestrator.langgraph.sram_wrapper import (
             uses_wrapper as _uses_wrapper,
@@ -2260,9 +2272,15 @@ def run_simulation(block: dict, rtl_path: str, tb_path: str, attempt: int = 1,
         from orchestrator.langgraph.sram_wrapper import (
             wrapper_lib_path as _wrapper_lib_path,
         )
-        _rtl_text = Path(rtl_path).read_text() if Path(rtl_path).exists() else ""
-        if _uses_wrapper(_rtl_text):
-            _verilog_sources = f"{_wrapper_lib_path()} {rtl_path}"
+        # Scan EVERY source, not just the primary: with an assembled top the
+        # cs_sram instantiation lives in a leaf block, so looking only at the
+        # top would miss it and the build would fail on a missing module.
+        _rtl_text = "".join(
+            Path(p).read_text(errors="replace") for p in _srcs if Path(p).exists()
+        )
+        _wlib = _wrapper_lib_path()
+        if _uses_wrapper(_rtl_text) and _wlib not in _srcs:
+            _verilog_sources = " ".join([_wlib] + _srcs)
     except Exception:
         pass
     # Coverage injection. Instrumentation is added when EITHER the explicit
@@ -2294,7 +2312,7 @@ def run_simulation(block: dict, rtl_path: str, tb_path: str, attempt: int = 1,
 
     # TOPLEVEL must be the module Verilator will find with --top-module, which
     # is not always the architectural block name (locked Caravel/vendor tops).
-    _toplevel = rtl_module_name(rtl_path, block_name)
+    _toplevel = rtl_module_name(_primary, block_name)
     if _toplevel != block_name:
         log(f"  [SIM] TOPLEVEL={_toplevel} (block {block_name} declares an "
             f"externally-mandated module name)", CYAN)

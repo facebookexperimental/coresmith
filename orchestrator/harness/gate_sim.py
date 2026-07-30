@@ -73,14 +73,20 @@ SKY130 GATE-SIM UNDER VERILATOR (the footguns, and what we do about them)
   block. Without ``--timing`` both delays collapse to zero and the X-drive races
   the consumer, destroying every read; with ``VERBOSE=1`` they also ``$display``
   on every access. We therefore substitute a generated CYCLE-ACCURATE model per
-  instantiated macro (:func:`macro_model_source`), derived from the macro's own
-  registry geometry, reproducing the PDK model's cycle semantics with no delays
-  and no tracing. ``CORESMITH_GATE_SIM_MACRO_MODEL=pdk`` opts back into the
-  PDK's own file for a simulator that honours delays.
+  instantiated macro (:func:`macro_model_source`), reproducing the PDK model's
+  cycle semantics with no delays and no tracing. Its INTERFACE -- which ports
+  exist, and how wide each one is -- is read from the REAL macro's own Verilog
+  (:func:`macro_interface`), never computed from registry metadata: a stand-in
+  whose ports are guessed produces a confidently wrong verdict (see the comment
+  above :func:`macro_interface`). ``CORESMITH_GATE_SIM_MACRO_MODEL=pdk`` opts
+  back into the PDK's own file for a simulator that honours delays.
 
 ENV GATES
 ---------
 ``CORESMITH_GATE_SIM``            default **ON**. ``0/false/no/off`` disables.
+``CORESMITH_GATE_SIM_SCOPE``      ``chip_top`` (default) | ``block`` | ``any``.
+                                  Which artifact the gate may judge; a subject
+                                  outside the scope is ``not_run`` with a reason.
 ``CORESMITH_GATE_SIM_STRICT``     default off. When on, a MISSING TOOLCHAIN
                                   (no Verilator, no PDK cell models) is a FAIL
                                   instead of a non-blocking ``not_run``.
@@ -88,6 +94,11 @@ ENV GATES
                                   at most this many cycles.
 ``CORESMITH_GATE_SIM_TIMEOUT_S``  default 1800.
 ``CORESMITH_GATE_SIM_MACRO_MODEL`` ``generated`` (default) | ``pdk``.
+``CORESMITH_GATE_SIM_DEBUG``      default off. TRIAGE AID: keep comparing past
+                                  the first divergence and report how many there
+                                  were in total. Does not change the verdict.
+``CORESMITH_GATE_SIM_MAX_DIVERGENCES`` default 32. How many mismatches the debug
+                                  mode records in full.
 
 FAIL SEMANTICS (fail-closed is the whole point)
 -----------------------------------------------
@@ -133,17 +144,58 @@ def _flag(name: str, default: bool) -> bool:
 
 
 def gate_sim_enabled() -> bool:
-    """Whether the post-synthesis gate-level simulation gate runs. Default ON.
+    """Whether the post-synthesis gate-level simulation gate runs.
 
-    Default-on matches the repo's other honest gates (synth, PnR route-DRC,
-    DRC-report fallback, read-timing) and is justified by what it closes: the
-    only check in the pipeline that ever exercises the artifact that becomes
-    silicon. Every other functional gate reads RTL, so with this off the
-    netlist is never simulated at all and a synthesis-side stub is invisible
-    end to end. Set ``CORESMITH_GATE_SIM=0`` to restore the pre-fix behaviour
-    (netlist never simulated).
+    **Default ON.** Nothing else in the flow simulates the artifact that becomes
+    silicon: every functional gate reads RTL, every PPA gate reads a netlist.
+
+    The gate was briefly turned default-OFF because it was MIS-SCOPED -- it ran
+    per block, and a per-block netlist is an intermediate whose stimulus is that
+    block's own testbench rather than real chip traffic. That is fixed by
+    :func:`gate_sim_scope`, not by disabling the gate: the default scope is now
+    ``chip_top``, so what is default-on is the judgement of the FLAT CHIP
+    NETLIST against the integration-DV vectors. Per-block replay still exists as
+    fast local feedback (``CORESMITH_GATE_SIM_SCOPE=block``) -- it is how a
+    synthesis-side stub scoring 143/144 line coverage was caught.
+
+    ``CORESMITH_GATE_SIM=0`` disables it entirely, which is recorded as
+    ``disabled`` with a reason that names what is no longer being checked.
     """
     return _flag(GATE_SIM_ENV, True)
+
+
+GATE_SIM_SCOPE_ENV = "CORESMITH_GATE_SIM_SCOPE"
+
+
+def gate_sim_scope() -> str:
+    """Which artifact this gate is allowed to judge. Default ``"chip_top"``.
+
+    A PER-BLOCK netlist is not what becomes silicon -- the integrated
+    ``chip_top`` netlist is -- and per-block replay uses that block's own
+    testbench vectors rather than real chip traffic. So the gate is scoped to
+    chip_top: any other subject is ``not_run`` with an explicit reason, never
+    a pass and never a failure.
+
+    ``CORESMITH_GATE_SIM_SCOPE=block`` opts back into per-block replay, which
+    is genuinely useful as fast local feedback -- it is how a synthesis-side
+    stub scoring 143/144 line coverage was caught. ``=any`` judges whatever it
+    is handed.
+
+    The chip-top subject is real: ``backend_graph`` runs this gate immediately
+    after ``flat_top_synthesis`` -- the first point at which a flat chip netlist
+    exists on disk -- and marks the subject ``is_chip_top``, so the guard admits
+    it (see :func:`block_is_chip_top`).
+    """
+    val = os.environ.get(GATE_SIM_SCOPE_ENV, "").strip().lower()
+    return val if val in {"block", "chip_top", "any"} else "chip_top"
+
+
+def block_is_chip_top(block: dict) -> bool:
+    """True when this subject is the integrated chip top, not a leaf block."""
+    if block.get("is_chip_top") or block.get("scope") == "chip_top":
+        return True
+    name = str(block.get("name", ""))
+    return name in {"chip_top", "integration"} or name.endswith("_chip_top")
 
 
 def gate_sim_strict() -> bool:
@@ -178,6 +230,41 @@ def gate_sim_timeout_s() -> int:
 def gate_sim_macro_model_mode() -> str:
     raw = (os.environ.get("CORESMITH_GATE_SIM_MACRO_MODEL", "") or "generated").strip().lower()
     return "pdk" if raw == "pdk" else "generated"
+
+
+GATE_SIM_DEBUG_ENV = "CORESMITH_GATE_SIM_DEBUG"
+
+
+def gate_sim_debug() -> bool:
+    """TRIAGE AID: keep comparing after the first divergence. Default off.
+
+    The default driver stops at the first mismatch, so ``cycles_compared`` reads
+    like a test length when it is really "where it stopped" -- 5151 of 200000
+    recorded vectors is 2.6% of the stimulus, and nothing says whether the
+    remaining 97% would have diverged once or ten thousand times. That is the
+    difference between "one wrong beat" and "the memory never writes", and it is
+    the first thing a human wants to know.
+
+    This does NOT change the verdict: one divergence has always been a FAIL and
+    still is. It only adds ``divergence_count`` and the first
+    :func:`gate_sim_max_divergences` mismatches to ``detail``. The default
+    verdict JSON is byte-for-byte unchanged, because the driver is generated
+    without the debug code at all when this is off.
+    """
+    return _flag(GATE_SIM_DEBUG_ENV, False)
+
+
+def gate_sim_max_divergences() -> int:
+    """How many individual mismatches debug mode records in full (default 32).
+
+    Bounded on purpose: a design whose memory never writes diverges on every
+    output beat, and 200000 recorded mismatches is not a report, it is a
+    denial of service on the reader. The COUNT is always exact.
+    """
+    try:
+        return max(1, int(os.environ.get("CORESMITH_GATE_SIM_MAX_DIVERGENCES", "") or 32))
+    except ValueError:
+        return 32
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +335,12 @@ class GateSimResult:
                 f"    expected : {div.get('expected')}   (RTL reference)",
                 f"    actual   : {div.get('actual')}   (gate netlist)",
             ]
+        # Only present when the run was made under CORESMITH_GATE_SIM_DEBUG: the
+        # default driver stops at the first mismatch, so it cannot know a total.
+        total = (self.detail or {}).get("divergence_count")
+        if total:
+            lines.append(f"    total    : {total} diverging port-cycles "
+                         f"(CORESMITH_GATE_SIM_DEBUG kept comparing)")
         lines += [
             "",
             "WHAT THIS MEANS: RTL DV, coverage and every PPA/PnR number were "
@@ -283,6 +376,37 @@ class Port:
     width: int = 1
     msb: int = 0
     lsb: int = 0
+
+
+_MODULE_DECL_RE = re.compile(r"^[ \t]*module[ \t]+([A-Za-z_][\w$]*)", re.MULTILINE)
+_INSTANCE_RE = re.compile(
+    r"^[ \t]*([A-Za-z_][\w$]*)[ \t]+(?:#\s*\([^;]*?\)\s*)?[A-Za-z_\\][\w$\\.\[\]]*[ \t]*\(",
+    re.MULTILINE,
+)
+
+
+def resolve_netlist_top(netlist_text: str) -> Optional[str]:
+    """Return the netlist's top module, derived from STRUCTURE not from a name.
+
+    The top is the one declared module that no other module instantiates. This
+    is deterministic and identifier-agnostic, which is the point: a block's
+    architectural name is chosen by the architecture agent and is NOT a stable
+    key. Keying a signoff gate off that name made it fail on a correctly
+    synthesized netlist whenever the name diverged from the mandated module
+    name (a Caravel ``user_project_wrapper``, a vendor-locked top).
+
+    Returns ``None`` when the answer is ambiguous -- zero candidates, or more
+    than one -- so the caller can FAIL rather than guess. A netlist with two
+    un-instantiated modules is not something to pick a winner from.
+    """
+    declared = set(_MODULE_DECL_RE.findall(netlist_text))
+    if not declared:
+        return None
+    instantiated = {m for m in _INSTANCE_RE.findall(netlist_text) if m in declared}
+    roots = declared - instantiated
+    if len(roots) == 1:
+        return roots.pop()
+    return None
 
 
 _MODULE_RE_TMPL = r"^[ \t]*module[ \t]+{top}[ \t]*\("
@@ -323,6 +447,71 @@ def parse_netlist_ports(netlist_text: str, top: str) -> list[Port]:
                      msb=hi, lsb=lo)
             )
     return ports
+
+
+# ---------------------------------------------------------------------------
+# Power/ground boundary nets
+# ---------------------------------------------------------------------------
+#
+# A tri-state SIGNAL boundary genuinely defeats vector replay: nothing tells the
+# driver when the pin is an input and when it is an output, so neither driving
+# nor comparing it is honest. A POWER RAIL declared ``inout`` is not that. It is
+# a constant, it carries no behaviour, and it is ``inout`` only because that is
+# the convention every PDK/harness uses for supplies.
+#
+# Refusing on any ``inout`` therefore made the gate structurally unable to judge
+# the one artifact it exists for: a Caravel ``user_project_wrapper``, whose ONLY
+# bidirectional ports are ``vdda1 vdda2 vssa1 vssa2 vccd1 vccd2 vssd1 vssd2``.
+# That is the artifact the external grader drives, so "no honest verdict is
+# available" was a hole exactly where the gate is supposed to be strongest.
+#
+# Conservative on purpose: recognition is by EXACT name against a curated list,
+# not by prefix or substring. An unrecognised inout is a SIGNAL and still vetoes
+# the gate -- mis-classifying a real tri-state as a rail would tie it to a
+# constant and then not compare it, i.e. fabricate a pass.
+_SUPPLY_INOUTS = frozenset({
+    "vdd", "vdd1v8", "vdd3v3", "vdda", "vdda1", "vdda2", "vddio", "vddd",
+    "vccd", "vccd1", "vccd2", "vccd3",
+    "vpwr", "vpb",          # cell-level views (VPWR / p-substrate bias)
+})
+_GROUND_INOUTS = frozenset({
+    "vss", "vssa", "vssa1", "vssa2", "vssio", "vssd", "vssd1", "vssd2", "vssd3",
+    "gnd", "vgnd", "vnb",   # cell-level views (VGND / n-well bias)
+})
+
+
+def power_inout_level(name: str) -> Optional[int]:
+    """``1`` for a supply rail, ``0`` for a ground rail, ``None`` otherwise.
+
+    ``None`` means "this is a signal", which is the safe answer: the caller then
+    declines to render a verdict at all. Only add a name here when it is a rail
+    in every context, because the consequence of a wrong entry is a pass that
+    ignored a real port.
+    """
+    key = str(name).lstrip("\\").strip().lower()
+    if key in _SUPPLY_INOUTS:
+        return 1
+    if key in _GROUND_INOUTS:
+        return 0
+    return None
+
+
+def split_inouts(ports: list[Port]) -> tuple[list[Port], list[Port]]:
+    """``(power_rails, signal_inouts)`` among the top's bidirectional ports.
+
+    A rail wider than one bit is not a rail we understand, so it is reported as a
+    signal rather than tied to a guessed constant.
+    """
+    rails: list[Port] = []
+    signals: list[Port] = []
+    for p in ports:
+        if p.direction != "inout":
+            continue
+        if p.width == 1 and power_inout_level(p.name) is not None:
+            rails.append(p)
+        else:
+            signals.append(p)
+    return rails, signals
 
 
 def pick_clock(ports: list[Port], hint: str = "") -> Optional[Port]:
@@ -673,8 +862,300 @@ def cell_model_files(
 # ---------------------------------------------------------------------------
 
 
-def macro_model_source(name: str, ports: str, data_bits: int, words: int,
-                       mask_bits: int = 0) -> str:
+# The stand-in's INTERFACE is read from the real macro's own Verilog, never
+# computed from registry metadata. Arithmetic on metadata got this wrong twice on
+# one design, in opposite directions:
+#
+#   * ``sram_1rw1r_8_4096_8`` (word_size == write_size == 8) declares NO
+#     ``wmask0`` port at all -- one whole-word mask bit IS the write enable, so
+#     OpenRAM legitimately omits it. The old generator emitted ``wmask0``
+#     unconditionally and gated writes on ``wmask0[0]``. The flat netlist
+#     correctly leaves the pin unconnected, Verilator ties the floating input
+#     low, EVERY write is suppressed, and every read returns zero -- a
+#     confident gate-sim FAIL on a correctly synthesized netlist.
+#   * ``sram_1rw1r_9_4096_8`` DOES declare ``wmask0``, as ``[1:0]``
+#     (NUM_WMASKS == ceil(9/8) == 2). The old generator computed ``9 // 8 == 1``
+#     and declared ``[0:0]``, so the netlist drove ``2'h3`` into a 1-bit port.
+#     Harmless only because that mask happens to be a constant.
+#
+# Both are one defect: a stand-in whose interface is GUESSED. The same guess also
+# hard-coded active-low ``csb0`` while the OpenROM mask-ROM models declare
+# active-HIGH ``cs0``, which would have inverted every ROM access.
+#
+# So: read the ports, the widths, the select polarity, the mask slices and the
+# ROM contents out of the macro. When any of that cannot be read, return "" --
+# the caller reports the macro as unresolved, which is a FAIL ("refusing to
+# simulate a design whose memories are undriven"). Never fall back to the guess.
+
+_MACRO_COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
+_MACRO_SUBPROG_RE = re.compile(
+    r"\bfunction\b.*?\bendfunction\b|\btask\b.*?\bendtask\b", re.DOTALL)
+_MACRO_PARAM_RE = re.compile(
+    r"\b(?:parameter|localparam)\b\s*(?:integer|signed)?\s*(?:\[[^\]]*\]\s*)?"
+    r"([A-Za-z_]\w*)\s*=\s*([^;,]+)")
+_MACRO_PORT_DECL_RE = re.compile(
+    r"\b(input|output|inout)\b\s+(?:(?:wire|reg|logic|signed)\s+)*"
+    r"(?:\[\s*([^:\]]+?)\s*:\s*([^\]]+?)\s*\]\s*)?([A-Za-z_]\w*)\s*(?=[;,)])")
+_MACRO_READMEM_RE = re.compile(r"\$readmem([bh])\s*\(\s*\"([^\"]+)\"")
+# The PDK model's own write-merge function is the GROUND TRUTH for which data
+# bits each mask bit covers -- including a partial final group (a 9-bit word
+# with write_size 8 has mask bit 1 covering exactly ``[8:8]``).
+_MACRO_MERGE_RE = re.compile(
+    r"if\s*\(\s*write_mask\s*\[\s*(\d+)\s*\]\s*\)\s*"
+    r"merge_write\d+\s*\[\s*(\d+)\s*:\s*(\d+)\s*\]")
+_MACRO_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+_MACRO_LITERAL_RE = re.compile(r"\b(\d+)'\s*([bodhBODH])\s*([0-9a-fA-FxzXZ_]+)")
+_MACRO_SAFE_EXPR_RE = re.compile(r"^[0-9+\-*/%()<>\s]+$")
+# Roles the generator understands. ``csb`` before ``cs`` so the active-low form
+# is not mis-read as the active-high one -- getting that backwards yields a
+# memory selected exactly when it should be idle.
+_MACRO_ROLE_RE = re.compile(r"^(clk|csb|cs|web|wmask|addr|din|dout)(\d+)$")
+
+
+def _macro_eval_int(expr: str, params: dict) -> Optional[int]:
+    """Evaluate one small integer expression out of a macro's own source.
+
+    Handles what OpenRAM/OpenROM actually write (``64``, ``1 << ADDR_WIDTH``,
+    ``DATA_WIDTH-1``, sized literals). Returns ``None`` for anything else --
+    an unresolvable width must propagate as "unknown", never as a default.
+    """
+    e = str(expr).strip().rstrip(";").strip()
+    if not e:
+        return None
+
+    def _lit(m: re.Match) -> str:
+        base = {"b": 2, "o": 8, "d": 10, "h": 16}[m.group(2).lower()]
+        try:
+            return str(int(m.group(3).replace("_", ""), base))
+        except ValueError:
+            return "?"
+
+    e = _MACRO_LITERAL_RE.sub(_lit, e)
+
+    def _ident(m: re.Match) -> str:
+        v = params.get(m.group(0))
+        return f"({v})" if isinstance(v, int) else "?"
+
+    e = _MACRO_IDENT_RE.sub(_ident, e)
+    if "?" in e or not _MACRO_SAFE_EXPR_RE.match(e):
+        return None
+    # Verilog `/` is integer division; every identifier is already substituted,
+    # so what is left is digits and operators only.
+    e = e.replace("/", "//")
+    try:
+        val = eval(e, {"__builtins__": {}}, {})  # noqa: S307 - whitelisted chars
+    except Exception:  # noqa: BLE001 - any arithmetic error means "unknown"
+        return None
+    return int(val) if isinstance(val, int) and not isinstance(val, bool) else None
+
+
+def _macro_params(text: str) -> dict:
+    """``{name: int}`` for every parameter whose value we can evaluate.
+
+    Iterated because a parameter may reference one declared later; a parameter we
+    cannot evaluate is simply absent, which only matters if a port width needs it.
+    """
+    params: dict = {}
+    pending = _MACRO_PARAM_RE.findall(text)
+    for _ in range(6):
+        rest = []
+        for nm, expr in pending:
+            val = _macro_eval_int(expr, params)
+            if val is None:
+                rest.append((nm, expr))
+            else:
+                params[nm] = val
+        if not rest or len(rest) == len(pending):
+            break
+        pending = rest
+    return params
+
+
+def _macro_balanced(text: str, open_at: int) -> tuple[str, int]:
+    """Text inside the parens starting at ``open_at``, and the index past them."""
+    depth = 0
+    for i in range(open_at, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_at + 1:i], i + 1
+    return "", len(text)
+
+
+def _macro_split_power_guard(header: str) -> tuple[str, str]:
+    """Split a module header into (unguarded, ``USE_POWER_PINS``-guarded) text.
+
+    The supplies live behind ```ifdef USE_POWER_PINS`` and are NOT part of the
+    functional port list; treating them as ordinary ports would declare pins the
+    netlist never connects.
+    """
+    plain: list[str] = []
+    guarded: list[str] = []
+    stack: list[bool] = []
+    for line in header.splitlines():
+        s = line.strip()
+        if s.startswith("`"):
+            tok = s[1:].split()
+            kw = tok[0] if tok else ""
+            if kw in ("ifdef", "ifndef"):
+                arg = tok[1] if len(tok) > 1 else ""
+                stack.append(arg == "USE_POWER_PINS" and kw == "ifdef")
+            elif kw == "else" and stack:
+                stack[-1] = not stack[-1]
+            elif kw == "endif" and stack:
+                stack.pop()
+            continue
+        (guarded if any(stack) else plain).append(line)
+    return "\n".join(plain), "\n".join(guarded)
+
+
+def _macro_header_names(region: str) -> list[str]:
+    """Port names from a module header region, in declaration order.
+
+    Serves both header styles: non-ANSI (``clk0,csb0,addr0``) and ANSI
+    (``input wire [11:0] addr0``) -- in both, the LAST identifier of each
+    comma-separated item is the port name.
+    """
+    out: list[str] = []
+    depth = 0
+    item: list[str] = []
+    items: list[str] = []
+    for ch in region:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            items.append("".join(item))
+            item = []
+            continue
+        item.append(ch)
+    items.append("".join(item))
+    for it in items:
+        ids = _MACRO_IDENT_RE.findall(it)
+        if ids and ids[-1] not in out:
+            out.append(ids[-1])
+    return out
+
+
+@dataclass
+class MacroIface:
+    """One hard macro's DECLARED interface, read from its own Verilog model.
+
+    Everything here is a fact stated by the macro, not a derivation from a name
+    or from registry metadata. ``ranges`` keeps the declared ``[msb:lsb]`` (not
+    just the width) so the stand-in's declaration is textually equivalent to the
+    real one.
+    """
+
+    name: str = ""
+    order: list = field(default_factory=list)      # port names, decl order
+    dirs: dict = field(default_factory=dict)       # name -> input/output/inout
+    ranges: dict = field(default_factory=dict)     # name -> (msb, lsb) or None
+    widths: dict = field(default_factory=dict)     # name -> declared width
+    power_pins: list = field(default_factory=list)  # USE_POWER_PINS-guarded
+    mask_slices: list = field(default_factory=list)  # [(hi, lo)] per mask bit
+    contents: str = ""                             # $readmem file, absolute
+    contents_radix: str = ""                       # "b" | "h"
+
+
+def macro_interface(name: str, verilog_path: str | Path) -> Optional[MacroIface]:
+    """Read one macro's declared interface out of its own Verilog model.
+
+    Returns ``None`` when the model cannot be read, its module cannot be found,
+    or any declared port's width cannot be resolved. ``None`` must degrade to
+    "macro unresolved" -> FAIL; it must never degrade to a guessed interface.
+
+    The port list is the module header's own, in declaration order. It is then
+    CROSS-CHECKED against
+    :func:`orchestrator.langgraph.macro_prebind.macro_ports` -- the same function
+    the pre-synthesis binder uses to decide which pins to CONNECT. If the binder
+    cannot see a port the header declares, the netlist will not connect it and
+    the stand-in would be modelling a different interface than the one being
+    simulated, so that disagreement returns ``None``. Note it must NOT resolve by
+    dropping the port: an absent input ties low, which is how every write got
+    silently suppressed in the first place.
+    """
+    p = Path(verilog_path)
+    if not str(verilog_path) or not p.is_file():
+        return None
+    try:
+        raw = p.read_text(errors="ignore")
+    except OSError:
+        return None
+
+    try:
+        from orchestrator.langgraph.macro_prebind import macro_ports
+    except Exception:  # pragma: no cover - import guard
+        return None
+    declared = macro_ports(p)
+    if not declared:
+        return None
+
+    text = _MACRO_COMMENT_RE.sub(" ", raw)
+    m = re.search(r"\bmodule\s+%s\b" % re.escape(name), text)
+    if not m:
+        return None
+    open_at = text.find("(", m.end())
+    if open_at < 0:
+        return None
+    header, past = _macro_balanced(text, open_at)
+    body = _MACRO_SUBPROG_RE.sub(" ", text[past:])
+    plain_hdr, guarded_hdr = _macro_split_power_guard(header)
+
+    iface = MacroIface(name=name)
+    iface.order = _macro_header_names(plain_hdr)
+    if not iface.order or any(n not in declared for n in iface.order):
+        return None
+    iface.power_pins = [n for n in _macro_header_names(guarded_hdr)
+                        if n in declared]
+
+    params = _macro_params(text)
+    # Declarations may be in the header (ANSI) or the body (non-ANSI); scan both.
+    # Subprograms are stripped from the body first so a function's own `input`
+    # declarations cannot be mistaken for ports.
+    for d in _MACRO_PORT_DECL_RE.finditer(plain_hdr + "\n" + body):
+        direction, msb, lsb, nm = d.group(1), d.group(2), d.group(3), d.group(4)
+        if nm not in iface.order or nm in iface.widths:
+            continue
+        if msb is None:
+            iface.dirs[nm] = direction
+            iface.ranges[nm] = None
+            iface.widths[nm] = 1
+            continue
+        hi, lo = _macro_eval_int(msb, params), _macro_eval_int(lsb, params)
+        if hi is None or lo is None:
+            return None          # a width we cannot resolve is not a width
+        iface.dirs[nm] = direction
+        iface.ranges[nm] = (hi, lo)
+        iface.widths[nm] = abs(hi - lo) + 1
+    if any(nm not in iface.widths for nm in iface.order):
+        return None              # a port with no resolvable declaration
+
+    for bit, hi, lo in _MACRO_MERGE_RE.findall(text):
+        iface.mask_slices.append((int(bit), int(hi), int(lo)))
+    iface.mask_slices = [(hi, lo) for _b, hi, lo in
+                         sorted(iface.mask_slices, key=lambda t: t[0])]
+
+    rm = _MACRO_READMEM_RE.search(text)
+    if rm:
+        iface.contents_radix = rm.group(1)
+        cand = Path(rm.group(2))
+        if not cand.is_absolute():
+            cand = p.parent / cand
+        iface.contents = str(cand)
+    return iface
+
+
+def _macro_range_str(rng) -> str:
+    return "" if rng is None else f"[{rng[0]}:{rng[1]}]"
+
+
+def macro_model_source(name: str, ports: str = "", data_bits: int = 0,
+                       words: int = 0, mask_bits: int = 0,
+                       iface: Optional[MacroIface] = None) -> str:
     """Generate a cycle-accurate simulation model for one hard memory macro.
 
     Reproduces the OpenRAM behavioural model's CYCLE semantics -- inputs
@@ -684,89 +1165,176 @@ def macro_model_source(name: str, ports: str, data_bits: int, words: int,
     redrive race that makes the PDK's own model unusable in a zero-delay
     simulator, and the per-access tracing that makes it unusable at scale.
 
-    Supports the ``1rw``/``1rw1r``/``1r`` port sets used by the sky130 SRAM and
-    ROM macro families. Returns ``""`` for an unrecognised port set, which the
-    caller reports as ``not_run`` (or FAIL under strict) rather than guessing.
+    ``iface`` (from :func:`macro_interface`) is REQUIRED and is the only source
+    of the port list, the port widths, the select polarity, the write-mask
+    slicing and the memory depth. ``ports``/``data_bits``/``words``/``mask_bits``
+    are registry metadata used for the header comment and as the fallback
+    mask granularity only -- they never decide what the interface looks like.
+    See the comment above :func:`macro_interface` for the two false verdicts
+    that deriving the interface arithmetically produced.
+
+    Returns ``""`` -- "unresolved", which the caller turns into a FAIL -- when
+    there is no ``iface``, when the macro declares a port this generator does not
+    understand, when the geometry is inconsistent, or when a read-only memory's
+    contents cannot be located. Guessing in any of those cases produces a
+    confident verdict about hardware that was never simulated.
     """
-    addr_bits = max(1, (words - 1).bit_length())
-    nmask = max(1, data_bits // mask_bits) if mask_bits else 1
-    has_rw = "rw" in ports
-    n_r = 0
-    m = re.search(r"(\d+)r(?!w)", ports)
-    if m:
-        n_r = int(m.group(1))
-    if not has_rw and n_r == 0:
+    if iface is None or not iface.order:
         return ""
 
+    # --- classify every declared port; refuse on anything unrecognised -------
+    roles: dict = {}
+    for nm in iface.order:
+        m = _MACRO_ROLE_RE.match(nm)
+        if not m:
+            return ""            # an unknown pin means we do not know this macro
+        role, idx = m.group(1), int(m.group(2))
+        if role in roles.setdefault(idx, {}):
+            return ""            # duplicate declaration
+        roles[idx][role] = nm
+    if not roles:
+        return ""
+
+    def _w(nm: str) -> int:
+        return int(iface.widths.get(nm, 0) or 0)
+
+    # --- geometry, entirely from the declarations ----------------------------
+    data_names = [r[k] for r in roles.values() for k in ("din", "dout") if k in r]
+    addr_names = [r["addr"] for r in roles.values() if "addr" in r]
+    if not data_names or not addr_names:
+        return ""
+    if len({_w(n) for n in data_names}) != 1:
+        return ""                # din/dout disagree: not a memory we understand
+    if len({_w(n) for n in addr_names}) != 1:
+        return ""
+    dwidth = _w(data_names[0])
+    awidth = _w(addr_names[0])
+    if dwidth <= 0 or awidth <= 0:
+        return ""
+    # Matches the PDK model exactly: ``RAM_DEPTH = 1 << ADDR_WIDTH``. Sizing from
+    # the registry's word count instead would leave an addressable index out of
+    # range for a non-power-of-two macro (e.g. a 127-word SRAM with 7 address
+    # bits).
+    depth = 1 << awidth
+    data_rng = _macro_range_str(iface.ranges.get(data_names[0]))
+    if not data_rng:
+        data_rng = "[0:0]"
+
     decl: list[str] = []
+    for nm in iface.order:
+        kw = "output reg" if iface.dirs.get(nm) == "output" else \
+             f"{iface.dirs.get(nm, 'input')}  wire"
+        rng = _macro_range_str(iface.ranges.get(nm))
+        decl.append(f"  {kw} {rng + ' ' if rng else ''}{nm};")
+
     body: list[str] = []
-    portnames: list[str] = []
-
-    if has_rw:
-        portnames += ["clk0", "csb0", "web0", "wmask0", "addr0", "din0", "dout0"]
-        decl += [
-            "  input  wire                    clk0;",
-            "  input  wire                    csb0;",
-            "  input  wire                    web0;",
-            f"  input  wire [{nmask - 1}:0]{' ' * 12}wmask0;",
-            f"  input  wire [{addr_bits - 1}:0] addr0;",
-            f"  input  wire [{data_bits - 1}:0] din0;",
-            f"  output reg  [{data_bits - 1}:0] dout0;",
-        ]
-        wr = []
-        if mask_bits and nmask > 1:
-            for i in range(nmask):
-                hi = (i + 1) * mask_bits - 1
-                lo = i * mask_bits
-                wr.append(f"        if (wmask0[{i}]) mem[addr0][{hi}:{lo}] "
-                          f"<= din0[{hi}:{lo}];")
+    for idx in sorted(roles):
+        r = roles[idx]
+        clk, addr = r.get("clk"), r.get("addr")
+        dout, din, web = r.get("dout"), r.get("din"), r.get("web")
+        if not clk or not addr or not dout:
+            return ""            # a port with no clock/address/data path
+        # Select polarity is READ, not assumed: OpenRAM SRAMs declare active-low
+        # `csb`, OpenROM mask ROMs declare active-high `cs`.
+        if "csb" in r:
+            sel = f"!{r['csb']}"
+        elif "cs" in r:
+            sel = r["cs"]
         else:
-            wr.append("        if (wmask0[0]) mem[addr0] <= din0;")
-        body.append(
-            "  always @(posedge clk0) begin\n"
-            "    if (!csb0) begin\n"
-            "      if (!web0) begin\n"
-            + "\n".join(wr) + "\n"
-            "      end else begin\n"
-            "        dout0 <= mem[addr0];\n"
-            "      end\n"
-            "    end\n"
-            "  end"
-        )
+            sel = "1'b1"
 
-    base = 1 if has_rw else 0
-    for k in range(n_r):
-        idx = base + k
-        portnames += [f"clk{idx}", f"csb{idx}", f"addr{idx}", f"dout{idx}"]
-        decl += [
-            f"  input  wire                    clk{idx};",
-            f"  input  wire                    csb{idx};",
-            f"  input  wire [{addr_bits - 1}:0] addr{idx};",
-            f"  output reg  [{data_bits - 1}:0] dout{idx};",
-        ]
-        body.append(
-            f"  always @(posedge clk{idx}) begin\n"
-            f"    if (!csb{idx}) dout{idx} <= mem[addr{idx}];\n"
-            f"  end"
-        )
+        if web and din:
+            wmask = r.get("wmask")
+            writes: list[str] = []
+            if wmask is None:
+                # The macro has NO write mask: word_size == write_size, so the
+                # write enable IS the mask. Gating on a pin that does not exist
+                # is how every write got silently dropped.
+                writes.append(f"        mem[{addr}] <= {din};")
+            else:
+                nmask = _w(wmask)
+                slices = list(iface.mask_slices)
+                if len(slices) != nmask:
+                    # No usable merge function in the model: fall back to the
+                    # registry's write granularity, but only if it reproduces the
+                    # DECLARED mask width exactly. Otherwise refuse.
+                    gran = int(mask_bits or 0)
+                    if gran <= 0 or -(-dwidth // gran) != nmask:
+                        return ""
+                    slices = [(min((i + 1) * gran - 1, dwidth - 1), i * gran)
+                              for i in range(nmask)]
+                if nmask == 1 and slices[0] == (dwidth - 1, 0):
+                    writes.append(f"        if ({wmask}[0]) mem[{addr}] <= {din};")
+                else:
+                    for i, (hi, lo) in enumerate(slices):
+                        writes.append(
+                            f"        if ({wmask}[{i}]) mem[{addr}][{hi}:{lo}] "
+                            f"<= {din}[{hi}:{lo}];")
+            body.append(
+                f"  always @(posedge {clk}) begin\n"
+                f"    if ({sel}) begin\n"
+                f"      if (!{web}) begin\n"
+                + "\n".join(writes) + "\n"
+                "      end else begin\n"
+                f"        {dout} <= mem[{addr}];\n"
+                "      end\n"
+                "    end\n"
+                "  end"
+            )
+        elif web or din:
+            return ""            # half a write port is not something to guess at
+        else:
+            body.append(
+                f"  always @(posedge {clk}) begin\n"
+                f"    if ({sel}) {dout} <= mem[{addr}];\n"
+                f"  end"
+            )
 
+    # A memory with no write port anywhere is a ROM: its behaviour IS its
+    # contents, so a stand-in that cannot load them would read zeros and hand
+    # back a verdict about hardware it never modelled.
+    writable = any("web" in r and "din" in r for r in roles.values())
+    init = ""
+    if iface.contents:
+        if not Path(iface.contents).is_file():
+            return ""
+        init = (f'  initial $readmem{iface.contents_radix or "b"}'
+                f'("{iface.contents}", mem, 0, {depth - 1});\n\n')
+    elif not writable:
+        return ""
+
+    pin_list = list(iface.order)
+    guard_hdr = guard_decl = ""
+    if iface.power_pins:
+        guard_hdr = ("`ifdef USE_POWER_PINS\n"
+                     + "".join(f"  {n},\n" for n in iface.power_pins)
+                     + "`endif\n")
+        guard_decl = ("`ifdef USE_POWER_PINS\n"
+                      + "".join(f"  inout {n};\n" for n in iface.power_pins)
+                      + "`endif\n")
+
+    geom = f"{ports or '?'}, {words or depth}w x {data_bits or dwidth}b"
     return (
         "// Generated by coresmith harness.gate_sim -- cycle-accurate stand-in\n"
-        f"// for hard macro {name} ({ports}, {words}w x {data_bits}b).\n"
+        f"// for hard macro {name} ({geom}).\n"
         "// The PDK's own behavioural model drives `#(T_HOLD) dout = 'bx;` from\n"
         "// a posedge block and re-drives on negedge: that races to destruction\n"
         "// in a zero-delay simulator, and its VERBOSE $display floods a\n"
         "// full-length gate run. Cycle semantics below match the PDK model.\n"
+        "//\n"
+        "// PORT LIST AND WIDTHS ARE READ FROM THE REAL MACRO'S OWN VERILOG --\n"
+        "// a port it does not declare must not appear here (an unconnected\n"
+        "// input ties low, which silently suppressed every write), and a port\n"
+        "// it does declare must have the same width.\n"
         "`default_nettype wire\n"
         "`timescale 1ns / 1ps\n\n"
         f"module {name} (\n"
-        "`ifdef USE_POWER_PINS\n"
-        "  inout wire vccd1,\n"
-        "  inout wire vssd1,\n"
-        "`endif\n"
-        "  " + ",\n  ".join(portnames) + "\n);\n"
+        + guard_hdr
+        + "  " + ",\n  ".join(pin_list) + "\n);\n"
+        + guard_decl
         + "\n".join(decl) + "\n\n"
-        f"  reg [{data_bits - 1}:0] mem [0:{words - 1}];\n\n"
+        f"  reg {data_rng} mem [0:{depth - 1}];\n\n"
+        + init
         + "\n\n".join(body) + "\n"
         "endmodule\n"
     )
@@ -778,7 +1346,8 @@ def macro_model_files(netlist_path: str | Path, work_dir: Path) -> tuple[list[st
     Returns ``(files, unresolved)``. ``unresolved`` names macros we could not
     model -- the caller must FAIL rather than simulate a design with an
     undriven memory (an unmodelled macro is a guaranteed false verdict, in
-    either direction).
+    either direction). A macro whose own Verilog cannot be read or parsed lands
+    here too: the interface is never guessed.
     """
     try:
         from orchestrator.langgraph import macro_registry
@@ -796,13 +1365,15 @@ def macro_model_files(netlist_path: str | Path, work_dir: Path) -> tuple[list[st
     unresolved: list[str] = []
     work_dir.mkdir(parents=True, exist_ok=True)
     for info in found:
-        if mode == "pdk" and getattr(info, "verilog", ""):
-            src = Path(info.verilog)
+        model = getattr(info, "verilog", "") or ""
+        if mode == "pdk" and model:
+            src = Path(model)
             if src.exists():
                 files.append(str(src))
                 continue
         src_text = macro_model_source(
             info.name, info.ports, info.data_bits, info.words, info.mask_bits,
+            iface=macro_interface(info.name, model),
         )
         if not src_text:
             unresolved.append(info.name)
@@ -839,15 +1410,39 @@ def write_if_changed(path: Path, text: str) -> None:
     path.write_text(text)
 
 
-def render_driver_cpp(top: str, ports: list[Port], clock: str) -> str:
+def render_driver_cpp(top: str, ports: list[Port], clock: str,
+                      debug: Optional[bool] = None,
+                      max_divergences: Optional[int] = None) -> str:
     """Generate the C++ testbench that replays the recorded vectors.
 
     Fully design-agnostic: the port list is derived from the netlist, so the
     same generator serves any design. The driver writes a JSON verdict and only
     ever reports success when it actually compared cycles AND bits.
+
+    Power/ground ``inout`` ports are tied to their own rail every cycle and never
+    compared -- see :func:`power_inout_level`. A non-power ``inout`` never reaches
+    here: :func:`check_gate_sim` declines to render a verdict on it.
+
+    ``debug`` (default: :func:`gate_sim_debug`) keeps comparing past the first
+    divergence and adds ``divergence_count`` plus the first ``max_divergences``
+    mismatches to the verdict. When it is off the debug code is not emitted at
+    all, so the default driver and its verdict JSON are unchanged.
     """
+    if debug is None:
+        debug = gate_sim_debug()
+    if max_divergences is None:
+        max_divergences = gate_sim_max_divergences()
     ins = [p for p in ports if p.direction == "input" and p.name != clock]
     outs = [p for p in ports if p.direction == "output"]
+    rails, _ = split_inouts(ports)
+
+    # Supplies are constants, but they are re-asserted every cycle: an `inout`
+    # can be driven from inside the netlist during eval(), and a rail that
+    # collapses mid-run would poison every cell it feeds.
+    tie: list[str] = [
+        f"    dut->{p.name} = {power_inout_level(p.name)};   // power rail, not compared"
+        for p in rails
+    ]
 
     drive: list[str] = []
     for i, p in enumerate(ins):
@@ -896,6 +1491,42 @@ def render_driver_cpp(top: str, ports: list[Port], clock: str) -> str:
     }}""")
 
     n_in, n_out = len(ins), len(outs)
+
+    # --- opt-in debug instrumentation ---------------------------------------
+    # Emitted only under CORESMITH_GATE_SIM_DEBUG so the default driver, its
+    # verdict JSON and its PASS/FAIL semantics are exactly as before.
+    if debug:
+        dbg_globals = f"""
+// CORESMITH_GATE_SIM_DEBUG: keep comparing after the first mismatch. The verdict
+// is unchanged (one divergence is still a FAIL); this only distinguishes "one
+// wrong beat" from "every beat is wrong", which the first-mismatch-only report
+// cannot.
+static const size_t DIV_LIMIT = {max_divergences};
+static std::vector<std::string> div_all;
+static long long div_count = 0;
+"""
+        dbg_record = """  div_count++;
+  if (div_all.size() < DIV_LIMIT) {
+    char buf[512];
+    snprintf(buf, sizeof(buf),
+             "{\\"cycle\\": %lld, \\"port\\": \\"%s\\", \\"expected\\": \\"%s\\", "
+             "\\"actual\\": \\"%s\\"}",
+             cycle, port, e.c_str(), to_bits(a, e.size()).c_str());
+    div_all.push_back(buf);
+  }
+"""
+        dbg_break = ("    // CORESMITH_GATE_SIM_DEBUG: do NOT stop at the first "
+                     "divergence.")
+        dbg_json = """  fprintf(jf, ", \\"divergence_count\\": %lld, \\"divergences\\": [",
+          div_count);
+  for (size_t i = 0; i < div_all.size(); i++)
+    fprintf(jf, "%s%s", i ? ", " : "", div_all[i].c_str());
+  fprintf(jf, "]");
+"""
+    else:
+        dbg_globals = dbg_record = dbg_json = ""
+        dbg_break = "    if (div_cycle >= 0) break;   // stop at the first divergence"
+
     return f"""// Generated by coresmith harness.gate_sim -- vector-replay driver for
 // the post-synthesis gate netlist of `{top}`. No cocotb, no design knowledge:
 // the port list below was parsed from the netlist itself.
@@ -935,7 +1566,7 @@ static void parse_wide(const std::string &v, uint32_t *w, int nw) {{
 
 static long long div_cycle = -1;
 static std::string div_port, div_exp, div_act;
-
+{dbg_globals}
 // Render the actual value in the SAME binary form as the recorded expected
 // value, so the divergence line in the report compares like with like.
 static std::string to_bits(uint64_t v, size_t width) {{
@@ -957,7 +1588,7 @@ static std::string word_bits(const std::string &e, int k) {{
 
 static void record(const char *port, long long cycle, const std::string &e,
                    uint64_t a) {{
-  if (div_cycle >= 0) return;
+{dbg_record}  if (div_cycle >= 0) return;
   div_cycle = cycle; div_port = port; div_exp = e;
   div_act = to_bits(a, e.size());
 }}
@@ -975,6 +1606,9 @@ int main(int argc, char **argv) {{
   std::string line;
   std::vector<std::string> in_tok({n_in}), out_tok({n_out});
 
+  // Power/ground boundary: bring the rails up before the first eval().
+{chr(10).join(tie) or "  // (none)"}
+
   while (std::getline(vf, line)) {{
     if (line.empty() || line[0] == '#') continue;
     size_t bar = line.find('|');
@@ -990,6 +1624,7 @@ int main(int argc, char **argv) {{
 
     // Apply the recorded pre-edge inputs and let combinational logic settle.
     dut->{clock} = 0;
+{chr(10).join(tie)}
 {chr(10).join(drive)}
     dut->eval();
 
@@ -1001,7 +1636,7 @@ int main(int argc, char **argv) {{
     dut->{clock} = 1; dut->eval();
     dut->{clock} = 0; dut->eval();
     cycle++;
-    if (div_cycle >= 0) break;   // stop at the first divergence
+{dbg_break}
   }}
 
   dut->final();
@@ -1012,11 +1647,12 @@ int main(int argc, char **argv) {{
           compared, bits_compared);
   if (div_cycle >= 0) {{
     fprintf(jf, "\\"diverged\\": true, \\"first_divergence\\": {{\\"cycle\\": %lld, "
-            "\\"port\\": \\"%s\\", \\"expected\\": \\"%s\\", \\"actual\\": \\"%s\\"}}}}\\n",
+            "\\"port\\": \\"%s\\", \\"expected\\": \\"%s\\", \\"actual\\": \\"%s\\"}}",
             div_cycle, div_port.c_str(), div_exp.c_str(), div_act.c_str());
   }} else {{
-    fprintf(jf, "\\"diverged\\": false, \\"first_divergence\\": {{}}}}\\n");
+    fprintf(jf, "\\"diverged\\": false, \\"first_divergence\\": {{}}");
   }}
+{dbg_json}  fprintf(jf, "}}\\n");
   fclose(jf);
   delete dut;
   return div_cycle >= 0 ? 1 : 0;
@@ -1148,15 +1784,20 @@ def check_gate_sim(
     sim_runner: Optional[Callable] = None,
     pdk_root: str | Path | None = None,
 ) -> GateSimResult:
-    """Run the post-synthesis gate-level simulation for one block.
+    """Run the post-synthesis gate-level simulation for one subject.
 
     ``sim_runner`` is injected by tests; it defaults to
     ``pipeline_helpers.run_simulation`` and must accept
     ``(block, rtl_path, tb_path, attempt, extra_defines=, sim_subdir=,
     extra_args=)``.
+
+    The two gates that decide whether a verdict is even ADMISSIBLE come first,
+    before anything is read off disk: the env switch (:func:`gate_sim_enabled`)
+    and the scope (:func:`gate_sim_scope`). "Off" outranks "out of scope" --
+    when the gate is off, that is the whole story, and a reader must not be told
+    a leaf block was skipped for scope reasons when nothing would have run.
     """
     block_name = block.get("name", "block")
-    top = block.get("top") or block_name
 
     if not gate_sim_enabled():
         return GateSimResult(
@@ -1164,6 +1805,44 @@ def check_gate_sim(
             reason=f"{GATE_SIM_ENV}=0 -- the synthesized netlist is NEVER "
                    f"simulated; a synthesis-side stub cannot be caught",
         )
+
+    scope = gate_sim_scope()
+    if scope == "chip_top" and not block_is_chip_top(block):
+        return GateSimResult(
+            ran=False, ok=True, status=STATUS_NOT_RUN,
+            reason=(f"scope={scope}: this gate only judges the integrated "
+                    f"chip_top netlist, and '{block_name or '?'}' is a "
+                    f"leaf block. A per-block netlist is not the artifact that "
+                    f"becomes silicon, and per-block replay drives it with that "
+                    f"block's own testbench rather than real chip traffic. Set "
+                    f"{GATE_SIM_SCOPE_ENV}=block for per-block replay."),
+        )
+
+    # Resolve the top from the NETLIST'S STRUCTURE, never from an identifier.
+    #
+    # A block's architectural name is chosen by the architecture agent and is
+    # not a stable key: when an external contract fixes the module name (a
+    # Caravel user_project_wrapper, a vendor-locked top), the block keeps its
+    # own name while the RTL declares the mandated one. Keying this gate off
+    # block_name made it FAIL CLOSED on a correctly synthesized netlist --
+    # "top module not found", 0 cycles compared -- and which way it went
+    # depended on whether the architecture agent happened to append a suffix.
+    #
+    # Precedence: an explicit block["top"] (a deliberate override) > the
+    # netlist's own root module > the RTL's declared module. The structural
+    # answer returns None when ambiguous rather than guessing.
+    top = block.get("top")
+    if not top:
+        try:
+            top = resolve_netlist_top(Path(netlist_path).read_text(errors="replace"))
+        except OSError:
+            top = None
+    if not top:
+        try:
+            from orchestrator.langgraph.pipeline_helpers import rtl_module_name
+            top = rtl_module_name(rtl_path, block_name)
+        except Exception:  # noqa: BLE001 - resolver is best-effort
+            top = block_name
 
     def _not_run(reason: str, **detail) -> GateSimResult:
         strict = gate_sim_strict()
@@ -1219,14 +1898,18 @@ def check_gate_sim(
     if clock is None:
         return _not_run("no clock port identified on the netlist top -- "
                         "cycle-accurate replay needs one")
-    inouts = [p.name for p in ports if p.direction == "inout"]
-    if inouts:
-        # A bidirectional boundary port is neither driven nor compared by the
-        # replay, so a PASS would carry a hole exactly where the gate is
-        # supposed to be strongest. Report it instead of hiding it.
+    rails, signal_inouts = split_inouts(ports)
+    if signal_inouts:
+        # A bidirectional SIGNAL is neither driven nor compared by the replay, so
+        # a PASS would carry a hole exactly where the gate is supposed to be
+        # strongest. Report it instead of hiding it. Power/ground rails are not
+        # this: they are constants, they are tied in the driver, and they are
+        # excluded from the comparison -- otherwise the gate could never judge a
+        # Caravel user_project_wrapper, whose only inouts are supplies, which is
+        # precisely the artifact the external grader drives.
         return _not_run(
             "the netlist top has bidirectional port(s) "
-            + ", ".join(inouts)
+            + ", ".join(p.name for p in signal_inouts)
             + " -- vector replay cannot drive or compare a tri-state boundary, "
               "so no honest verdict is available"
         )
@@ -1346,13 +2029,22 @@ def check_gate_sim(
         return _fail("gate simulation compared 0 output bits (every recorded "
                      "output was unknown) -- that is not a pass")
 
+    detail = {"work_dir": str(work_dir), "recorded_cycles": vec.cycles,
+              "seed": seed}
+    if rails:
+        detail["power_rails_tied"] = [p.name for p in rails]
+    # Present only when the run was built under CORESMITH_GATE_SIM_DEBUG: the
+    # default driver stops at the first mismatch and cannot know a total.
+    if raw.get("divergence_count") is not None:
+        detail["divergence_count"] = int(raw.get("divergence_count") or 0)
+        detail["divergences"] = raw.get("divergences") or []
+
     if raw.get("diverged"):
         res = _fail("the gate netlist diverges from the verified RTL")
         res.cycles_compared = cycles
         res.output_bits_compared = bits
         res.first_divergence = raw.get("first_divergence") or {}
-        res.detail = {"work_dir": str(work_dir), "recorded_cycles": vec.cycles,
-                      "seed": seed}
+        res.detail = detail
         return res
 
     return GateSimResult(
@@ -1361,18 +2053,23 @@ def check_gate_sim(
         netlist_path=netlist_path,
         cycles_compared=cycles,
         output_bits_compared=bits,
-        detail={"work_dir": str(work_dir), "recorded_cycles": vec.cycles,
-                "seed": seed, "macro_models": len(macro_files)},
+        detail={**detail, "macro_models": len(macro_files)},
     )
 
 
 __all__ = [
-    "GATE_SIM_ENV", "GateSimResult", "Port", "Vectors",
+    "GATE_SIM_ENV", "GATE_SIM_SCOPE_ENV", "GATE_SIM_DEBUG_ENV",
+    "GateSimResult", "MacroIface", "Port", "Vectors",
     "STATUS_PASS", "STATUS_FAIL", "STATUS_NOT_RUN", "STATUS_DISABLED",
-    "gate_sim_enabled", "gate_sim_strict", "gate_sim_max_cycles",
+    "gate_sim_enabled", "gate_sim_scope", "block_is_chip_top",
+    "gate_sim_strict", "gate_sim_max_cycles",
     "gate_sim_timeout_s", "gate_sim_macro_model_mode",
-    "parse_netlist_ports", "pick_clock", "extract_vectors", "write_vector_file",
-    "udp_shim_source", "cell_model_files", "macro_model_source",
+    "gate_sim_debug", "gate_sim_max_divergences",
+    "resolve_netlist_top", "parse_netlist_ports", "pick_clock",
+    "power_inout_level", "split_inouts",
+    "extract_vectors", "write_vector_file",
+    "udp_shim_source", "cell_model_files",
+    "macro_interface", "macro_model_source",
     "macro_model_files", "render_driver_cpp", "build_and_run_gate_sim",
     "write_if_changed",
     "check_gate_sim",

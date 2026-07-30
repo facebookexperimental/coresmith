@@ -3757,8 +3757,12 @@ async def get_tapeout_state() -> str:
         "wrapper_drc_clean": wrapper_drc.get("clean"),
         "wrapper_lvs_match": wrapper_lvs.get("match"),
         "precheck_pass": precheck.get("pass"),
+        # Tri-state: True / False / None ("could not be measured"). An agent
+        # reads this to decide what to do next, so a not_run check flattened to
+        # False sends it off to fix a violation that was never observed.
         "precheck_checks": {
-            k: v.get("pass") for k, v in precheck.get("checks", {}).items()
+            k: (v.get("pass") if v.get("status") != "not_run" else None)
+            for k, v in precheck.get("checks", {}).items()
         },
         "submission_dir": values.get("submission_dir", ""),
         "wrapper_gds_path": values.get("wrapper_gds_path", ""),

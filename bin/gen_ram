@@ -26,7 +26,15 @@ silently went missing and were misread as "slow macro" rather than "no data".
 is disabled". Therefore:
 
 * **No DRC and no LVS run during generation.** Those verdicts are reported as
-  ``not run`` (never as a pass) and must come from the backend flow.
+  ``not_run`` -- the same three-state vocabulary as
+  ``orchestrator/langgraph/drc_verdict.py`` and ``harness/gate_sim.py``: a
+  stage that was not measured carries ``status="not_run"``, ``ok=None``,
+  ``violations=None`` and a ``reason``. Never a pass, and never a numeric
+  ``violations`` (a ``-1`` "sentinel" read as "this macro HAS DRC violations"
+  and FAILed two real raster macros for a DRC that never ran). The report also
+  lists every unmeasured stage under the top-level ``unmeasured`` key, so
+  ``verdict: PASS`` cannot be misread as "DRC clean". The authoritative DRC/LVS
+  verdicts must come from the backend flow.
 * **Liberty timing is an ANALYTICAL ESTIMATE, not a SPICE measurement.** This
   is why generated macros report 600-700 MHz while the one macro that was
   fully characterized end-to-end (``sram_1rw1r_16_128_8_sky130``) measures
@@ -308,12 +316,33 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"[liberty] {ldetail} (analytical model, not characterized)")
         if not lok:
             ok, detail = False, f"liberty check failed: {ldetail}"
-        report["stages"]["drc"] = {"ok": None, "detail": "not run by OpenRAM "
-                                   "(check_lvs=False); use the backend DRC flow"}
-        report["stages"]["lvs"] = {"ok": None, "detail": "not run by OpenRAM "
-                                   "(check_lvs=False); use the backend LVS flow"}
-        _log("[drc] not run -- OpenRAM generation has DRC/LVS disabled")
-        _log("[lvs] not run -- OpenRAM generation has DRC/LVS disabled")
+        # DRC/LVS were not measured here. Record that as the engine's honest
+        # NOT-MEASURED state (status=not_run + reason, ok=None, violations=None)
+        # rather than a bare ok=None with prose: `ok=False`/`violations=-1` is
+        # what made an unwritten precheck_magic_drc.rpt read as a real DRC
+        # failure. See orchestrator/langgraph/drc_verdict.py.
+        from orchestrator.langgraph.drc_verdict import (
+            STATUS_NOT_RUN,
+            drc_stage,
+            unmeasured_drc,
+        )
+        _off = ("not run during generation: openram_gen's config sets "
+                "check_lvs=False, so OpenRAM reports \"DRC/LVS/PEX is "
+                "disabled\" and measures nothing")
+        _drc_why = f"{_off}; the authoritative verdict must come from the backend DRC flow"
+        _lvs_why = f"{_off}; the authoritative verdict must come from the backend LVS flow"
+        report["stages"]["drc"] = drc_stage(
+            unmeasured_drc(_drc_why, tool="OpenRAM"))
+        report["stages"]["lvs"] = {
+            "ok": None,
+            "status": STATUS_NOT_RUN,
+            "measured": False,
+            "reason": _lvs_why,
+            "detail": ("OpenRAM LVS COULD NOT BE MEASURED "
+                       f"(status={STATUS_NOT_RUN}): {_lvs_why}"),
+        }
+        _log(f"[drc] {STATUS_NOT_RUN} -- {_drc_why}")
+        _log(f"[lvs] {STATUS_NOT_RUN} -- {_lvs_why}")
     if not ok:
         report["verdict"] = "FAIL"
         _emit(report, args.out)
@@ -328,6 +357,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _emit(report: dict, out: Path) -> None:
+    # Name every stage that produced NO measurement at the TOP level, next to
+    # `verdict`, so a reader of "verdict": "PASS" cannot mistake an unmeasured
+    # DRC/LVS for a measured clean one.
+    from orchestrator.langgraph.drc_verdict import STATUS_NOT_RUN
+    report["unmeasured"] = sorted(
+        name for name, stage in (report.get("stages") or {}).items()
+        if isinstance(stage, dict) and stage.get("status") == STATUS_NOT_RUN
+    )
     try:
         out.mkdir(parents=True, exist_ok=True)
         path = out / "gen_ram_report.json"

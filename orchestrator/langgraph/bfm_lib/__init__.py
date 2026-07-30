@@ -12,8 +12,16 @@ families are a follow-on -- the classifier/codegen split is designed to grow a
 new ``*_contract`` + ``*_master_bfm`` per protocol.
 
 Public API:
+  * ``classify_bus_verdict(project_root, top_rtl_source, connections,
+    top_module, top_rtl_path)`` -> ``BusVerdict`` (is this a QSPI-slave chassis,
+    WHERE is the graded Caravel pin boundary, and will the integration sim
+    actually drive it?). Pin-driving callers must use this one: it separates
+    "not the graded boundary" (fail closed) from "not a QSPI design" (advisory).
   * ``classify_chip_bus(project_root, top_rtl_source, connections)`` ->
-    ``QSPIContract | None``  (is this chip-top a QSPI-slave? DUT-blind)
+    ``QSPIContract | None``  (is this chip a QSPI-slave? DUT-blind)
+  * ``find_pin_boundary(...)`` -> ``PinBoundary | None`` (which module declares
+    io_in/io_out/io_oeb, and in which file)
+  * ``boundary_gate_enabled()`` -> the fail-closed pin-boundary gate's env flag
   * ``build_plan_from_run(project_root, contract)`` -> ``StimulusPlan | None``
     (host-flow writes + expected OUT from the LLM golden reference)
   * ``plan_deterministic_dv(...)`` -> ``(contract, plan) | (None, None)``
@@ -27,11 +35,19 @@ import os
 from pathlib import Path
 
 from .classifier import (
+    STATUS_BOUNDARY_OFF_TOP,
+    STATUS_CONTRADICTION,
+    STATUS_NOT_QSPI,
+    STATUS_QSPI_TOP,
+    BusVerdict,
+    PinBoundary,
     arch_indicates_qspi_slave,
+    classify_bus_verdict,
     classify_chip_bus,
     describe_unmodeled_roles,
     detect_bus_roles,
     detect_dut_mastered_buses,
+    find_pin_boundary,
 )
 from .codegen import (
     render_bfm_module,
@@ -48,19 +64,28 @@ from .qspi_rom_bfm import QSPIRomContract, QSPIRomResponderBFM
 from .stimulus import StimulusPlan, build_plan_from_run
 
 __all__ = [
+    "STATUS_BOUNDARY_OFF_TOP",
+    "STATUS_CONTRADICTION",
+    "STATUS_NOT_QSPI",
+    "STATUS_QSPI_TOP",
+    "BusVerdict",
+    "PinBoundary",
     "QSPIContract",
     "QSPIMasterBFM",
     "QSPIRomContract",
     "QSPIRomResponderBFM",
     "StimulusPlan",
     "arch_indicates_qspi_slave",
+    "boundary_gate_enabled",
     "build_plan_from_run",
+    "classify_bus_verdict",
     "classify_chip_bus",
     "conformance_enabled",
     "describe_unmodeled_roles",
     "detect_bus_roles",
     "detect_dut_mastered_buses",
     "deterministic_bfm_enabled",
+    "find_pin_boundary",
     "plan_deterministic_dv",
     "render_bfm_module",
     "render_conformance_tb",
@@ -110,18 +135,61 @@ def conformance_enabled() -> bool:
     return deterministic_bfm_enabled()
 
 
+def boundary_gate_enabled() -> bool:
+    """True when the QSPI PIN-BOUNDARY gate fails the run CLOSED (default ON).
+
+    The gate fires when the run's spec says the external bus is QSPI but the
+    module integration DV elaborates does NOT expose the graded Caravel pin
+    boundary -- either because no ``io_in``/``io_out``/``io_oeb`` boundary exists
+    anywhere (spec/RTL contradiction) or because it lives on another module (the
+    ``user_project_wrapper`` the grader actually drives). Proceeding there means
+    silently keeping the DUT-co-tuned LLM BFM in exactly the runs most likely to
+    be non-conformant, so it is a gate, not a log line.
+
+    Overridable per the repo's gate idiom: ``CORESMITH_QSPI_BOUNDARY_GATE=0``
+    (or the single global rollback knob ``CORESMITH_GATE_FAIL_OPEN=1``) restores
+    the pre-fix advisory-only behavior -- the caller then keeps the LLM BFM but
+    records a carried-forward defect, so the bypass is never silent.
+
+    Scope note: the gate only reaches a run that opted into the deterministic
+    BFM campaign at all (see :func:`conformance_enabled`); with both BFM flags
+    unset this module is never consulted and behavior is byte-identical.
+    """
+    try:
+        from orchestrator.profile import flag_enabled
+        on = flag_enabled("CORESMITH_QSPI_BOUNDARY_GATE", default=True)
+    except Exception:  # noqa: BLE001 - a profile import hiccup must not break a gate
+        raw = (os.environ.get("CORESMITH_QSPI_BOUNDARY_GATE") or "").strip().lower()
+        on = raw not in ("0", "false", "no", "off")
+    if not on:
+        return False
+    try:
+        from orchestrator.langgraph.gate_guard import gate_fail_open_enabled
+        if gate_fail_open_enabled():
+            return False
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
 def plan_deterministic_dv(
     project_root: str,
     top_rtl_source: str,
     connections: list | None = None,
+    top_module: str = "",
+    top_rtl_path: str = "",
 ) -> tuple[QSPIContract | None, StimulusPlan | None]:
     """Classify the chip-top bus and, if QSPI-slave, build a host-flow plan.
 
     Returns ``(contract, plan)`` when a deterministic, contract-enforcing DV is
-    possible, else ``(None, None)`` -- the caller falls back to the LLM BFM with
-    a loud advisory.
+    possible, else ``(None, None)``. ``(None, None)`` alone does NOT tell you
+    whether this is an honest non-QSPI design or a spec/RTL disagreement that
+    must fail the run closed -- use :func:`classify_bus_verdict` for that.
     """
-    contract = classify_chip_bus(project_root, top_rtl_source, connections)
+    verdict = classify_bus_verdict(
+        project_root, top_rtl_source, connections, top_module, top_rtl_path
+    )
+    contract = verdict.contract if verdict.contract_enforcing else None
     if contract is None:
         return None, None
     plan = build_plan_from_run(project_root, contract)

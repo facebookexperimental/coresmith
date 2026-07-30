@@ -275,6 +275,14 @@ def test_idempotent_second_run_is_noop(tmp_path, monkeypatch):
         "sky130-width-model",
         "maglef-mag-alias",
         "spice-micron-units",
+        # repair (10): only freepdk45 ships nand4_leakage; gf180mcu and
+        # scn3me_subm still omit it (sky130 was fixed upstream in 3f1f580, but
+        # the pinned 1.2.48 wheel predates that). This fixture package carries
+        # no technology tech.py at all, so the repair reports it had nothing to
+        # act on instead of claiming a patch it never made -- which is why the
+        # name here is the -unavailable variant and why r.applied (asserted in
+        # test_applies_both_fixes) is deliberately unchanged.
+        "nand4-leakage-unavailable",
     }
 
 
