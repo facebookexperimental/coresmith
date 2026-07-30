@@ -92,6 +92,28 @@ code change.
 
 Before you trust any large diff: check the `environment:` line first.
 
+### The `claude`-on-PATH trap works in BOTH directions
+
+Adding `claude` to PATH retires ~50 entries, and it also **adds two**:
+
+    orchestrator/tests/test_live_architecture.py::TestLiveArchitecture16BitAdder::test_ers_questions_generated
+    orchestrator/tests/test_live_architecture.py::TestLiveArchitecture16BitAdder::test_full_architecture_cycle
+
+Those carry `@requires_claude`
+(`pytest.mark.skipif(shutil.which("claude") is None)`), so with no CLI they
+SKIP and never enter the ledger. With the CLI present but not logged in they
+RUN and fail on `Not logged in - Please run /login` (the ERS question list comes
+back as a single `parse_error` entry). Verified both ways on the OCI box: 2
+skipped without it, 2 failed with it.
+
+So a `claude` on PATH that is not authenticated makes the guard report a
+regression that is not one. Neither `--refresh` nor a code change is the answer
+-- refreshing would bake an auth failure into the ledger as though it were a
+known-red test. Either run the guard with the toolchain the baseline was
+measured with, or log the CLI in, and read the `environment:` line before
+believing any verdict.
+
+
 ## Refreshing the ledger, deliberately
 
 Refreshing is a **deliberate, reviewed act**, never a way to get to green.
