@@ -282,3 +282,72 @@ def check_block(project_root, block_name: str, rtl_path,
                 res.undeclared.append(port)
                 break
     return res
+
+
+def _rename_in_module(text: str, module: str, renames: dict) -> str:
+    """Apply identifier renames inside one module body only."""
+    m = re.search(r"\bmodule\s+" + re.escape(module) + r"\b", text)
+    if not m:
+        return text
+    end = text.find("endmodule", m.start())
+    end = end + len("endmodule") if end != -1 else len(text)
+    body = text[m.start():end]
+    for old, new in renames.items():
+        body = re.sub(r"\b" + re.escape(old) + r"\b", new, body)
+    return text[:m.start()] + body + text[end:]
+
+
+def plan_port_repairs(result: "ConformanceResult") -> dict:
+    """Map each undeclared port to the declared port it is a near-miss for.
+
+    Only unambiguous pairs are returned. A declared name and an existing port
+    match when they agree on the trailing signal name, which covers both
+    observed shapes -- a collapsed duplicate token and a wrong channel prefix --
+    without needing to know which one it is.
+
+    Ambiguity means no repair. Renaming the wrong wire cross-wires a channel,
+    and a silent cross-wire is worse than a loud deviation.
+    """
+    if not result.missing or not result.undeclared:
+        return {}
+
+    pairs: dict = {}
+    for chan, want in result.missing:
+        # Only ports already wearing this channel's prefix are candidates. The
+        # channel is what makes the match unambiguous: `host_read_enable` can
+        # only be repairing a `host_read` signal, even though it shares
+        # `read_enable` with framebuffer_read's.
+        cands = [h for h in result.undeclared if h.startswith(chan + "_")]
+        if len(cands) == 1:
+            pairs.setdefault(cands[0], []).append(want)
+
+    # A source port wanted by two declared names is ambiguous -- drop it.
+    return {have: wants[0] for have, wants in pairs.items() if len(wants) == 1}
+
+
+def repair_block_ports(project_root, block_name: str, rtl_path,
+                       siblings=(), apply: bool = False) -> dict:
+    """Compute (and optionally apply) port-name repairs for one block.
+
+    Returns ``{"renames": {...}, "before": n, "after": n, "conforms": bool}``.
+    The result is RE-CHECKED after applying, so a repair can never be reported
+    as success unless the checker agrees.
+    """
+    before = check_block(project_root, block_name, rtl_path, siblings=siblings)
+    renames = plan_port_repairs(before)
+    out = {"renames": renames, "before": len(before.missing),
+           "after": len(before.missing), "conforms": before.ok}
+    if not renames or not apply:
+        return out
+
+    text = Path(rtl_path).read_text(errors="ignore")
+    mod = block_name
+    if not re.search(r"\bmodule\s+" + re.escape(block_name) + r"\b", text):
+        mod = Path(rtl_path).stem
+    Path(str(rtl_path) + ".pre_portrepair").write_text(text)
+    Path(rtl_path).write_text(_rename_in_module(text, mod, renames))
+
+    after = check_block(project_root, block_name, rtl_path, siblings=siblings)
+    out["after"] = len(after.missing)
+    out["conforms"] = after.ok
+    return out

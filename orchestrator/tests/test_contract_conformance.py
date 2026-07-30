@@ -17,6 +17,7 @@ caught that.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -249,3 +250,80 @@ class TestALeafMustNotAssembleTheDesign:
         r = check_block(root, "pads",
                         self._design(tmp_path, "  qspi_cdc_frontend u ();"))
         assert not r.instantiates
+
+
+class TestDeterministicPortRepair:
+    """The generator will not fix these, measured rather than assumed.
+
+    All four deviating blocks were regenerated with fresh uarch specs and fresh
+    RTL, handed the exact required port name and the explicit "do not shorten a
+    repeated word" rule -- which `contract_lookup` already carried -- and all
+    four came back with the SAME deviations. So the repair belongs in a pass over
+    the emitted RTL, which is safe here only because the checker re-verifies the
+    result afterwards.
+    """
+
+    def test_collapsed_token_is_repaired(self, tmp_path):
+        from orchestrator.langgraph.contract_conformance import repair_block_ports
+        root = _project(tmp_path, [
+            _edge("ap", "store", "host_write",
+                  fields=["wdata"], sideband=["write_enable"])])
+        f = _rtl(tmp_path, "ap", ["host_write_wdata", "host_write_enable"])
+        out = repair_block_ports(root, "ap", f, apply=True)
+        assert out["renames"] == {"host_write_enable": "host_write_write_enable"}
+        assert out["conforms"] is True
+        assert "host_write_write_enable" in f.read_text()
+
+    def test_the_channel_disambiguates_a_shared_signal_name(self, tmp_path):
+        """`host_read_enable` and `framebuffer_read_enable` both end in
+        `read_enable`. Matching on trailing tokens ties and repairs neither;
+        matching within the channel resolves both."""
+        from orchestrator.langgraph.contract_conformance import plan_port_repairs
+        root = _project(tmp_path, [
+            _edge("ap", "s", "host_read", sideband=["read_enable"]),
+            _edge("ap", "f", "framebuffer_read", sideband=["read_enable"]),
+        ])
+        f = _rtl(tmp_path, "ap", ["host_read_enable", "framebuffer_read_enable"])
+        plan = plan_port_repairs(check_block(root, "ap", f))
+        assert plan == {
+            "host_read_enable": "host_read_read_enable",
+            "framebuffer_read_enable": "framebuffer_read_read_enable",
+        }
+
+    def test_a_different_vocabulary_is_NOT_guessed(self, tmp_path):
+        """`qspi_req_addr` for contract channel `qspi_aperture`'s `req_addr` is
+        left alone: it wears no channel prefix, so matching it would mean
+        guessing by suffix across the module, and a wrong guess there silently
+        cross-wires a channel."""
+        from orchestrator.langgraph.contract_conformance import plan_port_repairs
+        root = _project(tmp_path, [
+            _edge("eng", "ap", "qspi_aperture", sideband=["req_addr"])])
+        f = _rtl(tmp_path, "ap", ["qspi_req_addr"])
+        assert plan_port_repairs(check_block(root, "ap", f)) == {}
+
+    def test_nothing_is_applied_without_apply(self, tmp_path):
+        from orchestrator.langgraph.contract_conformance import repair_block_ports
+        root = _project(tmp_path, [
+            _edge("ap", "s", "host_write", sideband=["write_enable"])])
+        f = _rtl(tmp_path, "ap", ["host_write_enable"])
+        before = f.read_text()
+        out = repair_block_ports(root, "ap", f)
+        assert out["renames"] and f.read_text() == before
+
+    def test_a_backup_is_left_behind(self, tmp_path):
+        from orchestrator.langgraph.contract_conformance import repair_block_ports
+        root = _project(tmp_path, [
+            _edge("ap", "s", "host_write", sideband=["write_enable"])])
+        f = _rtl(tmp_path, "ap", ["host_write_enable"])
+        repair_block_ports(root, "ap", f, apply=True)
+        assert Path(str(f) + ".pre_portrepair").exists()
+
+    def test_the_result_is_re_checked_not_assumed(self, tmp_path):
+        """conforms must come from a fresh check after the edit, so a repair
+        that does not actually fix the block cannot report success."""
+        from orchestrator.langgraph.contract_conformance import repair_block_ports
+        root = _project(tmp_path, [
+            _edge("ap", "s", "ch", fields=["data"], sideband=["valid"])])
+        f = _rtl(tmp_path, "ap", ["ch_dat"])          # nothing repairable
+        out = repair_block_ports(root, "ap", f, apply=True)
+        assert out["conforms"] is False
