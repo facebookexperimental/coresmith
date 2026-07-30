@@ -1,0 +1,104 @@
+# CoreSmith test-suite failure baseline.
+#
+# THIS IS A DEBT LEDGER, NOT A PERMANENT EXCUSE. Every node ID below is a test
+# that was ALREADY failing before the current work started. The list exists for
+# exactly one reason: so that failure number N+1 -- the one YOU just added -- is
+# visible against a suite that is already red.
+#
+# Rules:
+#   * Never add a line to this file to make your own change go green. Adding a
+#     line is admitting a regression. Fix the test or fix the code.
+#   * Deleting lines is the point. When a test here starts passing, prune it:
+#       python scripts/check_test_baseline.py --refresh
+#   * The guard reads only the node IDs. Header fields are provenance.
+#
+# The failing set depends on the TOOLCHAIN, not only the code -- see the
+# `environment:` field below. On the first measurement 50 of 75 entries failed
+# only because the `claude` binary was off PATH. Put the toolchain back before
+# you believe a big diff.
+#
+# Check a change against it:   python scripts/check_test_baseline.py
+# Full policy:                 docs/TEST-BASELINE.md
+#
+# measured-at-commit: 06d82e85d0ac1ef5e5e2d543ee5c945110f12c45
+# measured-on: 2026-07-30
+# pytest-invocation: python -m pytest orchestrator/tests -q --no-header -p no:cacheprovider
+# environment: claude=NO pdk=NO yosys=yes verilator=yes openroad=yes magic=yes iverilog=yes
+# counts: failed=75 passed=2857 skipped=23 xfailed=8
+# baseline-failures: 75
+#
+orchestrator/tests/test_backend_helpers.py::TestToolResolution::test_pdk_files_exist
+orchestrator/tests/test_bfm_lib.py::test_metatest_accepts_conformant_dut
+orchestrator/tests/test_composition_audit.py::TestBlockPortInfo::test_driven_through_local_helper
+orchestrator/tests/test_composition_audit.py::TestBlockPortInfo::test_signature_and_driven
+orchestrator/tests/test_composition_audit.py::TestBlockPortInfo::test_signature_appendix
+orchestrator/tests/test_composition_audit.py::TestGateIntegration::test_gate_returns_audit_violations_before_sim
+orchestrator/tests/test_composition_audit.py::TestGateIntegration::test_signature_feedback_on_runtime_typeerror
+orchestrator/tests/test_composition_audit.py::TestInstantiationSignature::test_too_many_positionals
+orchestrator/tests/test_composition_audit.py::TestInstantiationSignature::test_unexpected_kwarg_flagged_with_signature
+orchestrator/tests/test_composition_audit.py::TestMultiDriven::test_double_driver_flagged
+orchestrator/tests/test_composition_audit.py::TestRobustness::test_env_kill_switch
+orchestrator/tests/test_composition_audit.py::TestSignatureFeedbackHelper::test_signature_error_gets_appendix
+orchestrator/tests/test_composition_audit.py::TestSymdict::test_symdict_in_chip_model_flagged
+orchestrator/tests/test_composition_audit.py::TestUndrivenNet::test_multi_consumer_undriven_flagged
+orchestrator/tests/test_composition_audit.py::TestUndrivenNet::test_single_consumer_zero_init_is_warning_only
+orchestrator/tests/test_composition_audit.py::TestZeroWidth::test_zero_width_flagged
+orchestrator/tests/test_flow_fixes.py::TestIntegrationReviewAgent::test_constructor
+orchestrator/tests/test_flow_fixes.py::TestIntegrationReviewAgent::test_tools_enabled
+orchestrator/tests/test_flow_fixes.py::TestIntegrationReviewSoftLock::test_inplace_env_var_uses_canonical_path
+orchestrator/tests/test_flow_fixes.py::TestIntegrationReviewSoftLock::test_review_writes_to_review_dir_not_canonical
+orchestrator/tests/test_integration_lead.py::TestBuildPrompt::test_handles_many_connections
+orchestrator/tests/test_integration_lead.py::TestBuildPrompt::test_includes_block_rtl_sources
+orchestrator/tests/test_integration_lead.py::TestBuildPrompt::test_includes_connections
+orchestrator/tests/test_integration_lead.py::TestBuildPrompt::test_includes_design_name
+orchestrator/tests/test_integration_lead.py::TestBuildPrompt::test_includes_port_summaries
+orchestrator/tests/test_integration_lead.py::TestBuildPrompt::test_includes_prd_summary
+orchestrator/tests/test_integration_lead.py::TestBuildPrompt::test_omits_prd_section_when_empty
+orchestrator/tests/test_integration_lead.py::TestBuildPrompt::test_truncates_large_rtl
+orchestrator/tests/test_integration_lead.py::TestIntegrate::test_handles_llm_returning_garbage
+orchestrator/tests/test_integration_lead.py::TestIntegrate::test_integration_with_mismatches
+orchestrator/tests/test_integration_lead.py::TestIntegrate::test_llm_called_with_correct_params
+orchestrator/tests/test_integration_lead.py::TestIntegrate::test_successful_integration
+orchestrator/tests/test_integration_lead.py::TestIntegrationCheckNode::test_agent_failure_skips_gracefully
+orchestrator/tests/test_integration_lead.py::TestIntegrationCheckNode::test_agent_parse_error_skips
+orchestrator/tests/test_integration_lead.py::TestIntegrationCheckNode::test_calls_integration_lead_agent
+orchestrator/tests/test_integration_lead.py::TestIntegrationCheckNode::test_clean_integration_passes
+orchestrator/tests/test_integration_lead.py::TestIntegrationCheckNode::test_fix_rtl_resume_action
+orchestrator/tests/test_integration_lead.py::TestIntegrationCheckNode::test_lint_failure_triggers_interrupt
+orchestrator/tests/test_integration_lead.py::TestIntegrationCheckNode::test_mismatch_errors_trigger_interrupt
+orchestrator/tests/test_integration_lead.py::TestIntegrationCheckWarningTriage::test_nonblocking_env_var_restores_old_behaviour
+orchestrator/tests/test_integration_lead.py::TestIntegrationCheckWarningTriage::test_warning_only_fires_triage_interrupt
+orchestrator/tests/test_integration_lead.py::TestIntegrationCheckWarningTriage::test_warning_triage_abort_ends_pipeline
+orchestrator/tests/test_integration_lead.py::TestIntegrationCheckWarningTriage::test_warning_triage_accept_proceeds
+orchestrator/tests/test_integration_lead.py::TestIntegrationCheckWarningTriage::test_warning_triage_retry_ends_with_fix_recorded
+orchestrator/tests/test_integration_lead.py::TestModelNameUpdates::test_integration_lead_default_model
+orchestrator/tests/test_integration_lead.py::TestModelNameUpdates::test_integration_testbench_default_model
+orchestrator/tests/test_integration_lead.py::TestParseResponse::test_handles_empty_response
+orchestrator/tests/test_integration_lead.py::TestParseResponse::test_handles_invalid_json
+orchestrator/tests/test_integration_lead.py::TestParseResponse::test_handles_partial_json
+orchestrator/tests/test_integration_lead.py::TestParseResponse::test_parses_json_with_surrounding_text
+orchestrator/tests/test_integration_lead.py::TestParseResponse::test_parses_valid_json
+orchestrator/tests/test_integration_lead.py::TestParseResponse::test_preserves_mismatches
+orchestrator/tests/test_integration_lead.py::TestValidateResult::test_adds_default_fields
+orchestrator/tests/test_integration_lead.py::TestValidateResult::test_adds_default_severity
+orchestrator/tests/test_integration_lead.py::TestValidateResult::test_warns_on_missing_module_declaration
+orchestrator/tests/test_microarch_exp.py::test_elaborate_block_model_clean_passes
+orchestrator/tests/test_microarch_exp.py::test_elaborate_block_model_rejects_verilog_code_override
+orchestrator/tests/test_microarch_exp.py::test_elaborate_block_model_rejects_vhdl_code_override
+orchestrator/tests/test_microarch_exp.py::test_lint_models_node_all_clean
+orchestrator/tests/test_microarch_exp.py::test_lint_models_node_collects_per_block_errors
+orchestrator/tests/test_microarch_exp.py::test_lint_skips_unchanged_passing_block
+orchestrator/tests/test_output_contract_gate.py::test_node_passes_clean
+orchestrator/tests/test_pipeline_efficiency.py::TestIntegrationReviewAgent::test_agent_importable
+orchestrator/tests/test_pipeline_efficiency.py::TestRtlGeneratorModel::test_uses_default_model
+orchestrator/tests/test_pipeline_graph.py::TestDiskFirstAgentToolsEnabled::test_debug_agent_tools_enabled
+orchestrator/tests/test_pipeline_graph.py::TestDiskFirstAgentToolsEnabled::test_integration_lead_tools_enabled
+orchestrator/tests/test_pipeline_graph.py::TestDiskFirstAgentToolsEnabled::test_integration_tb_generator_tools_enabled
+orchestrator/tests/test_pipeline_graph.py::TestDiskFirstAgentToolsEnabled::test_rtl_generator_tools_enabled
+orchestrator/tests/test_pipeline_graph.py::TestDiskFirstAgentToolsEnabled::test_testbench_generator_tools_enabled
+orchestrator/tests/test_pipeline_graph.py::TestDiskFirstAgentToolsEnabled::test_uarch_spec_generator_tools_enabled
+orchestrator/tests/test_pipeline_graph.py::TestGraphConstruction::test_integration_testbench_generator_accepts_written_file
+orchestrator/tests/test_qspi_conformance.py::test_conformance_accepts_conformant_frontend
+orchestrator/tests/test_rtl_model_equiv.py::test_non_axis_interface_skips
+orchestrator/tests/test_stability.py::TestPipelineStability::test_pipeline_single_fft_block_no_crash
+orchestrator/tests/test_stability.py::TestPipelineStability::test_pipeline_three_fft_blocks_no_crash
