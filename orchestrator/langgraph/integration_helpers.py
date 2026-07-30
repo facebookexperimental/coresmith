@@ -746,6 +746,7 @@ def generate_top_level_rtl(
         lines.append("  );")
         lines.append("")
 
+
     lines.append("endmodule")
     lines.append("")
 
@@ -1058,6 +1059,7 @@ def generate_caravel_wrapper_top(
     rtl_paths: dict[str, str],
     output_dir: str,
     wrapper_block: str | None = None,
+    pin_map=None,
 ) -> dict:
     """Assemble a wired ``user_project_wrapper`` chip_top deterministically.
 
@@ -1079,6 +1081,25 @@ def generate_caravel_wrapper_top(
 
     if wrapper_block is None:
         wrapper_block = detect_wrapper_block(modules)
+
+    # A declared pin map REPLACES the pin-adapter block. The adapter existed
+    # only to translate pad bits into named signals, and the top now does that
+    # itself from data. Keeping it would instantiate a module that duplicates
+    # the routing -- and, in the case that motivated this, the entire rest of
+    # the chip, because its mandated module name means "the whole design" and
+    # the generator built one.
+    #
+    # The contract edges that reference it describe that same translation, so
+    # they are dropped with it: they are no longer block-to-block channels.
+    dropped_adapter = ""
+    if (pin_map is not None and getattr(pin_map, "ok", False)
+            and wrapper_block is not None):
+        dropped_adapter = wrapper_block
+        modules = {k: v for k, v in modules.items() if k != wrapper_block}
+        edges = [e for e in edges
+                 if wrapper_block not in (e.get("producer_block"),
+                                          e.get("consumer_block"))]
+        wrapper_block = None
 
     clk_name = "wb_clk_i"
     rst_name = "wb_rst_i"          # Caravel wb_rst_i is active-high
@@ -1373,6 +1394,32 @@ def generate_caravel_wrapper_top(
             Path(renamed_pad_path).write_text(renamed, encoding="utf-8")
             lint_block_paths[wrapper_block] = renamed_pad_path
 
+    # ---- pin routing (from the PRD's structured pin_map) ----
+    # With the assignment available as data the top slices io_in itself and
+    # drives io_out/io_oeb itself, so the design needs no pin-adapter block --
+    # the block an LLM could not generate because its mandated module name
+    # means "the entire chip".
+    pin_decls: list[str] = []
+    pin_assigns: list[str] = []
+    pin_sigs: dict = {}
+    pin_block_driven: dict = {}
+    if pin_map is not None and getattr(pin_map, "ok", False):
+        from orchestrator.architecture.pin_map import (
+            emit_pin_routing,
+            mapped_signals,
+        )
+        pin_decls, pin_assigns = emit_pin_routing(pin_map)
+        pin_sigs = mapped_signals(pin_map)
+        # Output-side signals (and any output-enable) are DRIVEN BY BLOCKS, so
+        # the top declares a wire for each and the producing block connects to
+        # it. Input-side signals are already assigned from io_in by pin_decls.
+        for e in pin_map.entries:
+            if e.dir == "out":
+                pin_block_driven[e.signal] = e.width
+            if e.oe:
+                pin_block_driven[e.oe] = 1
+        pin_sigs.update(pin_block_driven)
+
     # ---- emit ----
     lines: list[str] = []
     lines.append("// Auto-generated Caravel user_project_wrapper chip_top")
@@ -1397,6 +1444,15 @@ def generate_caravel_wrapper_top(
     for name, val in _CARAVEL_TIEOFFS:
         lines.append(f"  assign {name} = {val};")
     lines.append("")
+
+    if pin_decls or pin_block_driven:
+        lines.append("  // ---- pin map (declared in the PRD) ----")
+        for sig, w in sorted(pin_block_driven.items()):
+            rng = "" if w == 1 else f"[{w - 1}:0] "
+            lines.append(f"  wire {rng}{sig};")
+        for d in pin_decls:
+            lines.append(f"  {d}")
+        lines.append("")
 
     if wire_decls:
         lines.append(f"  // ---- internal block<->block wires ({len(wire_decls)}) ----")
@@ -1429,6 +1485,12 @@ def generate_caravel_wrapper_top(
             if bn == wrapper_block and p.name in _PAD_IO_PORTS:
                 conns.append(f"    .{p.name}({p.name})")  # straight to top GPIO
                 continue
+            if p.name in pin_sigs:
+                # A block port named after a pin-map signal binds to it. The
+                # contract already uses these names, so this needs no new
+                # convention.
+                conns.append(f"    .{p.name}({p.name})")
+                continue
             w = port_wire.get((bn, p.name))
             if w:
                 conns.append(f"    .{p.name}({w})")
@@ -1452,6 +1514,11 @@ def generate_caravel_wrapper_top(
         lines.append("")
         instantiated.append(bn)
 
+    if pin_assigns:
+        lines.append("")
+        lines.append("  // ---- pin map: drive the pads ----")
+        for a in pin_assigns:
+            lines.append(f"  {a}")
     lines.append("endmodule")
     lines.append("")
     verilog = "\n".join(lines)
@@ -1468,6 +1535,7 @@ def generate_caravel_wrapper_top(
         "instantiated": instantiated,
         "wrapper_block": wrapper_block,
         "renamed_pad_path": renamed_pad_path,
+        "dropped_adapter": dropped_adapter,
         "lint_block_paths": lint_block_paths,
         # Non-empty => the deterministic wiring is UNSAFE (an ambiguous key that
         # would be [0]-picked, or a width mismatch that would be shorted). The
