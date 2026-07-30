@@ -181,7 +181,13 @@ def check_block(project_root, block_name: str, rtl_path) -> ConformanceResult:
         res.reason = f"cannot read {rtl_path}: {exc}"
         return res
 
-    ports = declared_ports(rtl)
+    # Same trap: parse the BLOCK's module. Defaulting to the first
+    # module made this checker report 22 phantom missing ports for a
+    # block whose real module is declared last in its own file.
+    _mod = block_name
+    if not re.search(r"\bmodule\s+" + re.escape(block_name) + r"\b", rtl):
+        _mod = Path(rtl_path).stem
+    ports = declared_ports(rtl, module=_mod)
     # A block carrying the Caravel pad boundary is NOT exempt from the contract.
     # Its io_in/io_out/io_oeb names are externally mandated, so those specific
     # ports are never reported as undeclared -- but the channel signals the

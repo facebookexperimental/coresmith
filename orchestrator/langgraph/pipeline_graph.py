@@ -67,6 +67,7 @@ from opentelemetry import trace
 from orchestrator.langgraph.event_stream import write_graph_event
 from orchestrator.langgraph.integration_helpers import (
     discover_block_rtl,
+    module_for_block,
     generate_integration_testbench,
     generate_validation_testbench,
     lint_top_level,
@@ -6414,7 +6415,12 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         modules = {}
         block_rtl_sources: dict[str, str] = {}
         for block_name, rtl_path in rtl_paths.items():
-            mod = await asyncio.to_thread(parse_verilog_ports, rtl_path)
+            # Parse the BLOCK's module, not whichever comes first in
+            # the file: generated files declare internal stages ahead
+            # of the block itself.
+            mod = await asyncio.to_thread(
+                parse_verilog_ports, rtl_path,
+                module_for_block(rtl_path, block_name))
             if mod.name:
                 modules[block_name] = mod
                 try:
@@ -6572,10 +6578,24 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                     f"Integration Lead:", RED)
                 for _we in _wiring_errors[:8]:
                     log(f"      - {_we}", RED)
+                # Persist the FULL list. Logging [:8] and storing [:16] left
+                # 24 of 40 hazards existing nowhere on disk -- and this list is
+                # the only artifact explaining why assembly refused, so an outer
+                # agent could not obtain it by any documented path.
+                _haz_path = Path(pr) / ".coresmith" / "caravel_wiring_errors.json"
+                try:
+                    _haz_path.write_text(json.dumps({
+                        "wrapper_block": _wrapper_block,
+                        "count": len(_wiring_errors),
+                        "wiring_errors": _wiring_errors,
+                    }, indent=2), encoding="utf-8")
+                except OSError:
+                    pass
                 write_graph_event(pr, "Integration Check", "caravel_wiring_fallback", {
                     "wrapper_block": _wrapper_block,
                     "wiring_error_count": len(_wiring_errors),
                     "wiring_errors": _wiring_errors[:16],
+                    "wiring_errors_path": str(_haz_path),
                 })
             if not _wiring_errors:
                 top_rtl_path = asm["rtl_path"]
@@ -8884,7 +8904,12 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
         # Re-parse modules so the LLM gets block port details
         modules = {}
         for block_name, rtl_path in block_rtl_paths.items():
-            mod = await asyncio.to_thread(parse_verilog_ports, rtl_path)
+            # Parse the BLOCK's module, not whichever comes first in
+            # the file: generated files declare internal stages ahead
+            # of the block itself.
+            mod = await asyncio.to_thread(
+                parse_verilog_ports, rtl_path,
+                module_for_block(rtl_path, block_name))
             if mod.name:
                 modules[block_name] = mod
 
@@ -9747,7 +9772,12 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
 
         modules = {}
         for block_name, rtl_path in block_rtl_paths.items():
-            mod = await asyncio.to_thread(parse_verilog_ports, rtl_path)
+            # Parse the BLOCK's module, not whichever comes first in
+            # the file: generated files declare internal stages ahead
+            # of the block itself.
+            mod = await asyncio.to_thread(
+                parse_verilog_ports, rtl_path,
+                module_for_block(rtl_path, block_name))
             if mod.name:
                 modules[block_name] = mod
 

@@ -79,11 +79,19 @@ class VerilogModule:
         }
 
 
-def parse_verilog_ports(rtl_path: str) -> VerilogModule:
+def parse_verilog_ports(rtl_path: str, module: str | None = None) -> VerilogModule:
     """Parse a Verilog file and extract the module name, ports, and parameters.
 
     Handles both ANSI-style (ports in header) and non-ANSI (separate
-    declarations) Verilog modules. Extracts the *first* module found.
+    declarations) Verilog modules.
+
+    ``module`` selects WHICH module to parse; without it the first one wins,
+    which is frequently the wrong answer. A generated block file commonly
+    declares its internal stages first -- raster_scan_pipeline.v declares four
+    sub-stages before the block itself at line 668 -- so integration judged a
+    sub-stage's ports as the block's interface and raised 22 wiring hazards for
+    a block that conforms perfectly. Callers that know the block name should
+    pass it.
 
     Returns:
         VerilogModule with parsed port list.
@@ -97,6 +105,16 @@ def parse_verilog_ports(rtl_path: str) -> VerilogModule:
     # Strip comments (line and block)
     source = re.sub(r'//.*?$', '', source, flags=re.MULTILINE)
     source = re.sub(r'/\*.*?\*/', '', source, flags=re.DOTALL)
+
+    # Narrow to the requested module, else the file stem -- the same precedence
+    # rtl_module_name uses. Sliced to its endmodule so a later module's
+    # non-ANSI port declarations cannot leak in.
+    for _want in [w for w in (module, path.stem) if w]:
+        _m = re.search(r'\bmodule\s+' + re.escape(str(_want)) + r'\b', source)
+        if _m:
+            _end = source.find('endmodule', _m.start())
+            source = source[_m.start():_end if _end != -1 else len(source)]
+            break
 
     # Find module declaration
     mod_match = re.search(
@@ -2349,6 +2367,20 @@ def discover_block_rtl(
                 f"with no GPIO boundary.", RED)
 
     return rtl_paths
+
+
+def module_for_block(rtl_path, block_name: str) -> str:
+    """Module name to parse for ``block_name``. Mirrors rtl_module_name."""
+    from pathlib import Path as _P
+    try:
+        text = _P(rtl_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return block_name
+    import re as _re
+    for cand in (block_name, _P(rtl_path).stem):
+        if cand and _re.search(r"\bmodule\s+" + _re.escape(cand) + r"\b", text):
+            return cand
+    return block_name
 
 
 def merge_block_specs(blocks: list[dict], block_queue: list) -> list[dict]:
