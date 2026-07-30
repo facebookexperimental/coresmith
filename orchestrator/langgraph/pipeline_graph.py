@@ -6131,6 +6131,13 @@ async def integration_check_node(state: OrchestratorState) -> dict:
     completed = _current_phase_completed(state)
     passed_blocks = [b for b in completed if b.get("success")]
     block_queue = state.get("block_queue", [])
+    # Join the RESULT dicts to their SPECS. A block result carries
+    # {name, success, attempts, ...} and NOT rtl_target, so discovery would fall
+    # back to filename convention and silently drop the one block whose file
+    # stem differs from its name -- the contract-locked pad adapter. The spec
+    # was already in scope here and used only for len().
+    from orchestrator.langgraph.integration_helpers import merge_block_specs
+    passed_blocks = merge_block_specs(passed_blocks, block_queue)
     expected_blocks = len(block_queue) if block_queue else len(completed)
 
     write_graph_event(pr, "Integration Check", "graph_node_enter", {

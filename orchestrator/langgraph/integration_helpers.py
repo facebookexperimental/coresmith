@@ -2351,6 +2351,34 @@ def discover_block_rtl(
     return rtl_paths
 
 
+def merge_block_specs(blocks: list[dict], block_queue: list) -> list[dict]:
+    """Join per-block RESULT dicts to their SPEC entries by name.
+
+    A block RESULT records what happened ({name, success, attempts, ...}); the
+    block SPEC records what the block IS, including ``rtl_target``. Only the
+    result reaches discovery, so a block whose Verilog file is not named after
+    it -- the contract-locked case ``rtl_target`` exists for -- resolved to
+    nothing and was dropped.
+
+    Result keys win on conflict: nothing a block actually reported is
+    overwritten by its spec.
+    """
+    by_name: dict[str, dict] = {}
+    for spec in block_queue or []:
+        if isinstance(spec, dict):
+            n = spec.get("name") or spec.get("block_name")
+            if n:
+                by_name[str(n)] = spec
+    out: list[dict] = []
+    for b in blocks or []:
+        if not isinstance(b, dict):
+            continue
+        n = b.get("name") or b.get("block_name")
+        spec = by_name.get(str(n)) if n else None
+        out.append({**spec, **b} if spec else dict(b))
+    return out
+
+
 def missing_from(
     rtl_paths: dict[str, str],
     completed_blocks: list[dict],
