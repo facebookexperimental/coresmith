@@ -1331,23 +1331,47 @@ def generate_caravel_wrapper_top(
     if wrapper_block is not None:
         wrap_mod_name = modules[wrapper_block].name
         wrap_inst_module = wrap_mod_name
+        src_path = rtl_paths.get(wrapper_block, "")
+        try:
+            src = Path(src_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            src = ""
+        # `\b` after the name means this does NOT match `user_project_wrapper_io`
+        # (an underscore is a word character), so the block's own module is safe.
+        _top_decl = re.search(
+            rf"\bmodule\s+{re.escape(CARAVEL_TOP_MODULE)}\b", src) if src else None
+        renamed = ""
         if wrap_mod_name == CARAVEL_TOP_MODULE:
+            # The pad block IS named like the graded top. Rename it so the top
+            # this function emits can take that name.
             wrap_inst_module = f"{CARAVEL_TOP_MODULE}_pads"
-            src_path = rtl_paths.get(wrapper_block, "")
-            try:
-                src = Path(src_path).read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                src = ""
-            if src:
-                renamed = re.sub(
-                    rf"\bmodule\s+{re.escape(CARAVEL_TOP_MODULE)}\b",
-                    f"module {wrap_inst_module}",
-                    src,
-                    count=1,
-                )
-                renamed_pad_path = str(out_dir / f"{wrap_inst_module}.v")
-                Path(renamed_pad_path).write_text(renamed, encoding="utf-8")
-                lint_block_paths[wrapper_block] = renamed_pad_path
+            renamed = re.sub(
+                rf"\bmodule\s+{re.escape(CARAVEL_TOP_MODULE)}\b",
+                f"module {wrap_inst_module}",
+                src,
+                count=1,
+            )
+        elif _top_decl:
+            # The block's own module is named something else, but its FILE also
+            # declares the graded module -- a thin alias wrapper emitted next to
+            # the block. Left alone it collides with the top emitted below: two
+            # definitions of CARAVEL_TOP_MODULE, which is a MODDUP abort at
+            # elaboration and, worse, makes resolve_netlist_top see TWO
+            # un-instantiated roots so the chip gate-sim cannot resolve a top at
+            # all. The alias is redundant -- this function emits that module --
+            # so drop it from a COPY. The block's own source is never modified.
+            _end = src.find("endmodule", _top_decl.start())
+            if _end != -1:
+                renamed = (src[:_top_decl.start()]
+                           + f"// [coresmith] removed a redundant "
+                             f"`module {CARAVEL_TOP_MODULE}` alias: the "
+                             f"integration stage emits that module itself, and "
+                             f"two definitions collide.\n"
+                           + src[_end + len("endmodule"):])
+        if renamed:
+            renamed_pad_path = str(out_dir / f"{wrap_inst_module}.v")
+            Path(renamed_pad_path).write_text(renamed, encoding="utf-8")
+            lint_block_paths[wrapper_block] = renamed_pad_path
 
     # ---- emit ----
     lines: list[str] = []
