@@ -62,13 +62,15 @@ class ConformanceResult:
     missing: list = field(default_factory=list)     # [(channel, expected_port)]
     undeclared: list = field(default_factory=list)  # [port] -- <channel>_* not in the contract
     ambiguous: list = field(default_factory=list)   # [(channel, explanation)]
+    instantiates: list = field(default_factory=list)  # sibling blocks wired in
     exempt: bool = False
     locked_boundary: bool = False   # carries externally-mandated pad names
     reason: str = ""
 
     @property
     def ok(self) -> bool:
-        return not (self.missing or self.undeclared or self.ambiguous)
+        return not (self.missing or self.undeclared or self.ambiguous
+                    or self.instantiates)
 
     def as_feedback(self) -> str:
         """An actionable message for the RTL generator.
@@ -80,6 +82,15 @@ class ConformanceResult:
         prompt already says that.
         """
         lines = []
+        if self.instantiates:
+            lines.append(
+                "This block INSTANTIATES other blocks: "
+                + ", ".join(self.instantiates)
+                + ". It is a leaf, not the chip top. Delete those "
+                "instantiations and expose the channel signals below as PORTS "
+                "instead -- the integration stage wires the blocks together, "
+                "and a block that assembles the design itself cannot be wired "
+                "into anything.")
         if self.missing:
             lines.append(
                 "The interface contract declares these ports and the RTL does "
@@ -172,7 +183,8 @@ def declared_ports(rtl_text: str, module: str | None = None) -> set[str]:
     return ports
 
 
-def check_block(project_root, block_name: str, rtl_path) -> ConformanceResult:
+def check_block(project_root, block_name: str, rtl_path,
+                siblings=()) -> ConformanceResult:
     """Verify one block's ports against every contract edge that touches it."""
     res = ConformanceResult(block=block_name)
     try:
@@ -188,6 +200,20 @@ def check_block(project_root, block_name: str, rtl_path) -> ConformanceResult:
     if not re.search(r"\bmodule\s+" + re.escape(block_name) + r"\b", rtl):
         _mod = Path(rtl_path).stem
     ports = declared_ports(rtl, module=_mod)
+
+    # Structural: a leaf must not assemble the design. Scoped to this block's
+    # own module -- a file may legitimately carry an alias wrapper after it.
+    body = rtl
+    _bm = re.search(r"\bmodule\s+" + re.escape(_mod) + r"\b", rtl)
+    if _bm:
+        _be = rtl.find("endmodule", _bm.start())
+        body = rtl[_bm.start():_be if _be != -1 else len(rtl)]
+    body = re.sub(r"//[^\n]*", " ", re.sub(r"/\*.*?\*/", " ", body, flags=re.S))
+    for sib in siblings or ():
+        if sib == block_name:
+            continue
+        if re.search(r"\b" + re.escape(str(sib)) + r"\s+[A-Za-z_\\]", body):
+            res.instantiates.append(str(sib))
     # A block carrying the Caravel pad boundary is NOT exempt from the contract.
     # Its io_in/io_out/io_oeb names are externally mandated, so those specific
     # ports are never reported as undeclared -- but the channel signals the

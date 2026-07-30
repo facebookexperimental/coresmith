@@ -191,3 +191,61 @@ class TestPortParsing:
         root = _project(tmp_path, [])
         r = check_block(root, "gone", tmp_path / "absent.v")
         assert not r.exempt and r.reason
+
+
+class TestALeafMustNotAssembleTheDesign:
+    """A block that instantiates its siblings is a competing chip top.
+
+    `user_project_wrapper_io` was generated as a 264-line module instantiating
+    all seven other blocks and exposing only the Caravel boundary. Nothing can
+    wire that -- the assembler has no inward ports to connect, so it refuses,
+    the LLM fallback drops blocks, and integration produces no chip_top at all.
+    Every downstream gate (flat synth, chip gate-sim) is unreachable behind it.
+
+    The mandated module name is the likely cause: told its module must be named
+    `user_project_wrapper`, a generator writes the Caravel wrapper, which by
+    convention instantiates the user's design. The name induces the error, so
+    the structural property is what to check, not the prompt.
+    """
+
+    def _design(self, tmp_path, body):
+        f = tmp_path / "pads.v"
+        f.write_text("module pads (\n  input wire io_in,\n  output wire io_out,\n"
+                     "  output wire io_oeb\n);\n" + body + "\nendmodule\n")
+        return f
+
+    def test_instantiating_a_sibling_is_a_deviation(self, tmp_path):
+        root = _project(tmp_path, [])
+        f = self._design(tmp_path, "  qspi_cdc_frontend u_front ();")
+        r = check_block(root, "pads", f, siblings=["pads", "qspi_cdc_frontend"])
+        assert not r.ok
+        assert r.instantiates == ["qspi_cdc_frontend"]
+        assert "It is a leaf, not the chip top" in r.as_feedback()
+
+    def test_a_clean_leaf_passes(self, tmp_path):
+        root = _project(tmp_path, [])
+        r = check_block(root, "pads",
+                        self._design(tmp_path, "  assign io_out = io_in;"),
+                        siblings=["pads", "qspi_cdc_frontend"])
+        assert r.ok and not r.instantiates
+
+    def test_an_alias_wrapper_after_the_block_is_not_counted(self, tmp_path):
+        """A file may legitimately carry a thin alias module after the block --
+        the real one does. Only the BLOCK's own module body is examined."""
+        f = tmp_path / "pads.v"
+        f.write_text(
+            "module pads (\n  input wire io_in\n);\n  assign x = io_in;\n"
+            "endmodule\n\n"
+            "module pads_alias (\n  input wire io_in\n);\n"
+            "  pads u (.io_in(io_in));\nendmodule\n")
+        root = _project(tmp_path, [])
+        r = check_block(root, "pads", f, siblings=["pads", "pads_alias"])
+        assert not r.instantiates
+
+    def test_siblings_default_to_empty_so_existing_callers_are_unaffected(
+        self, tmp_path
+    ):
+        root = _project(tmp_path, [])
+        r = check_block(root, "pads",
+                        self._design(tmp_path, "  qspi_cdc_frontend u ();"))
+        assert not r.instantiates
