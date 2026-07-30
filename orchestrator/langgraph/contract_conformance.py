@@ -63,6 +63,7 @@ class ConformanceResult:
     undeclared: list = field(default_factory=list)  # [port] -- <channel>_* not in the contract
     ambiguous: list = field(default_factory=list)   # [(channel, explanation)]
     exempt: bool = False
+    locked_boundary: bool = False   # carries externally-mandated pad names
     reason: str = ""
 
     @property
@@ -141,10 +142,25 @@ def _signal_names(edge: dict) -> list[str]:
 _PORT_RE = re.compile(r"\b(?:input|output|inout)\b([^;)]*)", re.MULTILINE)
 
 
-def declared_ports(rtl_text: str) -> set[str]:
-    """Port names the module declares. Tolerant of both Verilog styles."""
+def declared_ports(rtl_text: str, module: str | None = None) -> set[str]:
+    """Port names ONE module declares. Tolerant of both Verilog styles.
+
+    Scoped to a single module deliberately. A generated file routinely carries
+    stub declarations of other modules after the real one, and unioning their
+    ports produced a FALSE PASS for the pad block: it looked like it exposed
+    qspi_csn/qspi_sck because the stubs at the bottom of its own file declare
+    them, while the top module itself has only the Caravel boundary. Defaults to
+    the FIRST module, which is the one the file is named for.
+    """
     text = re.sub(r"/\*.*?\*/", " ", rtl_text, flags=re.S)
     text = re.sub(r"//[^\n]*", " ", text)
+    if module:
+        m = re.search(r"\bmodule\s+" + re.escape(module) + r"\b", text)
+    else:
+        m = re.search(r"\bmodule\s+[A-Za-z_]\w*", text)
+    if m:
+        end = text.find("endmodule", m.start())
+        text = text[m.start():end if end != -1 else len(text)]
     noise = {"wire", "reg", "logic", "signed", "unsigned", "input", "output",
              "inout", "bit", "tri", "var", "integer", "real"}
     ports: set[str] = set()
@@ -166,12 +182,18 @@ def check_block(project_root, block_name: str, rtl_path) -> ConformanceResult:
         return res
 
     ports = declared_ports(rtl)
-    if all(p in ports for p in _LOCKED_BOUNDARY_PORTS):
-        res.exempt = True
-        res.reason = ("declares the Caravel pad boundary (io_in/io_out/io_oeb); "
-                      "its port names are externally mandated, so the "
-                      "<channel>_<field> convention does not apply")
-        return res
+    # A block carrying the Caravel pad boundary is NOT exempt from the contract.
+    # Its io_in/io_out/io_oeb names are externally mandated, so those specific
+    # ports are never reported as undeclared -- but the channel signals the
+    # contract says this block exposes INWARD must still be there.
+    #
+    # A blanket exemption hid the largest defect in the design: the pad block was
+    # generated as a complete chip top that instantiates the other blocks
+    # internally, with the channel signals as internal wires and NO inward ports
+    # at all. The architecture specifies a pin ADAPTER with ports; the RTL
+    # produced a competing top. Nothing can wire that, which is why the
+    # deterministic assembler always fell back to an LLM-authored integration.
+    res.locked_boundary = all(p in ports for p in _LOCKED_BOUNDARY_PORTS)
 
     bare_owner: dict[str, str] = {}      # bare port -> channel that claimed it
     accepted: set[str] = set()
@@ -221,7 +243,7 @@ def check_block(project_root, block_name: str, rtl_path) -> ConformanceResult:
             if edge.get(role) == block_name and edge.get(key):
                 channels.add(str(edge[key]))
     for port in sorted(ports):
-        if port in accepted:
+        if port in accepted or port in _LOCKED_BOUNDARY_PORTS:
             continue
         for chan in channels:
             if port.startswith(chan + "_"):

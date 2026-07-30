@@ -838,6 +838,85 @@ def detect_wrapper_block(modules: dict[str, VerilogModule]) -> str | None:
     return None
 
 
+def _contract_signal_names(edge: dict) -> list[str]:
+    """Every signal a contract edge declares: payload fields + sideband.
+
+    The schema splits them across two keys, which is why several readers
+    concluded the contract did not record signal names at all. Their union is
+    the channel's port set.
+    """
+    out: list[str] = []
+    for f in (edge.get("fields") or []):
+        n = f.get("name") if isinstance(f, dict) else f
+        if n:
+            out.append(str(n))
+    for s in (edge.get("sideband_signals") or []):
+        n = s.get("name") if isinstance(s, dict) else s
+        if n:
+            out.append(str(n))
+    seen, uniq = set(), []
+    for n in out:
+        if n not in seen:
+            seen.add(n)
+            uniq.append(n)
+    return uniq
+
+
+def _resolve_by_contract(edge, pb, cb, port_exact, modules):
+    """Wire an edge signal-by-signal from the contract's own declaration.
+
+    Returns ``(paired, hazards)``, or ``None`` when the edge declares no
+    signals (the caller then falls back to the legacy name/positional path, so
+    contracts that predate signal lists are unaffected).
+
+    Each side is resolved INDEPENDENTLY against the declared name, accepting
+    either ``<channel>_<signal>`` or bare ``<signal>``. Because both ends are
+    matched to the same contract signal, they are never matched to each other:
+    the two sides may legitimately spell their ports differently and still bind
+    correctly, which the positional path could not express.
+    """
+    signals = _contract_signal_names(edge)
+    if not signals:
+        return None
+    if pb not in modules or cb not in modules:
+        return None
+
+    def _one(block: str, chan: str, sig: str):
+        pref = port_exact(block, f"{chan}_{sig}")
+        bare = port_exact(block, sig)
+        if pref is not None and bare is not None:
+            return None, (f"{block}.{chan}_{sig} and {block}.{sig} both exist "
+                          f"-- ambiguous which implements '{sig}'")
+        got = pref or bare
+        if got is None:
+            return None, (f"{block} implements no port for declared signal "
+                          f"'{sig}' (expected '{chan}_{sig}' or '{sig}')")
+        return got, None
+
+    pchan = str(edge.get("producer_port") or "")
+    cchan = str(edge.get("consumer_port") or "")
+    eid = edge.get("edge_id")
+    paired, hazards = [], []
+    for sig in signals:
+        pp, perr = _one(pb, pchan, sig)
+        cp, cerr = _one(cb, cchan, sig)
+        for err in (perr, cerr):
+            if err:
+                hazards.append(f"edge {eid}: {err}")
+        if pp is None or cp is None:
+            continue
+        if _wrap_shared_signal(pp.name) or _wrap_shared_signal(cp.name):
+            continue
+        if pp.width != cp.width:
+            hazards.append(
+                f"edge {eid}: signal '{sig}' is {pp.width}b on {pb}.{pp.name} "
+                f"but {cp.width}b on {cb}.{cp.name} -- refusing to short "
+                f"mismatched-width ports")
+            continue
+        paired.append((pp, cp))
+    return paired, hazards
+
+
 def load_interface_contract_edges(project_root: str) -> list[dict]:
     """Load endpoint-resolved block<->block edges from
     ``.coresmith/interface_contracts.json`` (producer/consumer block + port).
@@ -876,6 +955,15 @@ def load_interface_contract_edges(project_root: str) -> list[dict]:
             "consumer_port": c.get("consumer_port") or c.get("to_port") or "",
             "data_width": c.get("data_width_bits") or c.get("data_width") or 0,
             "edge_id": c.get("edge_id") or f"{pb}__to__{cb}",
+            # Carry the channel SIGNAL LIST through. The contract declares every
+            # signal on the edge (fields = payload, sideband_signals =
+            # everything else, union = the port set); dropping them here forced
+            # the assembler to re-derive the port set from a naming convention
+            # and to pair the two ends positionally against each other. With the
+            # list present each end resolves against the CONTRACT instead, so
+            # the two ends never have to agree on spelling.
+            "fields": c.get("fields") or [],
+            "sideband_signals": c.get("sideband_signals") or [],
         })
     return edges
 
@@ -1092,6 +1180,21 @@ def generate_caravel_wrapper_top(
         pb, cb = e.get("producer_block"), e.get("consumer_block")
         if pb not in modules or cb not in modules or pb == cb:
             continue
+        # Contract-directed resolution: match each END against the contract's
+        # declared signal list, never against the other end. See
+        # _resolve_by_contract for why this removes positional pairing.
+        _by_contract = _resolve_by_contract(e, pb, cb, _port_exact, modules)
+        if _by_contract is not None:
+            _paired, _hazards = _by_contract
+            if _hazards:
+                wiring_errors.extend(_hazards)
+                continue
+            for pp, cp in _paired:
+                uf.union((pb, pp.name), (cb, cp.name))
+            if _paired:
+                edge_bound.add(frozenset((pb, cb)))
+            continue
+
         pfields = _resolve_fields(pb, e.get("producer_port", ""))
         cfields = _resolve_fields(cb, e.get("consumer_port", ""))
         # A NAMED port that fails to resolve is a hazard (fall back to the

@@ -117,14 +117,52 @@ class TestAmbiguityIsADeviation:
         assert any("claimed by both" in w for _c, w in r.ambiguous)
 
 
-class TestExemption:
-    def test_caravel_pad_boundary_is_exempt(self, tmp_path):
-        """io_in/io_out/io_oeb are fixed by the shuttle, so the convention
-        cannot apply -- and enforcing it would break the graded boundary."""
-        root = _project(tmp_path, [_edge("x", "pads", "ch", fields=["data"])])
+class TestPadBoundaryIsNotABlanketExemption:
+    """The mandated pin NAMES are exempt. The block is not.
+
+    A blanket exemption hid the largest defect in the raster design: the pad
+    block was generated as a complete chip top that instantiates the other
+    blocks internally, with the channel signals as internal wires and NO inward
+    ports at all. The architecture specifies a pin ADAPTER with ports; the RTL
+    produced a competing top, which nothing can wire.
+    """
+
+    def test_mandated_pins_are_never_undeclared(self, tmp_path):
+        root = _project(tmp_path, [
+            _edge("pads", "core", "ch", fields=["data"])])
+        r = check_block(root, "pads",
+                        _rtl(tmp_path, "pads",
+                             ["io_in", "io_out", "io_oeb", "ch_data"]))
+        assert r.ok, (r.missing, r.undeclared)
+        assert r.locked_boundary
+        assert not r.undeclared, "flagged an externally-mandated pin"
+
+    def test_a_pad_block_still_owes_its_inward_channel_ports(self, tmp_path):
+        """THE defect. Carrying io_* does not excuse a block from exposing the
+        signals its contract says it produces."""
+        root = _project(tmp_path, [
+            _edge("pads", "core", "qspi_async_pins",
+                  fields=["qspi_csn", "qspi_sck"])])
         r = check_block(root, "pads",
                         _rtl(tmp_path, "pads", ["io_in", "io_out", "io_oeb"]))
-        assert r.exempt and r.ok and r.reason
+        assert not r.ok
+        assert r.locked_boundary
+        assert ("qspi_async_pins", "qspi_async_pins_qspi_csn") in r.missing
+
+
+class TestPortsAreReadFromOneModuleOnly:
+    def test_stub_modules_later_in_the_file_do_not_count(self, tmp_path):
+        """Generated files carry stub declarations of child modules after the
+        real one. Unioning their ports gave the pad block a FALSE PASS."""
+        f = tmp_path / "pads.v"
+        f.write_text(
+            "module pads (\n  input wire io_in,\n  output wire io_out,\n"
+            "  output wire io_oeb\n);\nendmodule\n\n"
+            "module child (\n  input wire ch_data\n);\nendmodule\n")
+        root = _project(tmp_path, [_edge("pads", "core", "ch", fields=["data"])])
+        r = check_block(root, "pads", f)
+        assert not r.ok, "read ports from a stub module lower in the file"
+        assert ("ch", "ch_data") in r.missing
 
 
 class TestFeedbackIsActionable:
