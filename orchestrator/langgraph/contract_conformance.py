@@ -63,6 +63,8 @@ class ConformanceResult:
     undeclared: list = field(default_factory=list)  # [port] -- <channel>_* not in the contract
     ambiguous: list = field(default_factory=list)   # [(channel, explanation)]
     instantiates: list = field(default_factory=list)  # sibling blocks wired in
+    accounted: set = field(default_factory=set)     # ports bound to a declared signal
+    ports: set = field(default_factory=set)         # every port the module declares
     exempt: bool = False
     locked_boundary: bool = False   # carries externally-mandated pad names
     reason: str = ""
@@ -265,6 +267,9 @@ def check_block(project_root, block_name: str, rtl_path,
                 else:
                     res.missing.append((chan, prefixed))
 
+    res.accounted = set(accepted)
+    res.ports = set(ports)
+
     # A port wearing a channel prefix that no declared signal accounts for is
     # either a misspelling of one of the above or an invented signal; both break
     # name-based edge resolution.
@@ -308,7 +313,11 @@ def plan_port_repairs(result: "ConformanceResult") -> dict:
     Ambiguity means no repair. Renaming the wrong wire cross-wires a channel,
     and a silent cross-wire is worse than a loud deviation.
     """
-    if not result.missing or not result.undeclared:
+    # Tier 3 needs no undeclared ports, so only `missing` gates the pass. The
+    # earlier guard also required undeclared to be non-empty, which meant a
+    # block whose prefix-collapsed ports had already been repaired could never
+    # reach tier 3.
+    if not result.missing:
         return {}
 
     pairs: dict = {}
@@ -320,6 +329,20 @@ def plan_port_repairs(result: "ConformanceResult") -> dict:
         cands = [h for h in result.undeclared if h.startswith(chan + "_")]
         if len(cands) == 1:
             pairs.setdefault(cands[0], []).append(want)
+            continue
+        if cands:
+            continue        # ambiguous within the channel -- leave it alone
+        # Tier 3: a port spelling this channel with a DIFFERENT prefix. Match on
+        # the trailing signal name, but only among ports not already bound to
+        # some declared signal -- without that exclusion, three ports on the
+        # real block end in `_req_addr` and the match is a coin flip.
+        sig = want[len(chan) + 1:] if want.startswith(chan + "_") else want
+        if not sig:
+            continue
+        free = [q for q in result.ports
+                if q not in result.accounted and q.endswith("_" + sig)]
+        if len(free) == 1:
+            pairs.setdefault(free[0], []).append(want)
 
     # A source port wanted by two declared names is ambiguous -- drop it.
     return {have: wants[0] for have, wants in pairs.items() if len(wants) == 1}

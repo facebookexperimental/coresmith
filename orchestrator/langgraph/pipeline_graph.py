@@ -6557,14 +6557,30 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             load_interface_contract_edges,
         )
         _wrapper_block = detect_wrapper_block(modules)
-        if _wrapper_block is not None and _deterministic_caravel_top_enabled():
-            log(f"  [INTEGRATION] Caravel wrapper block '{_wrapper_block}' "
-                f"detected -- assembling wired user_project_wrapper "
-                f"deterministically", CYAN)
+        # The PRD's structured pin map, when present, lets the top route the pads
+        # itself -- so the design needs no pin-adapter block and assembly no
+        # longer depends on finding one.
+        from orchestrator.architecture.pin_map import load_pin_map
+        _pin_map = load_pin_map(pr)
+        if _pin_map is not None and not _pin_map.ok:
+            for _e in _pin_map.errors:
+                log(f"  [INTEGRATION] pin_map: {_e}", RED)
+            _pin_map = None
+        if ((_wrapper_block is not None or _pin_map is not None)
+                and _deterministic_caravel_top_enabled()):
+            if _pin_map is not None:
+                log(f"  [INTEGRATION] pin map declared ({len(_pin_map.entries)} "
+                    f"signals) -- the top routes the pads itself; assembling "
+                    f"wired user_project_wrapper deterministically", CYAN)
+            else:
+                log(f"  [INTEGRATION] Caravel wrapper block '{_wrapper_block}' "
+                    f"detected -- assembling wired user_project_wrapper "
+                    f"deterministically", CYAN)
             edges = await asyncio.to_thread(load_interface_contract_edges, pr)
             asm = await asyncio.to_thread(
                 generate_caravel_wrapper_top,
                 modules, edges, rtl_paths, str(rtl_dir), _wrapper_block,
+                _pin_map,
             )
             # FAIL-LOUD (Section 2): if the deterministic assembler found a
             # wiring hazard it cannot safely resolve -- an ambiguous normalized

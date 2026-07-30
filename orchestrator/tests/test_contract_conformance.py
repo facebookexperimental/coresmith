@@ -290,15 +290,43 @@ class TestDeterministicPortRepair:
             "framebuffer_read_enable": "framebuffer_read_read_enable",
         }
 
-    def test_a_different_vocabulary_is_NOT_guessed(self, tmp_path):
-        """`qspi_req_addr` for contract channel `qspi_aperture`'s `req_addr` is
-        left alone: it wears no channel prefix, so matching it would mean
-        guessing by suffix across the module, and a wrong guess there silently
-        cross-wires a channel."""
+    def test_a_different_vocabulary_is_repaired_when_unambiguous(self, tmp_path):
+        """`qspi_req_addr` for contract channel `qspi_aperture`'s `req_addr`.
+        It wears no channel prefix, so tiers 1 and 2 cannot see it -- but with
+        exactly one unaccounted candidate the answer is not a guess."""
         from orchestrator.langgraph.contract_conformance import plan_port_repairs
         root = _project(tmp_path, [
             _edge("eng", "ap", "qspi_aperture", sideband=["req_addr"])])
         f = _rtl(tmp_path, "ap", ["qspi_req_addr"])
+        assert plan_port_repairs(check_block(root, "ap", f)) == {
+            "qspi_req_addr": "qspi_aperture_req_addr"}
+
+    def test_ports_bound_to_another_channel_are_excluded(self, tmp_path):
+        """THE case that makes tier 3 safe, taken from the real block.
+
+        control_status_aperture declares three ports ending in `_req_addr`:
+        framebuffer_read_req_addr, host_read_req_addr and qspi_req_addr. Two are
+        already the accepted implementation of their own channel's req_addr, so
+        only one is a candidate. Without that exclusion this is a coin flip
+        between three channels."""
+        from orchestrator.langgraph.contract_conformance import plan_port_repairs
+        root = _project(tmp_path, [
+            _edge("a", "ap", "framebuffer_read", sideband=["req_addr"]),
+            _edge("b", "ap", "host_read", sideband=["req_addr"]),
+            _edge("c", "ap", "qspi_aperture", sideband=["req_addr"]),
+        ])
+        f = _rtl(tmp_path, "ap", ["framebuffer_read_req_addr",
+                                  "host_read_req_addr", "qspi_req_addr"])
+        assert plan_port_repairs(check_block(root, "ap", f)) == {
+            "qspi_req_addr": "qspi_aperture_req_addr"}
+
+    def test_two_unaccounted_candidates_are_refused(self, tmp_path):
+        """No unique answer means no repair. Renaming the wrong wire
+        cross-wires a channel, which RTL cannot show you."""
+        from orchestrator.langgraph.contract_conformance import plan_port_repairs
+        root = _project(tmp_path, [
+            _edge("eng", "ap", "ch", sideband=["req_addr"])])
+        f = _rtl(tmp_path, "ap", ["alpha_req_addr", "beta_req_addr"])
         assert plan_port_repairs(check_block(root, "ap", f)) == {}
 
     def test_nothing_is_applied_without_apply(self, tmp_path):
