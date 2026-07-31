@@ -96,3 +96,8 @@ dashboard.html
 # excluded), then its contents.
 !orchestrator/tests/fixtures/stage/**/.coresmith/
 !orchestrator/tests/fixtures/stage/**/.coresmith/**
+# Cross-artifact gate fixtures mirror a project root the same way: the four
+# architecture artifacts the gate compares live where a real run puts them,
+# two of them under .coresmith/. Same two-step re-include as above.
+!orchestrator/tests/fixtures/cross_artifact/**/.coresmith/
+!orchestrator/tests/fixtures/cross_artifact/**/.coresmith/**

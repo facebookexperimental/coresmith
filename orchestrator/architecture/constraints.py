@@ -58,6 +58,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -526,6 +527,193 @@ def _check_interface_family_coherence(
     return violations
 
 
+# ---------------------------------------------------------------------------
+# Cross-artifact consistency gate (deterministic half + catalog plumbing)
+# ---------------------------------------------------------------------------
+#
+# The architecture phase emits four+ artifacts describing one design. When one
+# is re-issued and the rest are not, the design carries two incompatible
+# specifications and nothing at architecture time notices: every existing
+# catalog entry is intra-artifact (block_diagram vs itself, memory_map vs
+# itself) or artifact-vs-uArch-spec, and `cross_spec_contract_adherence`
+# self-disables before per-block specs exist. Each contradiction was then
+# caught one at a time, days later, by a different downstream gate.
+#
+# This gate has two halves that share one ``check`` id (the same split
+# ``inter_block_payload_protocol_coherence`` already uses):
+#   * deterministic -- named numeric quantities that disagree across artifacts
+#     (``orchestrator/architecture/cross_artifact.py``);
+#   * LLM subagent -- semantic/scheduling contradictions, as an OWNED catalog
+#     entry so the shared "another subagent owns it" instruction cannot
+#     suppress it.
+# Env ``CORESMITH_CROSS_ARTIFACT_GATE=0`` restores the pre-fix behavior.
+
+CROSS_ARTIFACT_CHECK_ID = "cross_artifact_consistency"
+
+
+def _cross_artifact_gate_enabled() -> bool:
+    """Default-ON gate for the cross-artifact consistency checks."""
+    return (os.environ.get("CORESMITH_CROSS_ARTIFACT_GATE", "1") or "1") != "0"
+
+
+def _cross_artifact_artifact_count(ctx: dict) -> int:
+    """How many distinct architecture artifacts are available to compare."""
+    count = 0
+    if (ctx.get("block_diagram") or {}).get("blocks"):
+        count += 1
+    if (ctx.get("interface_contracts") or {}).get("contracts"):
+        count += 1
+    ers = ctx.get("ers_spec") or {}
+    if isinstance(ers, dict) and (ers.get("ers") or ers.get("prd")):
+        count += 1
+    root = ctx.get("project_root") or ""
+    if root:
+        arch = Path(root) / "arch"
+        count += sum(
+            1 for n in ("ers_spec.md", "frd_spec.md", "sad_spec.md")
+            if (arch / n).exists()
+        )
+    return count
+
+
+def _collect_cross_artifact_sources(
+    project_root: str,
+    block_diagram: dict | None,
+    interface_contracts: dict | None,
+) -> list:
+    """Build the artifact list the deterministic quantity scan reads.
+
+    Structured artifacts come from memory (they are what the caller froze);
+    the prose documents come from disk, which is where every downstream
+    consumer reads them from too.
+    """
+    from orchestrator.architecture.cross_artifact import (
+        ArtifactSource,
+        load_text_source,
+    )
+
+    sources: list = []
+    if (block_diagram or {}).get("blocks"):
+        sources.append(ArtifactSource(
+            artifact="block_diagram", kind="json", payload=block_diagram,
+            label=".coresmith/block_diagram.json",
+        ))
+    if (interface_contracts or {}).get("contracts"):
+        sources.append(ArtifactSource(
+            artifact="interface_contracts", kind="json",
+            payload=interface_contracts,
+            label=".coresmith/interface_contracts.json",
+        ))
+    arch_dir = Path(project_root or ".") / "arch"
+    for artifact, filename in (
+        ("ers", "ers_spec.md"),
+        ("frd", "frd_spec.md"),
+        ("sad", "sad_spec.md"),
+    ):
+        src = load_text_source(
+            artifact, arch_dir / filename, f"arch/{filename}",
+        )
+        if src is not None:
+            sources.append(src)
+    return sources
+
+
+def _check_cross_artifact_quantities(
+    project_root: str,
+    block_diagram: dict | None,
+    interface_contracts: dict | None,
+    memory_map: dict | None = None,
+    clock_tree: dict | None = None,
+    register_spec: dict | None = None,
+) -> list[dict]:
+    """Deterministic half of ``cross_artifact_consistency``.
+
+    Never guesses: a quantity it cannot name confidently is logged as a note
+    and skipped, not flagged. Fail-open -- a bug here must never break the
+    constraint pass.
+    """
+    if not _cross_artifact_gate_enabled():
+        return []
+    import logging
+
+    from orchestrator.architecture.cross_artifact import (
+        check_cross_artifact_quantities,
+    )
+
+    sources = _collect_cross_artifact_sources(
+        project_root, block_diagram, interface_contracts,
+    )
+    if len(sources) < 2:
+        return []
+    result = check_cross_artifact_quantities(
+        sources,
+        block_diagram=block_diagram,
+        interface_contracts=interface_contracts,
+        memory_map=memory_map,
+        clock_tree=clock_tree,
+        register_spec=register_spec,
+    )
+    if result.notes:
+        log = logging.getLogger("coresmith.constraints")
+        log.info(
+            "cross_artifact_consistency: %d quantity mention(s) deliberately "
+            "NOT judged (unnamed / approximate / ranged / ambiguous unit). "
+            "First few: %s",
+            len(result.notes), "; ".join(result.notes[:5]),
+        )
+    return result.violations
+
+
+# The catalog entry pins the evidence format
+# ``A: <artifact> — "<quote>" || B: <artifact> — "<quote>"``.
+_CROSS_ARTIFACT_SIDE_RE = re.compile(
+    r"\b([AB])\s*:\s*(.*?)\s*[\u2014\-:]\s*[\"\u201c](.*?)[\"\u201d]",
+    re.DOTALL,
+)
+
+
+def _parse_candidate_locations(evidence: str) -> list[dict]:
+    """Pull the two cited sides out of a subagent's ``evidence`` string.
+
+    LLMs drift, so this is best-effort: an unparseable evidence string yields
+    an empty list and the finding still surfaces (with its raw evidence), it
+    is simply not machine-split.
+    """
+    sides: list[dict] = []
+    for m in _CROSS_ARTIFACT_SIDE_RE.finditer(evidence or ""):
+        sides.append({
+            "side": m.group(1),
+            "artifact": m.group(2).strip()[:200],
+            "quote": m.group(3).strip()[:400],
+        })
+    return sides[:4]
+
+
+def _annotate_cross_artifact_candidates(violations: list[dict]) -> None:
+    """Mark LLM cross-artifact findings as CANDIDATES and split their sides.
+
+    The deterministic half proves its findings arithmetically; the LLM half
+    proposes them. Both block the run, but an operator adjudicating an
+    escalation must be able to tell which is which, and must see both cited
+    locations without re-reading the bundle. Nothing here edits an artifact.
+    """
+    for v in violations:
+        if v.get("check") != CROSS_ARTIFACT_CHECK_ID:
+            continue
+        if v.get("finding_kind"):  # deterministic half already annotated
+            continue
+        v["finding_kind"] = "llm_candidate"
+        sides = _parse_candidate_locations(v.get("evidence", ""))
+        v["locations"] = sides
+        if len(sides) < 2:
+            v["adjudication_note"] = (
+                "The subagent did not cite two locations in the pinned "
+                "'A: <artifact> — \"<quote>\" || B: ...' form; read the raw "
+                "evidence before acting on this candidate."
+            )
+        v["violation"] = f"CANDIDATE CONTRADICTION (LLM): {v['violation']}"
+
+
 def _shuttle_constraints_enabled(requirements: str = "", ers_spec: dict | None = None) -> bool:
     """Return whether package/shuttle constraints should be enforced.
 
@@ -832,6 +1020,90 @@ _CONSTRAINT_CATALOG: list[dict] = [
         ),
         "applies": lambda ctx: bool(
             (ctx.get("interface_contracts") or {}).get("contracts")
+        ),
+    },
+    {
+        "id": "cross_artifact_consistency",
+        "category": "structural",
+        "severity": "error",
+        "description": (
+            "**YOU OWN CROSS-ARTIFACT CONTRADICTIONS.** The general rule "
+            "\"if you see something else wrong, ignore it, another subagent "
+            "owns it\" does NOT apply to a contradiction between two "
+            "architecture artifacts -- that is exactly and only this "
+            "constraint. No other subagent will report it. If you skip it, "
+            "it survives into RTL.\n\n"
+            "The architecture phase emits several artifacts that describe the "
+            "SAME design from different angles: `block_diagram.json` "
+            "(topology + per-edge `semantic_contract`), "
+            "`interface_contracts.json` (frozen per-edge bit layout, "
+            "`rate_description`, `representations.state_semantics[*].rule`), "
+            "the FRD (how well it must work), the ERS (what is needed to "
+            "build it), and the SAD/PRD upstream of both. They are written at "
+            "different times by different generators. When one is re-issued "
+            "and the others are not, the design silently carries two "
+            "incompatible specifications, and the disagreement is only "
+            "discovered later -- one stale statement at a time -- by a "
+            "downstream gate, at the cost of a full re-spec each time.\n\n"
+            "Report EVERY place where two locations in the artifact bundle "
+            "state things that cannot BOTH be true of one chip. Both "
+            "locations may be in the same document; a document that "
+            "contradicts itself is the same defect.\n\n"
+            "Two classes to hunt, explicitly:\n\n"
+            "1. **Numeric / operating-point drift.** A clock rate, line rate, "
+            "phase width, latency, capacity, count or address that one "
+            "artifact states as X and another states as Y. Include the case "
+            "where a value in one artifact violates a limit declared in "
+            "another (a test written at 12.5 MHz against a spec that caps the "
+            "interface at 6.25 MHz). Note that a deterministic checker "
+            "already reports the subset of these it can name with certainty; "
+            "report the ones it cannot -- a value the prose names only "
+            "descriptively, an arithmetic consequence, a derived count.\n\n"
+            "2. **Semantic / scheduling contradiction.** Two statements about "
+            "WHEN or HOW something happens that cannot both hold. Examples of "
+            "the shape: one location mandates that an output is scheduled "
+            "from the already-consumed RISING edge while another says the "
+            "same output advances on the FALLING edge; one says a field is "
+            "latched on assertion while another says it is sampled on "
+            "deassertion; one says a transfer is always accepted while "
+            "another gives it backpressure; one says reset is synchronous "
+            "active-high while another says asynchronous active-low. These "
+            "are the ones that survive every structural gate, because each "
+            "artifact is internally plausible.\n\n"
+            "Pay particular attention to statements that appear in FOUR "
+            "places at once: an ERS requirement, the per-block ERS "
+            "requirement for the block that implements it, the "
+            "`interface_contracts.json` entry for the edge it travels on "
+            "(`rate_description` and `state_semantics[*].rule`), and the "
+            "`block_diagram.json` connection's `semantic_contract`. A "
+            "correction applied to one of the four and not the other three is "
+            "the single most common instance of this defect.\n\n"
+            "**Do NOT report:** a gap (something unspecified), a value you "
+            "merely disagree with, a stylistic difference, a difference in "
+            "wording that carries the same meaning, or a difference between "
+            "an artifact and your own expectations. Only text-vs-text "
+            "contradictions where you can quote BOTH sides.\n\n"
+            "**Every violation MUST cite both sides.** Put them in "
+            "`evidence` in exactly this form, on one line, so a human can "
+            "adjudicate without re-reading the bundle:\n\n"
+            "    A: <artifact> — \"<verbatim quote of side A, <=200 chars>\" "
+            "|| B: <artifact> — \"<verbatim quote of side B, <=200 chars>\"\n\n"
+            "where `<artifact>` is the bundle section the quote came from "
+            "(e.g. `ERS`, `FRD`, `interface_contracts.json "
+            "contracts[3].rate_description`, `block_diagram.json "
+            "connections[2].semantic_contract`). Set `source_doc` to the "
+            "artifact that should CHANGE (the stale one). One entry in the "
+            "`violations` array per distinct contradiction -- do not merge "
+            "four restatements of one wrong fact into one entry unless they "
+            "are literally the same sentence.\n\n"
+            "Pass only if you have read every artifact in the bundle and "
+            "found no pair of mutually exclusive statements."
+        ),
+        # Needs at least two artifacts to compare. Bundle-building already
+        # concatenates them; this predicate just avoids a pointless subagent
+        # on a design where nothing but the block diagram exists yet.
+        "applies": lambda ctx: _cross_artifact_gate_enabled() and (
+            _cross_artifact_artifact_count(ctx) >= 2
         ),
     },
     {
@@ -1283,6 +1555,21 @@ async def check_constraints(
         except Exception:  # noqa: BLE001
             family_violations = []
 
+        # Deterministic half of cross_artifact_consistency: named numeric
+        # quantities that two artifacts state differently. Env-gated default
+        # ON; fail-open. The LLM half is the catalog entry of the same id.
+        try:
+            cross_artifact_violations = _check_cross_artifact_quantities(
+                project_root=project_root,
+                block_diagram=block_diagram or {},
+                interface_contracts=loaded_contracts or {},
+                memory_map=memory_map or {},
+                clock_tree=clock_tree or {},
+                register_spec=register_spec or {},
+            )
+        except Exception:  # noqa: BLE001
+            cross_artifact_violations = []
+
         applicability_ctx = {
             "block_diagram": block_diagram or {},
             "memory_map": memory_map or {},
@@ -1290,6 +1577,7 @@ async def check_constraints(
             "register_spec": register_spec or {},
             "ers_spec": ers_spec or {},
             "interface_contracts": loaded_contracts or {},
+            "project_root": project_root,
         }
         applicable = []
         for constraint in _CONSTRAINT_CATALOG:
@@ -1318,11 +1606,18 @@ async def check_constraints(
         )
 
         llm_violations: list[dict] = [v for batch in subagent_results for v in batch]
+        # LLM cross-artifact findings are CANDIDATES: render both cited sides
+        # so an operator can adjudicate the escalation. Never auto-edits.
+        _annotate_cross_artifact_candidates(llm_violations)
         violations = (
             shuttle_violations
             + die_rollup_violations
             + family_violations
+            + cross_artifact_violations
             + llm_violations
+        )
+        span.set_attribute(
+            "cross_artifact_violation_count", len(cross_artifact_violations),
         )
 
         span.set_attribute("llm_violation_count", len(llm_violations))

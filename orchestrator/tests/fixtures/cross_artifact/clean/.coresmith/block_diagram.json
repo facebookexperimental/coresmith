@@ -1,0 +1,93 @@
+{
+  "_fixture_note": "CORRECTED counterpart of contradictory/.coresmith/block_diagram.json: the qspi_drive semantic_contract now states the rise-scheduled update the ERS READ-serializer requirement mandates.",
+  "blocks": [
+    {
+      "name": "user_project_wrapper_io",
+      "tier": 1,
+      "estimated_gates": 200,
+      "description": "Locked Caravel harness pin mapping for the QSPI lanes and IRQ.",
+      "interfaces": {
+        "caravel_harness": {"width": 38, "direction": "inout"},
+        "qspi_async_pins": {"width": 6, "direction": "out"},
+        "qspi_drive": {"width": 5, "direction": "in"},
+        "irq_level": {"width": 1, "direction": "in"}
+      }
+    },
+    {
+      "name": "qspi_cdc_frontend",
+      "tier": 1,
+      "estimated_gates": 400,
+      "description": "Two-flop synchronizers for qspi_csn, qspi_sck and the four qspi_io lanes.",
+      "interfaces": {
+        "qspi_async_pins": {"width": 6, "direction": "in"},
+        "csn_sync": {"width": 1, "direction": "out"},
+        "edge_event": {"width": 6, "direction": "out"}
+      }
+    },
+    {
+      "name": "qspi_slave_engine",
+      "tier": 2,
+      "estimated_gates": 3000,
+      "description": "Quad mode-0 QSPI slave phase machine and READ serializer.",
+      "interfaces": {
+        "csn_sync": {"width": 1, "direction": "in"},
+        "edge_event": {"width": 6, "direction": "in"},
+        "qspi_aperture": {"width": 42, "direction": "out"},
+        "qspi_drive": {"width": 5, "direction": "out"}
+      }
+    },
+    {
+      "name": "control_status_aperture",
+      "tier": 2,
+      "estimated_gates": 2500,
+      "description": "24-bit QSPI aperture decode: CTRL, STATUS, CFG0, CFG1, IN and OUT windows.",
+      "interfaces": {
+        "qspi_aperture": {"width": 42, "direction": "in"},
+        "host_write": {"width": 24, "direction": "out"},
+        "host_read": {"width": 16, "direction": "out"},
+        "framebuffer_read": {"width": 21, "direction": "out"},
+        "start_config": {"width": 8, "direction": "out"},
+        "irq_level": {"width": 1, "direction": "out"}
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": "user_project_wrapper_io",
+      "to": "qspi_cdc_frontend",
+      "interface": "qspi_async_pins",
+      "data_width": 6,
+      "bus_name": "",
+      "handshake_protocol": "static",
+      "semantic_contract": "Raw asynchronous pad levels for qspi_csn, qspi_sck and qspi_io[3:0], presented combinationally to first-stage synchronizer inputs only."
+    },
+    {
+      "from": "qspi_cdc_frontend",
+      "to": "qspi_slave_engine",
+      "interface": "edge_event",
+      "data_width": 6,
+      "bus_name": "",
+      "handshake_protocol": "valid_only",
+      "semantic_contract": "One-cycle mutually exclusive sck_rise / sck_fall pulses plus the second-stage sampled_io nibble, all in the wb_clk_i domain."
+    },
+    {
+      "from": "qspi_slave_engine",
+      "to": "user_project_wrapper_io",
+      "interface": "qspi_drive",
+      "data_width": 5,
+      "bus_name": "",
+      "handshake_protocol": "static",
+      "semantic_contract": "LEGITIMATE RETURN/OUTPUT PATH: tier-2 qspi_slave_engine returns the registered host-read nibble and lane-drive qualifier to the tier-1 physical pad wrapper. Declared qspi_drive group carries qspi_io_out[4]+qspi_drive_en[1]=5 bits, is not a forward compute-stage dependency, and is stable from each synchronized RISING-SCK-scheduled update (advanced from the already-consumed rising edge, becoming visible during the following low phase) through the next host rising-edge sample."
+    },
+    {
+      "from": "qspi_slave_engine",
+      "to": "control_status_aperture",
+      "interface": "qspi_aperture",
+      "data_width": 42,
+      "bus_name": "",
+      "handshake_protocol": "req_resp",
+      "semantic_contract": "Byte-wide addressed request/response into the 24-bit QSPI aperture with a one-cycle registered read response."
+    }
+  ],
+  "reasoning": "Four-block QSPI ingress path: pad mapping, CDC, slave engine, aperture decode."
+}

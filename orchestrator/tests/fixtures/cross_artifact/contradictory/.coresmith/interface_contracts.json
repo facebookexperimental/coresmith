@@ -1,0 +1,102 @@
+{
+  "_fixture_note": "Trimmed excerpt of a real architecture-phase .coresmith/interface_contracts.json.bak-chiplead. TWO contradictions of the ERS READ-serializer requirement are preserved verbatim: edge_event.representations.state_semantics[0].rule ('on sck_fall=1 it advances only the read serializer') and qspi_drive.rate_description ('updated by the engine only on synchronized SCK falling-edge events').",
+  "design_summary": "Asynchronous quad mode-0 QSPI slave feeding a 64x64 triangle rasterizer behind the locked Caravel user_project_wrapper.",
+  "default_packing_convention": "msb_first_by_field_list",
+  "contracts": [
+    {
+      "edge_id": "qspi_cdc_frontend__edge_event__to__qspi_slave_engine__edge_event",
+      "producer_block": "qspi_cdc_frontend",
+      "producer_port": "edge_event",
+      "consumer_block": "qspi_slave_engine",
+      "consumer_port": "edge_event",
+      "handshake_protocol": "valid_only",
+      "data_width_bits": 6,
+      "sideband_signals": [],
+      "fields": [
+        {"name": "sck_rise", "msb": 5, "lsb": 5, "width": 1, "signed": false, "encoding": "one_cycle_pulse"},
+        {"name": "sck_fall", "msb": 4, "lsb": 4, "width": 1, "signed": false, "encoding": "one_cycle_pulse"},
+        {"name": "sampled_io", "msb": 3, "lsb": 0, "width": 4, "signed": false, "encoding": "quad_nibble_io3_to_io0"}
+      ],
+      "packing_convention": "msb_first_by_field_list",
+      "rate_description": "At most one mutually exclusive one-cycle edge pulse per legal synchronized SCK transition; sampled_io is meaningful for host input only when sck_rise=1.",
+      "bootstrap_policy": {
+        "required": true,
+        "policy_type": "primed_externally",
+        "seed_value_hex": null,
+        "rationale": "The external host first establishes CS low and then supplies the SCK transitions that advance the transaction."
+      },
+      "flow_control_policy": {
+        "semantics": "free_running",
+        "min_buffer_depth_beats": 0,
+        "credit_words": null,
+        "consumer_can_stall": false,
+        "producer_can_stall": false,
+        "feedback_cycle": false,
+        "rationale": "Edge pulses cannot be replayed or backpressured, so the engine always consumes each pulse in its asserted cycle."
+      },
+      "representations": {
+        "enums": [
+          {
+            "name": "qspi_edge_event_code",
+            "width": 2,
+            "values": {"NO_EDGE": "2'b00", "FALL": "2'b01", "RISE": "2'b10"},
+            "notes": "Encoding is the concatenation {sck_rise,sck_fall}; 2'b11 is illegal and must never be generated."
+          }
+        ],
+        "address_maps": [],
+        "record_layouts": [],
+        "state_semantics": [
+          {
+            "name": "nibble_sampling",
+            "rule": "On sck_rise=1 the engine latches sampled_io as the current host nibble; on sck_fall=1 it advances only the read serializer. sampled_io changes without sck_rise have no host-input meaning."
+          }
+        ]
+      },
+      "notes": "sck_rise=(~sck_prev)&sck_sync2 and sck_fall=sck_prev&(~sck_sync2); both pulses are derived and consumed only on wb_clk_i."
+    },
+    {
+      "edge_id": "qspi_slave_engine__qspi_drive__to__user_project_wrapper_io__qspi_drive",
+      "producer_block": "qspi_slave_engine",
+      "producer_port": "qspi_drive",
+      "consumer_block": "user_project_wrapper_io",
+      "consumer_port": "qspi_drive",
+      "handshake_protocol": "static",
+      "data_width_bits": 5,
+      "sideband_signals": [],
+      "fields": [
+        {"name": "qspi_io_out", "msb": 4, "lsb": 1, "width": 4, "signed": false, "encoding": "quad_nibble_io3_to_io0"},
+        {"name": "qspi_drive_en", "msb": 0, "lsb": 0, "width": 1, "signed": false, "encoding": "active_high_drive_enable"}
+      ],
+      "packing_convention": "msb_first_by_field_list",
+      "rate_description": "Static drive controls updated by the engine only on synchronized SCK falling-edge events and held stable through the following rising-edge sample.",
+      "bootstrap_policy": {
+        "required": true,
+        "policy_type": "reset_seed",
+        "seed_value_hex": "0x0",
+        "rationale": "Reset drives all output data low and disables the lanes, breaking the pin-level ownership loop without contention."
+      },
+      "flow_control_policy": {
+        "semantics": "free_running",
+        "min_buffer_depth_beats": 0,
+        "credit_words": null,
+        "consumer_can_stall": false,
+        "producer_can_stall": false,
+        "feedback_cycle": false,
+        "rationale": "The wrapper continuously maps these levels to GPIO output and active-low output enable without backpressure."
+      },
+      "representations": {
+        "enums": [],
+        "address_maps": [],
+        "record_layouts": [],
+        "state_semantics": [
+          {
+            "name": "lane_drive_window",
+            "rule": "qspi_drive_en is 1 only for the post-dummy data phase of READ 0x03 or for exactly two response nibbles of READ_STATUS 0x05; otherwise it is 0, including reset, CS high, command, address, write data, and dummy turnaround."
+          }
+        ]
+      },
+      "notes": "The wrapper maps qspi_io_out to io_out[5:2] and sets io_oeb[5:2]=4'b0000 iff qspi_drive_en=1, otherwise 4'b1111. Each byte is driven high nibble first and low nibble second."
+    }
+  ],
+  "open_questions": []
+}
