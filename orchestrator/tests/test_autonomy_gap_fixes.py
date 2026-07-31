@@ -274,10 +274,18 @@ def test_the_discount_expires_the_moment_the_run_stops(daemon, monkeypatch):
     assert daemon._consumed_interrupt_ids == set()
 
 
-def test_suspected_stale_labelling_is_unchanged(daemon, monkeypatch):
+def test_suspected_stale_labelling_needs_the_completion_to_be_NEWER(
+        daemon, monkeypatch):
+    """A leftover is an interrupt the graph has moved PAST -- so the block's
+    completion must post-date it. Bare membership in the append-only
+    completed_blocks made every pass-2 interrupt of a two-pass run read stale
+    on arrival with live_interrupt_count=0."""
     monkeypatch.setattr(daemon._pipeline, "task", _FinishedTask())
+    monkeypatch.setattr(daemon, "_interrupt_first_seen", {"i1": 10.0},
+                        raising=False)
     snap = _Snap(
-        {"completed_blocks": [{"name": "blk", "success": True}],
+        {"completed_blocks": [{"name": "blk", "success": True,
+                               "completed_at": 1e9}],
          "block_queue": [{"name": "blk"}]},
         [_Task([_Intr("i1", {"type": "dv_failure", "block": "blk"})])],
     )
@@ -285,3 +293,10 @@ def test_suspected_stale_labelling_is_unchanged(daemon, monkeypatch):
     assert st["interrupts"][0]["stale_suspected"] is True
     assert st["pending_interrupt_count"] == 1      # surfaced, not hidden
     assert st["suspected_stale_interrupt_count"] == 1
+
+    # Same shape, but the interrupt was raised AFTER the block completed: LIVE.
+    monkeypatch.setattr(daemon, "_interrupt_first_seen", {"i1": 2e9},
+                        raising=False)
+    st2 = daemon._shape_state(snap)
+    assert st2["interrupts"][0]["stale_suspected"] is False
+    assert st2["live_interrupt_count"] == 1

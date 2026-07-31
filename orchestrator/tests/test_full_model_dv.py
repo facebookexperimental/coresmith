@@ -172,3 +172,147 @@ def simulate(stimulus):
         violations = model_integration.run_model_integration_gate(str(root))
         assert violations
         assert "BYTE-SHIFT DETECTED" in str(violations[0].get("suggested_fix", ""))
+
+
+# ---------------------------------------------------------------------------
+# Timeout localization (run3-followups #4b)
+# ---------------------------------------------------------------------------
+#
+# When the composed model runs unbounded there is no divergence offset and no
+# traceback, so the failure reported "First-divergence block: (unlocalized)" and
+# the router broadcast a re-spec to EVERY block. A stall has one first cause, and
+# this is the failure mode where saying WHERE matters most.
+#
+# The probe is static (ast over the composition + a standalone import of each
+# block model), so it costs nothing and works on a run that is already hung.
+
+HANGING_CHIP = '''\
+def simulate(stimulus):
+    while True:
+        pass
+'''
+
+# A composition where one block's ports are wired to signals nothing else in the
+# whole chip model touches -- an output no one consumes / an input no one drives.
+DANGLING_CHIP = '''\
+from amaranth import Module, Signal
+
+from producer import producer
+from orphan import orphan
+
+
+class chip_model:
+    def elaborate(self, platform):
+        m = Module()
+        shared = Signal(8)
+        shared_valid = Signal()
+        never_read_a = Signal(8)
+        never_read_b = Signal()
+        m.submodules.p = producer(shared, shared_valid)
+        m.submodules.o = orphan(never_read_a, never_read_b)
+        m.d.comb += shared.eq(shared_valid)
+        return m
+
+
+def simulate(stimulus):
+    while True:
+        pass
+'''
+
+BROKEN_BLOCK = "import a_module_that_does_not_exist_anywhere\n"
+
+
+def _good_block(name: str) -> str:
+    """A block model that imports cleanly and exposes its own name."""
+    return f"class {name}:\n    def __init__(self, *args):\n        pass\n"
+
+
+def _stall_project(tmp_path: Path, chip: str, blocks: dict) -> Path:
+    d = tmp_path / "arch" / "block_models"
+    for stem, text in blocks.items():
+        _write(d / f"{stem}.py", text if text else _good_block(stem))
+    _write(d / "_chip_model.py", chip)
+    _write(tmp_path / "inputs" / "toy_golden.py", REFERENCE_IMPL)
+    return tmp_path
+
+
+class TestStallLocalization:
+    def test_probe_names_a_block_that_does_not_even_import(self, tmp_path):
+        root = _stall_project(tmp_path, HANGING_CHIP, {
+            "producer": "", "orphan": BROKEN_BLOCK})
+        rep = model_integration.probe_composition_stall(
+            str(root), root / "arch" / "block_models")
+        assert set(rep["blocks"]) == {"producer", "orphan"}
+        assert "orphan" in rep["import_failures"]
+        assert "producer" not in rep["import_failures"]
+        assert rep["candidates"] == ["orphan"]
+        assert "DOES NOT IMPORT" in rep["summary"]
+
+    def test_probe_names_a_block_whose_ports_are_wired_to_nothing(self, tmp_path):
+        root = _stall_project(tmp_path, DANGLING_CHIP, {
+            "producer": "", "orphan": ""})
+        rep = model_integration.probe_composition_stall(
+            str(root), root / "arch" / "block_models")
+        assert rep["dangling"].get("orphan") == ["never_read_a", "never_read_b"]
+        assert "producer" not in rep["dangling"]     # its signals ARE consumed
+        assert rep["candidates"] == ["orphan"]
+        assert "read NOWHERE else" in rep["summary"]
+
+    def test_probe_reports_nothing_when_the_composition_is_well_formed(
+            self, tmp_path):
+        chip = DANGLING_CHIP.replace(
+            "m.submodules.o = orphan(never_read_a, never_read_b)",
+            "m.submodules.o = orphan(shared, shared_valid)")
+        root = _stall_project(tmp_path, chip, {
+            "producer": "", "orphan": ""})
+        rep = model_integration.probe_composition_stall(
+            str(root), root / "arch" / "block_models")
+        assert rep["candidates"] == []
+        assert rep["summary"] == ""
+
+    def test_probe_never_raises_on_a_missing_or_unparseable_dir(self, tmp_path):
+        rep = model_integration.probe_composition_stall(
+            str(tmp_path), tmp_path / "nope")
+        assert rep["candidates"] == [] and rep["blocks"] == []
+
+    def test_timeout_violation_says_WHERE(self, tmp_path, monkeypatch):
+        """PRODUCTION PATH: the real gate, a real (fast) timeout, and the
+        violation the router consumes now NAMES the block instead of reporting
+        '(unlocalized)'."""
+        _env(monkeypatch)
+        monkeypatch.setenv("CORESMITH_GATE_SIM_TIMEOUT", "1")
+        root = _stall_project(tmp_path, DANGLING_CHIP, {
+            "producer": "", "orphan": ""})
+        violations = model_integration.run_model_integration_gate(str(root))
+        assert violations, "a hanging simulate() must be a violation"
+        v = violations[0]
+        assert v["criterion"] == "simulate_timeout"
+        assert v["first_divergence_block"] == "orphan"
+        assert "LOCALIZED to block 'orphan'" in v["observed"]
+        assert "read NOWHERE else" in v["suggested_fix"]
+        assert v["stall_localization"]["candidates"] == ["orphan"]
+
+    def test_localization_can_be_switched_off(self, tmp_path, monkeypatch):
+        """Env-gate convention: 0 restores the pre-fix '(unlocalized)' report,
+        so both branches are covered."""
+        _env(monkeypatch)
+        monkeypatch.setenv("CORESMITH_GATE_SIM_TIMEOUT", "1")
+        monkeypatch.setenv("CORESMITH_GATE_STALL_LOCALIZE", "0")
+        root = _stall_project(tmp_path, DANGLING_CHIP, {
+            "producer": "", "orphan": ""})
+        violations = model_integration.run_model_integration_gate(str(root))
+        assert violations
+        v = violations[0]
+        assert v["first_divergence_block"] == ""
+        assert "NOT localized" in v["observed"]
+        assert v["stall_localization"] == {}
+
+    def test_ambiguous_evidence_does_not_invent_a_single_block(self, tmp_path):
+        """Two candidate blocks -> the probe reports both and names NEITHER as
+        the first-divergence block. A false-precise pointer misdirects a re-spec,
+        which is why the broadcast default exists."""
+        root = _stall_project(tmp_path, DANGLING_CHIP, {
+            "producer": BROKEN_BLOCK, "orphan": BROKEN_BLOCK})
+        rep = model_integration.probe_composition_stall(
+            str(root), root / "arch" / "block_models")
+        assert len(rep["candidates"]) == 2

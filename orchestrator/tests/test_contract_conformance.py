@@ -355,3 +355,218 @@ class TestDeterministicPortRepair:
         f = _rtl(tmp_path, "ap", ["ch_dat"])          # nothing repairable
         out = repair_block_ports(root, "ap", f, apply=True)
         assert out["conforms"] is False
+
+
+# ---------------------------------------------------------------------------
+# The stage, and its wiring into the per-block RTL flow
+# ---------------------------------------------------------------------------
+
+class TestTheStage:
+    """``run_conformance_stage`` is what the block flow calls: check, repair
+    what is provable, re-check, and carry the testbench along."""
+
+    def test_a_deviation_is_repaired_and_the_channel_reported(self, tmp_path):
+        from orchestrator.langgraph.contract_conformance import (
+            run_conformance_stage,
+        )
+        root = _project(tmp_path, [
+            _edge("ap", "s", "host_write", sideband=["write_enable"])])
+        f = _rtl(tmp_path, "ap", ["host_write_enable"])
+        rec = run_conformance_stage(root, "ap", f)
+        assert rec["ran"] and rec["ok"]
+        assert rec["renames"] == {"host_write_enable": "host_write_write_enable"}
+        assert rec["rename_channels"]["host_write_enable"] == "host_write"
+        assert rec["before_missing"] == 1 and rec["after_missing"] == 0
+        assert "host_write_write_enable" in f.read_text()
+
+    def test_no_contract_edge_means_not_run_not_pass(self, tmp_path):
+        """A block no edge names has no evidence either way. The stage must
+        say so instead of manufacturing a green verdict."""
+        from orchestrator.langgraph.contract_conformance import (
+            run_conformance_stage,
+        )
+        root = _project(tmp_path, [_edge("x", "y", "ch", fields=["data"])])
+        rec = run_conformance_stage(root, "ap", _rtl(tmp_path, "ap", ["clk"]))
+        assert rec["ran"] is False and rec["checked_edges"] == 0
+        assert "no interface contract edge" in rec["reason"]
+
+    def test_an_unrepairable_deviation_fails_with_the_exact_name(self, tmp_path):
+        from orchestrator.langgraph.contract_conformance import (
+            run_conformance_stage,
+        )
+        root = _project(tmp_path, [
+            _edge("ap", "s", "ch", fields=["data"], sideband=["valid"])])
+        rec = run_conformance_stage(root, "ap", _rtl(tmp_path, "ap", ["ch_dat"]))
+        assert rec["ran"] and rec["ok"] is False
+        assert "ch_data" in rec["feedback"] and "ch_valid" in rec["feedback"]
+        assert rec["deviations"]
+
+    def test_testbench_dut_references_follow_the_rename(self, tmp_path):
+        from orchestrator.langgraph.contract_conformance import (
+            run_conformance_stage,
+        )
+        root = _project(tmp_path, [
+            _edge("ap", "s", "host_write", sideband=["write_enable"])])
+        f = _rtl(tmp_path, "ap", ["host_write_enable"])
+        tb = tmp_path / "test_ap.py"
+        tb.write_text("async def t(dut):\n"
+                      "    dut.host_write_enable.value = 1\n"
+                      "    return int(dut.host_write_enable.value)\n")
+        rec = run_conformance_stage(root, "ap", f, tb_path=str(tb))
+        assert "dut.host_write_write_enable" in tb.read_text()
+        assert "dut.host_write_enable" not in tb.read_text()
+        assert rec["tb"]["changed"] and not rec["tb"]["needs_regen"]
+        assert Path(str(tb) + ".pre_portrepair").exists()
+
+    def test_a_name_string_reference_asks_for_regeneration(self, tmp_path):
+        """Generated testbenches really do drive ``getattr(dut, field)`` over a
+        tuple of port-name strings -- and key their MODEL stimulus with the same
+        strings. Rewriting those blind would corrupt the model side, so the
+        stage asks for a regeneration instead of guessing."""
+        from orchestrator.langgraph.contract_conformance import (
+            run_conformance_stage,
+        )
+        root = _project(tmp_path, [
+            _edge("ap", "s", "host_write", sideband=["write_enable"])])
+        f = _rtl(tmp_path, "ap", ["host_write_enable"])
+        tb = tmp_path / "test_ap.py"
+        tb.write_text('FIELDS = ("host_write_enable",)\n'
+                      'def t(dut):\n'
+                      '    for k in FIELDS:\n'
+                      '        getattr(dut, k).value = 0\n')
+        rec = run_conformance_stage(root, "ap", f, tb_path=str(tb))
+        assert rec["tb"]["needs_regen"] is True
+        assert rec["tb"]["residual"] == ["host_write_enable"]
+
+    def test_an_unreadable_rtl_is_not_a_verdict(self, tmp_path):
+        from orchestrator.langgraph.contract_conformance import (
+            run_conformance_stage,
+        )
+        root = _project(tmp_path, [
+            _edge("ap", "s", "ch", fields=["data"])])
+        rec = run_conformance_stage(root, "ap", tmp_path / "absent.v")
+        assert rec["ran"] is False and rec["ok"] is True and rec["reason"]
+
+
+class TestWiredIntoTheBlockFlow:
+    """The check existed and had tests; nothing CALLED it. These assert the
+    PRODUCTION node -- ``generate_testbench_node`` -- runs it."""
+
+    @staticmethod
+    def _state(tmp_path, rtl, tb):
+        return {
+            "current_block": {"name": "ap", "testbench": str(
+                Path(tb).relative_to(tmp_path))},
+            "project_root": str(tmp_path),
+            "attempt": 1,
+            "rtl_path": str(rtl),
+            "tb_path": str(tb),
+            "force_regen_tb": False,
+            "preserve_testbench": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_the_node_repairs_before_it_simulates(self, tmp_path):
+        from unittest.mock import patch
+
+        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
+        root = _project(tmp_path, [
+            _edge("ap", "s", "host_write", sideband=["write_enable"])])
+        rtl = _rtl(tmp_path, "ap", ["host_write_enable"])
+        tb = tmp_path / "tb" / "test_ap.py"
+        tb.parent.mkdir(parents=True)
+        tb.write_text("def t(dut):\n    dut.host_write_enable.value = 1\n")
+        seen = {}
+
+        def _sim(block, rtl_path, tb_path, attempt):
+            # The sim that runs is the one AFTER the repair -- that is the
+            # whole reason the stage sits here and not after the testbench.
+            seen["rtl"] = Path(rtl_path).read_text()
+            seen["tb"] = Path(tb_path).read_text()
+            return {"passed": True, "log": "ok", "returncode": 0,
+                    "tests_passed": 1, "tests_total": 1}
+
+        with patch("orchestrator.langgraph.pipeline_graph.run_simulation", _sim):
+            out = await generate_testbench_node(
+                self._state(tmp_path, rtl, tb))
+        assert out["sim_passed"] is True
+        assert out["conformance_renames"] == {
+            "host_write_enable": "host_write_write_enable"}
+        assert "host_write_write_enable" in seen["rtl"]
+        assert "dut.host_write_write_enable" in seen["tb"]
+        rec = json.loads((root / ".coresmith" / "blocks" / "ap"
+                          / "contract_conformance.json").read_text())
+        assert rec["renames"] and rec["ok"]
+
+    @pytest.mark.asyncio
+    async def test_a_deviating_block_never_reaches_sim(self, tmp_path):
+        from unittest.mock import patch
+
+        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
+        root = _project(tmp_path, [
+            _edge("ap", "s", "ch", fields=["data"], sideband=["valid"])])
+        rtl = _rtl(tmp_path, "ap", ["ch_dat"])
+        tb = tmp_path / "tb" / "test_ap.py"
+        tb.parent.mkdir(parents=True)
+        tb.write_text("# tb\n")
+        calls = []
+
+        with patch("orchestrator.langgraph.pipeline_graph.run_simulation",
+                   lambda *a, **k: calls.append(a) or {"passed": True}):
+            out = await generate_testbench_node(
+                self._state(tmp_path, rtl, tb))
+        assert out["sim_passed"] is False and not calls
+        prev = (root / ".coresmith" / "blocks" / "ap"
+                / "previous_error.txt").read_text()
+        assert "CONTRACT-CONFORMANCE" in prev and "ch_data" in prev
+
+    @pytest.mark.asyncio
+    async def test_the_env_gate_turns_it_off(self, tmp_path, monkeypatch):
+        from unittest.mock import patch
+
+        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
+        monkeypatch.setenv("CORESMITH_CONTRACT_CONFORMANCE_GATE", "0")
+        root = _project(tmp_path, [
+            _edge("ap", "s", "host_write", sideband=["write_enable"])])
+        rtl = _rtl(tmp_path, "ap", ["host_write_enable"])
+        tb = tmp_path / "tb" / "test_ap.py"
+        tb.parent.mkdir(parents=True)
+        tb.write_text("# tb\n")
+        with patch("orchestrator.langgraph.pipeline_graph.run_simulation",
+                   lambda *a, **k: {"passed": True, "log": "", "returncode": 0}):
+            out = await generate_testbench_node(
+                self._state(tmp_path, rtl, tb))
+        assert out["sim_passed"] is True
+        assert "host_write_enable" in rtl.read_text()
+        assert "host_write_write_enable" not in rtl.read_text()
+        assert not (root / ".coresmith" / "blocks" / "ap"
+                    / "contract_conformance.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_the_second_failure_parks_instead_of_looping(self, tmp_path):
+        from unittest.mock import patch
+
+        from orchestrator.langgraph.pipeline_graph import generate_testbench_node
+        root = _project(tmp_path, [
+            _edge("ap", "s", "ch", fields=["data"], sideband=["valid"])])
+        rtl = _rtl(tmp_path, "ap", ["ch_dat"])
+        tb = tmp_path / "tb" / "test_ap.py"
+        tb.parent.mkdir(parents=True)
+        tb.write_text("# tb\n")
+        parked = []
+
+        with patch("orchestrator.langgraph.pipeline_graph.run_simulation",
+                   lambda *a, **k: {"passed": True}), \
+             patch("orchestrator.langgraph.pipeline_graph.interrupt",
+                   lambda payload: parked.append(payload) or {}):
+            await generate_testbench_node(self._state(tmp_path, rtl, tb))
+            assert not parked          # first failure: retry, do not park
+            await generate_testbench_node(self._state(tmp_path, rtl, tb))
+
+        assert len(parked) == 1
+        assert parked[0]["type"] == "contract_conformance_unrepairable"
+        assert "ch_data" in parked[0]["expected_ports"]
+        # the counter resets after a park, so a later genuine change gets a
+        # fresh pair of tries rather than parking on every entry
+        assert not (root / ".coresmith" / "blocks" / "ap"
+                    / "_conformance_failures.txt").exists()

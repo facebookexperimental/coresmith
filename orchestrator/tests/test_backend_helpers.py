@@ -838,3 +838,117 @@ class TestLvsIntegration:
         # Expected tap cell delta
         assert lvs["device_delta"] <= 2
         assert Path(lvs["report_path"]).exists()
+
+
+# ---------------------------------------------------------------------------
+# Synthesis attempt-history retention (run3-followups #3)
+# ---------------------------------------------------------------------------
+#
+# The flat-synth driver retries Yosys inside its own LLM step. A live run logged
+# "Synthesis succeeded on attempt 2" and attempt 1's failure reason was retained
+# NOWHERE -- not in attempt_history, not in previous_error, not in
+# synth_result.json. A driver that heals itself in silence teaches nobody: the
+# same script defect recurs every run and the only trace is a discarded
+# transcript.
+
+class TestSynthAttemptHistory:
+    def _collect(self, **kw):
+        from orchestrator.langgraph.backend_helpers import (
+            collect_synth_attempt_history,
+        )
+        kw.setdefault("now", "2026-07-31T00:00:00")
+        return collect_synth_attempt_history(kw.pop("result", {}), **kw)
+
+    def test_clean_first_attempt_records_nothing(self, tmp_path):
+        assert self._collect(
+            result={"success": True},
+            output_dir=str(tmp_path),
+            llm_reply="Synthesis succeeded.",
+        ) == []
+
+    def test_driver_reported_failures_are_retained_on_a_SUCCESS(self, tmp_path):
+        h = self._collect(
+            result={"success": True, "attempt_history": [
+                {"attempt": 1, "error_summary": "ERROR: Module `cs_sram_1rw' "
+                                                "is not part of the design"},
+            ]},
+            output_dir=str(tmp_path),
+            llm_reply="Synthesis succeeded on attempt 2.",
+        )
+        assert [e["attempt"] for e in h] == [1]
+        assert "cs_sram_1rw" in h[0]["error_summary"]
+        assert h[0]["source"] == "driver_reported"
+        assert h[0]["unrecorded"] is False
+
+    def test_yosys_logs_on_disk_are_harvested_without_the_driver(self, tmp_path):
+        """Deterministic evidence: the driver need not be honest about its own
+        retries for the failure reason to survive."""
+        (tmp_path / "synth_attempt1.log").write_text(
+            "1. Executing Verilog frontend\n"
+            "ERROR: syntax error, unexpected TOK_ID at line 12\n")
+        h = self._collect(result={"success": True}, output_dir=str(tmp_path),
+                          llm_reply="done")
+        assert len(h) == 1
+        assert h[0]["source"] == "yosys_log"
+        assert "syntax error" in h[0]["error_summary"]
+        assert "synth_attempt1.log" in h[0]["error_summary"]
+
+    def test_a_claimed_retry_with_no_evidence_is_recorded_as_NOT_RETAINED(
+            self, tmp_path):
+        """THE defect. The driver says it took two attempts and supplies nothing
+        about the first. The gap becomes a record instead of a silence."""
+        h = self._collect(result={"success": True}, output_dir=str(tmp_path),
+                          llm_reply="Synthesis succeeded on attempt 2.")
+        assert len(h) == 1
+        assert h[0]["attempt"] == 1
+        assert h[0]["unrecorded"] is True
+        assert "not retained" in h[0]["error_summary"]
+
+    def test_real_evidence_wins_over_the_not_retained_placeholder(self, tmp_path):
+        (tmp_path / "a.log").write_text("ERROR: cannot open liberty file\n")
+        h = self._collect(result={"success": True}, output_dir=str(tmp_path),
+                          llm_reply="succeeded on attempt 3")
+        assert [e["attempt"] for e in h] == [1, 2]
+        assert h[0]["unrecorded"] is False and "liberty" in h[0]["error_summary"]
+        assert h[1]["unrecorded"] is True
+
+    def test_node_level_prior_failure_is_folded_in(self, tmp_path):
+        h = self._collect(result={"success": True}, output_dir=str(tmp_path),
+                          prior_error="hierarchy -check failed on top",
+                          node_attempt=2, llm_reply="ok")
+        assert [e["source"] for e in h] == ["node_previous_error"]
+        assert h[0]["attempt"] == 1
+
+    def test_collector_never_raises_on_garbage(self, tmp_path):
+        assert self._collect(result={"attempt_history": "not-a-list"},
+                             output_dir="/nonexistent/dir",
+                             llm_reply=None) == []
+
+    def test_persist_merges_into_the_synth_result_artifact(self, tmp_path):
+        from orchestrator.langgraph.backend_helpers import (
+            persist_synth_attempt_history,
+        )
+        import json as _json
+        p = tmp_path / "synth_result.json"
+        p.write_text(_json.dumps({"success": True, "gate_count": 42}))
+        hist = [{"attempt": 1, "error_summary": "ERROR: boom",
+                 "source": "yosys_log", "timestamp": "t", "unrecorded": False}]
+        assert persist_synth_attempt_history(str(p), hist) is True
+        data = _json.loads(p.read_text())
+        assert data["gate_count"] == 42                 # existing keys survive
+        assert data["attempt_history"] == hist
+        assert data["attempt_failures"] == 1
+        assert data["attempt_history_unrecorded"] == 0
+
+    def test_describe_names_every_attempt(self):
+        from orchestrator.langgraph.backend_helpers import (
+            describe_synth_attempt_history,
+        )
+        assert describe_synth_attempt_history([]) == ""
+        txt = describe_synth_attempt_history([
+            {"attempt": 1, "error_summary": "boom", "source": "yosys_log",
+             "timestamp": "t", "unrecorded": False},
+            {"attempt": 2, "error_summary": "(not retained) ...",
+             "source": "unrecorded", "timestamp": "t", "unrecorded": True},
+        ])
+        assert "attempt 1" in txt and "attempt 2 [NOT RETAINED]" in txt

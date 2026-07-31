@@ -3003,6 +3003,27 @@ async def launch_backend(
     if not block_queue:
         return {"error": "No blocks found in block_specs.json or config.yaml"}
 
+    # Blocks retired by the pin map were deliberately never microarchitected,
+    # generated or synthesized (the chip top emits their routing itself) --
+    # they must not gate the backend launch nor enter the backend state.
+    from orchestrator.architecture.pin_map_retire import read_retired_blocks
+    _retired = {r.get("block") for r in read_retired_blocks(_project_root())
+                if isinstance(r, dict) and r.get("block")}
+    if _retired:
+        def _blk_name(b):
+            return b["name"] if isinstance(b, dict) else b
+        _before = len(block_queue)
+        block_queue = [b for b in block_queue if _blk_name(b) not in _retired]
+        frontend_blocks = [
+            b for b in frontend_blocks if _blk_name(b) not in _retired
+        ]
+        import logging
+        logging.getLogger(__name__).warning(
+            "backend gate: excluding %d pin-map-retired block(s) %s "
+            "(%d -> %d in queue)",
+            len(_retired), sorted(_retired), _before, len(block_queue),
+        )
+
     # Load architecture connections
     from orchestrator.langgraph.integration_helpers import load_architecture_connections
     architecture_connections, design_name = load_architecture_connections(_project_root())

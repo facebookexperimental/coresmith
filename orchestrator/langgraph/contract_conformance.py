@@ -39,10 +39,17 @@ So this is deterministic and it runs per block, right after RTL generation --
 not at integration. An integration-time failure has already paid for seven other
 blocks; a block-time failure is one cheap regeneration with an exact expected
 name to fix.
+
+:func:`run_conformance_stage` is the production entry point the per-block RTL
+flow calls (see ``generate_testbench_node``): check -> unambiguous repair ->
+re-check, with the testbench's port references carried along. Everything here is
+pure file I/O and returns a record; the caller owns logging, the block verdict
+and the park.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -374,3 +381,152 @@ def repair_block_ports(project_root, block_name: str, rtl_path,
     out["after"] = len(after.missing)
     out["conforms"] = after.ok
     return out
+
+
+# ---------------------------------------------------------------------------
+# Production stage: check -> repair -> re-check, wired into the block RTL flow
+# ---------------------------------------------------------------------------
+
+def conformance_gate_enabled() -> bool:
+    """Contract-conformance stage in the per-block RTL flow (default ON).
+
+    ``CORESMITH_CONTRACT_CONFORMANCE_GATE=0`` disables it -- the same env-gate
+    convention as the storage / ifdef / stage lints.
+    """
+    return (os.environ.get("CORESMITH_CONTRACT_CONFORMANCE_GATE", "1")
+            or "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+#: How a cocotb testbench names a DUT port. A rename is applied to THESE forms
+#: only. A blanket word-boundary substitution over the TB would also rewrite a
+#: local variable that happens to share a generic signal name (`read_enable` is
+#: not distinctive), and corrupting a testbench to fix a port name trades a
+#: loud failure for a silent one.
+def _tb_ref_patterns(old: str) -> list[tuple[str, str]]:
+    o = re.escape(old)
+    return [
+        (rf"(?<![\w.])dut\.{o}\b", "dut.{new}"),
+        (rf"(?<![\w.])dut\._id\(\s*(['\"]){o}\1", 'dut._id("{new}"'),
+        (rf"getattr\(\s*dut\s*,\s*(['\"]){o}\1", 'getattr(dut, "{new}"'),
+    ]
+
+
+def repair_testbench_refs(tb_path, renames: dict) -> dict:
+    """Rewrite a testbench's DUT port references after a port rename.
+
+    Returns ``{"applied": {old: n_sites}, "residual": [old, ...],
+    "changed": bool, "needs_regen": bool}``. ``residual`` lists renamed ports
+    whose OLD name still appears as a bare word in the testbench after the
+    narrow rewrite -- either a harmless local, or a port reference in a form
+    this function deliberately does not touch (a generated testbench really does
+    drive ``getattr(dut, field)`` over a tuple of port-name STRINGS, and the
+    same strings key its stimulus dict, which is also how it feeds the Amaranth
+    block model; blanket-renaming quoted strings would corrupt the model side).
+
+    So residual references are not guessed at -- they set ``needs_regen``, and
+    the caller regenerates the testbench against the repaired RTL. That is one
+    cheap testbench call instead of a sim failure that costs an RTL attempt,
+    and it never invents a mapping the checker cannot prove.
+    """
+    out: dict = {"applied": {}, "residual": [], "changed": False,
+                 "needs_regen": False}
+    p = Path(tb_path)
+    if not renames or not tb_path or not p.exists():
+        return out
+    try:
+        text = original = p.read_text(errors="ignore")
+    except OSError:
+        return out
+    for old, new in renames.items():
+        n = 0
+        for pat, repl in _tb_ref_patterns(old):
+            text, k = re.subn(pat, repl.format(new=new), text)
+            n += k
+        if n:
+            out["applied"][old] = n
+        if re.search(r"\b" + re.escape(old) + r"\b", text):
+            out["residual"].append(old)
+    out["needs_regen"] = bool(out["residual"])
+    if text != original:
+        try:
+            Path(str(tb_path) + ".pre_portrepair").write_text(original)
+            p.write_text(text)
+            out["changed"] = True
+        except OSError:
+            return {"applied": {}, "residual": sorted(renames),
+                    "changed": False, "needs_regen": True}
+    return out
+
+
+def run_conformance_stage(project_root, block_name: str, rtl_path,
+                          siblings=(), tb_path: str = "") -> dict:
+    """Check one block against its contract, repair what is unambiguous, re-check.
+
+    This is what the per-block flow calls. It NEVER decides the block's fate --
+    it returns the record and the caller (``generate_testbench_node``) logs it,
+    fails the block, or parks.
+
+    Returns::
+
+        {ran, ok, reason, checked_edges, renames{old:new}, rename_channels,
+         before_missing, after_missing, deviations[], feedback, tb{...}}
+
+    ``ran`` is False (and ``ok`` True) when the stage does not apply: no
+    contract edge names this block, or the RTL is unreadable. Those are other
+    gates' jobs -- this one must not invent a verdict it has no evidence for.
+    """
+    out: dict = {
+        "block": block_name, "ran": False, "ok": True, "reason": "",
+        "checked_edges": 0, "renames": {}, "rename_channels": {},
+        "before_missing": 0, "after_missing": 0, "deviations": [],
+        "feedback": "",
+        "tb": {"applied": {}, "residual": [], "changed": False,
+               "needs_regen": False},
+    }
+    before = check_block(project_root, block_name, rtl_path, siblings=siblings)
+    if before.reason:
+        out["reason"] = before.reason
+        return out
+    out["checked_edges"] = before.checked_edges
+    if not before.checked_edges:
+        out["reason"] = ("no interface contract edge names this block -- "
+                         "nothing to conform to")
+        return out
+
+    out["ran"] = True
+    out["before_missing"] = len(before.missing)
+    out["deviations"] = _deviation_lines(before)
+    if before.ok:
+        out["ok"] = True
+        return out
+
+    # Repair only the unambiguous renames, then let the checker -- not the
+    # repairer -- say whether the block conforms.
+    want_channel = {port: chan for chan, port in before.missing}
+    rep = repair_block_ports(project_root, block_name, rtl_path,
+                             siblings=siblings, apply=True)
+    renames = rep.get("renames") or {}
+    out["renames"] = dict(renames)
+    out["rename_channels"] = {
+        old: want_channel.get(new, "") for old, new in renames.items()
+    }
+
+    after = check_block(project_root, block_name, rtl_path, siblings=siblings)
+    out["after_missing"] = len(after.missing)
+    out["ok"] = after.ok
+    if not after.ok:
+        out["deviations"] = _deviation_lines(after)
+        out["feedback"] = after.as_feedback()
+
+    if renames:
+        out["tb"] = repair_testbench_refs(tb_path, renames)
+    return out
+
+
+def _deviation_lines(res: ConformanceResult) -> list[str]:
+    """One flat, greppable line per deviation (for logs + the run artifact)."""
+    lines = [f"missing {port} (channel '{chan}')" for chan, port in res.missing]
+    lines += [f"undeclared port {p}" for p in res.undeclared]
+    lines += [f"ambiguous channel '{c}': {why}" for c, why in res.ambiguous]
+    lines += [f"instantiates sibling block {s}" for s in res.instantiates]
+    return lines

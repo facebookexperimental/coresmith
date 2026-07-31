@@ -116,6 +116,10 @@ class BackendState(TypedDict):
     chip_gate_sim_status: str
     chip_gate_sim_reason: str
     flat_sdc_path: str                   # syn/output/<design>/<design>.sdc
+    # Per-attempt synthesis failure reasons retained even when a LATER attempt
+    # succeeded ([{attempt, error_summary, source, timestamp, unrecorded}]).
+    # Empty when nothing failed. Also merged into synth_result.json.
+    synth_attempt_history: list[dict]
     synth_gate_count: int
     synth_area_um2: float
     macro_bindings: list                 # Part C: [{name,lef,gds,lib,...}] bound shells
@@ -239,6 +243,7 @@ async def _run_llm_eda_step(
     context: dict,
     result_json_path: str,
     timeout: int = 1200,
+    capture_reply: bool = False,
 ) -> dict:
     """Run an EDA step entirely within the inner Claude LLM.
 
@@ -252,6 +257,12 @@ async def _run_llm_eda_step(
         context: Dict of template variables to fill into the prompt.
         result_json_path: Path where the LLM must write the result JSON.
         timeout: Max seconds for the LLM call.
+        capture_reply: Attach the step's own summary text under ``_llm_reply``.
+            Default OFF so every other EDA step's result dict is byte-identical
+            (these dicts land in graph state and the final report). The
+            synthesis driver opts in because a step that RETRIED internally says
+            so only in that text -- the transcript is otherwise discarded, which
+            is how "succeeded on attempt 2" left no record of attempt 1.
 
     Returns:
         Parsed result dict from the JSON file, or a failure dict.
@@ -269,23 +280,33 @@ async def _run_llm_eda_step(
 
     llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=timeout)
 
+    reply = ""
     try:
-        await llm.call(
+        reply = await llm.call(
             system=system_prompt,
             prompt=user_message,
             run_name=step_name,
-        )
+        ) or ""
     except Exception as e:
         return {"success": False, "error": f"LLM call failed: {e}"}
 
     result_path = Path(result_json_path)
     if result_path.exists():
         try:
-            return json.loads(result_path.read_text(encoding="utf-8"))
+            parsed = json.loads(result_path.read_text(encoding="utf-8"))
+            if capture_reply and isinstance(parsed, dict):
+                parsed.setdefault("_llm_reply", str(reply)[:4000])
+            return parsed
         except (json.JSONDecodeError, OSError):
             pass
 
-    return {"success": False, "error": f"LLM did not write result JSON to {result_json_path}"}
+    failed = {
+        "success": False,
+        "error": f"LLM did not write result JSON to {result_json_path}",
+    }
+    if capture_reply:
+        failed["_llm_reply"] = str(reply)[:4000]
+    return failed
 
 
 def _block_name(state: BackendState) -> str:
@@ -855,16 +876,43 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
                 "sram_wrapper_lib": _sram_wrapper_lib or "(already in inputs)",
             },
             result_json_path=result_json_path,
+            # the driver retries Yosys internally -- its own summary is the only
+            # place that says so (see collect_synth_attempt_history)
+            capture_reply=True,
         )
 
         span.set_attribute("success", result.get("success", False))
         if result.get("success"):
             span.set_attribute("gate_count", result.get("gate_count", 0))
 
+    # SELF-RECOVERY MUST NOT BE SILENT. The driver retries Yosys internally; a
+    # live run logged "Synthesis succeeded on attempt 2" and attempt 1's reason
+    # survived nowhere -- not in attempt_history, not in previous_error, not in
+    # synth_result.json. Retain every attempt's failure reason (driver-reported,
+    # harvested from the Yosys logs on disk, and the node's own prior failure),
+    # and record EXPLICITLY when the driver claims a retry we cannot account for.
+    from orchestrator.langgraph.backend_helpers import (
+        collect_synth_attempt_history,
+        describe_synth_attempt_history,
+        persist_synth_attempt_history,
+    )
+    _synth_history = collect_synth_attempt_history(
+        result,
+        output_dir=output_dir,
+        llm_reply=str(result.get("_llm_reply", "")),
+        prior_error=str(state.get("previous_error", "")),
+        node_attempt=int(state.get("attempt", 1) or 1),
+    )
+    if _synth_history:
+        persist_synth_attempt_history(result_json_path, _synth_history)
+        log("  [FLAT-SYNTH] " + describe_synth_attempt_history(_synth_history),
+            YELLOW)
+
     write_graph_event(pr, "Flat Top Synthesis", "graph_node_exit", {
         "design_name": design_name,
         "success": result.get("success", False),
         "gate_count": result.get("gate_count", 0),
+        "synth_attempt_failures": len(_synth_history),
         "graph": "backend",
     })
 
@@ -885,6 +933,7 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
             })
             return {
                 "phase": "synth",
+                "synth_attempt_history": _synth_history,
                 "previous_error": _bind_err,
                 "flat_netlist_path": "",
                 "flat_sdc_path": "",
@@ -892,6 +941,7 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
         _gs_ok, _gs_status, _gs_reason = _run_chip_top_gate_sim(state, _netlist)
         return {
             "phase": "synth",
+            "synth_attempt_history": _synth_history,
             "flat_netlist_path": _netlist,
             "flat_sdc_path": result.get("sdc_path", ""),
             "synth_gate_count": result.get("gate_count", 0),
@@ -906,9 +956,15 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
                 f"chip_top gate-sim FAIL: {_gs_reason}"} if _gs_ok is False else {}),
         }
     else:
+        # A FAILED synthesis carries its per-attempt history into previous_error
+        # too: diagnose reads that string, and "attempt 3 failed" without the two
+        # reasons before it is what made the same script defect recur every run.
+        _err = result.get("error", "Flat synthesis failed")
+        _hist_txt = describe_synth_attempt_history(_synth_history)
         return {
             "phase": "synth",
-            "previous_error": result.get("error", "Flat synthesis failed"),
+            "synth_attempt_history": _synth_history,
+            "previous_error": (f"{_err}\n\n{_hist_txt}" if _hist_txt else _err),
             "flat_netlist_path": "",
             "flat_sdc_path": "",
         }

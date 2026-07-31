@@ -21,8 +21,33 @@ import os
 from pathlib import Path
 
 
+def _retire_pin_mapped(project_root: str | Path, queue: list[dict]) -> list[dict]:
+    """Drop a pad-adapter block a declared PRD pin map fully covers.
+
+    The graph retires it at ``init_tier`` (and owns the partial-coverage park);
+    this mirrors ONLY the unambiguous full-coverage case so every other reader
+    of the queue -- the conformance stage's sibling list, ``coresmith verify``,
+    the MCP status views -- reports the same block set the pipeline runs. Never
+    parks and never raises: a bookkeeping helper must not gate anything.
+    """
+    try:
+        from orchestrator.architecture import pin_map_retire as _pmr
+        if not _pmr.retirement_enabled():
+            return queue
+        plan = _pmr.plan_retirement(project_root, queue)
+        return _pmr.apply_retirement(queue, plan) if plan.retire else queue
+    except Exception:  # noqa: BLE001
+        return queue
+
+
 def load_block_queue(project_root: str | Path) -> list[dict]:
     """Return the resolved block queue (list of block spec dicts)."""
+    root = Path(project_root)
+    return _retire_pin_mapped(root, _load_block_queue_raw(root))
+
+
+def _load_block_queue_raw(project_root: str | Path) -> list[dict]:
+    """The queue exactly as the architecture phase / config declared it."""
     root = Path(project_root)
 
     specs = root / ".coresmith" / "block_specs.json"
