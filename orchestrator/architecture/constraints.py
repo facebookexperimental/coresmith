@@ -58,6 +58,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -663,25 +664,21 @@ def _check_cross_artifact_quantities(
     return result.violations
 
 
-_CROSS_ARTIFACT_SIDE_RE = None
+# The catalog entry pins the evidence format
+# ``A: <artifact> — "<quote>" || B: <artifact> — "<quote>"``.
+_CROSS_ARTIFACT_SIDE_RE = re.compile(
+    r"\b([AB])\s*:\s*(.*?)\s*[\u2014\-:]\s*[\"\u201c](.*?)[\"\u201d]",
+    re.DOTALL,
+)
 
 
 def _parse_candidate_locations(evidence: str) -> list[dict]:
     """Pull the two cited sides out of a subagent's ``evidence`` string.
 
-    The catalog entry pins the format ``A: <artifact> — "<quote>" || B: ...``.
     LLMs drift, so this is best-effort: an unparseable evidence string yields
     an empty list and the finding still surfaces (with its raw evidence), it
     is simply not machine-split.
     """
-    global _CROSS_ARTIFACT_SIDE_RE
-    if _CROSS_ARTIFACT_SIDE_RE is None:
-        import re
-
-        _CROSS_ARTIFACT_SIDE_RE = re.compile(
-            r"\b([AB])\s*:\s*(.*?)\s*[—\-:]\s*[\"“](.*?)[\"”]",
-            re.DOTALL,
-        )
     sides: list[dict] = []
     for m in _CROSS_ARTIFACT_SIDE_RE.finditer(evidence or ""):
         sides.append({

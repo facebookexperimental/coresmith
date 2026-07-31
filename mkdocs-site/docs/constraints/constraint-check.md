@@ -11,13 +11,29 @@ flowchart LR
     BD[Block Diagram] --> MM[Memory Map]
     MM --> CT[Clock Tree]
     CT --> RS[Register Spec]
-    RS --> CC[Constraint Check]
+    RS --> ERS[Engineering Requirements]
+    ERS --> CC[Constraint Check]
     CC -->|PASS - all_pass=True| FIN[Finalize Architecture]
     CC -->|STRUCTURAL violations| ECS[Escalate Constraints ⏸]
+    CC -->|DOC_FIX violations| DF[Doc Fix]
+    DF --> ERS
     CC -->|AUTO_FIX violations| CI[Increment Round]
     CI -->|round ≤ max_rounds| BD
     CI -->|exhausted| EEX[Escalate Exhausted ⏸]
 ```
+
+!!! note "The ERS is emitted *before* the gate"
+    `arch/ers_spec.md` used to be written by `create_documentation_node`,
+    which runs **after** `Finalize Architecture` — i.e. after the only
+    automated gate in the architecture phase. Any ERS-vs-anything check was
+    therefore structurally impossible: at Constraint Check time
+    `state["ers_spec"]` was still the seeded `None` and the file did not exist
+    on disk. The **Engineering Requirements** node now emits it one step
+    earlier, and `create_documentation_node` *reuses* that result rather than
+    regenerating (so the ERS that ships is the one the gate approved). Doc Fix
+    routes through the node too, so a repaired FRD refreshes the ERS before
+    constraints are re-checked. `CORESMITH_ERS_BEFORE_CONSTRAINTS=0` restores
+    the old ordering.
 
 Entry point: `constraint_check_node:1137` in `architecture_graph.py`, which calls `check_constraints(...)` in `constraints.py`.
 
@@ -54,6 +70,48 @@ The LLM gets the rule text embedded in the prompt and produces structured violat
 |---|---|---|
 | (deterministic) | **Performance / cycle budget** | Cycle-count claims vs clock × FPS × dimensions. |
 | 6 | **Tier assignment reasonableness** | LLM judgment call — e.g. an FFT block shouldn't be tier 1. |
+
+### Cross-artifact consistency
+
+The architecture phase emits several artifacts describing **one** design:
+`block_diagram.json` (topology + per-edge `semantic_contract`),
+`interface_contracts.json` (frozen bit layout, `rate_description`,
+`representations.state_semantics[*].rule`), the FRD, and the ERS. Every other
+entry in the catalog is *intra*-artifact (block diagram vs itself, memory map
+vs itself) or artifact-vs-uArch-spec — so when one artifact was re-issued and
+the others were not, nothing at architecture time noticed. The disagreements
+surfaced later, one stale statement at a time, in a different downstream gate,
+each costing a full re-spec.
+
+`cross_artifact_consistency` closes that. Like
+`inter_block_payload_protocol_coherence`, it has two halves sharing one
+`check` id:
+
+| Half | Where | What it catches |
+|---|---|---|
+| **Deterministic** | `orchestrator/architecture/cross_artifact.py` | A *named* numeric quantity two artifacts state differently — clock rate, line rate, phase width, capacity. Normalizes units before comparing (`9 KiB` == `73728 bits`). |
+| **LLM subagent** | catalog entry `cross_artifact_consistency` | Semantic / scheduling contradictions: "rise-scheduled here, fall-scheduled there", "always accepted here, backpressured there". Reported as **candidates**, with both cited locations split out for a human. |
+
+The deterministic half **never guesses**. It judges a value only when the
+document writes the quantity's name immediately next to the number
+(`tHIGH>=80 ns`, `SCK <=6.25 MHz`, `12.5 MHz QSPI clock`). Anything else — an
+approximate value (`~30 ns`), a range, a list member, an ambiguous unit
+(`KB`: 1000 or 1024?), or a value with no adjacent name — is skipped and
+logged as a note. Binding numbers to identifiers merely *nearby* was tried
+first and measured against 58 real architecture runs: it flagged 48 of them,
+because one clause routinely mentions the interface clock, the core clock and
+a latency together. Adjacency-only naming flags 5 findings across the same 58
+runs.
+
+The catalog entry has to claim ownership of the class **explicitly**, because
+the shared subagent system prompt says *"Do not invent constraints. If you see
+something else wrong, ignore it; another subagent owns it."* — which would
+otherwise suppress exactly this finding.
+
+Both halves emit `category="structural"`, so a contradiction routes to
+`Escalate Constraints` and blocks `Finalize Architecture` until the operator
+resolves it or explicitly `accept`s a documented supersession. Nothing
+auto-edits an artifact. `CORESMITH_CROSS_ARTIFACT_GATE=0` disables the gate.
 
 ## How a check actually runs
 

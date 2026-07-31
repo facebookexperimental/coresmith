@@ -129,7 +129,7 @@ _UNIT_ALTERNATION = "|".join(
 _QUANTITY_RE = re.compile(
     r"(?P<sym>(?:<=|>=|=<|=>|<|>|≤|≥)\s*)?"
     r"(?P<num>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
-    r"(?:\s| |-)?"
+    r"(?P<sep>[\s\u00a0-])?"
     r"(?P<unit>" + _UNIT_ALTERNATION + r")"
     r"(?![A-Za-z0-9_/])",
     re.IGNORECASE,
@@ -218,11 +218,11 @@ class Quantity:
     strict: bool           # True for < / > (as opposed to <= / >=)
     name: str              # the adjacent identifier that names this quantity
 
-    def render(self) -> str:
-        cmp_txt = {"eq": "", "le": "<" if self.strict else "<=",
-                   "ge": ">" if self.strict else ">="}[self.comparator]
-        num = f"{self.raw_value:g}"
-        return f"{self.artifact}:{self.location} — \"{cmp_txt}{num} {self.unit}\""
+    def claim(self) -> str:
+        """The claim as written, e.g. ``<= 6.25 MHz``."""
+        cmp_txt = {"eq": "", "le": "< " if self.strict else "<= ",
+                   "ge": "> " if self.strict else ">= "}[self.comparator]
+        return f"{cmp_txt}{self.raw_value:g} {self.unit}"
 
 
 @dataclass
@@ -274,12 +274,12 @@ def build_anchor_vocabulary(
     clock_tree: dict | None = None,
     register_spec: dict | None = None,
 ) -> frozenset[str]:
-    """Harvest comparison anchors from the STRUCTURED artifacts.
+    """Harvest the design's own identifiers from the STRUCTURED artifacts.
 
-    Only names that a structured artifact actually declares (blocks,
-    interfaces, contract ports/fields, peripherals, clock domains) may anchor
-    a comparison.  A phrase that exists only in generated prose can therefore
-    never create a cross-artifact comparison.
+    A token in here is accepted as a quantity NAME even when it does not look
+    like an identifier (see :func:`_is_named_quantity`), because a structured
+    artifact declared it.  Generic words are filtered out, so a phrase that
+    exists only in generated prose cannot become a name by itself.
     """
     vocab: set[str] = set()
 
@@ -549,9 +549,11 @@ def extract_quantities(
                     f"identifier."
                 )
                 continue
-            # `N-bit` / `N-byte` are type widths, not budgets. Too FP-prone.
-            if unit in ("bit", "bits", "byte", "bytes") and m.group(0)[len(
-                    (m.group("sym") or "") + m.group("num")):].startswith("-"):
+            # `N-bit` / `N-byte` is a type width, not a budget -- silently
+            # out of scope rather than noted, or every ledger in the bundle
+            # would emit a note.
+            if m.group("sep") == "-" and unit in (
+                    "bit", "bits", "byte", "bytes"):
                 continue
             name = _resolve_name(sentence, m.start(), m.end(), vocab)
             if not name:
@@ -801,8 +803,8 @@ def check_cross_artifact_quantities(
                 f"CROSS-ARTIFACT CONTRADICTION ({_DIMENSION_LABEL[f['dimension']]}"
                 f", quantity named '{f['name']}'): {f['reason']}. "
                 f"{a_label}:{a.location} states "
-                f"{_render_claim(a)}; {b_label}:{b.location} states "
-                f"{_render_claim(b)}. Two architecture artifacts cannot both be "
+                f"{a.claim()}; {b_label}:{b.location} states "
+                f"{b.claim()}. Two architecture artifacts cannot both be "
                 f"authoritative -- pick one value and update every artifact that "
                 f"repeats the other."
             ),
@@ -816,12 +818,12 @@ def check_cross_artifact_quantities(
             "locations": [
                 {
                     "artifact": a.artifact, "file": a_label,
-                    "location": a.location, "claim": _render_claim(a),
+                    "location": a.location, "claim": a.claim(),
                     "quote": a.sentence,
                 },
                 {
                     "artifact": b.artifact, "file": b_label,
-                    "location": b.location, "claim": _render_claim(b),
+                    "location": b.location, "claim": b.claim(),
                     "quote": b.sentence,
                 },
             ],
@@ -837,12 +839,6 @@ def check_cross_artifact_quantities(
             ),
         })
     return result
-
-
-def _render_claim(q: Quantity) -> str:
-    cmp_txt = {"eq": "", "le": "< " if q.strict else "<= ",
-               "ge": "> " if q.strict else ">= "}[q.comparator]
-    return f"{cmp_txt}{q.raw_value:g} {q.unit}"
 
 
 def load_json_source(
