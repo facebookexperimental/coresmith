@@ -3483,6 +3483,26 @@ def _evaluate_ppa_gate(
                     f"buffered {mf.get('buffered_wns_ns')}); gating on "
                     f"max(unbuffered={_meta.get('wns_ns_base_unbuffered')}, "
                     f"buffered)={_eff_wns:+.2f} ns", GREEN)
+            else:
+                # The fan-out-aware measurement produced NO timing (both
+                # sub-flows errored, or both answered with OpenSTA's
+                # no-endpoints sentinel). That used to be silent -- and silence
+                # is how +1e39 ns of "slack" got compared to a budget and
+                # called "within budget". Say what it saw; and when the base
+                # measurement is absent too, hand the reason to the gate so the
+                # timing dimension fails CLOSED as unmeasured rather than
+                # skipped.
+                _mf_err = str(mf.get("sta_error") or "no measurement")
+                _meta["sta_maxfanout_error"] = _mf_err
+                if _eff_wns is None:
+                    _eff_sta_error = _eff_sta_error or _mf_err
+                    log(f"  [PPA] {block_name}: fan-out-aware STA produced NO "
+                        f"timing and there is no base measurement either -- "
+                        f"timing is UNMEASURED: {_mf_err[:220]}", RED)
+                else:
+                    log(f"  [PPA] {block_name}: fan-out-aware STA produced NO "
+                        f"timing ({_mf_err[:220]}) -- keeping the base "
+                        f"measurement {_eff_wns:+.2f} ns", YELLOW)
     _meta["wns_ns"] = _eff_wns
     verdict = evaluate_ppa(
         actual_ff=actual_ff,

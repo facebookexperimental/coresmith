@@ -693,3 +693,97 @@ some stderr noise
         # the last === marker is STDERR with no cells; candidates must fall
         # back to the real table section
         assert count_ff_bits_from_stat(self._REAL_FORMAT) > 0
+
+
+class TestSentinelSlackIsNotAMeasurement:
+    """The first hands-off run's PPA gate accepted ``WNS +1e39 ns`` on three
+    blocks (both SRAM-bearing ones among them) and printed "within budget".
+
+    ``worst_slack -max`` answers with OpenSTA's infinity when the linked design
+    has no timing endpoints at all. That is the tool saying "there was nothing
+    to measure", and the gate read it as an enormous margin.
+    """
+
+    OBSERVED = 1.0000000433293989e+39      # verbatim, exp-raster-auto-20260731
+
+    def test_the_observed_value_is_recognised(self):
+        from orchestrator.langgraph.ppa_check import slack_is_implausible
+        assert slack_is_implausible(self.OBSERVED) is True
+        assert slack_is_implausible(-self.OBSERVED) is True
+        assert slack_is_implausible(float("nan")) is True
+        # every plausible pre-layout number stays a measurement
+        for ok in (0.0, 19.44, -17.75, -7.31, 999.0):
+            assert slack_is_implausible(ok) is False
+        assert slack_is_implausible(None) is False
+
+    def test_the_bound_is_configurable(self, monkeypatch):
+        from orchestrator.langgraph.ppa_check import slack_is_implausible
+        monkeypatch.setenv("CORESMITH_PPA_MAX_PLAUSIBLE_WNS_NS", "10")
+        assert slack_is_implausible(11.0) is True
+        assert slack_is_implausible(9.0) is False
+
+    def test_the_exponent_is_not_truncated_to_its_mantissa(self):
+        """The old number pattern read `1.0000000433293989e+39` as 1.0 -- a
+        sentinel laundered into a plausible 1 ns of slack, which is worse than
+        either the sentinel or a parse failure."""
+        out = parse_sta_report(f"wns max {self.OBSERVED!r}\ntns max 0.0\n")
+        assert out["wns_ns"] == pytest.approx(self.OBSERVED)
+
+    def test_the_gate_calls_it_unmeasured_not_within_budget(self):
+        v = evaluate_ppa(actual_ff=100, ff_budget=1200,
+                         wns_ns=self.OBSERVED, period_ns=20.0)
+        assert v.ok is False
+        wns = [c for c in v.checks if c["metric"] == "wns_ns"][0]
+        assert wns["actual"] is None            # NOT recorded as +1e39
+        assert wns["unmeasured_timing"] is True
+        assert wns["implausible_slack"] is True
+        reason = " ".join(v.reasons)
+        assert "SENTINEL" in reason and "1e+39" in reason.replace("E", "e")
+
+    def test_the_operator_opt_out_still_applies(self, monkeypatch):
+        """It must not silently FAIL either: the documented advisory opt-out
+        is the one way past an unmeasurable timing dimension, and it records
+        the demotion rather than inventing a number."""
+        monkeypatch.setenv("CORESMITH_PPA_TIMING_ADVISORY", "1")
+        v = evaluate_ppa(actual_ff=100, ff_budget=1200,
+                         wns_ns=self.OBSERVED, period_ns=20.0)
+        assert v.ok is True
+        wns = [c for c in v.checks if c["metric"] == "wns_ns"][0]
+        assert wns["unmeasured_timing"] is True and wns["advisory"] is True
+
+    def test_a_real_negative_slack_still_fails_on_its_merits(self):
+        v = evaluate_ppa(actual_ff=100, ff_budget=1200,
+                         wns_ns=-7.31, period_ns=20.0)
+        wns = [c for c in v.checks if c["metric"] == "wns_ns"][0]
+        assert wns["actual"] == pytest.approx(-7.31)
+        assert not wns.get("unmeasured_timing")
+
+    def test_the_maxfanout_measurement_refuses_to_return_it(self, tmp_path,
+                                                            monkeypatch):
+        """The measurement site rejects it too, so the sentinel never reaches
+        the max(base, buffered) comparison it would win by construction."""
+        import subprocess
+
+        from orchestrator.langgraph import ppa_check as pc
+
+        lib = tmp_path / "x.lib"
+        lib.write_text("library(x){}\n")
+        src = tmp_path / "b.v"
+        src.write_text("module b(input clk); endmodule\n")
+
+        def _fake_run(cmd, *a, **k):
+            if "yosys" in str(cmd[0]):
+                # the script's write_verilog target is the last token of the
+                # netlist path the caller composed
+                Path(str(cmd[-1])).parent.joinpath("netlist.v").write_text(
+                    "module b(); endmodule\n")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.CompletedProcess(
+                cmd, 0, f"CORESMITH_WNS {self.OBSERVED!r}\n", "")
+
+        monkeypatch.setattr(pc.subprocess, "run", _fake_run)
+        wns, detail = pc._measure_wns_from_rtl(
+            [str(src)], str(lib), tmp_path, "base", False, 20.0, "b", "clk",
+            "/usr/bin/yosys", "/usr/bin/sta", 30)
+        assert wns is None
+        assert "implausible slack" in detail and "SENTINEL" in detail
