@@ -288,6 +288,12 @@ class BlockState(TypedDict):
     preserve_testbench: bool
     force_regen_tb: bool
 
+    # Contract-conformance stage: {old_port: contract_port} the stage renamed
+    # in this block's generated RTL (empty when it already conformed). Carried
+    # in state as well as on disk so a reader of the block result can see that
+    # the engine edited the design, not just that the block passed.
+    conformance_renames: dict
+
     # Human interaction ─────────────────────────────────────────────────────
     human_response: dict | None
 
@@ -625,6 +631,138 @@ def _persist_block_throughput(project_root: str, block_name: str,
         (block_dir / "throughput.json").write_text(json.dumps(rec, indent=2))
     except Exception:  # noqa: BLE001
         pass
+
+
+#: Post-repair contract-conformance failures for ONE block before the flow
+#: stops spending regeneration attempts on it and parks instead. Two is the
+#: cap because the first failure is news and the second is a pattern: the
+#: feedback names the EXACT required port, so a generator that misses it twice
+#: is not going to find it on attempt three.
+_CONFORMANCE_MAX_FAILURES = 2
+
+
+def _conformance_failures_path(project_root: str, block_name: str) -> Path:
+    return (Path(project_root) / ".coresmith" / "blocks" / block_name
+            / "_conformance_failures.txt")
+
+
+def _record_block_conformance(project_root: str, block_name: str,
+                              record: dict) -> None:
+    """Persist the block's contract-conformance record (a git-visible artifact).
+
+    Applied renames MUTATE generated RTL, so they are written down where the
+    final report and a reviewer can see them -- an engine that silently edits
+    the design it is grading is exactly the failure this whole stage exists to
+    stop. Never raises: a record, not a gate.
+    """
+    try:
+        bdir = Path(project_root) / ".coresmith" / "blocks" / block_name
+        bdir.mkdir(parents=True, exist_ok=True)
+        (bdir / "contract_conformance.json").write_text(
+            json.dumps(record, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+    renames = record.get("renames") or {}
+    if not renames:
+        return
+    try:
+        _chans = record.get("rename_channels") or {}
+        record_carried_forward_defect(project_root, {
+            "gate": "contract_conformance",
+            "kind": "block_port_renamed",
+            "advisory": True,
+            "first_divergence_block": block_name,
+            "violation_count": len(renames),
+            "unmodeled": (
+                f"block '{block_name}' declared "
+                + ", ".join(f"{o} (contract wants {n}, channel "
+                            f"'{_chans.get(o) or '?'}')"
+                            for o, n in sorted(renames.items()))
+                + " -- the engine RENAMED the generated ports to the contract "
+                  "names so the design could be wired deterministically"),
+            "detail": (
+                "The RTL generator did not spell this block's channel signals "
+                "the way the frozen interface contract declares them. The "
+                "renames were unambiguous (one candidate port per declared "
+                "signal) and were applied in place, with the pre-repair file "
+                "kept alongside as <rtl>.pre_portrepair. The block's own "
+                "simulation ran AFTER the rename."),
+            "note": "",
+        })
+    except Exception:  # noqa: BLE001 - reporting must never block the flow
+        pass
+
+
+def _bump_conformance_failures(project_root: str, block_name: str) -> int:
+    """Count consecutive post-repair conformance failures for one block."""
+    p = _conformance_failures_path(project_root, block_name)
+    n = 0
+    try:
+        if p.exists():
+            n = int((p.read_text().strip() or "0"))
+    except (OSError, ValueError):
+        n = 0
+    n += 1
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(str(n))
+    except OSError:
+        pass
+    return n
+
+
+def _reset_conformance_failures(project_root: str, block_name: str) -> None:
+    """Drop the counter once the block conforms (or after a park)."""
+    p = _conformance_failures_path(project_root, block_name)
+    try:
+        if p.exists():
+            p.unlink()
+    except OSError:
+        pass
+
+
+def _park_conformance_unrepairable(state: BlockState, block_name: str,
+                                   record: dict, failures: int) -> None:
+    """PARK when regeneration will not converge on the block's contract.
+
+    The stage already told the generator the exact required port names, twice.
+    Burning the remaining attempt budget on a third identical rediscovery buys
+    nothing; an operator (or the outer agent) can fix the RTL, amend the
+    contract, or accept a hand-wired top. The node re-executes on resume, so the
+    stage re-checks the possibly-hand-fixed file: if it now conforms the block
+    proceeds normally, and if it does not the block still fails (loudly) rather
+    than reaching integration deviating.
+    """
+    pr = _pr(state)
+    log(f"  [CONFORM] {block_name}: {failures} post-repair conformance "
+        f"failures -- PARKING instead of spending more regeneration attempts",
+        RED)
+    write_graph_event(pr, "Contract Conformance", "interrupt", {
+        "block": block_name, "consecutive_failures": failures,
+        "deviations": (record.get("deviations") or [])[:16],
+    })
+    interrupt({
+        "type": "contract_conformance_unrepairable",
+        "block_name": block_name,
+        "consecutive_failures": failures,
+        "deviations": (record.get("deviations") or [])[:16],
+        "renames_applied": record.get("renames") or {},
+        "expected_ports": record.get("feedback", ""),
+        "supported_actions": ["retry", "proceed"],
+        "outer_agent_guidance": (
+            f"'{block_name}' has now failed the deterministic "
+            f"contract-conformance check {failures} times AFTER the engine "
+            f"applied every unambiguous port rename it could prove. Its RTL "
+            f"does not expose the ports .coresmith/interface_contracts.json "
+            f"declares, so the deterministic chip assembler cannot wire it and "
+            f"the design would fall back to an LLM-authored top. The exact "
+            f"required names are in the payload's expected_ports (and in "
+            f".coresmith/blocks/<block>/previous_error.txt). Either edit the "
+            f"block RTL to use them, or amend the contract if the CONTRACT is "
+            f"what is wrong -- then resume. The check re-runs on resume; it "
+            f"passes the block only if the RTL actually conforms."
+        ),
+    })
 
 
 def _guard_rtl_phase(state: BlockState, node_name: str) -> None:
@@ -2417,13 +2555,136 @@ async def generate_testbench_node(state: BlockState) -> dict:
                     "phase": "sim", "force_regen_tb": False,
                     "step_log_paths": existing_logs}
 
+    # --- CONTRACT-CONFORMANCE stage: check + repair the block's PORT NAMES ---
+    # Sibling of the width gate above, and for the same reason: the contract
+    # already says what every channel signal is called, and a block that spells
+    # one differently is unwireable. The deterministic Caravel assembler
+    # resolves edges BY NAME, so a deviation makes the edge unresolvable, the
+    # assembler correctly refuses, and the whole chip falls back to an
+    # LLM-authored top. Measured on the first hands-off run: 8/8 blocks passed
+    # every per-block gate on attempt 1, then assembly reported 10 wiring
+    # hazards and the LLM fallback miswired 4 nets that lint blessed.
+    #
+    # The checker and the repairer already existed; nothing CALLED them. Here
+    # is where they belong -- a block-time failure costs one regeneration with
+    # the exact expected name, an integration-time failure has already paid for
+    # every other block.
+    #
+    # Placed pre-TB deliberately. A repair that renames a port must be followed
+    # by the block's own simulation, and running here means the sim below is
+    # that re-run: the testbench is generated (or its DUT references rewritten)
+    # AFTER the rename, never before it. Default-on; CORESMITH_CONTRACT_
+    # CONFORMANCE_GATE=0 disables.
+    _conform: dict = {}
+    _conform_force_tb = False
+    try:
+        from orchestrator.langgraph.contract_conformance import (
+            conformance_gate_enabled,
+            run_conformance_stage,
+        )
+        _conform_on = conformance_gate_enabled()
+    except Exception as _cie:  # noqa: BLE001 - gate must never crash the node
+        log(f"  [CONFORM] {block_name}: stage unavailable ({_cie})", YELLOW)
+        _conform_on = False
+    if _conform_on:
+        try:
+            from orchestrator.harness.blocks import block_names as _queue_names
+            _sibs = _queue_names(_pr(state))
+        except Exception:  # noqa: BLE001 - siblings are best-effort
+            _sibs = []
+        try:
+            _conform = await asyncio.to_thread(
+                run_conformance_stage, _pr(state), block_name, rtl_path,
+                _sibs, str(tb_path_obj),
+            )
+        except Exception as _ce:  # noqa: BLE001 - gate must never crash the node
+            log(f"  [CONFORM] {block_name}: stage error (skipped): {_ce}",
+                YELLOW)
+            _conform = {}
+    if _conform.get("ran"):
+        _renames = _conform.get("renames") or {}
+        _chans = _conform.get("rename_channels") or {}
+        for _old, _new in _renames.items():
+            log(f"  [CONFORM] renamed {_old} -> {_new} "
+                f"(contract: channel {_chans.get(_old) or '?'})", YELLOW)
+        _tbrep = _conform.get("tb") or {}
+        if _tbrep.get("changed"):
+            log(f"  [CONFORM] {block_name}: rewrote "
+                f"{sum((_tbrep.get('applied') or {}).values())} testbench DUT "
+                f"reference(s) to match "
+                f"(backup at {Path(tb_path_obj).name}.pre_portrepair)", YELLOW)
+        if _renames and _tbrep.get("needs_regen"):
+            _conform_force_tb = True
+            log(f"  [CONFORM] {block_name}: the testbench still mentions "
+                f"{', '.join(_tbrep['residual'])} in a form this stage will "
+                f"NOT rewrite blind (a generated TB drives getattr(dut, "
+                f"<name-string>) and keys its model stimulus with the same "
+                f"strings) -- REGENERATING the testbench against the repaired "
+                f"RTL", YELLOW)
+        _record_block_conformance(_pr(state), block_name, _conform)
+        if _renames:
+            log(f"  [CONFORM] {block_name}: repaired {len(_renames)} "
+                f"contract deviation(s) in the generated RTL", YELLOW)
+        if _conform.get("ok"):
+            if not _renames:
+                log(f"  [CONFORM] {block_name}: ports match the contract "
+                    f"({_conform.get('checked_edges')} edge(s))", GREEN)
+        else:
+            _cf_n = _bump_conformance_failures(_pr(state), block_name)
+            for _d in (_conform.get("deviations") or [])[:8]:
+                log(f"  [CONFORM] {block_name}: {_d}", RED)
+            log(f"  [CONFORM] {block_name}: RTL does NOT conform to the "
+                f"interface contract after repair "
+                f"({_conform.get('after_missing')} missing, failure "
+                f"{_cf_n}/{_CONFORMANCE_MAX_FAILURES}) -- FAILING before "
+                f"TB/sim; a deviating block must not reach integration", RED)
+            try:
+                _bd = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
+                _bd.mkdir(parents=True, exist_ok=True)
+                (_bd / "previous_error.txt").write_text(
+                    "DETERMINISTIC CONTRACT-CONFORMANCE FAILURE (no sim was "
+                    "run). The RTL does not expose the ports the FROZEN "
+                    "interface contract declares, and the deviation is not one "
+                    "the engine can rename unambiguously. Regenerate the RTL "
+                    "with these EXACT port names:\n\n"
+                    + _conform.get("feedback", ""), encoding="utf-8")
+            except OSError:
+                pass
+            write_graph_event(_pr(state), "Contract Conformance",
+                              "gate_failed", {
+                                  "block": block_name,
+                                  "after_missing": _conform.get("after_missing"),
+                                  "renames": _renames,
+                                  "deviations": (
+                                      _conform.get("deviations") or [])[:8],
+                                  "consecutive_failures": _cf_n,
+                              })
+            if _cf_n >= _CONFORMANCE_MAX_FAILURES:
+                # Cap: regeneration is not converging on the contract. PARK
+                # with the exact expected names rather than burn the rest of
+                # the attempt budget rediscovering the same deviation.
+                _park_conformance_unrepairable(state, block_name, _conform,
+                                               _cf_n)
+                _reset_conformance_failures(_pr(state), block_name)
+            return {"tb_path": str(tb_path_obj), "sim_passed": False,
+                    "phase": "sim", "force_regen_tb": False,
+                    "conformance_renames": _renames,
+                    "step_log_paths": existing_logs}
+        _reset_conformance_failures(_pr(state), block_name)
+    elif _conform_on and _conform.get("reason"):
+        log(f"  [CONFORM] {block_name}: NOT RUN -- {_conform['reason']}",
+            YELLOW)
+
     with _tracer.start_as_current_span(
         f"Generate Testbench + Sim [{block_name}]"
     ) as span:
         span.set_attribute("block_name", block_name)
 
         # --- Step 1: Generate or reuse testbench ---
-        force_regen = state.get("force_regen_tb", False)
+        # A conformance repair that renamed a port makes an EXISTING testbench
+        # stale by construction, so it also forces regeneration (the reuse
+        # branches below key on freshness, which a rename does not change).
+        force_regen = state.get("force_regen_tb", False) or _conform_force_tb
         if not force_regen and (
             (state.get("preserve_testbench") and tb_path_obj.exists()) or
             (attempt == 1 and tb_path_obj.exists() and _file_is_fresh(tb_path_obj, state))
@@ -2770,6 +3031,7 @@ async def generate_testbench_node(state: BlockState) -> dict:
         "sim_passed": sim_passed,
         "phase": "sim" if not sim_passed else "tb",
         "force_regen_tb": False,
+        "conformance_renames": _conform.get("renames") or {},
         "step_log_paths": existing_logs,
     }
 
