@@ -250,6 +250,14 @@ def render_conformance_tb(contract: QSPIContract, design_name: str) -> str:
 # the exercise-specific compute oracle is NOT modeled. This is the gate a frontend
 # that dropped 0x05 or mistimed the read turnaround must fail at generation -- the
 # the image codec gap where such a frontend slipped through on the co-tuned LLM BFM.
+from __future__ import annotations
+# The future import is REQUIRED, not style: the BFM class source is inlined
+# below via inspect.getsource, and its `-> QSPIContract` method annotations
+# only defer (instead of evaluating at class-body time, where the name does
+# not exist yet) when this file itself has the future import. Without it the
+# generated module dies at import with NameError -- which is how the
+# contract-enforcing conformance DV shipped without ever having produced an
+# importable testbench.
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge
@@ -312,6 +320,14 @@ def render_integration_tb(
 # supplies only the golden MODEL, evaluated at generation time into the
 # expected bytes below. A DUT that violates the QSPI-slave read/dummy/serialize
 # contract de-aligns and is caught -- the property the co-tuned LLM BFM lacked.
+from __future__ import annotations
+# The future import is REQUIRED, not style: the BFM class source is inlined
+# below via inspect.getsource, and its `-> QSPIContract` method annotations
+# only defer (instead of evaluating at class-body time, where the name does
+# not exist yet) when this file itself has the future import. Without it the
+# generated module dies at import with NameError -- which is how the
+# contract-enforcing conformance DV shipped without ever having produced an
+# importable testbench.
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge

@@ -67,6 +67,7 @@ from opentelemetry import trace
 from orchestrator.langgraph.event_stream import write_graph_event
 from orchestrator.langgraph.integration_helpers import (
     discover_block_rtl,
+    module_for_block,
     generate_integration_testbench,
     generate_validation_testbench,
     lint_top_level,
@@ -6131,6 +6132,13 @@ async def integration_check_node(state: OrchestratorState) -> dict:
     completed = _current_phase_completed(state)
     passed_blocks = [b for b in completed if b.get("success")]
     block_queue = state.get("block_queue", [])
+    # Join the RESULT dicts to their SPECS. A block result carries
+    # {name, success, attempts, ...} and NOT rtl_target, so discovery would fall
+    # back to filename convention and silently drop the one block whose file
+    # stem differs from its name -- the contract-locked pad adapter. The spec
+    # was already in scope here and used only for len().
+    from orchestrator.langgraph.integration_helpers import merge_block_specs
+    passed_blocks = merge_block_specs(passed_blocks, block_queue)
     expected_blocks = len(block_queue) if block_queue else len(completed)
 
     write_graph_event(pr, "Integration Check", "graph_node_enter", {
@@ -6407,7 +6415,12 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         modules = {}
         block_rtl_sources: dict[str, str] = {}
         for block_name, rtl_path in rtl_paths.items():
-            mod = await asyncio.to_thread(parse_verilog_ports, rtl_path)
+            # Parse the BLOCK's module, not whichever comes first in
+            # the file: generated files declare internal stages ahead
+            # of the block itself.
+            mod = await asyncio.to_thread(
+                parse_verilog_ports, rtl_path,
+                module_for_block(rtl_path, block_name))
             if mod.name:
                 modules[block_name] = mod
                 try:
@@ -6544,14 +6557,30 @@ async def integration_check_node(state: OrchestratorState) -> dict:
             load_interface_contract_edges,
         )
         _wrapper_block = detect_wrapper_block(modules)
-        if _wrapper_block is not None and _deterministic_caravel_top_enabled():
-            log(f"  [INTEGRATION] Caravel wrapper block '{_wrapper_block}' "
-                f"detected -- assembling wired user_project_wrapper "
-                f"deterministically", CYAN)
+        # The PRD's structured pin map, when present, lets the top route the pads
+        # itself -- so the design needs no pin-adapter block and assembly no
+        # longer depends on finding one.
+        from orchestrator.architecture.pin_map import load_pin_map
+        _pin_map = load_pin_map(pr)
+        if _pin_map is not None and not _pin_map.ok:
+            for _e in _pin_map.errors:
+                log(f"  [INTEGRATION] pin_map: {_e}", RED)
+            _pin_map = None
+        if ((_wrapper_block is not None or _pin_map is not None)
+                and _deterministic_caravel_top_enabled()):
+            if _pin_map is not None:
+                log(f"  [INTEGRATION] pin map declared ({len(_pin_map.entries)} "
+                    f"signals) -- the top routes the pads itself; assembling "
+                    f"wired user_project_wrapper deterministically", CYAN)
+            else:
+                log(f"  [INTEGRATION] Caravel wrapper block '{_wrapper_block}' "
+                    f"detected -- assembling wired user_project_wrapper "
+                    f"deterministically", CYAN)
             edges = await asyncio.to_thread(load_interface_contract_edges, pr)
             asm = await asyncio.to_thread(
                 generate_caravel_wrapper_top,
                 modules, edges, rtl_paths, str(rtl_dir), _wrapper_block,
+                _pin_map,
             )
             # FAIL-LOUD (Section 2): if the deterministic assembler found a
             # wiring hazard it cannot safely resolve -- an ambiguous normalized
@@ -6565,10 +6594,24 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                     f"Integration Lead:", RED)
                 for _we in _wiring_errors[:8]:
                     log(f"      - {_we}", RED)
+                # Persist the FULL list. Logging [:8] and storing [:16] left
+                # 24 of 40 hazards existing nowhere on disk -- and this list is
+                # the only artifact explaining why assembly refused, so an outer
+                # agent could not obtain it by any documented path.
+                _haz_path = Path(pr) / ".coresmith" / "caravel_wiring_errors.json"
+                try:
+                    _haz_path.write_text(json.dumps({
+                        "wrapper_block": _wrapper_block,
+                        "count": len(_wiring_errors),
+                        "wiring_errors": _wiring_errors,
+                    }, indent=2), encoding="utf-8")
+                except OSError:
+                    pass
                 write_graph_event(pr, "Integration Check", "caravel_wiring_fallback", {
                     "wrapper_block": _wrapper_block,
                     "wiring_error_count": len(_wiring_errors),
                     "wiring_errors": _wiring_errors[:16],
+                    "wiring_errors_path": str(_haz_path),
                 })
             if not _wiring_errors:
                 top_rtl_path = asm["rtl_path"]
@@ -6580,7 +6623,13 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 )
                 lint_clean = lint_result.get("clean", False)
                 # Postcondition: every block is instantiated in the assembled top.
-                missing = [b for b in modules if f"u_{b} (" not in asm["verilog"]]
+                # A block the assembler deliberately DROPPED is not missing.
+                # With a pin map the pad adapter is replaced by routing emitted
+                # in the top, so requiring its instantiation would fail the
+                # postcondition on the very design that fixed the problem.
+                _dropped = asm.get("dropped_adapter") or ""
+                missing = [b for b in modules
+                           if b != _dropped and f"u_{b} (" not in asm["verilog"]]
                 log(f"  [INTEGRATION] Caravel top: {len(asm['instantiated'])} blocks "
                     f"instantiated, {asm['wire_count']} internal wires, lint "
                     f"{'CLEAN' if lint_clean else 'ERRORS'}",
@@ -8877,7 +8926,12 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
         # Re-parse modules so the LLM gets block port details
         modules = {}
         for block_name, rtl_path in block_rtl_paths.items():
-            mod = await asyncio.to_thread(parse_verilog_ports, rtl_path)
+            # Parse the BLOCK's module, not whichever comes first in
+            # the file: generated files declare internal stages ahead
+            # of the block itself.
+            mod = await asyncio.to_thread(
+                parse_verilog_ports, rtl_path,
+                module_for_block(rtl_path, block_name))
             if mod.name:
                 modules[block_name] = mod
 
@@ -9740,7 +9794,12 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
 
         modules = {}
         for block_name, rtl_path in block_rtl_paths.items():
-            mod = await asyncio.to_thread(parse_verilog_ports, rtl_path)
+            # Parse the BLOCK's module, not whichever comes first in
+            # the file: generated files declare internal stages ahead
+            # of the block itself.
+            mod = await asyncio.to_thread(
+                parse_verilog_ports, rtl_path,
+                module_for_block(rtl_path, block_name))
             if mod.name:
                 modules[block_name] = mod
 

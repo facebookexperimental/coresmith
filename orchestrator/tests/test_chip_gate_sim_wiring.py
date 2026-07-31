@@ -215,19 +215,45 @@ class TestModdupHazard:
                        "endmodule\n")
         return top, pad
 
-    def test_duplicate_module_is_removed_when_a_dedup_dir_is_given(self, tmp_path):
-        top, pad = self._caravel_layout(tmp_path)
-        srcs = chip_rtl_sources(
-            str(top), {"user_project_wrapper_io": str(pad)},
-            dedup_dir=tmp_path / "scratch")
-        decls = 0
-        for s in srcs:
-            decls += Path(s).read_text().count("module user_project_wrapper ")
-        assert decls == 1, f"{decls} definitions survived: {srcs}"
-
-    def test_raw_paths_when_no_dedup_dir_is_given(self, tmp_path):
-        """Callers that only want paths (linting, reporting) get them back
-        unchanged -- deduping writes files, which a pure query must not do."""
+    def test_an_alias_carrier_is_excluded_at_the_source(self, tmp_path):
+        """A block file that RE-DECLARES the top's own module leaves the list
+        entirely. The generated pad block ships a thin `module
+        user_project_wrapper` alias plus STUBS of its sibling blocks; keeping
+        the file let the dedup keep the stubs (they sort first) and strip the
+        real logic -- the gate's reference then elaborated a hollow chip,
+        honestly failed it, and reported not_run on a design that was fine."""
         top, pad = self._caravel_layout(tmp_path)
         srcs = chip_rtl_sources(str(top), {"user_project_wrapper_io": str(pad)})
-        assert srcs == [str(top), str(pad)]
+        assert srcs == [str(top)]
+        # with a dedup dir the answer is the same -- exclusion happens earlier
+        srcs2 = chip_rtl_sources(
+            str(top), {"user_project_wrapper_io": str(pad)},
+            dedup_dir=tmp_path / "scratch")
+        decls = sum(Path(s).read_text().count("module user_project_wrapper ")
+                    for s in srcs2)
+        assert decls == 1, f"{decls} definitions survived: {srcs2}"
+
+    def test_dedup_still_handles_blocks_sharing_a_macro_module(self, tmp_path):
+        """The case the dedup genuinely exists for: two blocks each bundling
+        the SAME shared behavioural macro. Neither re-declares the top, so both
+        stay in the list, and the dedup strips the second copy of the macro."""
+        top = tmp_path / "rtl" / "integration" / "chip_top.v"
+        top.parent.mkdir(parents=True)
+        top.write_text("module chip_top (input wire clk);\nendmodule\n")
+        a = tmp_path / "rtl" / "a.v"
+        a.write_text("module a();\nendmodule\n"
+                     "module shared_macro();\nendmodule\n")
+        b = tmp_path / "rtl" / "b.v"
+        b.write_text("module b();\nendmodule\n"
+                     "module shared_macro();\nendmodule\n")
+        srcs = chip_rtl_sources(str(top), {"a": str(a), "b": str(b)},
+                                dedup_dir=tmp_path / "scratch")
+        # Count DECLARATIONS, not the substring: the dedup leaves a tombstone
+        # comment ("removed duplicate module shared_macro") that contains the
+        # module name -- a naive substring count reads the receipt of the
+        # removal as the thing it removed.
+        import re as _re
+        decls = sum(len(_re.findall(r"^\s*module\s+shared_macro\b",
+                                    Path(s).read_text(), _re.M))
+                    for s in srcs)
+        assert decls == 1, f"shared_macro declared {decls} times"

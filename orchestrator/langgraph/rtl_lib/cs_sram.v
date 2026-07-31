@@ -42,12 +42,18 @@ module cs_mem_macro_shell #(
     parameter integer WIDTH = 32,
     parameter integer DEPTH = 512,
     parameter integer NPORT = 1,                 // 1 = 1rw, 2 = 1rw1r
+    // Write-mask lanes on port 0. 1 = whole-word (the legacy shape: wmask0 is
+    // then a single "do the write" bit and is tied high by callers that do not
+    // mask). The macro flow binds this to the resolved macro's own mask port,
+    // or folds it into the write enable when the macro has none.
+    parameter integer NMASK = 1,
     parameter integer AW    = (DEPTH <= 1) ? 1 : $clog2(DEPTH)
 ) (
     input  wire             clk,
     // port 0 (read/write)
     input  wire             ce0,
     input  wire             we0,
+    input  wire [NMASK-1:0] wmask0,
     input  wire [AW-1:0]    addr0,
     input  wire [WIDTH-1:0] wdata0,
     output wire [WIDTH-1:0] rdata0,
@@ -56,7 +62,8 @@ module cs_mem_macro_shell #(
     input  wire [AW-1:0]    addr1,
     output wire [WIDTH-1:0] rdata1
 );
-    // Black box: the macro flow resolves WIDTH/DEPTH/NPORT to a real SRAM and
+    // Black box: the macro flow resolves WIDTH/DEPTH/NPORT/NMASK to a real
+    // SRAM and
     // streams in its GDS/LEF/lib. No internal logic -> 0 flip-flops at synth.
     // (Reads are 0 in pure RTL sim -- "MACRO" is a backend impl, not a sim
     // model; use "BEHAV"/"FLOP" for simulation.)
@@ -89,7 +96,11 @@ module cs_mem_1rw #(
         if (MEM_IMPL == "MACRO") begin : g_macro
         // verilator lint_on WIDTHEXPAND
             // Separately-named empty shell bound by the PD macro flow.
-            cs_mem_macro_shell #(.WIDTH(WIDTH), .DEPTH(DEPTH), .NPORT(1)) u_shell (
+            // 1RW has no mask concept; hold the shell's single lane high so
+            // web0 reduces to ~we0 exactly as before.
+            cs_mem_macro_shell #(.WIDTH(WIDTH), .DEPTH(DEPTH), .NPORT(1),
+                                 .NMASK(1)) u_shell (
+                .wmask0(1'b1),
                 .clk(clk),
                 .ce0(ce), .we0(we), .addr0(addr), .wdata0(wdata), .rdata0(rdata),
                 .ce1(1'b0), .addr1({AW{1'b0}}), .rdata1()
@@ -157,13 +168,19 @@ module cs_mem_1rw1r #(
         // time constant compare; width expansion is exactly what we want.
         if (MEM_IMPL == "MACRO") begin : g_macro
         // verilator lint_on WIDTHEXPAND
-            // NOTE (USE_WMASK): the black-box shell carries no mask pins; the
-            // macro flow must resolve a USE_WMASK=1 geometry to a byte-write-
-            // enable macro (e.g. the sky130 ..._1rw1r_32x512_8 family, wmask
-            // granularity 8) or an OpenRAM config with write_size=8.
-            cs_mem_macro_shell #(.WIDTH(WIDTH), .DEPTH(DEPTH), .NPORT(2)) u_shell (
+            // The mask now REACHES the memory. Previously the shell carried
+            // no mask pins, so a USE_WMASK=1 geometry had its mask tied to
+            // all-ones at bind time: every partial write became a full-word
+            // write, clobbering neighbouring lanes. RTL DV could not see it --
+            // the BEHAV arm honours the mask -- so it appeared only in the
+            // macro-backed netlist.
+            wire [NB-1:0] wmask0_macro;
+            assign wmask0_macro = (USE_WMASK != 0) ? wmask0 : {NB{1'b1}};
+            cs_mem_macro_shell #(.WIDTH(WIDTH), .DEPTH(DEPTH), .NPORT(2),
+                                 .NMASK(NB)) u_shell (
                 .clk(clk),
-                .ce0(ce0), .we0(we0), .addr0(addr0), .wdata0(wdata0), .rdata0(rdata0),
+                .ce0(ce0), .we0(we0), .wmask0(wmask0_macro),
+                .addr0(addr0), .wdata0(wdata0), .rdata0(rdata0),
                 .ce1(ce1), .addr1(addr1), .rdata1(rdata1)
             );
         end else begin : g_behav
