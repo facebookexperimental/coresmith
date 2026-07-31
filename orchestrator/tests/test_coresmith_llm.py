@@ -28,6 +28,7 @@ from orchestrator.langchain.agents.coresmith_llm import (
     _CLI_MODEL_MAP,
     _CODEX_MODEL_MAP,
     _KIMI_MODEL_MAP,
+    _OPENCODE_LOW_REASONING_STEPS,
     _OPENCODE_MODEL_MAP,
     _RESUME_FLAGS_CACHE,
     BLOCK_MODEL,
@@ -41,15 +42,18 @@ from orchestrator.langchain.agents.coresmith_llm import (
     _call_site_context,
     _codex_resume_supported_flags,
     _detect_provider,
+    _is_transient_opencode_failure,
     _llm_breakers,
     _llm_breakers_lock,
     _log_llm_call,
     _log_opencode_turns,
+    _normalize_opencode_variant,
     _parse_codex_json,
     _parse_kimi_acp_json,
     _parse_opencode_json,
     _register_process,
     _resolve_model,
+    _resolve_opencode_variant,
     _unregister_process,
     kill_active_cli_processes,
 )
@@ -67,6 +71,8 @@ def _clear_provider_env(monkeypatch):
     monkeypatch.delenv("CORESMITH_LLM_PROVIDER", raising=False)
     monkeypatch.delenv("CORESMITH_CODEX_MODEL", raising=False)
     monkeypatch.delenv("CORESMITH_OPENCODE_MODEL", raising=False)
+    monkeypatch.delenv("CORESMITH_OPENCODE_VARIANT", raising=False)
+    monkeypatch.delenv("CORESMITH_OPENCODE_MAX_RETRIES", raising=False)
     monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
     monkeypatch.delenv("CORESMITH_KIMI_MODEL", raising=False)
     monkeypatch.delenv("KIMI_MODEL_NAME", raising=False)
@@ -268,6 +274,173 @@ class TestOpenCodeInvocation:
         assert "<user>\nhello\n</user>" in watchdog.call_args.args[1]
         config = json.loads(watchdog.call_args.kwargs["process_env"]["OPENCODE_CONFIG_CONTENT"])
         assert config == {"theme": "system", "permission": "deny"}
+
+
+_KIMI = "openrouter/moonshotai/kimi-k3"
+
+
+class TestOpenCodeVariantNormalization:
+    """The block-diagram write-failure root cause: 'minimal' is NOT a valid
+    reasoning effort for hosted Kimi (low/high/max only) -- the provider
+    silently ignores it, leaving full reasoning that starves the completion
+    budget before the file is written (reason='length')."""
+
+    @pytest.mark.parametrize("value", ["low", "high", "max", "LOW", " Max "])
+    def test_valid_efforts_pass_through(self, value):
+        assert _normalize_opencode_variant(value, _KIMI) == value.strip().lower()
+
+    @pytest.mark.parametrize(
+        "alias,expected",
+        [
+            ("minimal", "low"), ("min", "low"), ("minimum", "low"),
+            ("none", "low"), ("off", "low"),
+            ("medium", "high"), ("mid", "high"),
+            ("xhigh", "max"), ("highest", "max"),
+        ],
+    )
+    def test_known_aliases_map_to_valid_tier(self, alias, expected):
+        assert _normalize_opencode_variant(alias, _KIMI) == expected
+
+    def test_unknown_value_is_dropped_not_shipped_as_noop(self):
+        # An unrecognised effort would be silently ignored by the provider;
+        # dropping it (return "") makes the no-op explicit rather than passing
+        # a flag a reader mistakes for an applied cap.
+        assert _normalize_opencode_variant("banana", _KIMI) == ""
+
+    def test_empty_returns_empty(self):
+        assert _normalize_opencode_variant("", _KIMI) == ""
+        assert _normalize_opencode_variant("   ", _KIMI) == ""
+
+    def test_non_kimi_model_passes_value_through_unchanged(self):
+        # Non-Kimi opencode models keep their own effort vocabulary.
+        assert _normalize_opencode_variant("minimal", "anthropic/claude-x") == "minimal"
+
+
+class TestOpenCodeVariantResolution:
+    def test_block_diagram_defaults_to_low_when_unset(self, monkeypatch):
+        monkeypatch.delenv("CORESMITH_OPENCODE_VARIANT", raising=False)
+        assert "block_diagram" in _OPENCODE_LOW_REASONING_STEPS
+        assert _resolve_opencode_variant(_KIMI, "block_diagram") == "low"
+
+    def test_other_steps_keep_provider_default_when_unset(self, monkeypatch):
+        monkeypatch.delenv("CORESMITH_OPENCODE_VARIANT", raising=False)
+        assert _resolve_opencode_variant(_KIMI, "generate_rtl") == ""
+        assert _resolve_opencode_variant(_KIMI, "") == ""
+
+    def test_explicit_env_wins_over_step_default(self, monkeypatch):
+        monkeypatch.setenv("CORESMITH_OPENCODE_VARIANT", "high")
+        assert _resolve_opencode_variant(_KIMI, "block_diagram") == "high"
+
+    def test_explicit_minimal_env_is_normalized(self, monkeypatch):
+        # The exact footgun from the theora run: launch env set 'minimal'.
+        monkeypatch.setenv("CORESMITH_OPENCODE_VARIANT", "minimal")
+        assert _resolve_opencode_variant(_KIMI, "generate_rtl") == "low"
+
+
+class TestOpenCodeTransientFailure:
+    def test_clean_exit_not_transient(self):
+        assert _is_transient_opencode_failure(0, "ok", "") is False
+
+    def test_signal_kill_not_transient(self):
+        # -15 = SIGTERM from a daemon pause/shutdown -- retrying is wrong.
+        assert _is_transient_opencode_failure(-15, "provider_unavailable", "") is False
+
+    @pytest.mark.parametrize(
+        "blob",
+        [
+            '{"code":502,"message":"Network connection lost.",'
+            '"metadata":{"error_type":"provider_unavailable"}}',
+            "upstream returned 503",
+            "429 Too Many Requests",
+            "socket hang up",
+        ],
+    )
+    def test_transient_signatures_detected(self, blob):
+        assert _is_transient_opencode_failure(1, blob, "") is True
+        assert _is_transient_opencode_failure(1, "", blob) is True
+
+    def test_deterministic_error_not_transient(self):
+        assert _is_transient_opencode_failure(1, "invalid model id", "") is False
+
+
+class TestOpenCodeVariantInvocation:
+    @patch(
+        "orchestrator.langchain.agents.coresmith_llm._find_opencode_binary",
+        return_value="/usr/bin/opencode",
+    )
+    def test_block_diagram_call_site_adds_variant_low(
+        self, _mock_find, monkeypatch, tmp_path,
+    ):
+        monkeypatch.setenv("CORESMITH_LLM_PROVIDER", "openrouter")
+        monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
+        model = ClaudeLLM(model="opus-4.8", timeout=10)
+        token = _call_site_context.set({"run_name": "block_diagram"})
+        try:
+            with patch.object(model, "_run_cli_with_watchdog") as watchdog:
+                watchdog.return_value = ("ready", "", 0, 1.0, False, False, {})
+                model._generate_via_cli("system", "hello")
+        finally:
+            _call_site_context.reset(token)
+        cmd = watchdog.call_args.args[0]
+        assert "--variant" in cmd
+        assert cmd[cmd.index("--variant") + 1] == "low"
+
+    @patch(
+        "orchestrator.langchain.agents.coresmith_llm._find_opencode_binary",
+        return_value="/usr/bin/opencode",
+    )
+    def test_non_arch_call_site_omits_variant(
+        self, _mock_find, monkeypatch, tmp_path,
+    ):
+        monkeypatch.setenv("CORESMITH_LLM_PROVIDER", "openrouter")
+        monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
+        model = ClaudeLLM(model="opus-4.8", timeout=10)
+        token = _call_site_context.set({"run_name": "generate_rtl"})
+        try:
+            with patch.object(model, "_run_cli_with_watchdog") as watchdog:
+                watchdog.return_value = ("ready", "", 0, 1.0, False, False, {})
+                model._generate_via_cli("system", "hello")
+        finally:
+            _call_site_context.reset(token)
+        assert "--variant" not in watchdog.call_args.args[0]
+
+    @patch(
+        "orchestrator.langchain.agents.coresmith_llm._find_opencode_binary",
+        return_value="/usr/bin/opencode",
+    )
+    def test_retries_once_on_transient_then_succeeds(
+        self, _mock_find, monkeypatch, tmp_path,
+    ):
+        monkeypatch.setenv("CORESMITH_LLM_PROVIDER", "openrouter")
+        monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setattr(coresmith_llm._time_mod, "sleep", lambda *_a, **_k: None)
+        model = ClaudeLLM(model="opus-4.8", timeout=10)
+        transient = ("[502 provider_unavailable]", "Network connection lost", 1,
+                     1.0, False, False, {})
+        ok = ("ready", "", 0, 1.0, False, False, {})
+        with patch.object(model, "_run_cli_with_watchdog",
+                          side_effect=[transient, ok]) as watchdog:
+            output = model._generate_via_cli("system", "hello")
+        assert output == "ready"
+        assert watchdog.call_count == 2
+
+    @patch(
+        "orchestrator.langchain.agents.coresmith_llm._find_opencode_binary",
+        return_value="/usr/bin/opencode",
+    )
+    def test_no_retry_when_disabled(
+        self, _mock_find, monkeypatch, tmp_path,
+    ):
+        monkeypatch.setenv("CORESMITH_LLM_PROVIDER", "openrouter")
+        monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setenv("CORESMITH_OPENCODE_MAX_RETRIES", "0")
+        model = ClaudeLLM(model="opus-4.8", timeout=10)
+        transient = ("[502]", "provider_unavailable", 1, 1.0, False, False, {})
+        with patch.object(model, "_run_cli_with_watchdog",
+                          side_effect=[transient]) as watchdog:
+            output = model._generate_via_cli("system", "hello")
+        assert watchdog.call_count == 1
+        assert "[ClaudeLLM error:" in output
 
 
 class TestCodexJsonParsing:
