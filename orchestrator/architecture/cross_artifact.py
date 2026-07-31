@@ -368,23 +368,23 @@ _TRAILING_IDENT_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)$")
 _LEADING_IDENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)")
 
 # Function words that can never name a quantity, whatever their shape.
+# Disjoint from _ANCHOR_STOPWORDS below it, which is unioned in.
 _NAME_STOPWORDS = frozenset({
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "at", "to", "of", "on", "in", "for", "with", "and", "or", "than", "then",
-    "each", "every", "one", "two", "all", "any", "no", "not", "per", "up",
-    "about", "exactly", "least", "most", "supported", "provide", "provides",
-    "provided", "sustain", "shall", "must", "should", "will", "may", "can",
-    "run", "runs", "capture", "test", "tests", "require", "requires",
-    "required", "using", "use", "uses", "used", "from", "through", "during",
-    "while", "when", "if", "its", "it", "this", "that", "these", "those",
-    "both", "only", "also", "still", "raw", "total", "full", "half", "high",
-    "low", "first", "second", "third", "next", "last", "same", "other",
-    "such", "more", "less", "above", "below", "within", "without", "across",
-    "between", "over", "under", "into", "onto", "via", "but", "so", "as",
-    "has", "have", "had", "does", "do", "did", "give", "gives", "giving",
+    "a", "an", "is", "are", "was", "were", "be", "been", "being", "at",
+    "to", "of", "on", "or", "than", "then", "each", "every", "no", "not",
+    "up", "about", "exactly", "least", "most", "supported", "provide",
+    "provides", "provided", "sustain", "shall", "must", "should", "will",
+    "may", "can", "run", "runs", "capture", "test", "tests", "require",
+    "requires", "required", "using", "use", "uses", "used", "through",
+    "during", "while", "when", "its", "it", "this", "that", "these",
+    "those", "both", "only", "also", "still", "raw", "total", "full",
+    "half", "high", "low", "second", "third", "same", "other", "such",
+    "more", "less", "above", "below", "within", "without", "across",
+    "between", "over", "under", "onto", "via", "but", "so", "as", "has",
+    "have", "had", "does", "do", "did", "give", "gives", "giving",
     "target", "targets", "nominal", "typical", "worst", "best", "case",
     "measured", "assume", "assumed", "assumes", "operate", "operates",
-    "operating", "supports", "support", "least", "up", "roughly", "about",
+    "operating", "supports", "support", "roughly",
 }) | _ANCHOR_STOPWORDS
 
 
