@@ -162,7 +162,8 @@ def _wire_mismatch_design(monkeypatch, *, src_width=8, dst_width=16):
     )
     monkeypatch.setattr(
         pipeline_graph, "parse_verilog_ports",
-        lambda path: modules["a"] if path.endswith("a.v") else modules["b"],
+        lambda path, module=None: (modules["a"] if path.endswith("a.v")
+                                   else modules["b"]),
     )
     monkeypatch.setattr(
         pipeline_graph, "lint_top_level",

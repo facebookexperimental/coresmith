@@ -55,7 +55,7 @@ def _seams(monkeypatch, *, rtl_target: str = ""):
         pipeline_graph, "load_architecture_connections", lambda pr: ([{"a": 1}], "chip"))
     monkeypatch.setattr(
         pipeline_graph, "parse_verilog_ports",
-        lambda p: VerilogModule(name="core", ports=[VerilogPort("clk", "input")]))
+        lambda p, module=None: VerilogModule(name="core", ports=[VerilogPort("clk", "input")]))
     monkeypatch.setattr(pipeline_graph, "write_graph_event", lambda *a, **k: None)
 
     # discover_block_rtl / unresolved_block_rtl read the block spec for
@@ -129,7 +129,7 @@ async def test_rtl_target_resolution_clears_the_gate(monkeypatch, tmp_path):
     # stop the node right after the gate so no LLM/assembly runs
     monkeypatch.setattr(
         pipeline_graph, "parse_verilog_ports",
-        lambda p: VerilogModule(name="", ports=[]))
+        lambda p, module=None: VerilogModule(name="", ports=[]))
 
     result = await pipeline_graph.integration_check_node(
         _state(tmp_path, write_missing_rtl=True))
@@ -175,7 +175,7 @@ async def test_gate_off_restores_drop_and_continue(monkeypatch, tmp_path):
         lambda p: (_ for _ in ()).throw(AssertionError("gate must not park")))
     monkeypatch.setattr(
         pipeline_graph, "parse_verilog_ports",
-        lambda p: VerilogModule(name="", ports=[]))
+        lambda p, module=None: VerilogModule(name="", ports=[]))
 
     result = await pipeline_graph.integration_check_node(_state(tmp_path))
     # unchanged legacy behavior: the missing block is simply absent
@@ -189,7 +189,7 @@ async def test_override_assembles_without_the_block(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline_graph, "interrupt", lambda p: {"action": "override"})
     monkeypatch.setattr(
         pipeline_graph, "parse_verilog_ports",
-        lambda p: VerilogModule(name="", ports=[]))
+        lambda p, module=None: VerilogModule(name="", ports=[]))
 
     result = await pipeline_graph.integration_check_node(_state(tmp_path))
     assert result["integration_result"]["reason"] == "No block RTL could be parsed"

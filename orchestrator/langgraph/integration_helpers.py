@@ -79,11 +79,19 @@ class VerilogModule:
         }
 
 
-def parse_verilog_ports(rtl_path: str) -> VerilogModule:
+def parse_verilog_ports(rtl_path: str, module: str | None = None) -> VerilogModule:
     """Parse a Verilog file and extract the module name, ports, and parameters.
 
     Handles both ANSI-style (ports in header) and non-ANSI (separate
-    declarations) Verilog modules. Extracts the *first* module found.
+    declarations) Verilog modules.
+
+    ``module`` selects WHICH module to parse; without it the first one wins,
+    which is frequently the wrong answer. A generated block file commonly
+    declares its internal stages first -- raster_scan_pipeline.v declares four
+    sub-stages before the block itself at line 668 -- so integration judged a
+    sub-stage's ports as the block's interface and raised 22 wiring hazards for
+    a block that conforms perfectly. Callers that know the block name should
+    pass it.
 
     Returns:
         VerilogModule with parsed port list.
@@ -97,6 +105,16 @@ def parse_verilog_ports(rtl_path: str) -> VerilogModule:
     # Strip comments (line and block)
     source = re.sub(r'//.*?$', '', source, flags=re.MULTILINE)
     source = re.sub(r'/\*.*?\*/', '', source, flags=re.DOTALL)
+
+    # Narrow to the requested module, else the file stem -- the same precedence
+    # rtl_module_name uses. Sliced to its endmodule so a later module's
+    # non-ANSI port declarations cannot leak in.
+    for _want in [w for w in (module, path.stem) if w]:
+        _m = re.search(r'\bmodule\s+' + re.escape(str(_want)) + r'\b', source)
+        if _m:
+            _end = source.find('endmodule', _m.start())
+            source = source[_m.start():_end if _end != -1 else len(source)]
+            break
 
     # Find module declaration
     mod_match = re.search(
@@ -728,6 +746,7 @@ def generate_top_level_rtl(
         lines.append("  );")
         lines.append("")
 
+
     lines.append("endmodule")
     lines.append("")
 
@@ -838,6 +857,85 @@ def detect_wrapper_block(modules: dict[str, VerilogModule]) -> str | None:
     return None
 
 
+def _contract_signal_names(edge: dict) -> list[str]:
+    """Every signal a contract edge declares: payload fields + sideband.
+
+    The schema splits them across two keys, which is why several readers
+    concluded the contract did not record signal names at all. Their union is
+    the channel's port set.
+    """
+    out: list[str] = []
+    for f in (edge.get("fields") or []):
+        n = f.get("name") if isinstance(f, dict) else f
+        if n:
+            out.append(str(n))
+    for s in (edge.get("sideband_signals") or []):
+        n = s.get("name") if isinstance(s, dict) else s
+        if n:
+            out.append(str(n))
+    seen, uniq = set(), []
+    for n in out:
+        if n not in seen:
+            seen.add(n)
+            uniq.append(n)
+    return uniq
+
+
+def _resolve_by_contract(edge, pb, cb, port_exact, modules):
+    """Wire an edge signal-by-signal from the contract's own declaration.
+
+    Returns ``(paired, hazards)``, or ``None`` when the edge declares no
+    signals (the caller then falls back to the legacy name/positional path, so
+    contracts that predate signal lists are unaffected).
+
+    Each side is resolved INDEPENDENTLY against the declared name, accepting
+    either ``<channel>_<signal>`` or bare ``<signal>``. Because both ends are
+    matched to the same contract signal, they are never matched to each other:
+    the two sides may legitimately spell their ports differently and still bind
+    correctly, which the positional path could not express.
+    """
+    signals = _contract_signal_names(edge)
+    if not signals:
+        return None
+    if pb not in modules or cb not in modules:
+        return None
+
+    def _one(block: str, chan: str, sig: str):
+        pref = port_exact(block, f"{chan}_{sig}")
+        bare = port_exact(block, sig)
+        if pref is not None and bare is not None:
+            return None, (f"{block}.{chan}_{sig} and {block}.{sig} both exist "
+                          f"-- ambiguous which implements '{sig}'")
+        got = pref or bare
+        if got is None:
+            return None, (f"{block} implements no port for declared signal "
+                          f"'{sig}' (expected '{chan}_{sig}' or '{sig}')")
+        return got, None
+
+    pchan = str(edge.get("producer_port") or "")
+    cchan = str(edge.get("consumer_port") or "")
+    eid = edge.get("edge_id")
+    paired, hazards = [], []
+    for sig in signals:
+        pp, perr = _one(pb, pchan, sig)
+        cp, cerr = _one(cb, cchan, sig)
+        for err in (perr, cerr):
+            if err:
+                hazards.append(f"edge {eid}: {err}")
+        if pp is None or cp is None:
+            continue
+        if _wrap_shared_signal(pp.name) or _wrap_shared_signal(cp.name):
+            continue
+        if pp.width != cp.width:
+            hazards.append(
+                f"edge {eid}: signal '{sig}' is {pp.width}b on {pb}.{pp.name} "
+                f"but {cp.width}b on {cb}.{cp.name} -- refusing to short "
+                f"mismatched-width ports")
+            continue
+        paired.append((pp, cp))
+    return paired, hazards
+
+
 def load_interface_contract_edges(project_root: str) -> list[dict]:
     """Load endpoint-resolved block<->block edges from
     ``.coresmith/interface_contracts.json`` (producer/consumer block + port).
@@ -876,6 +974,15 @@ def load_interface_contract_edges(project_root: str) -> list[dict]:
             "consumer_port": c.get("consumer_port") or c.get("to_port") or "",
             "data_width": c.get("data_width_bits") or c.get("data_width") or 0,
             "edge_id": c.get("edge_id") or f"{pb}__to__{cb}",
+            # Carry the channel SIGNAL LIST through. The contract declares every
+            # signal on the edge (fields = payload, sideband_signals =
+            # everything else, union = the port set); dropping them here forced
+            # the assembler to re-derive the port set from a naming convention
+            # and to pair the two ends positionally against each other. With the
+            # list present each end resolves against the CONTRACT instead, so
+            # the two ends never have to agree on spelling.
+            "fields": c.get("fields") or [],
+            "sideband_signals": c.get("sideband_signals") or [],
         })
     return edges
 
@@ -952,6 +1059,7 @@ def generate_caravel_wrapper_top(
     rtl_paths: dict[str, str],
     output_dir: str,
     wrapper_block: str | None = None,
+    pin_map=None,
 ) -> dict:
     """Assemble a wired ``user_project_wrapper`` chip_top deterministically.
 
@@ -973,6 +1081,31 @@ def generate_caravel_wrapper_top(
 
     if wrapper_block is None:
         wrapper_block = detect_wrapper_block(modules)
+
+    # A declared pin map REPLACES the pin-adapter block. The adapter existed
+    # only to translate pad bits into named signals, and the top now does that
+    # itself from data. Keeping it would instantiate a module that duplicates
+    # the routing -- and, in the case that motivated this, the entire rest of
+    # the chip, because its mandated module name means "the whole design" and
+    # the generator built one.
+    #
+    # The contract edges that reference it describe that same translation, so
+    # they are dropped with it: they are no longer block-to-block channels.
+    dropped_adapter = ""
+    if (pin_map is not None and getattr(pin_map, "ok", False)
+            and wrapper_block is not None):
+        dropped_adapter = wrapper_block
+        modules = {k: v for k, v in modules.items() if k != wrapper_block}
+        # Its FILE has to go too, not just its instantiation. That file declares
+        # stub versions of the sibling blocks, and it sorts first, so leaving it
+        # in the source list makes _dedup_module_sources treat those stubs as
+        # the first definitions and strip the real implementations out of every
+        # other file -- emptying the design while still looking assembled.
+        rtl_paths = {k: v for k, v in rtl_paths.items() if k != wrapper_block}
+        edges = [e for e in edges
+                 if wrapper_block not in (e.get("producer_block"),
+                                          e.get("consumer_block"))]
+        wrapper_block = None
 
     clk_name = "wb_clk_i"
     rst_name = "wb_rst_i"          # Caravel wb_rst_i is active-high
@@ -1092,6 +1225,21 @@ def generate_caravel_wrapper_top(
         pb, cb = e.get("producer_block"), e.get("consumer_block")
         if pb not in modules or cb not in modules or pb == cb:
             continue
+        # Contract-directed resolution: match each END against the contract's
+        # declared signal list, never against the other end. See
+        # _resolve_by_contract for why this removes positional pairing.
+        _by_contract = _resolve_by_contract(e, pb, cb, _port_exact, modules)
+        if _by_contract is not None:
+            _paired, _hazards = _by_contract
+            if _hazards:
+                wiring_errors.extend(_hazards)
+                continue
+            for pp, cp in _paired:
+                uf.union((pb, pp.name), (cb, cp.name))
+            if _paired:
+                edge_bound.add(frozenset((pb, cb)))
+            continue
+
         pfields = _resolve_fields(pb, e.get("producer_port", ""))
         cfields = _resolve_fields(cb, e.get("consumer_port", ""))
         # A NAMED port that fails to resolve is a hazard (fall back to the
@@ -1210,23 +1358,73 @@ def generate_caravel_wrapper_top(
     if wrapper_block is not None:
         wrap_mod_name = modules[wrapper_block].name
         wrap_inst_module = wrap_mod_name
+        src_path = rtl_paths.get(wrapper_block, "")
+        try:
+            src = Path(src_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            src = ""
+        # `\b` after the name means this does NOT match `user_project_wrapper_io`
+        # (an underscore is a word character), so the block's own module is safe.
+        _top_decl = re.search(
+            rf"\bmodule\s+{re.escape(CARAVEL_TOP_MODULE)}\b", src) if src else None
+        renamed = ""
         if wrap_mod_name == CARAVEL_TOP_MODULE:
+            # The pad block IS named like the graded top. Rename it so the top
+            # this function emits can take that name.
             wrap_inst_module = f"{CARAVEL_TOP_MODULE}_pads"
-            src_path = rtl_paths.get(wrapper_block, "")
-            try:
-                src = Path(src_path).read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                src = ""
-            if src:
-                renamed = re.sub(
-                    rf"\bmodule\s+{re.escape(CARAVEL_TOP_MODULE)}\b",
-                    f"module {wrap_inst_module}",
-                    src,
-                    count=1,
-                )
-                renamed_pad_path = str(out_dir / f"{wrap_inst_module}.v")
-                Path(renamed_pad_path).write_text(renamed, encoding="utf-8")
-                lint_block_paths[wrapper_block] = renamed_pad_path
+            renamed = re.sub(
+                rf"\bmodule\s+{re.escape(CARAVEL_TOP_MODULE)}\b",
+                f"module {wrap_inst_module}",
+                src,
+                count=1,
+            )
+        elif _top_decl:
+            # The block's own module is named something else, but its FILE also
+            # declares the graded module -- a thin alias wrapper emitted next to
+            # the block. Left alone it collides with the top emitted below: two
+            # definitions of CARAVEL_TOP_MODULE, which is a MODDUP abort at
+            # elaboration and, worse, makes resolve_netlist_top see TWO
+            # un-instantiated roots so the chip gate-sim cannot resolve a top at
+            # all. The alias is redundant -- this function emits that module --
+            # so drop it from a COPY. The block's own source is never modified.
+            _end = src.find("endmodule", _top_decl.start())
+            if _end != -1:
+                renamed = (src[:_top_decl.start()]
+                           + f"// [coresmith] removed a redundant "
+                             f"`module {CARAVEL_TOP_MODULE}` alias: the "
+                             f"integration stage emits that module itself, and "
+                             f"two definitions collide.\n"
+                           + src[_end + len("endmodule"):])
+        if renamed:
+            renamed_pad_path = str(out_dir / f"{wrap_inst_module}.v")
+            Path(renamed_pad_path).write_text(renamed, encoding="utf-8")
+            lint_block_paths[wrapper_block] = renamed_pad_path
+
+    # ---- pin routing (from the PRD's structured pin_map) ----
+    # With the assignment available as data the top slices io_in itself and
+    # drives io_out/io_oeb itself, so the design needs no pin-adapter block --
+    # the block an LLM could not generate because its mandated module name
+    # means "the entire chip".
+    pin_decls: list[str] = []
+    pin_assigns: list[str] = []
+    pin_sigs: dict = {}
+    pin_block_driven: dict = {}
+    if pin_map is not None and getattr(pin_map, "ok", False):
+        from orchestrator.architecture.pin_map import (
+            emit_pin_routing,
+            mapped_signals,
+        )
+        pin_decls, pin_assigns = emit_pin_routing(pin_map)
+        pin_sigs = mapped_signals(pin_map)
+        # Output-side signals (and any output-enable) are DRIVEN BY BLOCKS, so
+        # the top declares a wire for each and the producing block connects to
+        # it. Input-side signals are already assigned from io_in by pin_decls.
+        for e in pin_map.entries:
+            if e.dir == "out":
+                pin_block_driven[e.signal] = e.width
+            if e.oe:
+                pin_block_driven[e.oe] = 1
+        pin_sigs.update(pin_block_driven)
 
     # ---- emit ----
     lines: list[str] = []
@@ -1252,6 +1450,15 @@ def generate_caravel_wrapper_top(
     for name, val in _CARAVEL_TIEOFFS:
         lines.append(f"  assign {name} = {val};")
     lines.append("")
+
+    if pin_decls or pin_block_driven:
+        lines.append("  // ---- pin map (declared in the PRD) ----")
+        for sig, w in sorted(pin_block_driven.items()):
+            rng = "" if w == 1 else f"[{w - 1}:0] "
+            lines.append(f"  wire {rng}{sig};")
+        for d in pin_decls:
+            lines.append(f"  {d}")
+        lines.append("")
 
     if wire_decls:
         lines.append(f"  // ---- internal block<->block wires ({len(wire_decls)}) ----")
@@ -1284,6 +1491,12 @@ def generate_caravel_wrapper_top(
             if bn == wrapper_block and p.name in _PAD_IO_PORTS:
                 conns.append(f"    .{p.name}({p.name})")  # straight to top GPIO
                 continue
+            if p.name in pin_sigs:
+                # A block port named after a pin-map signal binds to it. The
+                # contract already uses these names, so this needs no new
+                # convention.
+                conns.append(f"    .{p.name}({p.name})")
+                continue
             w = port_wire.get((bn, p.name))
             if w:
                 conns.append(f"    .{p.name}({w})")
@@ -1307,6 +1520,11 @@ def generate_caravel_wrapper_top(
         lines.append("")
         instantiated.append(bn)
 
+    if pin_assigns:
+        lines.append("")
+        lines.append("  // ---- pin map: drive the pads ----")
+        for a in pin_assigns:
+            lines.append(f"  {a}")
     lines.append("endmodule")
     lines.append("")
     verilog = "\n".join(lines)
@@ -1323,6 +1541,7 @@ def generate_caravel_wrapper_top(
         "instantiated": instantiated,
         "wrapper_block": wrapper_block,
         "renamed_pad_path": renamed_pad_path,
+        "dropped_adapter": dropped_adapter,
         "lint_block_paths": lint_block_paths,
         # Non-empty => the deterministic wiring is UNSAFE (an ambiguous key that
         # would be [0]-picked, or a width mismatch that would be shorted). The
@@ -1863,9 +2082,31 @@ def chip_rtl_sources(
     first entry.
     """
     sources = [top_rtl_path]
+    # A block file that RE-DECLARES the top's own module is an alias-carrier:
+    # the generated pad block ships a thin `module user_project_wrapper` alias
+    # plus stub declarations of its sibling blocks. Include it and the MODDUP
+    # dedup keeps the stubs (they sort first) and strips the real logic -- the
+    # reference then elaborates a hollow chip and honestly fails, so the gate
+    # reports not_run on a design that is fine. The top provides its own
+    # module; a file re-declaring it leaves the list, stubs and all.
+    _top_mod = ""
+    try:
+        _top_text = Path(top_rtl_path).read_text(errors="replace")
+        _m = re.search(r"\bmodule\s+([A-Za-z_]\w*)", _top_text)
+        _top_mod = _m.group(1) if _m else ""
+    except OSError:
+        pass
     for bp in block_rtl_paths.values():
-        if Path(bp).exists() and bp != top_rtl_path:
-            sources.append(bp)
+        if not Path(bp).exists() or bp == top_rtl_path:
+            continue
+        if _top_mod:
+            try:
+                if re.search(r"\bmodule\s+" + re.escape(_top_mod) + r"\b",
+                             Path(bp).read_text(errors="replace")):
+                    continue
+            except OSError:
+                pass
+        sources.append(bp)
     # Include the generic SRAM wrapper lib if any block instantiates cs_sram, so
     # the chip-level Verilator build can resolve cs_sram_1rw/1rw1r (without it
     # the sim hard-fails with "Cannot find module cs_sram_1rw1r"). Best-effort.
@@ -2246,6 +2487,48 @@ def discover_block_rtl(
                 f"with no GPIO boundary.", RED)
 
     return rtl_paths
+
+
+def module_for_block(rtl_path, block_name: str) -> str:
+    """Module name to parse for ``block_name``. Mirrors rtl_module_name."""
+    from pathlib import Path as _P
+    try:
+        text = _P(rtl_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return block_name
+    import re as _re
+    for cand in (block_name, _P(rtl_path).stem):
+        if cand and _re.search(r"\bmodule\s+" + _re.escape(cand) + r"\b", text):
+            return cand
+    return block_name
+
+
+def merge_block_specs(blocks: list[dict], block_queue: list) -> list[dict]:
+    """Join per-block RESULT dicts to their SPEC entries by name.
+
+    A block RESULT records what happened ({name, success, attempts, ...}); the
+    block SPEC records what the block IS, including ``rtl_target``. Only the
+    result reaches discovery, so a block whose Verilog file is not named after
+    it -- the contract-locked case ``rtl_target`` exists for -- resolved to
+    nothing and was dropped.
+
+    Result keys win on conflict: nothing a block actually reported is
+    overwritten by its spec.
+    """
+    by_name: dict[str, dict] = {}
+    for spec in block_queue or []:
+        if isinstance(spec, dict):
+            n = spec.get("name") or spec.get("block_name")
+            if n:
+                by_name[str(n)] = spec
+    out: list[dict] = []
+    for b in blocks or []:
+        if not isinstance(b, dict):
+            continue
+        n = b.get("name") or b.get("block_name")
+        spec = by_name.get(str(n)) if n else None
+        out.append({**spec, **b} if spec else dict(b))
+    return out
 
 
 def missing_from(
