@@ -90,6 +90,27 @@ def test_render_conformance_tb_is_valid_python_with_mandated_checks():
     assert "QSPIMasterBFM" in src and "CONTRACT = QSPIContract(" in src
 
 
+def test_cfg_probe_patterns_are_nibble_distinct_at_every_width():
+    """A CFG probe byte with two IDENTICAL nibbles cannot detect a read
+    serializer that launched one nibble early -- it returns the same byte either
+    way. The old first probe was 0x11223344 (low byte 0x44), which cost a
+    waveform session to re-derive by hand. Every byte of both probes, at every
+    contract-selectable width, must have two different nibbles."""
+    from orchestrator.langgraph.bfm_lib import codegen as _cg
+
+    for width in (1, 2, 3, 4):
+        assert _cg.nibble_distinct(_cg.CFG_PROBE_A, width), (width, hex(_cg.CFG_PROBE_A))
+        assert _cg.nibble_distinct(_cg.CFG_PROBE_B, width), (width, hex(_cg.CFG_PROBE_B))
+    # the two probes must also differ at the narrowest width, or the second
+    # write/read-back round is not a second observation at all
+    assert (_cg.CFG_PROBE_A & 0xFF) != (_cg.CFG_PROBE_B & 0xFF)
+    # ...and the property must survive into the emitted testbench text
+    src = render_conformance_tb(QSPIContract(), "chip_top")
+    assert f"0x{_cg.CFG_PROBE_A:08X}" in src
+    assert f"0x{_cg.CFG_PROBE_B:08X}" in src
+    assert "0x11223344" not in src
+
+
 def test_conformance_test_fn_op_probe_toggle():
     c = QSPIContract()
     with_probe = render_conformance_test_fn(c, start_clock=True, with_op_probe=True)

@@ -28,6 +28,33 @@ from .qspi_rom_bfm import QSPIRomContract
 from .stimulus import StimulusPlan
 
 
+# ---------------------------------------------------------------------------
+# CFG read-back probe patterns (bus-protocol conformance, phase A)
+# ---------------------------------------------------------------------------
+# EVERY BYTE of these constants must have two DIFFERENT nibbles, at every probe
+# width the contract can select (``cfg1_width_bytes`` 1..4 -> the low 1..4 bytes
+# are used). The old first probe was ``0x11223344``, whose low byte is 0x44:
+# both nibbles identical. A read serializer launched ONE NIBBLE EARLY at the
+# byte boundary still returns 0x44 for 0x44, so the probe that exists precisely
+# to catch a nibble-early launch could not distinguish it from a correct read.
+# Measured cost: a full waveform session to re-derive by hand what the probe was
+# supposed to prove. Nibble-distinct patterns make a one-nibble slip a value
+# mismatch, which is what the assertion message already claims to detect.
+CFG_PROBE_A = 0x3C71965A
+CFG_PROBE_B = 0xC31E4BA5
+
+
+def nibble_distinct(value: int, width_bytes: int) -> bool:
+    """True when every byte of ``value``'s low ``width_bytes`` has two DIFFERENT
+    nibbles -- the property that makes a one-nibble-early read serializer show up
+    as a value mismatch instead of an identical byte."""
+    for i in range(max(1, int(width_bytes))):
+        byte = (int(value) >> (8 * i)) & 0xFF
+        if (byte >> 4) == (byte & 0xF):
+            return False
+    return True
+
+
 def render_contract_literal(contract: QSPIContract) -> str:
     """A deterministic ``QSPIContract(...)`` constructor literal."""
     items = ", ".join(
@@ -119,6 +146,8 @@ def render_conformance_test_fn(
     """
     del start_clock  # every test starts its own clock (cocotb 2.x kills coroutines)
     clk = contract.clk_name
+    _probe_a = f"0x{CFG_PROBE_A:08X}"
+    _probe_b = f"0x{CFG_PROBE_B:08X}"
     clock_line = (
         f'    cocotb.start_soon(Clock(dut.{clk}, c.clk_period_ns, '
         'unit="ns").start())\n'
@@ -186,8 +215,8 @@ async def qspi_slave_protocol_conformance(dut):
     # designs whose CFG1 is a narrow register and false-fails them).
     _w = int(getattr(c, "cfg1_width_bytes", 1) or 1)
     _wm = (1 << (8 * _w)) - 1
-    for _addr, _val in ((c.cfg1_addr, 0x11223344 & _wm),
-                        (c.cfg1_addr, 0xA5C31E4B & _wm)):
+    for _addr, _val in ((c.cfg1_addr, {_probe_a} & _wm),
+                        (c.cfg1_addr, {_probe_b} & _wm)):
         await bfm.write_reg(_addr, _val, _w)
         _rb = await bfm.read(_addr, _w)
         _got = int.from_bytes(_rb, "little")
