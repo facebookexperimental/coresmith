@@ -29,13 +29,15 @@
     # validating the flow on a newer nixpkgs (CI: `nix flake update`
     # then run `make test` and the `requires_nix`-marked tests).
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
+    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, nixpkgs-unstable, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
+        unstablePkgs = import nixpkgs-unstable { inherit system; };
 
         # Python environment with the orchestrator dependencies. We pin
         # versions through the existing requirements.txt so the flake
@@ -60,7 +62,7 @@
           py.pkgs.virtualenv
           gnumake
           git
-          nodejs_20      # for Claude Code and OpenCode (`npm install -g opencode-ai`)
+          unstablePkgs.nodejs_22 # Kimi Code needs Node 22.19+; also used by Claude Code and OpenCode (`npm install -g opencode-ai`)
         ];
       in {
         # Default devShell: `nix develop`

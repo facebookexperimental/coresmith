@@ -103,6 +103,54 @@ with a **hundreds-of-ns critical path** through the read mux. The same
 single-cycle access. Same function, ~5× the area and ~50× the cycle time
 if you pick flops.
 
+## MEASURED crossover — the numbers behind the rule (2026-07, sky130, 50 MHz)
+
+The rule above used to rest on judgement. A 152-point characterization sweep
+plus one fully signed-off generated macro now put numbers on it.
+
+**The crossover is ~2 Kbit.** Like for like at 2048 bits, 1rw1r:
+
+| implementation | Fmax | area |
+|---|---|---|
+| macro `sram_1rw1r_16_128_8_sky130` | **227.3 MHz** | 94,990 µm² |
+| registered flops 8×256 | 189.4 MHz | 94,761 µm² |
+
+At 2 Kbit the macro is already ~20% **faster at essentially identical area**.
+Below that flops win on area (a macro carries fixed periphery overhead); above
+it the macro wins outright, because flop Fmax collapses with size while the
+macro's does not.
+
+Measured **registered**-flop Fmax (a raw combinational-read array is far
+worse):
+
+| geometry | Fmax | | geometry | Fmax |
+|---|---|---|---|---|
+| 8×64 | 495.0 MHz | | 8×1024 | 59.3 MHz |
+| 8×256 | 223.7 MHz | | 8×2048 | 30.5 MHz |
+| 32×256 | 63.7 MHz | | 8×4096 | 16.1 MHz |
+| 16×256 | 108.1 MHz | | 64×1024 | 8.0 MHz |
+
+**43 of 76 registered-flop geometries cannot reach 50 MHz at all.**
+
+**Total bits is what predicts the cliff** — fitted importances are bits=0.76,
+impl=0.12, log_depth=0.06, depth=0.05. Width alone and depth alone do not:
+32×256 and 8×1024 are both 8 Kbit and both land near 60 MHz, while 8×256 at
+2 Kbit makes 223.7 MHz. **Equal bits → comparable Fmax; equal depth → wildly
+different Fmax.** So reason about your array in *bits* first, and treat width
+and depth as secondary structural concerns (read-mux fanout, sense-amp cost).
+
+Two cautions when quoting macro speed. **Generated macros are much slower than
+stock ones** — the stock 1kbyte/2kbyte macros give 511–558 MHz from
+`minimum_period`, while a generated 16×128 gives 227 MHz; do not assume a macro
+is "fast enough" without checking its own Liberty. And **read `minimum_period`,
+never clock-to-output** — treating a clk→Q access arc as a legal clock period
+produced ~2 GHz macro frequencies for a macro whose real limit was 558 MHz.
+
+To generate a macro that actually passes DRC/LVS/characterization, use
+`bin/gen_ram` — it bakes in the OpenRAM repairs (see the `gen_ram` docstring
+and `scripts/patch_openram.py`), several of which fail *silently* and produce a
+plausible wrong answer rather than an error.
+
 ## Available sky130 SRAM macros (reference one by name in the spec)
 
 All are **1rw1r dual-port**: one read-write port (port A) + one
@@ -116,10 +164,34 @@ read-only port (port B).
 
 Pick the organization whose native word width / depth matches the
 access pattern (e.g. a byte-addressed buffer favors the ×8 part; a
-32-bit datapath favors a ×32 part). Compose multiple macros for memories
-that are wider (tile horizontally, concatenate `rdata`) or deeper (tile
-vertically, decode the high address bits to select a bank) than a single
-macro provides.
+32-bit datapath favors a ×32 part).
+
+### DO NOT TILE. Build the exact geometry instead.
+
+If no listed part matches your geometry, **do not compose several macros**
+into one logical memory — neither horizontally (concatenating `rdata`) nor
+vertically (decoding high address bits to select a bank). Tiling is disabled
+in the engine by default and `ensure_macro` will not return a tiled plan.
+
+Ask for the geometry you actually need and let OpenRAM build it
+(`bin/gen_ram --width W --depth D --ports 1rw1r`). A purpose-built macro is
+smaller than an over-provisioned tile and arrives with its own signed-off
+DRC/LVS/Liberty collateral.
+
+Two reasons this matters, both measured:
+
+- **Tiled timing is not modelled.** Composition Fmax is taken from the base
+  macro and ignores tile count, so a 16-tile memory reports the same frequency
+  as a 1-tile one. Deep tiling adds `ceil(log2(tiles))` output-mux levels that
+  nothing accounts for.
+- **Tiling existed only because the generator was broken.** An audit found 20
+  OpenRAM launches across 11 geometries with zero successes, so tiling was the
+  only way to avoid a flop array. The generator is now repaired.
+
+**If the geometry genuinely cannot be built, that is a human decision, not a
+fallback.** The engine returns no macro and escalates. Do not silently
+substitute a flop array — a large one costs multiple mm² at single-digit MHz
+(see the measured table above).
 
 ## uArch-spec implications you MUST record
 

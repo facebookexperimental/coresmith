@@ -49,7 +49,7 @@ RUN nix-channel --add https://nixos.org/channels/nixos-24.05 nixpkgs \
  && nix-channel --add https://nixos.org/channels/nixos-unstable nixos-unstable \
  && nix-channel --update \
  && nix-env -iA \
-        nixpkgs.nodejs_20 \
+        nixos-unstable.nodejs_22 \
         nixpkgs.gnumake \
         nixpkgs.openssh \
         nixpkgs.musl \
@@ -204,6 +204,7 @@ ENV PATH="/opt/npm-global/bin:${PATH}"
 # RUN below replaces that with a symlink to the musl binary.
 RUN mkdir -p /opt/npm-global \
  && npm install -g --force --libc=musl \
+        @moonshot-ai/kimi-code \
         @anthropic-ai/claude-code \
         @anthropic-ai/claude-code-linux-x64-musl \
         opencode-ai \
@@ -225,19 +226,22 @@ RUN set -eux \
  && test -x "${OPENCODE_MUSL_BIN}" \
  && ln -sf "${OPENCODE_MUSL_BIN}" /opt/npm-global/bin/opencode
 
-# Capture the resolved Claude CLI path at build time and bake it as
-# CLAUDE_CLI_PATH so runtime resolution can't drift if PATH changes
-# under us. Also fail the build loud if `claude --version` fails -- the
-# runtime "PermissionError: ''" failure mode is much harder to debug.
+# Capture the resolved agent CLI paths at build time and bake them so runtime
+# resolution can't drift if PATH changes under us. Fail the build loud if any
+# CLI is unusable -- the runtime "PermissionError: ''" failure mode is much
+# harder to debug.
 RUN set -eux \
  && CLAUDE_BIN="$(command -v claude)" \
  && OPENCODE_BIN="$(command -v opencode)" \
+ && KIMI_BIN="$(command -v kimi)" \
  && test -x "${CLAUDE_BIN}" \
  && test -x "${OPENCODE_BIN}" \
+ && test -x "${KIMI_BIN}" \
  && claude --version \
  && opencode --version \
- && printf 'CLAUDE_CLI_PATH=%s\nOPENCODE_CLI_PATH=%s\n' \
-      "${CLAUDE_BIN}" "${OPENCODE_BIN}" > /etc/coresmith.env
+ && kimi --version \
+ && printf 'CLAUDE_CLI_PATH=%s\nOPENCODE_CLI_PATH=%s\nKIMI_CLI_PATH=%s\n' \
+      "${CLAUDE_BIN}" "${OPENCODE_BIN}" "${KIMI_BIN}" > /etc/coresmith.env
 
 # sshd setup so RunPod / interactive users can ssh in (and the web
 # terminal works because PID 1 stays alive even after the pipeline

@@ -252,6 +252,13 @@ class BlockState(TypedDict):
     synth_gate_count: int
     ppa_ok: bool | None        # deterministic PPA gate verdict (None = not run)
     ppa_reasons: list             # human-readable budget-divergence reasons
+    # Post-synthesis GATE-LEVEL SIM verdict (harness.gate_sim). None = not run.
+    # False routes the block to diagnose: the synthesized netlist does not
+    # reproduce the behaviour the RTL was verified with, so DV and PPA were
+    # measured on different hardware.
+    gate_sim_ok: bool | None
+    gate_sim_status: str          # "pass"|"fail"|"not_run"|"disabled"
+    gate_sim_reason: str
     # Mem-price gate DEFER: set on the accept path when the bounded revise loop
     # gave up on an over-budget spec, so the deferred excess is carried into
     # state (die rollup + integration review also read the on-disk ledger flags).
@@ -3713,6 +3720,96 @@ def _measured_die_rollup(project_root: str, block_names: list):
     return std_rollup
 
 
+def _run_gate_sim_gate(
+    state: BlockState, block: dict, block_name: str,
+    synth_result: dict | None, rtl_path: str,
+) -> tuple:
+    """Run the post-synthesis gate-level simulation gate for one block.
+
+    Returns ``(gate_sim_ok, status, reason)`` where ``gate_sim_ok`` is:
+
+    * ``True``  -- the netlist reproduced the verified RTL cycle-for-cycle;
+    * ``False`` -- it DIVERGED, would not elaborate, or produced a blank /
+      missing / vacuous verdict (``route_after_synth`` sends this to diagnose);
+    * ``None``  -- the gate did not apply (disabled, synthesis produced no
+      netlist, toolchain/PDK absent). ALWAYS recorded with a reason so absence
+      is visible rather than silently reading as success.
+
+    Never raises: gate plumbing must not crash the synth node. A plumbing error
+    is reported as ``not_run`` (or, under ``CORESMITH_GATE_SIM_STRICT``, as a
+    failure by the harness itself).
+    """
+    from orchestrator.harness import gate_sim as _gs
+
+    if not _gs.gate_sim_enabled():
+        log("  [GATE-SIM] !!! GATE DISABLED (CORESMITH_GATE_SIM=0) -- the "
+            "SYNTHESIZED NETLIST is never simulated; a synthesis-side stub "
+            "cannot be caught", RED)
+        return (None, _gs.STATUS_DISABLED, f"{_gs.GATE_SIM_ENV}=0")
+
+    if not synth_result or not state.get("tb_path"):
+        reason = ("no netlist produced by synthesis" if not synth_result
+                  else "no testbench available to source reference vectors")
+        log(f"  [GATE-SIM] NOT RUN -- {reason}", YELLOW)
+        return (None, _gs.STATUS_NOT_RUN, reason)
+
+    netlist_path = (synth_result or {}).get("netlist_path", "")
+    log("  [GATE-SIM] Replaying verified RTL vectors through the gate "
+        "netlist...", YELLOW)
+    try:
+        res = _gs.check_gate_sim(
+            block=block,
+            netlist_path=netlist_path,
+            rtl_path=rtl_path,
+            tb_path=state.get("tb_path", ""),
+            attempt=state.get("attempt", 1),
+        )
+    except Exception as exc:  # noqa: BLE001 - never crash the synth node
+        strict = _gs.gate_sim_strict()
+        log(f"  [GATE-SIM] harness error: {exc}"
+            f"{' (STRICT -> FAIL)' if strict else ' (non-blocking)'}", RED)
+        return (False if strict else None, _gs.STATUS_NOT_RUN,
+                f"gate-sim harness error: {exc}")
+
+    try:
+        block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
+        block_dir.mkdir(parents=True, exist_ok=True)
+        (block_dir / "gate_sim_report.json").write_text(
+            json.dumps(res.as_dict(), indent=2)
+        )
+    except OSError:
+        pass
+
+    write_graph_event(_pr(state), "Gate Sim", "gate_result", {
+        "block": block_name, "name": "gate_level_sim", "kind": "gate_sim",
+        "status": res.status, "passed": res.status == _gs.STATUS_PASS,
+        "cycles_compared": res.cycles_compared,
+        "reason": res.reason,
+    })
+
+    if res.status == _gs.STATUS_PASS:
+        log(f"  [GATE-SIM] PASS -- netlist matched the verified RTL for "
+            f"{res.cycles_compared:,} cycles "
+            f"({res.output_bits_compared:,} output bits)", GREEN)
+        return (True, res.status, res.reason)
+
+    if res.status == _gs.STATUS_FAIL:
+        log(f"  [GATE-SIM] FAIL -- {res.reason}", RED)
+        try:
+            block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
+            block_dir.mkdir(parents=True, exist_ok=True)
+            (block_dir / "previous_error.txt").write_text(
+                res.as_prev_error(block_name)
+            )
+        except OSError:
+            pass
+        return (False, res.status, res.reason)
+
+    # not_run / disabled -- never a pass, always visible.
+    log(f"  [GATE-SIM] NOT RUN -- {res.reason}", YELLOW)
+    return (None, res.status, res.reason)
+
+
 async def synthesize_node(state: BlockState) -> dict:
     """Run Yosys synthesis with local LLM fix loop.
 
@@ -3793,7 +3890,15 @@ async def synthesize_node(state: BlockState) -> dict:
         if _ppa_should_park_tooling_missing(_pr(state), ppa_ok, ppa_meta):
             _park_ppa_unmeasurable(state, block_name)
         return {"synth_success": True, "synth_gate_count": 0,
-                "ppa_ok": ppa_ok, "ppa_reasons": ppa_reasons, "phase": "synth"}
+                "ppa_ok": ppa_ok, "ppa_reasons": ppa_reasons,
+                # No yosys run -> no netlist -> nothing for the gate-level sim
+                # to simulate. Recorded explicitly (never blank) so the absence
+                # of a gate-sim verdict is visible downstream.
+                "gate_sim_ok": None, "gate_sim_status": "not_run",
+                "gate_sim_reason": "CORESMITH_SKIP_SYNTH=1 -- no netlist was "
+                                   "produced, so the gate netlist was never "
+                                   "simulated",
+                "phase": "synth"}
 
     rtl_path = state.get("rtl_path", "")
     if not rtl_path or not Path(rtl_path).exists():
@@ -3959,6 +4064,27 @@ async def synthesize_node(state: BlockState) -> dict:
         if _ppa_should_park_tooling_missing(_pr(state), ppa_ok, ppa_meta):
             _park_ppa_unmeasurable(state, block_name)
 
+    # --- POST-SYNTHESIS GATE-LEVEL SIMULATION (CORESMITH_GATE_SIM) ----------
+    # Everything above this line was measured on two DIFFERENT artifacts: DV /
+    # coverage on the RTL source, PPA on the netlist. Nothing had ever run the
+    # NETLIST against the behaviour the RTL was verified with, so a module split
+    # into a simulation implementation and a (stub) synthesis implementation
+    # passed every gate in the pipeline. This replays the verified RTL's own
+    # port vectors through the gate netlist and fails closed on divergence.
+    # Only meaningful once synthesis SUCCEEDED: a failed synth has already
+    # written its own actionable previous_error.txt (which this gate would
+    # otherwise overwrite), and any netlist still on disk is a STALE one from a
+    # previous attempt -- simulating that would produce a verdict about code
+    # that is no longer the design.
+    if synth_ok:
+        gate_sim_ok, gate_sim_status, gate_sim_reason = _run_gate_sim_gate(
+            state, block, block_name, result, rtl_path,
+        )
+    else:
+        gate_sim_ok, gate_sim_status, gate_sim_reason = (
+            None, "not_run", "synthesis failed -- no current netlist to simulate",
+        )
+
     # B3: record the authoritative PPA verdict + measured numbers.
     # pdk-fixes-1: wns_ns is now available from the pre-layout STA (threaded
     # through ppa_meta) -- persist it so the ppa_history.wns_ns column stops
@@ -3979,6 +4105,9 @@ async def synthesize_node(state: BlockState) -> dict:
         "synth_gate_count": gate_count,
         "ppa_ok": ppa_ok,
         "ppa_reasons": ppa_reasons,
+        "gate_sim_ok": gate_sim_ok,
+        "gate_sim_status": gate_sim_status,
+        "gate_sim_reason": gate_sim_reason,
         "phase": "synth",
         "step_log_paths": existing_logs,
     }
@@ -4914,8 +5043,17 @@ def route_after_synth(state: BlockState) -> str:
     restructure it (e.g. a memory that should be an SRAM macro synthesized
     to flops). Default-off preserves the legacy "compiles == done" behavior.
     ``ppa_ok`` of None (not computed) never blocks.
+
+    The post-synthesis GATE-LEVEL SIM gate (``CORESMITH_GATE_SIM``, default ON)
+    routes ``gate_sim_ok is False`` to diagnose: the netlist that carries the
+    PPA numbers does not reproduce the RTL that carries the DV pass, so the
+    block is not done no matter how clean synthesis was. ``None`` (gate did not
+    apply -- disabled, no netlist, no toolchain) never blocks, exactly like
+    ``ppa_ok``.
     """
     if not state.get("synth_success"):
+        return "diagnose"
+    if state.get("gate_sim_ok") is False:
         return "diagnose"
     # rung2 defect 2: under SKIP_SYNTH the PDK-free synthesizability probes run
     # and GATE unconditionally (they need no PDK / no PPA-budget flag), so a

@@ -257,6 +257,67 @@ class TestOpenRAMFallback:
     def test_no_composition_for_odd_geometry(self, tmp_path):
         assert og.plan_composition(300, 17, self._reg(tmp_path)) is None
 
+
+class TestTilingDisabledByDefault:
+    """Tiling is OFF by default; ensure_macro must not return a tiled plan.
+
+    Both env-var branches are covered: default (off) and the explicit
+    CORESMITH_ALLOW_MACRO_TILING=1 escape hatch.
+    """
+
+    def _reg(self, tmp_path):
+        return {
+            "sky130_sram_1kbyte_1rw1r_32x256_8": _macro(root=tmp_path),
+            "sky130_sram_2kbyte_1rw1r_32x512_8": _macro(
+                name="sky130_sram_2kbyte_1rw1r_32x512_8", words=512, w=683.1,
+                root=tmp_path),
+        }
+
+    def test_tiling_off_by_default(self, monkeypatch):
+        monkeypatch.delenv("CORESMITH_ALLOW_MACRO_TILING", raising=False)
+        assert og.tiling_allowed() is False
+
+    def test_tiling_env_var_enables(self, monkeypatch):
+        for val in ("1", "true", "YES", "on"):
+            monkeypatch.setenv("CORESMITH_ALLOW_MACRO_TILING", val)
+            assert og.tiling_allowed() is True
+
+    def test_composable_geometry_is_not_tiled_by_default(self, tmp_path, monkeypatch):
+        """256x64 IS composable (2 tiles wide) -- but must not be returned."""
+        monkeypatch.delenv("CORESMITH_ALLOW_MACRO_TILING", raising=False)
+        reg = self._reg(tmp_path)
+        assert og.plan_composition(256, 64, reg) is not None  # composable...
+        res = og.ensure_macro(256, 64, allow_generate=False, registry=reg)
+        assert not isinstance(res, og.CompositionPlan), (
+            "ensure_macro returned a tiled plan with tiling disabled"
+        )
+        assert res is None, "no exact part and no generation -> must escalate"
+
+    def test_composable_geometry_is_tiled_when_explicitly_allowed(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("CORESMITH_ALLOW_MACRO_TILING", "1")
+        res = og.ensure_macro(
+            256, 64, allow_generate=False, registry=self._reg(tmp_path)
+        )
+        assert isinstance(res, og.CompositionPlan)
+        assert res.tiles_wide == 2
+
+    def test_exact_part_still_wins(self, tmp_path, monkeypatch):
+        """Disabling tiling must not disturb the exact-match path."""
+        monkeypatch.delenv("CORESMITH_ALLOW_MACRO_TILING", raising=False)
+        res = og.ensure_macro(
+            256, 32, allow_generate=False, registry=self._reg(tmp_path)
+        )
+        assert getattr(res, "name", None) == "sky130_sram_1kbyte_1rw1r_32x256_8"
+
+    def test_over_provision_gated_too(self, tmp_path, monkeypatch):
+        """32x64 is over-provisionable but must escalate when tiling is off."""
+        monkeypatch.delenv("CORESMITH_ALLOW_MACRO_TILING", raising=False)
+        reg = self._reg(tmp_path)
+        assert og.plan_over_provisioned(64, 32, reg) is not None  # available...
+        assert og.ensure_macro(64, 32, allow_generate=False, registry=reg) is None
+
     def test_over_provision_shallow_depth(self, tmp_path):
         # 32x64: no exact tiling (64 not a multiple of 256/512), but a single
         # 32x256 prebuilt COVERS it with the high address bits tied off.
@@ -283,9 +344,12 @@ class TestOpenRAMFallback:
         plan = og.plan_over_provisioned(200, 32, reg)
         assert plan.base.name == "sky130_sram_1kbyte_1rw1r_32x256_8"
 
-    def test_ensure_over_provisions_before_flopping(self, tmp_path):
+    def test_ensure_over_provisions_before_flopping(self, tmp_path, monkeypatch):
         # ensure_macro must reach over-provisioning (not None) when exact +
         # exact-tiling both miss and generation is disabled.
+        # Tiling is OFF by default now, so this path requires the opt-in flag;
+        # TestTilingDisabledByDefault covers the default (escalate) behaviour.
+        monkeypatch.setenv("CORESMITH_ALLOW_MACRO_TILING", "1")
         reg = self._reg(tmp_path)
         import orchestrator.langgraph.openram_gen as ogmod
         orig = ogmod.discover_macros
@@ -309,7 +373,9 @@ class TestOpenRAMFallback:
         finally:
             ogmod.discover_macros = orig
 
-    def test_ensure_returns_exact_before_compose(self, tmp_path):
+    def test_ensure_returns_exact_before_compose(self, tmp_path, monkeypatch):
+        # The over-provision leg below needs tiling explicitly enabled.
+        monkeypatch.setenv("CORESMITH_ALLOW_MACRO_TILING", "1")
         reg = self._reg(tmp_path)
         import orchestrator.langgraph.openram_gen as ogmod
         orig = ogmod.discover_macros

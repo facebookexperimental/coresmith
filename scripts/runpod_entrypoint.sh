@@ -43,6 +43,7 @@ if [[ -f /etc/coresmith.env ]]; then
     . /etc/coresmith.env
     [[ -n "${CLAUDE_CLI_PATH:-}" ]] && export CLAUDE_CLI_PATH
     [[ -n "${OPENCODE_CLI_PATH:-}" ]] && export OPENCODE_CLI_PATH
+    [[ -n "${KIMI_CLI_PATH:-}" ]] && export KIMI_CLI_PATH
 fi
 
 # --- Project root -----------------------------------------------------------
@@ -103,8 +104,35 @@ OpenRouter. Set CORESMITH_MODE=shell to authenticate interactively.
 MSG
         exit 2
     fi
+    if [[ "${provider}" == "kimi" || "${provider}" == "kimi_cli" ]]; then
+        if [[ -n "${KIMI_MODEL_NAME:-}" && -n "${KIMI_MODEL_API_KEY:-}" ]]; then
+            echo "[coresmith] auth: using KIMI_MODEL_NAME/KIMI_MODEL_API_KEY"
+            export KIMI_MODEL_NAME KIMI_MODEL_API_KEY
+            return 0
+        fi
+        local kimi_home="${KIMI_CODE_HOME:-${HOME:-/root}/.kimi-code}"
+        if [[ -f "${kimi_home}/config.toml" ]]; then
+            echo "[coresmith] auth: using Kimi Code config at ${kimi_home}"
+            export KIMI_CODE_HOME="${kimi_home}"
+            return 0
+        fi
+        cat <<'MSG' >&2
+
+[coresmith] ERROR: no Kimi Code credentials found.
+
+Either persist a prior `kimi login` directory and set KIMI_CODE_HOME, or set:
+
+  KIMI_MODEL_NAME       -- model id for the temporary provider
+  KIMI_MODEL_API_KEY    -- Kimi Platform API key
+
+Set CORESMITH_MODE=shell to enter the container and run `kimi login`.
+
+MSG
+        exit 2
+    fi
 
     if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+
         echo "[coresmith] auth: using CLAUDE_CODE_OAUTH_TOKEN"
         export CLAUDE_CODE_OAUTH_TOKEN
         return 0

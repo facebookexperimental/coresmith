@@ -1,7 +1,8 @@
 # Authentication
 
-coresmith supports Claude Code by default and OpenCode with OpenRouter's hosted
-Kimi K3. Select the latter with `CORESMITH_LLM_PROVIDER=opencode`.
+coresmith supports Claude Code (default), Codex CLI, OpenCode with OpenRouter's
+hosted Kimi K3, and the Kimi Code CLI. Select OpenCode with
+`CORESMITH_LLM_PROVIDER=opencode`, or Kimi Code with `CORESMITH_LLM_PROVIDER=kimi`.
 
 ## OpenCode + OpenRouter (Kimi K3)
 
@@ -38,6 +39,47 @@ consumes the NDJSON event stream. Every valid event—including model-exposed
 and usage remain in `.coresmith/llm_calls.jsonl`. The trajectory file can contain
 sensitive prompt, reasoning, and tool content, so protect it like other run
 artifacts. CoreSmith uses `permission: "deny"` when tools are disabled.
+
+## Kimi Code
+
+Install the official CLI (Node.js 22.19 or newer is required):
+
+```bash
+npm install -g @moonshot-ai/kimi-code
+kimi --version
+```
+
+For a developer machine or persistent worker, use Kimi's device-code login:
+
+```bash
+kimi login
+export CORESMITH_LLM_PROVIDER=kimi
+```
+
+The CLI stores config, sessions, and OAuth credentials in `~/.kimi-code`. Set
+`KIMI_CODE_HOME` to relocate that directory; mount it on persistent storage in
+a container or ephemeral worker.
+
+For headless API-key deployments, Kimi Code's explicit temporary-model channel
+requires both variables (an ordinary exported `KIMI_API_KEY` is not read):
+
+```bash
+export KIMI_MODEL_NAME=kimi-for-coding
+export KIMI_MODEL_API_KEY=...
+export CORESMITH_LLM_PROVIDER=kimi
+```
+
+Optional coresmith overrides:
+
+```bash
+export CORESMITH_KIMI_MODEL=kimi-code/k3
+export KIMI_CLI_PATH=/usr/local/bin/kimi
+export CORESMITH_KIMI_WORKDIR=/path/to/project
+```
+
+coresmith communicates with `kimi acp` over stdin/stdout JSON-RPC. This avoids
+command-line length limits for large RTL prompts and preserves streaming token
+usage.
 
 ## Claude Code
 

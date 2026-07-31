@@ -61,16 +61,56 @@ class TestParsing:
         area = mc._lef_area_um2(str(lef))
         assert area and abs(area - 479.78 * 397.5) < 1e-3
 
-    def test_lib_access_time(self, tmp_path):
+    # A clk->dout access arc is NOT a legal clock period. These pin the
+    # replacement of _lib_access_time_ns (which returned 0.484 ns here, i.e.
+    # a claimed 2066 MHz) with the Liberty's own cycle-time constraints.
+
+    _MIN_PERIOD_LIB = (
+        'time_unit : "1ns" ;\n'
+        'pin(dout0){ timing(){ related_pin:"clk0";\n'
+        '  cell_rise(t){ values("0.339, 0.368, 0.484"); }\n'
+        '  cell_fall(t){ values("0.300, 0.300, 0.300"); } }\n'
+        '  timing(){ related_pin:"clk0"; timing_type :"minimum_period";\n'
+        '    rise_constraint(s){ values("1.791"); }\n'
+        '    fall_constraint(s){ values("1.791"); } } }\n'
+    )
+
+    def test_lib_min_cycle_time_prefers_minimum_period(self, tmp_path):
+        lib = tmp_path / "m.lib"
+        lib.write_text(self._MIN_PERIOD_LIB)
+        cyc = mc._lib_min_cycle_time_ns(str(lib))
+        # 1.791 ns => 558 MHz, NOT 1000/0.484 = 2066 MHz.
+        assert cyc and abs(cyc - 1.791) < 1e-6
+        assert 1000.0 / cyc < 600.0
+
+    def test_lib_min_cycle_time_falls_back_to_pulse_widths(self, tmp_path):
         lib = tmp_path / "m.lib"
         lib.write_text(
+            'time_unit : "1ns" ;\n'
             'pin(dout0){ timing(){ related_pin:"clk0";\n'
-            '  cell_rise(t){ values("0.339, 0.368, 0.484",\n'
-            '                       "0.339, 0.368, 0.484"); }\n'
-            '  cell_fall(t){ values("0.300, 0.300, 0.300"); } } }\n'
+            '  timing_type :"min_pulse_width";\n'
+            '    rise_constraint(s){ values("0.8955"); }\n'
+            '    fall_constraint(s){ values("0.8955"); } } }\n'
         )
-        acc = mc._lib_access_time_ns(str(lib))
-        assert acc and abs(acc - 0.484) < 1e-6
+        cyc = mc._lib_min_cycle_time_ns(str(lib))
+        assert cyc and abs(cyc - 1.791) < 1e-6
+
+    def test_lib_min_cycle_time_scales_by_time_unit(self, tmp_path):
+        """A lib declaring ps must not be read 1000x too fast."""
+        lib = tmp_path / "m.lib"
+        lib.write_text(self._MIN_PERIOD_LIB.replace('"1ns"', '"1ps"'))
+        cyc = mc._lib_min_cycle_time_ns(str(lib))
+        assert cyc and abs(cyc - 0.001791) < 1e-9
+
+    def test_lib_min_cycle_time_fails_closed(self, tmp_path):
+        """No cycle evidence -> None, never an invented frequency."""
+        lib = tmp_path / "m.lib"
+        lib.write_text(
+            'time_unit : "1ns" ;\n'
+            'pin(dout0){ timing(){ related_pin:"clk0";\n'
+            '  cell_rise(t){ values("0.484"); } } }\n'
+        )
+        assert mc._lib_min_cycle_time_ns(str(lib)) is None
 
 
 # --------------------------------------------------------------------------

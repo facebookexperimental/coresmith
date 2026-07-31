@@ -28,9 +28,11 @@ from orchestrator.langchain.agents.coresmith_llm import (
     _CLI_MODEL_MAP,
     _CODEX_MODEL_MAP,
     _OPENCODE_MODEL_MAP,
+    _KIMI_MODEL_MAP,
     _RESUME_FLAGS_CACHE,
     BLOCK_MODEL,
     DEFAULT_CODEX_MODEL,
+    DEFAULT_KIMI_MODEL,
     DEFAULT_MODEL,
     DEFAULT_OPENCODE_MODEL,
     ClaudeLLM,
@@ -45,6 +47,7 @@ from orchestrator.langchain.agents.coresmith_llm import (
     _log_opencode_turns,
     _parse_codex_json,
     _parse_opencode_json,
+    _parse_kimi_acp_json,
     _register_process,
     _resolve_model,
     _unregister_process,
@@ -65,6 +68,8 @@ def _clear_provider_env(monkeypatch):
     monkeypatch.delenv("CORESMITH_CODEX_MODEL", raising=False)
     monkeypatch.delenv("CORESMITH_OPENCODE_MODEL", raising=False)
     monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
+    monkeypatch.delenv("CORESMITH_KIMI_MODEL", raising=False)
+    monkeypatch.delenv("KIMI_MODEL_NAME", raising=False)
     # Keep the JSONL-log path tests hermetic: _llm_log_root() prefers these
     # over CORESMITH_PROJECT_ROOT, so an ambient value (e.g. a CI/log-capture
     # harness) would redirect writes away from the per-test tmp_path.
@@ -159,6 +164,22 @@ class TestModelNameMapping:
         monkeypatch.setenv("CORESMITH_OPENCODE_MODEL", custom)
         assert _resolve_model("opus-4.8", "opencode_cli") == custom
 
+    def test_kimi_model_tiers_map_to_catalog_aliases(self):
+        assert _resolve_model("opus-4.7", "kimi_cli") == "kimi-code/k3"
+        assert _resolve_model("sonnet-4.6", "kimi_cli") == "kimi-code/kimi-for-coding"
+
+    def test_kimi_default_model_constant(self):
+        assert DEFAULT_KIMI_MODEL == "kimi-code/k3"
+        assert _KIMI_MODEL_MAP["opus-4.7"] == DEFAULT_KIMI_MODEL
+
+    def test_coresmith_kimi_model_env_overrides_passed_value(self, monkeypatch):
+        monkeypatch.setenv("CORESMITH_KIMI_MODEL", "kimi-code/kimi-for-coding")
+        assert _resolve_model("opus-4.7", "kimi_cli") == "kimi-code/kimi-for-coding"
+
+    def test_kimi_environment_model_uses_reserved_runtime_alias(self, monkeypatch):
+        monkeypatch.setenv("KIMI_MODEL_NAME", "kimi-for-coding")
+        assert _resolve_model("opus-4.7", "kimi_cli") == "__kimi_env_model__"
+
 
 class TestProviderDetection:
     def test_defaults_to_claude_cli(self, monkeypatch):
@@ -168,6 +189,10 @@ class TestProviderDetection:
     def test_codex_provider_env(self, monkeypatch):
         monkeypatch.setenv("CORESMITH_LLM_PROVIDER", "codex")
         assert _detect_provider() == "codex_cli"
+
+    def test_kimi_provider_env(self, monkeypatch):
+        monkeypatch.setenv("CORESMITH_LLM_PROVIDER", "kimi")
+        assert _detect_provider() == "kimi_cli"
 
     @pytest.mark.parametrize("alias", ["opencode", "opencode_cli", "openrouter"])
     def test_opencode_provider_aliases(self, monkeypatch, alias):
@@ -364,6 +389,24 @@ class TestCodexSessionResume:
         assert "resume" not in second_cmd        # attempt 2 is a fresh exec
         assert model.last_session_id == "new"    # new session captured
 
+
+
+class TestKimiAcpJsonParsing:
+    def test_parse_streamed_text_and_usage(self):
+        stdout = (
+            '{"method":"session/update","params":{"update":{"sessionUpdate":'
+            '"agent_message_chunk","content":{"type":"text","text":"hello"}}}}\n'
+            '{"id":4,"result":{"usage":{"inputTokens":10,"outputTokens":2,'
+            '"totalTokens":12,"thoughtTokens":4}}}\n'
+        )
+        text, usage = _parse_kimi_acp_json(stdout)
+        assert text == "hello"
+        assert usage == {
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "total_tokens": 12,
+            "reasoning_output_tokens": 4,
+        }
 
 class TestLLMTelemetry:
     def test_log_llm_call_backdates_otel_span(self, tmp_path, monkeypatch):
