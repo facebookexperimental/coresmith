@@ -747,6 +747,66 @@ def rtl_reference_source(block: dict) -> tuple[str, bool]:
 # Microarchitecture Spec Generation
 # ---------------------------------------------------------------------------
 
+def _report_uarch_golden(block_name: str, ref: str, resolved: str) -> None:
+    """D1: never let an unreadable / absent golden pass SILENTLY.
+
+    Three cases, three different truths -- and the old code told none of them,
+    because every reader of a golden returns "" on failure while the uArch
+    prompt appended the golden section unconditionally. Measured on the raster
+    validation run: all 8 uArch calls carried an empty golden block and nothing
+    anywhere said so.
+
+      * ref declared AND resolved  -> nothing to say.
+      * ref declared, resolved ""  -> a BROKEN PROMISE. The block diagram names
+        a transcription target that cannot be read; the spec author would have
+        invented the math in its place. RED log + carried defect naming the ref.
+      * no ref at all              -> this block legitimately has no reference
+        golden (6 of 8 raster blocks). Log it and carry it forward, because the
+        spec -- and every RTL lowering below it -- is then unconstrained by any
+        reference and the final report should say so.
+
+    Neither empty case raises here: the hard failure belongs where a FLAG
+    explicitly promised a golden (``CORESMITH_RTL_FROM_HW_GOLDEN`` in the RTL
+    generator, which tells the model in as many words that its output must be
+    byte-exact to a file). A block diagram ref is a weaker claim, and failing
+    every such block would trade a silent gap for a stopped run.
+    """
+    if resolved.strip():
+        return
+    if ref:
+        log(f"  [UARCH] {block_name}: DECLARED golden '{ref}' resolves to "
+            "NOTHING (missing file, bad slice name, or unreadable). The spec "
+            "author is being asked to design with no transcription target and "
+            "will invent the math. FIX THE REF.", RED)
+        kind, detail = "declared_golden_unreadable", (
+            f"block '{block_name}' declares python_source '{ref}' but it "
+            "resolves to nothing, so its uArch spec was written with an EMPTY "
+            "golden model")
+    else:
+        log(f"  [UARCH] {block_name}: NO reference golden model (no "
+            "python_source in the block diagram). The uArch spec -- and every "
+            "RTL lowering below it -- is unconstrained by any reference for "
+            "this block.", YELLOW)
+        kind, detail = "no_reference_golden", (
+            f"block '{block_name}' has no reference golden model "
+            "(python_source absent), so its uArch spec and RTL were never "
+            "checked against one")
+    try:
+        from orchestrator.langgraph.pipeline_graph import (
+            record_carried_forward_defect,
+        )
+        record_carried_forward_defect(str(PROJECT_ROOT), {
+            "gate": "uarch_golden",
+            "kind": kind,
+            "advisory": True,
+            "unmodeled": detail,
+            "first_divergence_block": block_name,
+            "note": "",
+        })
+    except Exception:  # noqa: BLE001 - reporting must never block generation
+        pass
+
+
 async def generate_uarch_spec(
     block: dict,
     feedback: str = "",
@@ -773,8 +833,9 @@ async def generate_uarch_spec(
     # block's OWN golden math -- not empty, not the whole chip golden). Read the
     # ref from the LIVE block_diagram.json so a chip-lead's on-disk slice edit is
     # honoured on a feasibility revise (not shadowed by the checkpoint).
-    python_source = resolve_python_source(
-        _live_python_source_ref(block, PROJECT_ROOT), PROJECT_ROOT)
+    _golden_ref = _live_python_source_ref(block, PROJECT_ROOT)
+    python_source = resolve_python_source(_golden_ref, PROJECT_ROOT)
+    _report_uarch_golden(block.get("name", ""), _golden_ref, python_source)
 
     # C13: snapshot the pre-call canonical spec + call start time. The old
     # arbitration let (a) the PRE-CALL on-disk spec compete as a "candidate"

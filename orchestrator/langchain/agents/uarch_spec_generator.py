@@ -445,9 +445,27 @@ class UarchSpecGenerator:
                     except OSError:
                         pass
 
-            parts.append(
-                f"\n--- Python Golden Model ---\n```python\n{python_source}\n```"
-            )
+            # D1: an EMPTY golden must not be dressed up as a golden. This block
+            # used to append the section unconditionally, so a block whose
+            # python_source resolved to "" got `--- Python Golden Model ---`
+            # followed by an empty code fence -- indistinguishable, to the spec
+            # author, from a golden that says nothing. Measured on the raster
+            # validation run: all 8 uArch calls carried an empty golden block,
+            # silently. Say what actually happened instead.
+            if python_source.strip():
+                parts.append(
+                    f"\n--- Python Golden Model ---\n```python\n{python_source}\n```"
+                )
+            else:
+                parts.append(
+                    "\n--- Python Golden Model: NONE SUPPLIED ---\n"
+                    "This block has NO reference golden model. Nothing below is "
+                    "a transcription target: derive the microarchitecture from "
+                    "the description, the interface contracts and the ERS above, "
+                    "and state explicitly in the spec that no golden model "
+                    "constrained it. Do NOT invent one and do NOT assume the "
+                    "golden was omitted for brevity -- it does not exist."
+                )
 
             user_message = "\n".join(parts)
 

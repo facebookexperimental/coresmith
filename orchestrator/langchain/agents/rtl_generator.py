@@ -419,6 +419,26 @@ class RTLGeneratorAgent:
                 # forces the byte-exact target into context, the same fix the
                 # interface contracts already use below.
                 _hw_src = _read_hw_golden_source(project_root, python_source_path)
+                if not _hw_src.strip():
+                    # D1: the prompt three paragraphs up has just told the
+                    # generator "the golden model above is the per-block Amaranth
+                    # HARDWARE model ... the RTL must be FUNCTIONALLY BYTE-EXACT
+                    # to this model". If the file cannot be read, that sentence
+                    # is false and the generator is being asked to be byte-exact
+                    # to nothing -- it will re-derive the algorithm, which is the
+                    # precise failure the hardware-golden flag exists to stop.
+                    # Reading "" and carrying on was a silent fail-open.
+                    raise RuntimeError(
+                        f"RTL generation for '{block_name}': the run promised a "
+                        f"HARDWARE GOLDEN ({python_source_path}) as the "
+                        "byte-exact lowering target (CORESMITH_RTL_FROM_HW_GOLDEN"
+                        "), but it is empty or unreadable. Refusing to ask for a "
+                        "byte-exact lowering of nothing -- the generator would "
+                        "re-derive the algorithm and the equivalence gate would "
+                        "then fail on RTL nobody could explain. Regenerate the "
+                        "block model, or turn the flag off to fall back to the "
+                        "reference golden."
+                    )
                 if _hw_src and _prompt_slim_enabled():
                     # B4 prompt-slim: path + head instead of the full inline.
                     # The equivalence gate (with a fresh seed) catches any
