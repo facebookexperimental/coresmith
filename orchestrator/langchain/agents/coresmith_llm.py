@@ -753,6 +753,122 @@ DEFAULT_OPENCODE_MODEL = "openrouter/moonshotai/kimi-k3"
 # Override with CORESMITH_BLOCK_MODEL env var.
 BLOCK_MODEL = "sonnet-5"
 
+# --- OpenCode reasoning-effort ("--variant") handling ------------------------
+# OpenRouter's hosted Kimi models (kimi-k3 / kimi-k2-thinking) expose reasoning
+# EFFORT tiers {low, high, max} ONLY. "minimal" -- the natural thing to reach
+# for when you want to *cap* reasoning -- is NOT a valid effort for these
+# models; the provider silently ignores it and leaves FULL (high) reasoning in
+# effect. That is a silent, high-cost footgun: on a large tool-emitting turn
+# (e.g. the ~18K-token block_diagram.json write) full reasoning can burn the
+# whole ~32K completion budget before the file tool is ever called, truncating
+# mid-turn (reason="length") so nothing is written. We therefore normalise the
+# configured variant to a provider-valid tier (mapping known aliases, dropping
+# anything unrecognised with a warning) instead of shipping a no-op flag.
+_OPENCODE_KIMI_VALID_VARIANTS = frozenset({"low", "high", "max"})
+_OPENCODE_VARIANT_ALIASES = {
+    "minimal": "low",
+    "min": "low",
+    "minimum": "low",
+    "none": "low",
+    "off": "low",
+    "medium": "high",  # no "medium" tier on Kimi -- round to the nearest valid
+    "mid": "high",
+    "xhigh": "max",
+    "highest": "max",
+}
+# Architecture pipeline steps whose LLM turn emits a LARGE structured artifact
+# through a file-write tool. For these, full reasoning starves the completion
+# budget before the write lands, so we default the reasoning effort to "low"
+# when the operator has not set CORESMITH_OPENCODE_VARIANT. Frontend / diagnose
+# steps (where deep reasoning is valuable and outputs are small) are left at the
+# provider default. Keyed on the ``run_name`` label call() records.
+_OPENCODE_LOW_REASONING_STEPS = frozenset({"block_diagram"})
+
+
+def _normalize_opencode_variant(variant: str, resolved_model: str) -> str:
+    """Return a provider-valid ``--variant`` value, or "" to omit the flag.
+
+    ``variant`` is the raw configured reasoning-effort string. For OpenRouter's
+    hosted Kimi models only low/high/max are accepted; an unknown value
+    (notably "minimal") is silently ignored by the provider and leaves full
+    reasoning in effect. We map known aliases to a valid tier and drop
+    unrecognised values (with a warning) so the caller never ships a no-op flag
+    that a reader would mistake for an applied reasoning cap. Non-Kimi opencode
+    models pass through unchanged (their own effort vocabulary is respected).
+    """
+    v = (variant or "").strip().lower()
+    if not v:
+        return ""
+    if "kimi" not in (resolved_model or "").lower():
+        return v
+    if v in _OPENCODE_KIMI_VALID_VARIANTS:
+        return v
+    mapped = _OPENCODE_VARIANT_ALIASES.get(v)
+    if mapped:
+        logger.warning(
+            "CORESMITH_OPENCODE_VARIANT=%r is not a valid reasoning effort for "
+            "%s (valid: %s); using %r instead.",
+            variant, resolved_model,
+            sorted(_OPENCODE_KIMI_VALID_VARIANTS), mapped,
+        )
+        return mapped
+    logger.warning(
+        "CORESMITH_OPENCODE_VARIANT=%r is not recognised for %s (valid: %s); "
+        "omitting --variant so the provider default reasoning applies.",
+        variant, resolved_model, sorted(_OPENCODE_KIMI_VALID_VARIANTS),
+    )
+    return ""
+
+
+def _resolve_opencode_variant(resolved_model: str, run_name: str) -> str:
+    """Resolve the effective ``--variant`` value for one opencode call.
+
+    Precedence: an explicit ``CORESMITH_OPENCODE_VARIANT`` (normalised) wins;
+    otherwise large-output architecture steps (``_OPENCODE_LOW_REASONING_STEPS``)
+    default to "low" reasoning so a big file-writing turn cannot be starved of
+    completion tokens before the write. Everything else stays at the provider
+    default (no flag).
+    """
+    raw = os.environ.get("CORESMITH_OPENCODE_VARIANT", "").strip()
+    if not raw and run_name in _OPENCODE_LOW_REASONING_STEPS:
+        raw = "low"
+    return _normalize_opencode_variant(raw, resolved_model)
+
+
+# Error signatures that indicate a TRANSIENT provider/network failure (as
+# opposed to a deterministic bad request or a clean completion). OpenRouter
+# routinely drops long streams with a 502 "Network connection lost"
+# (provider_unavailable) mid-turn; retrying the whole call is the correct
+# recovery and cheap relative to losing a completed architecture step.
+_OPENCODE_TRANSIENT_SIGNATURES = (
+    "provider_unavailable",
+    "network connection lost",
+    "connection error",
+    "socket hang up",
+    "econnreset",
+    "temporarily unavailable",
+    "overloaded",
+    "502",
+    "503",
+    "429",
+)
+
+
+def _is_transient_opencode_failure(
+    returncode: int, output: str, stderr: str
+) -> bool:
+    """Whether an opencode failure looks transient enough to retry.
+
+    Returns False for a clean exit (returncode 0) and for signal-kills
+    (returncode < 0, e.g. SIGTERM from a daemon pause/shutdown -- retrying an
+    externally-cancelled turn is wrong). Otherwise matches known transient
+    provider/network signatures in the combined stderr/stdout.
+    """
+    if returncode == 0 or returncode < 0:
+        return False
+    blob = f"{stderr or ''}\n{output or ''}".lower()
+    return any(sig in blob for sig in _OPENCODE_TRANSIENT_SIGNATURES)
+
 
 def _resolve_model(model: str, provider: str = "claude_cli") -> str:
     """Map short model name to the selected CLI model ID.
@@ -2228,6 +2344,16 @@ class ClaudeLLM:
             "--dir", workdir,
             "--auto",
         ]
+        # Reasoning-effort variant (opencode --variant). For hosted Kimi the
+        # valid tiers are low/high/max (NOT "minimal" -- see
+        # _normalize_opencode_variant). CORESMITH_OPENCODE_VARIANT, when set,
+        # wins after normalisation; otherwise large-output architecture steps
+        # (block_diagram) default to "low" so a big JSON file-write turn is not
+        # starved of completion tokens by runaway reasoning (reason="length").
+        _run_name = (_call_site_context.get(None) or {}).get("run_name", "")
+        _variant = _resolve_opencode_variant(resolved_model, _run_name)
+        if _variant:
+            cmd.extend(["--variant", _variant])
 
         process_env = os.environ.copy()
         if self.disable_tools:
@@ -2250,38 +2376,72 @@ class ClaudeLLM:
             len(user_prompt),
             len(system_prompt),
         )
-        t0 = _time_mod.monotonic()
-        span_start_ns = _time_mod.time_ns()
+        # Bounded retry on TRANSIENT provider failures (OpenRouter 5xx / dropped
+        # stream). Default 1 retry; override with CORESMITH_OPENCODE_MAX_RETRIES.
         try:
-            output, stderr_text, returncode, elapsed, timed_out, stalled, usage = (
-                self._run_cli_with_watchdog(
-                    cmd,
-                    combined_prompt,
-                    project_root,
-                    resolved_model,
-                    t0,
-                    process_env=process_env,
+            _max_retries = int(
+                os.environ.get("CORESMITH_OPENCODE_MAX_RETRIES", "1") or 1
+            )
+        except ValueError:
+            _max_retries = 1
+        _attempt = 0
+        while True:
+            t0 = _time_mod.monotonic()
+            span_start_ns = _time_mod.time_ns()
+            try:
+                output, stderr_text, returncode, elapsed, timed_out, stalled, usage = (
+                    self._run_cli_with_watchdog(
+                        cmd,
+                        combined_prompt,
+                        project_root,
+                        resolved_model,
+                        t0,
+                        process_env=process_env,
+                    )
                 )
-            )
-        except FileNotFoundError:
-            elapsed = _time_mod.monotonic() - t0
-            error_msg = "OpenCode CLI binary not found"
-            output = (
-                "[ClaudeLLM error: OpenCode CLI binary not found. "
-                "Install: npm install -g opencode-ai]"
-            )
-            _log_llm_call(
-                model=resolved_model,
-                provider="opencode_cli",
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                response=output,
-                duration_s=elapsed,
-                timeout=self.timeout,
-                error=error_msg,
-                start_ts_ns=span_start_ns,
-            )
-            return output
+            except FileNotFoundError:
+                elapsed = _time_mod.monotonic() - t0
+                error_msg = "OpenCode CLI binary not found"
+                output = (
+                    "[ClaudeLLM error: OpenCode CLI binary not found. "
+                    "Install: npm install -g opencode-ai]"
+                )
+                _log_llm_call(
+                    model=resolved_model,
+                    provider="opencode_cli",
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    response=output,
+                    duration_s=elapsed,
+                    timeout=self.timeout,
+                    error=error_msg,
+                    start_ts_ns=span_start_ns,
+                )
+                return output
+
+            if (
+                _attempt < _max_retries
+                and not timed_out
+                and not stalled
+                and _is_transient_opencode_failure(returncode, output, stderr_text)
+            ):
+                _attempt += 1
+                logger.warning(
+                    "OpenCode transient provider failure (retry %d/%d): %s",
+                    _attempt, _max_retries,
+                    (stderr_text or output or "")[:200],
+                )
+                self._write_llm_event(project_root, "llm_transient_retry", {
+                    "model": resolved_model,
+                    "provider": "opencode_cli",
+                    "attempt": _attempt,
+                    "max_retries": _max_retries,
+                    "returncode": returncode,
+                    "detail": (stderr_text or output or "")[:300],
+                })
+                _time_mod.sleep(min(2 ** _attempt, 8))
+                continue
+            break
 
         if timed_out or stalled:
             reason = "stalled" if stalled else "timed out"
