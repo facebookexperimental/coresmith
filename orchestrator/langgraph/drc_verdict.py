@@ -11,7 +11,7 @@ DRC run that produced NO REPORT AT ALL as::
 
     {"pass": false, "violation_count": -1}   ->   stage {"ok": false, "violations": -1}
 
-Two real macros in ``exp-raster-macro-20260727`` (``w32_d64``, ``w9_d512``)
+Two real macros from a validation run (``w32_d64``, ``w9_d512``)
 carry exactly that, and the ``precheck_magic_drc.rpt`` those verdicts name was
 never written -- Magic produced nothing even though the binary was on PATH.
 ``-1`` was *intended* as a "could not measure" sentinel, but every consumer read

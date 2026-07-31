@@ -20,13 +20,15 @@ from __future__ import annotations
 
 import inspect
 
+import re as _re
+
 from . import qspi_contract as _contract_mod
 from . import qspi_master_bfm as _bfm_mod
 from . import qspi_rom_bfm as _rom_mod
-from .maxgeo import BusMaxgeoCoverage, bus_maxgeo_coverage
+from .maxgeo import BusMaxgeoCoverage, bus_maxgeo_coverage, functional_maxgeo_dims
 from .qspi_contract import QSPIContract
 from .qspi_rom_bfm import QSPIRomContract
-from .stimulus import StimulusPlan
+from .stimulus import MaxGeoCase, StimulusPlan
 
 # ---------------------------------------------------------------------------
 # CFG read-back probe patterns (bus-protocol conformance, phase A)
@@ -352,34 +354,191 @@ async def qspi_slave_protocol_conformance(dut):
 {op_probe}{maxgeo_block}'''
 
 
-def render_maxgeo_markers(coverage: BusMaxgeoCoverage | None) -> str:
+def marker_token(text: str) -> str:
+    """Collapse free-form text to a single whitespace-free marker token.
+
+    Marker lines are whitespace-separated ``key=value`` records; a case name
+    carrying a space would silently split into two bogus records.
+    """
+    tok = _re.sub(r"\s+", "_", str(text).strip())
+    return tok or "(unnamed)"
+
+
+def render_maxgeo_case_marker(case: MaxGeoCase | None) -> str:
+    """The ``# MAXGEO_CASE:`` marker naming the max-configuration host-flow case.
+
+    ``# MAXGEO_CASE: name=<case> cfg0=<value> in_bytes=<n> out_bytes=<n>``
+
+    Like ``MAXGEO_NOT_COVERED`` and ``MAXGEO_SCOPE``, the underscore form does
+    NOT match the gate's ``#\\s*MAXGEO\\b`` coverage regex, so the case record
+    can never be misparsed as a coverage claim for a dim literally named
+    ``cfg0``/``in_bytes``/``out_bytes``. It is a provenance record: WHICH case
+    the max-geometry functional test drives, and at what magnitudes.
+    """
+    if case is None:
+        return ""
+    return (
+        "# MAXGEO_CASE: name=%s cfg0=%d in_bytes=%d out_bytes=%d"
+        % (marker_token(case.plan.case_name), int(case.cfg0),
+           int(case.in_bytes), int(case.out_bytes))
+    )
+
+
+def render_maxgeo_markers(
+    coverage: BusMaxgeoCoverage | None,
+    functional: dict | None = None,
+    case: MaxGeoCase | None = None,
+) -> str:
     """The ``# MAXGEO`` header block for a generated testbench.
 
-    Three lines, all machine-readable:
+    Machine-readable, all of it:
 
-      ``# MAXGEO: <dim>=<max> ...``       -- ONLY dims this TB drives at maximum
+      ``# MAXGEO: <dim>=<max> ...``       -- BUS dims driven at maximum extent
+      ``# MAXGEO: <dim>=<max> ...``       -- COMPUTE-LANE dims the max-geometry
+                                             functional case drives at maximum
+                                             (omitted when there are none)
+      ``# MAXGEO_CASE: name=... ...``     -- which acceptance case that is
       ``# MAXGEO_SCOPE: ...``             -- what kind of coverage this is
       ``# MAXGEO_NOT_COVERED: <dim>=<max> ...`` -- what it does NOT reach
 
-    The last two deliberately do NOT match the gate's ``# MAXGEO\\b`` marker
-    regex (``MAXGEO_`` has no word boundary after ``MAXGEO``), so recording an
-    UNCOVERED dim can never be misread as coverage. A marker is a claim; a claim
-    without the traffic behind it is worse than no claim at all.
+    Only the ``# MAXGEO:`` lines match the gate's marker regex; every other tag
+    carries an underscore right after ``MAXGEO`` (no word boundary), so a
+    confession or a provenance record can never be misread as coverage. A marker
+    is a claim; a claim without the traffic behind it is worse than no claim.
+
+    ``functional`` dims are SUBTRACTED from the confession -- and only those: a
+    dim the functional case does not drive at its declared maximum stays
+    confessed, however large the case is.
     """
-    if coverage is None:
+    covered_line = coverage.marker_line() if coverage is not None else ""
+    func = {str(k): int(v) for k, v in (functional or {}).items()}
+    uncovered = {}
+    if coverage is not None:
+        uncovered = {n: v for n, v in coverage.uncovered.items() if n not in func}
+    case_line = render_maxgeo_case_marker(case)
+    if not (covered_line or func or uncovered or case_line):
         return ""
-    lines = [ln for ln in (coverage.marker_line(),) if ln]
-    if not lines and not coverage.uncovered:
-        return ""
-    lines.append(
-        "# MAXGEO_SCOPE: bus-contract-only -- this testbench is the deterministic "
-        "QSPI-slave\n#   conformance DV. It has NO compute oracle, so it drives the "
-        "BUS dimensions at\n#   their declared maxima and cannot drive compute-lane "
-        "geometry at all."
-    )
-    if coverage.uncovered_line():
-        lines.append(coverage.uncovered_line())
+
+    lines: list[str] = []
+    if covered_line:
+        lines.append(covered_line)
+    if func:
+        lines.append(
+            "# MAXGEO: "
+            + " ".join(f"{n}={v}" for n, v in sorted(func.items()))
+        )
+    if case_line:
+        lines.append(case_line)
+    if func or case is not None:
+        lines.append(
+            ("# MAXGEO_SCOPE: bus contract at declared maxima PLUS the "
+             if covered_line else
+             "# MAXGEO_SCOPE: no bus-maxima probes in this testbench; the ")
+            + "max-configuration\n#   host-flow case named in MAXGEO_CASE, whose "
+            "golden was evaluated at\n#   GENERATION time and is asserted "
+            "byte-exact. Compute-lane dimensions the\n#   selected case does not "
+            "drive at their declared maximum stay in\n#   MAXGEO_NOT_COVERED."
+        )
+    else:
+        lines.append(
+            "# MAXGEO_SCOPE: bus-contract-only -- this testbench is the deterministic "
+            "QSPI-slave\n#   conformance DV. It has NO compute oracle, so it drives the "
+            "BUS dimensions at\n#   their declared maxima and cannot drive compute-lane "
+            "geometry at all."
+        )
+    if uncovered:
+        pairs = " ".join(f"{n}={v}" for n, v in sorted(uncovered.items()))
+        lines.append(f"# MAXGEO_NOT_COVERED: {pairs}")
     return "\n".join(lines) + "\n"
+
+
+def render_maxgeo_functional_test_fn(
+    contract: QSPIContract, case: MaxGeoCase, marked: dict | None = None
+) -> str:
+    """Emit the MAX-CONFIGURATION host-flow ``@cocotb.test()`` as source.
+
+    Same shape as the primary host-flow test -- CFG writes, IN burst, START,
+    poll DONE, read OUT, byte-exact vs the golden -- but for the acceptance case
+    that drives the LARGEST geometry, with its golden baked at GENERATION time
+    exactly like the primary's. No runtime import of the reference model: the
+    emitted testbench stays hermetic.
+
+    The point is the counters, not a second correctness sample: a length/index
+    width sized below the declared maximum survives the small canonical case and
+    wraps here, and the first-differing-byte message says where.
+    """
+    plan = case.plan
+    clk = contract.clk_name
+    cfg_lits = ", ".join(f"({a}, {v}, {w})" for (a, v, w) in plan.cfg)
+    write_lits = ", ".join(
+        f"({a}, bytes.fromhex({d.hex()!r}))" for (a, d) in plan.writes
+    )
+    marked_txt = (
+        " ".join(f"{n}={v}" for n, v in sorted((marked or {}).items()))
+        or "(bus dimensions only)"
+    )
+    return f'''
+
+# ---- MAX-CONFIGURATION host-flow plan (largest acceptance case; baked here) --
+# Selected GENERICALLY: the acceptance case maximizing (IN payload bytes, CFG0).
+# Declared maxima this case drives directly: {marked_txt}
+MAXGEO_CFG_WRITES = [{cfg_lits}]      # (addr, value, width_bytes)
+MAXGEO_IN_WRITES = [{write_lits}]     # (addr, data)
+MAXGEO_OUT_LEN = {plan.out_len}
+MAXGEO_EXPECTED = bytes.fromhex({plan.expected.hex()!r})
+MAXGEO_CASE_NAME = {plan.case_name!r}
+
+
+@cocotb.test()
+async def deterministic_qspi_dv_max_geometry(dut):
+    """MAX-GEOMETRY host-flow DV for case {plan.case_name!r} (byte-exact vs golden).
+
+    A chip can pass every fixed-small-geometry test and still ship an index /
+    length / address counter that wraps at a 2^n boundary BELOW the declared
+    maximum. This test drives the largest configuration the acceptance suite
+    declares ({case.in_bytes} IN bytes, CFG0={case.cfg0}, {case.out_bytes} OUT
+    bytes) and asserts the full OUT window byte-for-byte.
+    """
+    c = CONTRACT
+    cocotb.start_soon(Clock(dut.{clk}, c.clk_period_ns, unit="ns").start())
+    bfm = QSPIMasterBFM(dut, c)
+    await bfm.reset_dut(10)
+
+    for addr, value, width in MAXGEO_CFG_WRITES:
+        await bfm.write_reg(addr, value, width)
+    for addr, data in MAXGEO_IN_WRITES:
+        await bfm.write(addr, data)
+
+    await bfm.start()
+    done = await bfm.wait_done()
+    assert done, (
+        "MAX-GEOMETRY: DUT never signalled STATUS.DONE for the max-configuration "
+        "op (case %s, {case.in_bytes} IN bytes, CFG0={case.cfg0}). It completes "
+        "the small case, so this is a counter/state machine that does not survive "
+        "the declared maximum." % MAXGEO_CASE_NAME
+    )
+
+    out = await bfm.read(OUT_ADDR, MAXGEO_OUT_LEN)
+    dut._log.info("[det-bfm/maxgeo] case=%s expected_len=%d observed_len=%d",
+                  MAXGEO_CASE_NAME, len(MAXGEO_EXPECTED), len(out))
+    if out != MAXGEO_EXPECTED:
+        _fd = next(
+            (i for i in range(min(len(out), len(MAXGEO_EXPECTED)))
+             if out[i] != MAXGEO_EXPECTED[i]),
+            min(len(out), len(MAXGEO_EXPECTED)),
+        )
+        raise AssertionError(
+            "MAX-GEOMETRY: OUT != golden reference at maximum configuration "
+            "(case %s). first_diff_byte=%d exp=0x%02x got=0x%02x "
+            "(exp_len=%d got_len=%d). The small canonical case passes, so look "
+            "for an index/length/address width that wraps below the declared "
+            "maximum." % (
+                MAXGEO_CASE_NAME, _fd,
+                MAXGEO_EXPECTED[_fd] if _fd < len(MAXGEO_EXPECTED) else 0,
+                out[_fd] if _fd < len(out) else 0,
+                len(MAXGEO_EXPECTED), len(out))
+        )
+'''
 
 
 def render_conformance_tb(
@@ -445,6 +604,8 @@ def render_integration_tb(
     *,
     include_conformance: bool = False,
     declared_dims: dict | None = None,
+    maxgeo_case: MaxGeoCase | None = None,
+    schema_dims: dict | None = None,
 ) -> str:
     """Emit a hermetic deterministic cocotb integration testbench.
 
@@ -467,15 +628,28 @@ def render_integration_tb(
 
     ``declared_dims`` (with ``include_conformance``) additionally drives the
     design's BUS maxima at maximum extent and emits the matching ``# MAXGEO``
-    marker. It never invents coverage for the compute lane: the golden host-flow
-    case above is whatever geometry the golden reference chose, and this
-    testbench does not claim otherwise.
+    marker.
+
+    ``maxgeo_case`` is the MAX-CONFIGURATION acceptance case (see
+    :func:`stimulus.build_max_geometry_case`). When supplied -- and when it is
+    not already the primary case -- a SECOND host-flow test is emitted for it,
+    with its golden baked at generation time exactly like the primary's, plus a
+    ``# MAXGEO_CASE`` provenance marker. Compute-lane dims that case drives at
+    their declared maximum (matched against ``schema_dims``, the typed ERS
+    parameter table, by name-token AND value) join the ``# MAXGEO`` marker;
+    everything else stays in the ``MAXGEO_NOT_COVERED`` confession. ``None``
+    keeps the emitted testbench byte-identical to before this existed.
     """
     coverage = (
         bus_maxgeo_coverage(contract, declared_dims)
         if (declared_dims and include_conformance) else None
     )
-    maxgeo_markers = render_maxgeo_markers(coverage)
+    functional = (
+        functional_maxgeo_dims(
+            maxgeo_case.scalars, schema_dims if schema_dims else declared_dims)
+        if maxgeo_case is not None else {}
+    )
+    maxgeo_markers = render_maxgeo_markers(coverage, functional, maxgeo_case)
     bfm_src = render_bfm_module(contract)
     cfg_lits = ", ".join(f"({a}, {v}, {w})" for (a, v, w) in plan.cfg)
     write_lits = ", ".join(f"({a}, bytes.fromhex({d.hex()!r}))" for (a, d) in plan.writes)
@@ -583,6 +757,12 @@ async def deterministic_qspi_dv(dut):
         f"exp={{EXPECTED.hex()}} got={{out.hex()}}"
     )
 '''
+    if maxgeo_case is not None and not maxgeo_case.is_primary:
+        # The MAX-CONFIGURATION functional case. Emitted only when it is a
+        # DIFFERENT case from the primary: when the largest case already IS the
+        # primary, a second identical test would prove nothing (the marker still
+        # records that the primary is the max-geometry case).
+        tb += render_maxgeo_functional_test_fn(contract, maxgeo_case, functional)
     if include_conformance:
         # Append the compute-lane-independent bus-protocol conformance test to the
         # SAME module: the golden host-flow test above already started the clock

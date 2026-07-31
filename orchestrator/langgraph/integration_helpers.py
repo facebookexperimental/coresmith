@@ -87,7 +87,7 @@ def parse_verilog_ports(rtl_path: str, module: str | None = None) -> VerilogModu
 
     ``module`` selects WHICH module to parse; without it the first one wins,
     which is frequently the wrong answer. A generated block file commonly
-    declares its internal stages first -- raster_scan_pipeline.v declares four
+    declares its internal stages first -- one measured block file declared four
     sub-stages before the block itself at line 668 -- so integration judged a
     sub-stage's ports as the block's interface and raised 22 wiring hazards for
     a block that conforms perfectly. Callers that know the block name should
