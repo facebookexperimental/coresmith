@@ -73,10 +73,10 @@ def _import_module_from_path(path: Path, mod_name: str):
 
     Audit F2: the module's OWN directory goes on ``sys.path`` for the duration
     of the import. Project reference implementations and stimulus files live in
-    ``inputs/`` and import sibling helpers by plain name (e.g. the reference_codec
-    golden's ``import reference_codec_vectors``) -- without the parent dir on the path
-    that import raises ``No module named ...`` and the gate used to swallow it
-    as a no-op.
+    ``inputs/`` and import sibling helpers by plain name (a reference
+    implementation's ``import <its>_vectors``) -- without the parent dir on the
+    path that import raises ``No module named ...`` and the gate used to
+    swallow it as a no-op.
     """
     import sys
 
@@ -588,8 +588,8 @@ def _field_localization_enabled() -> bool:
     PRODUCING SUB-CHAIN of only the diverging output field(s).
 
     This is the convergence fix for framework-HDL composition runs: a wrong-bytes
-    divergence in ONE field of a multi-field output (e.g. a video codec's
-    ``{"bitstream": ..., "recon": ..., "stats": ...}``) is localizable to the
+    divergence in ONE field of a multi-field output (a design that emits
+    several named streams at once) is localizable to the
     blocks that feed that field, so a gate-triggered re-spec touches only those
     blocks and KEEPS the (passing) blocks of the other fields' sub-chains.
     Without this the gate returns no ``affected_blocks`` and the daemon
@@ -646,7 +646,8 @@ def _is_sideband_block(name: str, bd: dict) -> bool:
         if b.get("name") == name:
             desc = (b.get("description") or "").lower()
             # A block that explicitly does NOT participate in functional decisions
-            # is a pure monitor (video_codec lifecycle_status_monitor says exactly this).
+            # is a pure monitor (a status/telemetry block says exactly this
+            # of itself in its own description).
             if "without participating" in desc or "does not participate" in desc:
                 return True
     return False
@@ -808,9 +809,9 @@ def _localize_affected_blocks(
 
     conns = _bd_connections(bd)
     # Producer sub-chains follow the FUNCTIONAL DATAPATH only. The status/monitor
-    # sideband (every block -> lifecycle_status_monitor via event_axis) is NOT a
-    # datapath: a passing ``stats`` field proves the monitor good, it does NOT
-    # prove the datapath blocks that merely report to it good. Walking datapath
+    # sideband (every block -> a status/telemetry block over an event bus) is
+    # NOT a datapath: a passing status field proves the monitor good, it does
+    # NOT prove the datapath blocks that merely report to it good. Walking datapath
     # edges keeps the shared-prefix subtraction honest.
     dp_conns = _datapath_connections(conns, bd)
 
@@ -848,12 +849,13 @@ def _localize_affected_blocks(
 
     # Forward extension (bounded): a diverging field's value is also touched by
     # the datapath blocks that FORWARD/serialize it downstream to the chip
-    # boundary -- they can corrupt it too (e.g. entropy_bitstream_engine ->
-    # output_stream_adapter). Walk forward from each diverging terminal, but STOP
+    # boundary -- they can corrupt it too (an encoder stage feeding an output
+    # serializer). Walk forward from each diverging terminal, but STOP
     # at any block that is a PASSING field's terminal or lies in a passing field's
     # producer region: the diverging value does not flow THROUGH a block that is
     # busy producing a (correct) different output, so crossing it would be a
-    # false-positive (the recon-terminal -> entropy case). This keeps the
+    # false-positive (a passing field's terminal feeding the diverging one's
+    # producer). This keeps the
     # extension to the diverging field's OWN tail.
     outgoing: dict[str, list[str]] = {}
     for e in dp_conns:
@@ -878,9 +880,8 @@ def _localize_affected_blocks(
     # so it is proven-good and is NOT the culprit for the diverging field.
     # Re-spec only the blocks EXCLUSIVE to the diverging field(s) (the field's own
     # tail). This is the sharpest honest localization: it keeps every block that
-    # any passing field exercised. (For codecv4: recon proves
-    # input/pixel_block/intra good, so bitstream's exclusive tail =
-    # entropy_bitstream_engine + output_stream_adapter.)
+    # any passing field exercised: a passing field's sub-chain is proven good,
+    # so the diverging field's EXCLUSIVE tail is what is left to re-spec.
     exclusive = div_blocks - pass_blocks
     affected = exclusive if exclusive else (div_blocks - (pass_blocks - div_blocks))
     # Keep deterministic block-diagram order (``order`` computed at function top).
@@ -943,7 +944,7 @@ def _is_degenerate(observed: Any) -> bool:
     """True when ``observed`` is degenerate (all-zero / constant / None / empty).
 
     Used by the functional Tier-B non-degenerate fallback: a flat / collapsed
-    output (the class of bug that shipped the codec flat-output) is rejected
+    output (the class of bug that ships a design with a flat output) is rejected
     even without a declared acceptance predicate. Numpy/bytes-safe.
     """
     if observed is None:
@@ -1029,12 +1030,12 @@ def first_divergence_offset(expected: Any, observed: Any) -> int:
 # decomposed block).
 #
 # SCOPE (honest): a *sophisticated* stub -- one that drives the right ports but
-# routes the primary DATA path to a terminal error (the reference codec's dct_token_engine
-# emitting m_axis_error_completion instead of m_axis_fragment_coeff) -- is NOT
+# routes the primary DATA path to a terminal error (a transform stage emitting
+# its error-completion channel instead of its payload channel) -- is NOT
 # caught here. Detecting that requires simulating the block MODEL and byte-
 # comparing to the golden's boundary I/O, which needs a per-block Amaranth sim
 # harness + a confident block->golden slice (Phase 2's generalized mapping). That
-# is the documented follow-up. For the reference codec-class stub the uarch FEASIBILITY
+# is the documented follow-up. For that class of stub the uarch FEASIBILITY
 # gate (Phase 1) is the live backstop: it stops the block at spec time, before a
 # model is ever generated. This probe closes the *other* half -- the swallow.
 # ---------------------------------------------------------------------------
@@ -1056,9 +1057,9 @@ def _slice_reachability_probe(project_root: str, ref_path: str,
 
     Robust by construction: concludes 'reachable'/'unreachable' ONLY when the
     slice functions resolve to module-level callables we can actually intercept
-    (free-function goldens, e.g. the video codec). For method-based goldens (the reference codec's
-    stateful decoder methods) module-level instrumentation does not apply, so we
-    honest-SKIP rather than risk a false 'unreachable'. Never raises.
+    (free-function goldens). For method-based goldens (a stateful reference
+    whose slice lives in methods) module-level instrumentation does not apply,
+    so we honest-SKIP rather than risk a false 'unreachable'. Never raises.
     """
     out = {"verdict": "skipped", "reason": "", "calls": {}}
     import json as _json
@@ -1264,7 +1265,7 @@ def _persist_golden_feasibility(project_root: str, block_name: str,
     return result
 
 
-# A real header/framing prefix (parameter-set/group_header) is comfortably longer than
+# A real header/framing prefix is comfortably longer than
 # this; a genuine width/framing mismatch diverges at or near offset 0.
 _PREFIX_CLASSIFY_MIN = 8
 
@@ -1284,7 +1285,7 @@ def _classify_gap(project_root: str, expected: Any, observed: Any) -> str:
 
     PREFIX PROBE (CORESMITH_GATE_PREFIX_CLASSIFY, default on): for byte/seq
     outputs, length alone is misleading. A 238-byte golden vs a 50-byte composed
-    output that is BYTE-EXACT through byte 31 (the parameter-set/group_header framing)
+    output that is BYTE-EXACT through byte 31 (a header/framing prefix)
     and only then diverges/truncates is NOT a framing contract gap -- the chain
     composed correctly and ONE downstream block emitted wrong/short content. That
     is ``block_math`` (route to a single-block re-spec, not a whole-chip re-fan).
@@ -1590,7 +1591,7 @@ def _run_simulate_subprocess(chip_model_path, models_dir, stimulus,
     """Run ``simulate(stimulus)`` in a subprocess under ``interpreter``.
 
     Set ``CORESMITH_SIM_PYTHON=pypy3`` to JIT the pure-Python model sim (the
-    full-QCIF codec sim was ~430 s on CPython) WITHOUT running the whole
+    largest measured model sim was ~430 s on CPython) WITHOUT running the whole
     CPython daemon (FastAPI/pydantic/numpy/otel -- slow under PyPy's cpyext)
     under PyPy. The subprocess timeout actually KILLS a runaway sim, unlike the
     un-interruptible daemon thread. Returns ``(result, timed_out, exc)``.
@@ -1738,8 +1739,8 @@ def _run_full_model_dv(
     """FULL MODEL DV [dv-hardening-14]: mission-scale model-vs-golden.
 
     The armC lesson: the fast composition gate certified a 30dB floor on a
-    single-pixel_block stimulus (no cascade depth); real textured full-frame
-    content landed at ~21-23dB and no downstream gate could see it
+    single-tile stimulus (no cascade depth); real mission-scale content landed
+    at ~21-23dB and no downstream gate could see it
     (integration DV's oracle IS the model). This tier re-runs the SAME
     model-vs-golden comparison on the FRD's mission-scale acceptance stimulus
     (full frame / full audio segment / full program -- domain-generic: the
@@ -2115,8 +2116,8 @@ def _run_gate_inner(
     except Exception as exc:  # noqa: BLE001
         # Audit F2: a reference that RESOLVES but cannot be IMPORTED is a
         # broken oracle, not a goldenless run -- swallowing it as a no-op is
-        # how the encoder CLI printed "composed model == golden byte-exact"
-        # after "No module named 'reference_codec_vectors'". Report a violation.
+        # how a CLI printed "composed model == golden byte-exact" after a
+        # bare "No module named ..." from the reference. Report a violation.
         logger.warning(
             "model integration gate: reference import failed: %s -- violation "
             "(NOT a pass)", exc
@@ -2176,7 +2177,7 @@ def _run_gate_inner(
     # STATIC COMPOSITION AUDIT (pre-sim). Catches the mechanical wiring-defect
     # classes (bad kwargs, undriven nets, zero-width Signals, .symdict wiring)
     # in milliseconds WITH actionable feedback, instead of burning a full
-    # simulate-and-diff round to discover them (the 2026-07 video_codec A/B burned 10+
+    # simulate-and-diff round to discover them (a measured A/B burned 10+
     # attempts across two worker models on exactly these). Runs after all the
     # no-op early-returns above so gate no-op semantics are unchanged.
     from orchestrator.architecture.composition_audit import audit_violations

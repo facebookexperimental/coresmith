@@ -96,7 +96,7 @@ def preflight_check(phases: list[str] | None = None) -> dict:
         "yes",
         "on",
     }
-    # HOT-PATCH (chip-lead, codecv4-synthgated): honor CORESMITH_SYNTH_GENERIC in
+    # HOT-PATCH (chip-lead, synth-gated run): honor CORESMITH_SYNTH_GENERIC in
     # preflight. Generic (PDK-free) synth maps with abc -g and needs only yosys+
     # verilator -- NOT the sky130 Liberty/PDK. Preflight previously required the
     # PDK unconditionally whenever SKIP_SYNTH was unset, falsely blocking generic
@@ -752,7 +752,7 @@ def _report_uarch_golden(block_name: str, ref: str, resolved: str) -> None:
 
     Three cases, three different truths -- and the old code told none of them,
     because every reader of a golden returns "" on failure while the uArch
-    prompt appended the golden section unconditionally. Measured on the raster
+    prompt appended the golden section unconditionally. Measured on a
     validation run: all 8 uArch calls carried an empty golden block and nothing
     anywhere said so.
 
@@ -761,9 +761,9 @@ def _report_uarch_golden(block_name: str, ref: str, resolved: str) -> None:
         a transcription target that cannot be read; the spec author would have
         invented the math in its place. RED log + carried defect naming the ref.
       * no ref at all              -> this block legitimately has no reference
-        golden (6 of 8 raster blocks). Log it and carry it forward, because the
-        spec -- and every RTL lowering below it -- is then unconstrained by any
-        reference and the final report should say so.
+        golden (routinely most blocks of a design). Log it and carry it forward,
+        because the spec -- and every RTL lowering below it -- is then
+        unconstrained by any reference and the final report should say so.
 
     Neither empty case raises here: the hard failure belongs where a FLAG
     explicitly promised a golden (``CORESMITH_RTL_FROM_HW_GOLDEN`` in the RTL
