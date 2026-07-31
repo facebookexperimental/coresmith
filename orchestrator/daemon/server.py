@@ -152,6 +152,97 @@ async def _driver_liveness_watch() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Frontend -> backend handoff (opt-in): CORESMITH_AUTO_BACKEND=1
+# ---------------------------------------------------------------------------
+# The endpoint below is the SHAPE; this watch is what makes the handoff
+# autonomous. Without it, `pipeline_done` is a state field nobody acts on: the
+# chip_top gate-sim -- the only step that simulates the artifact that becomes
+# silicon -- has only ever been reached by a human or a hand-written driver.
+#
+# Opt-in and one-shot: it fires at most once per daemon process, only when the
+# frontend genuinely finished (pipeline_done AND no parked interrupt AND the
+# pipeline task is not running), and it stops the backend after flat synthesis +
+# the gate-sim verdict. It never runs P&R/DRC/LVS; that stays an explicit ask.
+
+_AUTO_BACKEND_POLL_S = float(os.environ.get("CORESMITH_AUTO_BACKEND_POLL_S", "30"))
+_auto_backend_fired = False
+
+
+def _auto_backend_enabled() -> bool:
+    """True when the daemon should enter the backend itself on pipeline_done.
+
+    Default OFF: entering the backend spends real EDA time, so it is an explicit
+    opt-in rather than something a run acquires by upgrading the engine.
+    """
+    return (os.environ.get("CORESMITH_AUTO_BACKEND", "0") or "0").strip().lower() \
+        not in ("", "0", "false", "no", "off")
+
+
+async def _frontend_is_done() -> bool:
+    """The frontend finished and is not waiting on anybody.
+
+    Deliberately conservative -- all four must hold. A parked interrupt is NOT
+    'done' even with pipeline_done set, because the run is waiting on a decision
+    that could still change the RTL the backend would synthesize.
+    """
+    if _pipeline.task is not None and not _pipeline.task.done():
+        return False
+    try:
+        await _pipeline.ensure_graph()
+        snap = await _pipeline.graph.aget_state(
+            {"configurable": {"thread_id": _pipeline.thread_id}}
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    if not snap or not snap.values:
+        return False
+    if not snap.values.get("pipeline_done"):
+        return False
+    if snap.tasks and any(t.interrupts for t in snap.tasks):
+        return False
+    return True
+
+
+async def _auto_backend_watch() -> None:
+    """Poll for a finished frontend and hand off to the backend, once."""
+    global _auto_backend_fired
+    if not _auto_backend_enabled():
+        return
+    log.info(
+        "CORESMITH_AUTO_BACKEND=1: this daemon will enter flat synthesis + the "
+        "chip_top gate-sim by itself when the frontend reaches pipeline_done "
+        "(P&R/DRC/LVS still require an explicit `backend start --full`).")
+    while not _auto_backend_fired:
+        try:
+            await asyncio.sleep(_AUTO_BACKEND_POLL_S)
+            if not await _frontend_is_done():
+                continue
+            _auto_backend_fired = True     # one-shot, even if the launch fails
+            log.warning(
+                "AUTO-BACKEND: frontend reached pipeline_done with no parked "
+                "interrupt -- entering flat synthesis + chip_top gate-sim.")
+            from orchestrator import mcp_server as _mcp
+            result = await _mcp.launch_backend(stop_after_gate_sim=True)
+            try:
+                from orchestrator.langgraph.event_stream import write_graph_event
+                write_graph_event(_PROJECT_ROOT, "daemon", "auto_backend_start",
+                                  {k: v for k, v in result.items()
+                                   if k != "block_names"})
+            except Exception:  # noqa: BLE001
+                pass
+            if result.get("error"):
+                log.error("AUTO-BACKEND: launch refused: %s", result)
+            else:
+                log.warning("AUTO-BACKEND: backend running (thread_id=%s)",
+                            result.get("thread_id"))
+        except asyncio.CancelledError:
+            break
+        except Exception:  # noqa: BLE001 - a handoff watch must never crash
+            log.warning("AUTO-BACKEND: watch iteration failed", exc_info=True)
+            continue
+
+
+# ---------------------------------------------------------------------------
 # Lifecycle wiring
 # ---------------------------------------------------------------------------
 
@@ -217,6 +308,14 @@ class ArchResumeRequest(BaseModel):
     rationale: str = ""
 
 
+class BackendStartRequest(BaseModel):
+    max_attempts: int = 3
+    target_clock_mhz: float = 50.0
+    # Default STOPS after flat synthesis + the chip_top gate-sim verdict.
+    # P&R/DRC/LVS is hours of EDA that must be asked for explicitly.
+    full: bool = False
+
+
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
@@ -243,12 +342,15 @@ async def _lifespan(_app: FastAPI):
         pass
     # Section 7b: start the driver-liveness watch (cheap, cancelled on shutdown).
     _watch_task = asyncio.create_task(_driver_liveness_watch())
+    # Frontend -> backend handoff. Returns immediately when the opt-in is off.
+    _auto_backend_task = asyncio.create_task(_auto_backend_watch())
     try:
         yield
     finally:
-        _watch_task.cancel()
-        with contextlib.suppress(Exception):
-            await _watch_task
+        for _t in (_watch_task, _auto_backend_task):
+            _t.cancel()
+            with contextlib.suppress(Exception):
+                await _t
 
 
 app = FastAPI(title="coresmithd", version="0.1", lifespan=_lifespan)
@@ -627,6 +729,107 @@ async def run_restart_node(req: RestartNodeRequest):
             " -- " + result["hint"] if result.get("hint") else ""))
     result["status"] = _pipeline.status
     return result
+
+
+# ---------------------------------------------------------------------------
+# Backend endpoints (flat synthesis -> chip_top gate-sim [-> P&R/DRC/LVS]).
+#
+# Until now the daemon's lifecycle stopped at the frontend: the chip_top
+# gate-sim -- the only thing that ever simulates the artifact that becomes
+# silicon -- lived in the backend graph and was reachable ONLY from an MCP
+# client or a hand-written driver script. A run could reach pipeline_done and
+# simply stop, with nobody to press the next button.
+#
+# Shape follows /architecture/*: a second graph gets its own
+# /<graph>/start|state|pause backed by a GraphLifecycle. The implementation is
+# shared with the MCP tool (mcp_server.launch_backend), exactly as
+# /run/restart-block shares restart_block -- one implementation, two transports.
+# ---------------------------------------------------------------------------
+
+def _backend_handle():
+    """The backend GraphLifecycle, imported lazily from the MCP server module.
+
+    Lazy for the same reason ``/run/restart-block`` is: importing mcp_server
+    pulls in the whole agent stack, and a daemon that only ever drives the
+    frontend should not pay for it. It reads ``CORESMITH_PROJECT_ROOT``, which
+    this daemon sets at import time, so both transports address the same
+    checkpoint DB.
+    """
+    from orchestrator import mcp_server as _mcp
+    return _mcp
+
+
+@app.post("/backend/start")
+async def backend_start(req: BackendStartRequest):
+    """Enter the backend: flat top synthesis + the chip_top gate-sim verdict.
+
+    Stops there unless ``full=true``. Requires every block to have RTL +
+    synthesis artifacts on disk (the shared launcher's own gate) -- so calling
+    this before the frontend finished returns the missing-artifact list rather
+    than starting a doomed run.
+    """
+    try:
+        _mcp = _backend_handle()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"backend launcher unavailable: {exc}") from exc
+    result = await _mcp.launch_backend(
+        max_attempts=req.max_attempts,
+        target_clock_mhz=req.target_clock_mhz,
+        stop_after_gate_sim=not req.full,
+    )
+    if result.get("error"):
+        raise HTTPException(409, json.dumps(result))
+    return result
+
+
+@app.get("/backend/state")
+async def backend_state():
+    """Backend graph snapshot, including the chip_top gate-sim verdict."""
+    try:
+        _mcp = _backend_handle()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"backend state unavailable: {exc}") from exc
+    raw = await _mcp.get_backend_state()
+    try:
+        state = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except (ValueError, TypeError):
+        return {"raw": raw}
+    # Surface the gate-sim verdict at the top level: it is the reason this
+    # endpoint exists, and burying it in the raw checkpoint means an outer agent
+    # has to know where to dig. Absence is reported as absence, never as a pass.
+    try:
+        snap = await _mcp._backend.graph.aget_state(
+            {"configurable": {"thread_id": _mcp._backend.thread_id}}
+        )
+        vals = (snap.values if snap else {}) or {}
+    except Exception:  # noqa: BLE001
+        vals = {}
+    state["chip_gate_sim"] = {
+        "ok": vals.get("chip_gate_sim_ok"),
+        "status": vals.get("chip_gate_sim_status", ""),
+        "reason": vals.get("chip_gate_sim_reason", ""),
+        "flat_netlist_path": vals.get("flat_netlist_path", ""),
+        "stopped_after_gate_sim": bool(vals.get("stop_after_gate_sim")),
+    }
+    return state
+
+
+@app.post("/backend/pause")
+async def backend_pause():
+    try:
+        _mcp = _backend_handle()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"backend pause unavailable: {exc}") from exc
+    handle = _mcp._backend
+    if handle.task is None or handle.task.done():
+        return {"paused": False, "reason": "no running task"}
+    handle.task.cancel()
+    try:
+        await handle.task
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+    handle.status = "paused"
+    return {"paused": True}
 
 
 # ---------------------------------------------------------------------------

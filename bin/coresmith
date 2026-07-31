@@ -446,6 +446,30 @@ def _arch_pause(args):
 
 
 # ---------------------------------------------------------------------------
+# backend (flat synthesis -> chip_top gate-sim [-> P&R/DRC/LVS])
+# ---------------------------------------------------------------------------
+
+def _backend_start(args):
+    project_root = _project_root(args.project_root)
+    body = {
+        "max_attempts": args.max_attempts,
+        "target_clock_mhz": args.target_clock_mhz,
+        "full": bool(args.full),
+    }
+    print(json.dumps(_post(project_root, "/backend/start", body), indent=2))
+
+
+def _backend_state(args):
+    project_root = _project_root(args.project_root)
+    print(json.dumps(_get(project_root, "/backend/state"), indent=2))
+
+
+def _backend_pause(args):
+    project_root = _project_root(args.project_root)
+    print(json.dumps(_post(project_root, "/backend/pause", {}), indent=2))
+
+
+# ---------------------------------------------------------------------------
 # Main parser
 # ---------------------------------------------------------------------------
 
@@ -536,6 +560,26 @@ def main():
     a4 = asub.add_parser("pause", help="cancel the architecture task")
     _add_project_root(a4)
     a4.set_defaults(func=_arch_pause)
+
+    # backend (flat synthesis + chip_top gate-sim). Use AFTER the frontend
+    # reaches pipeline_done; set CORESMITH_AUTO_BACKEND=1 on the daemon to have
+    # it make this call itself.
+    pb = sub.add_parser("backend", help="backend lifecycle (flat synth + gate-sim)")
+    bsub = pb.add_subparsers(dest="backend_cmd", required=True)
+    b1 = bsub.add_parser("start", help="flat top synthesis + chip_top gate-sim")
+    _add_project_root(b1)
+    b1.add_argument("--max-attempts", type=int, default=3)
+    b1.add_argument("--target-clock-mhz", type=float, default=50.0)
+    b1.add_argument("--full", action="store_true",
+                    help="continue into P&R/DRC/LVS after the gate-sim verdict "
+                         "(default: stop at the verdict -- P&R is hours of EDA)")
+    b1.set_defaults(func=_backend_start)
+    b2 = bsub.add_parser("state", help="backend state + chip_top gate-sim verdict")
+    _add_project_root(b2)
+    b2.set_defaults(func=_backend_state)
+    b3 = bsub.add_parser("pause", help="cancel the backend task")
+    _add_project_root(b3)
+    b3.set_defaults(func=_backend_pause)
 
     # state
     s = sub.add_parser("state", help="print the current pipeline state")

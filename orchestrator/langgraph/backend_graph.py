@@ -95,6 +95,12 @@ class BackendState(TypedDict):
     target_clock_mhz: float
     max_attempts: int
     block_queue: list[dict]
+    # Stop the backend after flat synthesis + the chip_top gate-sim verdict,
+    # WITHOUT entering P&R/DRC/LVS. This is what the frontend->backend handoff
+    # asks for: the flat netlist and its gate-sim verdict are the deliverable,
+    # and hardening a chip nobody asked to harden costs hours of EDA. Absent /
+    # False keeps the full physical flow (every existing caller).
+    stop_after_gate_sim: bool
 
     # Backend Lead fields (set by init_design, consumed downstream) ────────
     frontend_blocks: list[dict]           # completed blocks from pipeline
@@ -1037,8 +1043,22 @@ def route_after_flat_synth(state: BackendState) -> str:
     ``chip_gate_sim_ok is None`` means the gate did not APPLY (disabled, no
     integration TB, toolchain absent). That is not a verdict and must not block:
     it is already logged with a reason at the point it happened.
+
+    ``stop_after_gate_sim`` ends the graph here in EVERY outcome -- pass, fail
+    and did-not-apply alike. The caller asked for the flat netlist plus the
+    gate-sim verdict and nothing more, so a FAIL must not silently pull the run
+    into the diagnose/retry loop (hours of LLM-driven EDA the caller did not ask
+    for). The verdict is in ``chip_gate_sim_ok`` / ``_status`` / ``_reason``,
+    and a synth failure is in ``previous_error``; both are read from the final
+    state, so ending is not the same as hiding.
     """
     netlist = state.get("flat_netlist_path", "")
+    if state.get("stop_after_gate_sim"):
+        log("  [BACKEND] stopping after flat synthesis + chip gate-sim "
+            f"(gate-sim={state.get('chip_gate_sim_status', 'n/a')}); P&R/DRC/LVS "
+            "NOT run -- pass full=true / --full to continue into the physical "
+            "flow.", CYAN)
+        return END
     if not (netlist and Path(netlist).exists()):
         return "diagnose"
     if state.get("chip_gate_sim_ok") is False:
@@ -1049,6 +1069,7 @@ def route_after_flat_synth(state: BackendState) -> str:
 route_after_flat_synth.__edge_labels__ = {
     "run_pnr": "SUCCESS",
     "diagnose": "FAIL",
+    END: "STOP AFTER GATE-SIM",
 }
 
 
