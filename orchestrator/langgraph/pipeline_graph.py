@@ -6029,6 +6029,16 @@ def _deterministic_integration_check_enabled() -> bool:
     )
 
 
+def _block_rtl_complete_gate_enabled() -> bool:
+    """Refuse to assemble a chip that is MISSING a block. Default ON; set
+    ``CORESMITH_BLOCK_RTL_COMPLETE_GATE=0`` to restore the old
+    drop-the-block-and-continue behavior (the ``override`` interrupt action
+    remains the per-run escape for a block that genuinely does not belong)."""
+    return (
+        (os.environ.get("CORESMITH_BLOCK_RTL_COMPLETE_GATE", "1") or "1") != "0"
+    )
+
+
 def _deterministic_caravel_top_enabled() -> bool:
     """Defect 4: when the design carries a Caravel pad-adapter block (a block
     named ``user_project_wrapper`` or one exposing io_in/io_out/io_oeb), assemble
@@ -6280,6 +6290,119 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         rtl_paths = await asyncio.to_thread(
             discover_block_rtl, pr, passed_blocks
         )
+
+        # BLOCK-RTL COMPLETENESS GATE: refuse to assemble a chip that is MISSING
+        # a block. `discover_block_rtl` used to drop an unresolvable block
+        # SILENTLY, which structurally DELETES it from the chip: the raster run
+        # lost its locked Caravel pad adapter (whose file is
+        # rtl/user_project_wrapper.v, NOT <block_name>.v, because an interface
+        # contract locks the module name), so `detect_wrapper_block` returned
+        # None, the DEFAULT-ON deterministic Caravel assembler never ran, the LLM
+        # Lead promoted the pad block's own qspi_* ports to the chip boundary, and
+        # the assembled top -- and the netlist, and the GDS -- carried NO
+        # io_in/io_out/io_oeb, while integration DV reported PASS on a co-tuned
+        # BFM. A block that silently stops existing is an ASSEMBLY BLOCKER, not a
+        # warning: park BEFORE spending the Lead call, in the same shape as the
+        # staleness preflight above. Default-on; opt out with
+        # CORESMITH_BLOCK_RTL_COMPLETE_GATE=0.
+        if _block_rtl_complete_gate_enabled():
+            from orchestrator.langgraph.integration_helpers import (
+                missing_from,
+            )
+            # Judge the AUTHORITATIVE dict this node will actually assemble
+            # from, not a second discovery -- a gate and an assembler working
+            # off two different answers is its own bug.
+            _missing_rtl = await asyncio.to_thread(
+                missing_from, rtl_paths, passed_blocks
+            )
+            # Fires only on a PARTIAL resolution: some blocks resolved and at
+            # least one did not, which is the silent-deletion defect (a chip
+            # assembled AROUND a missing block). When NOTHING resolved there is
+            # no chip to assemble at all and the existing "No block RTL could be
+            # parsed" skip below already reports that honestly.
+            if rtl_paths and _missing_rtl:
+                log(f"  [INTEGRATION] BLOCK RTL UNRESOLVED for {_missing_rtl} -- "
+                    f"refusing to assemble a chip that is missing a block (a "
+                    f"silently dropped block is how a locked Caravel pad adapter "
+                    f"vanished and the chip shipped with no GPIO boundary)", RED)
+                write_graph_event(pr, "Integration Check",
+                                  "block_rtl_unresolved",
+                                  {"missing_blocks": _missing_rtl,
+                                   "resolved_blocks": sorted(rtl_paths)})
+                payload = {
+                    "type": "integration_failure",
+                    "error_kind": "unresolved_block_rtl",
+                    "missing_block_rtl": _missing_rtl,
+                    "resolved_block_rtl_paths": rtl_paths,
+                    "error_count": len(_missing_rtl),
+                    "supported_actions": ["retry", "override", "abort"],
+                    "outer_agent_guidance": (
+                        "These eligible blocks have NO locatable RTL file, so "
+                        "assembling now would ship a chip with those blocks "
+                        "DELETED -- no error, no instance, no ports. For each "
+                        "one: confirm the .v file exists on disk and that the "
+                        "block's `rtl_target` in .coresmith/block_specs.json "
+                        "points at it. A block whose module name is locked by an "
+                        "interface contract (e.g. a Caravel "
+                        "user_project_wrapper) is NOT named <block_name>.v, so "
+                        "`rtl_target` is the only correct answer for it. Then "
+                        "resume `retry` to re-run this preflight. `override` "
+                        "assembles WITHOUT those blocks -- only for a block that "
+                        "genuinely does not belong in the chip. `abort` ends "
+                        "integration."
+                    ),
+                    "reference_files": {
+                        "block_specs": ".coresmith/block_specs.json",
+                    },
+                }
+                response = interrupt(payload) or {}
+                _act = response.get("action", "retry")
+                write_graph_event(pr, "Integration Check",
+                                  "block_rtl_unresolved_resume",
+                                  {"action": _act})
+                if _act == "override":
+                    log("  [INTEGRATION] unresolved block RTL OVERRIDE by "
+                        f"chip-lead -- assembling WITHOUT {_missing_rtl}", YELLOW)
+                elif _act == "abort":
+                    result = {
+                        "aborted": True, "skipped": True,
+                        "reason": ("unresolved block RTL (aborted): "
+                                   f"{_missing_rtl}"),
+                        "error": "unresolved_block_rtl",
+                        "error_count": len(_missing_rtl),
+                        "missing_blocks": _missing_rtl,
+                    }
+                    write_graph_event(pr, "Integration Check",
+                                      "graph_node_exit", result)
+                    return {"integration_result": result}
+                else:  # retry (after fixing rtl_target / writing the file)
+                    # Re-discover: a retry means rtl_target was just fixed or
+                    # the file was just written. Then judge THAT dict.
+                    rtl_paths = await asyncio.to_thread(
+                        discover_block_rtl, pr, passed_blocks
+                    )
+                    _missing_rtl2 = await asyncio.to_thread(
+                        missing_from, rtl_paths, passed_blocks
+                    )
+                    if _missing_rtl2:
+                        log("  [INTEGRATION] block RTL STILL unresolved after "
+                            f"retry ({_missing_rtl2}) -- ending integration "
+                            "(fail-closed; resolve the block's rtl_target "
+                            "first)", RED)
+                        result = {
+                            "aborted": True, "skipped": True,
+                            "reason": ("block RTL unresolved after retry: "
+                                       f"{_missing_rtl2}"),
+                            "error": "unresolved_block_rtl",
+                            "error_count": len(_missing_rtl2),
+                            "missing_blocks": _missing_rtl2,
+                        }
+                        write_graph_event(pr, "Integration Check",
+                                          "graph_node_exit", result)
+                        return {"integration_result": result}
+                    log("  [INTEGRATION] block RTL resolved on retry "
+                        f"({len(rtl_paths)} blocks) -- proceeding to assembly",
+                        GREEN)
 
         modules = {}
         block_rtl_sources: dict[str, str] = {}
@@ -8805,10 +8928,23 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                     _top_src = await asyncio.to_thread(
                         lambda: Path(top_rtl_path).read_text(encoding="utf-8")
                     )
-                    _contract, _plan = await asyncio.to_thread(
-                        _bfm_lib.plan_deterministic_dv, pr, _top_src, connections
+                    # Classify the GRADED boundary, not merely "does this file
+                    # mention io_in". The external grader drives io_in/io_out/
+                    # io_oeb on `user_project_wrapper`, so an assembled top whose
+                    # own pins are design-prefixed (qspi_io_in/qspi_io_out/
+                    # qspi_drive_en) is NOT the graded boundary even though the
+                    # chassis IS QSPI-slave -- and the boundary usually still
+                    # exists, in rtl/user_project_wrapper.v. The verdict says
+                    # WHERE it lives and whether THIS sim will drive it.
+                    _verdict = await asyncio.to_thread(
+                        _bfm_lib.classify_bus_verdict, pr, _top_src, connections,
+                        design_name, top_rtl_path,
                     )
+                    _contract = _verdict.contract if _verdict.contract_enforcing else None
                     if _contract is not None:
+                        _plan = await asyncio.to_thread(
+                            _bfm_lib.build_plan_from_run, pr, _contract
+                        )
                         _out = str(
                             PROJECT_ROOT / "tb" / "integration"
                             / f"test_{design_name}.py"
@@ -8851,24 +8987,126 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                                 "turnaround FAILS HERE, not at the secret grader.",
                                 GREEN,
                             )
+                    elif _verdict.fails_closed:
+                        # THE FAIL-OPEN THIS CLOSES. The spec says the external
+                        # bus is QSPI, but the module this DV elaborates does not
+                        # expose the graded pin boundary -- either it lives on
+                        # another module (typically the wrapper the grader drives)
+                        # or no io_in/io_out/io_oeb boundary exists anywhere
+                        # (spec/RTL contradiction). Historically this logged a RED
+                        # advisory and PROCEEDED on the LLM-authored, DUT-co-tuned
+                        # BFM: DV was silently downgraded exactly when the design
+                        # is most likely to be non-conformant, and the run still
+                        # reported "INTEGRATION DV PASSED" (exp-raster-macro-
+                        # 20260727). It is now the run's normal tb_generation
+                        # interrupt (retry/fix_rtl/fix_tb/abort), per the local
+                        # honest-gate idiom.
+                        _gate_on = _bfm_lib.boundary_gate_enabled()
+                        write_graph_event(pr, "Integration DV", "qspi_boundary_gate", {
+                            "gate": "qspi_pin_boundary",
+                            "status": _verdict.status,
+                            "enforced": _gate_on,
+                            "simulated_top": _verdict.simulated_top,
+                            "boundary_module": (
+                                _verdict.boundary.module if _verdict.boundary else ""
+                            ),
+                            "boundary_path": (
+                                _verdict.boundary.path if _verdict.boundary else ""
+                            ),
+                            "top_ports": list(_verdict.top_ports[:16]),
+                            "reason": _verdict.reason,
+                        })
+                        if _gate_on:
+                            log(
+                                "  [INTEG-DV] QSPI PIN-BOUNDARY GATE FAILED "
+                                "(fail-closed -- this is NOT a pass, and the "
+                                "co-tuned LLM BFM is NOT an acceptable fallback "
+                                f"here): {_verdict.reason}",
+                                RED,
+                            )
+                            generation_error = RuntimeError(
+                                "QSPI pin-boundary gate: " + _verdict.reason
+                            )
+                        else:
+                            log(
+                                "  [INTEG-DV] ADVISORY (QSPI pin-boundary gate "
+                                "DISABLED by CORESMITH_QSPI_BOUNDARY_GATE=0 / "
+                                "CORESMITH_GATE_FAIL_OPEN=1): keeping the "
+                                "LLM-authored BFM. THIS RUN'S INTEGRATION DV IS "
+                                "NOT CONTRACT-ENFORCING -- the BFM may co-tune to "
+                                "the DUT and pass a non-conformant design. "
+                                f"{_verdict.reason}",
+                                RED,
+                            )
+                            # An advisory bypass must never be SILENT: carry the
+                            # specific unmodeled boundary forward to the final
+                            # report / validation-DV context.
+                            record_carried_forward_defect(pr, {
+                                "gate": "qspi_pin_boundary",
+                                "kind": "dv_not_contract_enforcing",
+                                "advisory": True,
+                                "unmodeled": (
+                                    "graded Caravel pin boundary (io_in/io_out/"
+                                    "io_oeb) not driven by integration DV "
+                                    f"({_verdict.status}; boundary="
+                                    + (
+                                        _verdict.boundary.describe()
+                                        if _verdict.boundary
+                                        else "absent"
+                                    )
+                                    + f"; simulated top='{_verdict.simulated_top}')"
+                                ),
+                                "first_divergence_block": "",
+                                "note": _verdict.reason,
+                            })
                     else:
                         log(
                             "  [INTEG-DV] ADVISORY: chip-top is not a QSPI-slave "
                             "bus; keeping the LLM-authored BFM. THIS RUN'S "
                             "INTEGRATION DV IS NOT CONTRACT-ENFORCING -- the BFM "
                             "may co-tune to the DUT and pass a non-conformant "
-                            "design.",
+                            f"design. ({_verdict.reason})",
                             RED,
                         )
             except Exception as _bfm_e:  # noqa: BLE001
-                log(
-                    "  [INTEG-DV] deterministic BFM path errored "
-                    f"({_bfm_e}); falling back to LLM BFM",
-                    YELLOW,
-                )
+                # A gate that RAISES is not a pass (gate_guard / A-Fix 2): when the
+                # architecture says the bus is QSPI we must not fall back to the
+                # co-tuned BFM just because the classifier/codegen broke. Fail
+                # closed unless the gate (or the global knob) is explicitly off.
+                _bfm_fail_closed = False
+                try:
+                    from orchestrator.langgraph import bfm_lib as _bfm_probe
+                    _bfm_fail_closed = (
+                        _bfm_probe.boundary_gate_enabled()
+                        and _bfm_probe.arch_indicates_qspi_slave(pr, connections)
+                    )
+                except Exception:  # noqa: BLE001
+                    _bfm_fail_closed = False
+                if _bfm_fail_closed:
+                    log(
+                        "  [INTEG-DV] deterministic BFM path ERRORED on a run "
+                        f"whose spec declares a QSPI bus ({_bfm_e}) -- failing "
+                        "closed: an errored gate is not a pass, and the co-tuned "
+                        "LLM BFM would silently un-enforce the bus contract.",
+                        RED,
+                    )
+                    generation_error = RuntimeError(
+                        "QSPI pin-boundary gate could not run (an errored gate is "
+                        f"not a pass): {_bfm_e}"
+                    )
+                else:
+                    log(
+                        "  [INTEG-DV] deterministic BFM path errored "
+                        f"({_bfm_e}); falling back to LLM BFM",
+                        YELLOW,
+                    )
                 tb_result = None
 
-            if tb_result is None:
+            # `generation_error` set above == the QSPI pin-boundary gate failed
+            # closed. Falling through to the LLM generator is precisely the
+            # outcome the gate forbids, so skip it and let the existing
+            # tb_generation failure path fire the interrupt.
+            if tb_result is None and generation_error is None:
                 # Re-point DV to model-equivalence when block-goldens is on: drive
                 # the RTL and the integrated Amaranth chip model with the same stimulus
                 # and assert RTL == chip model. Flag-off -> chip_model_path stays ""

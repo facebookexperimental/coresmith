@@ -284,6 +284,20 @@ module cs_sram_1rw1r #(
     parameter integer WIDTH = 32,
     parameter integer DEPTH = 512,
     parameter integer AW    = (DEPTH <= 1) ? 1 : $clog2(DEPTH),
+    // READ_FIRST=1 makes a same-edge port-0 write/port-1 read collision
+    // return the complete pre-write word, matching native OLD-data macros --
+    // which is what real silicon does, so a design that cares should pass it
+    // EXPLICITLY (every memory block in the raster design does).
+    //
+    // The DEFAULT stays 0 (write-first bypass) deliberately. Flipping a shared
+    // library default silently changes the read semantics of every design
+    // already built against it, including ones whose DV has already passed, and
+    // it breaks the documented bypass contract that tb_cs_sram_wmask.v asserts.
+    // A macro-faithful default is arguably the better long-term choice -- BEHAV
+    // should not promise data the macro cannot deliver -- but that is a breaking
+    // change to make deliberately, with the testbench updated to match, not as
+    // a side effect of one design needing it.
+    parameter integer READ_FIRST = 0,
     parameter         INIT_FILE = "",
     // Optional per-byte write mask on port 0 (see cs_mem_1rw1r). Legacy
     // instantiations (USE_WMASK=0, wmask0 unconnected) are unchanged.
@@ -308,7 +322,8 @@ module cs_sram_1rw1r #(
 );
     cs_mem_1rw1r #(
         .MEM_IMPL(MEM_IMPL), .WIDTH(WIDTH), .DEPTH(DEPTH),
-        .INIT_FILE(INIT_FILE), .USE_WMASK(USE_WMASK), .WMASK_GRAN(8)
+        .READ_FIRST(READ_FIRST), .INIT_FILE(INIT_FILE),
+        .USE_WMASK(USE_WMASK), .WMASK_GRAN(8)
     ) u_mem (
         .clk(clk),
         .ce0(ce0), .we0(we0), .addr0(addr0), .wdata0(wdata0), .wmask0(wmask0),

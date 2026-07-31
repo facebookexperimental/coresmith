@@ -577,14 +577,40 @@ def _run_chip_top_gate_sim(state: "BackendState", netlist: str) -> tuple:
         log(f"  [CHIP-GATE-SIM] not run -- {reason}", YELLOW)
         return (None, _gs.STATUS_NOT_RUN, reason)
 
-    top_rtl = state.get("top_rtl_path", "") or ""
-    log("  [CHIP-GATE-SIM] Replaying integration-DV vectors through the FLAT "
-        "chip netlist...", YELLOW)
+    # The reference stimulus is the integration DV's own source set, rebuilt
+    # from the SAME builder that DV used -- never a single path. `top_rtl_path`
+    # was read here originally and is NOT a BackendState field: nothing in the
+    # flow ever set it, so this gate reported not_run on every real run while
+    # its unit test passed by injecting the value itself.
+    from orchestrator.langgraph.integration_helpers import chip_rtl_sources
+
+    # Accept EITHER name. `integration_top_path` is what the backend graph's
+    # own init_design_node produces; `top_rtl_path` is what the frontend state
+    # and .coresmith/integration_result.json call the same artifact. The bug was
+    # never a misspelled key -- it was that NEITHER was populated here, so the
+    # gate silently self-disabled. Reading both, and failing loudly on neither,
+    # is what makes that impossible to reintroduce.
+    top_rtl_path = (state.get("integration_top_path", "")
+                    or state.get("top_rtl_path", "") or "")
+    block_rtl = state.get("block_rtl_paths", {}) or {}
+    if not top_rtl_path:
+        reason = ("no integration top on disk -- the assembled chip's RTL is "
+                  "the gate's reference; without it there is nothing to compare "
+                  "the flat netlist against")
+        log(f"  [CHIP-GATE-SIM] not run -- {reason}", YELLOW)
+        return (None, _gs.STATUS_NOT_RUN, reason)
+    # Dedup: on a Caravel design the assembled top and the pad-adapter block
+    # both declare `module user_project_wrapper`, which is a MODDUP abort.
+    rtl_sources = chip_rtl_sources(
+        top_rtl_path, block_rtl, dedup_dir=root / "sim_build" / "chip_gate_sim_srcs")
+
+    log(f"  [CHIP-GATE-SIM] Replaying integration-DV vectors through the FLAT "
+        f"chip netlist ({len(rtl_sources)} reference source file(s))...", YELLOW)
     try:
         res = _gs.check_gate_sim(
             block={"name": design, "is_chip_top": True},
             netlist_path=netlist,
-            rtl_path=top_rtl,
+            rtl_path=rtl_sources,
             tb_path=tb,
         )
     except Exception as exc:  # noqa: BLE001 - never crash the backend
@@ -692,6 +718,53 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
     except Exception as _exc:  # noqa: BLE001 - macro selection is best-effort
         log(f"  [FLAT-SYNTH] SRAM-macro directive setup skipped: {_exc!r}", YELLOW)
 
+    # --- Pre-synthesis macro binding ---------------------------------------
+    # cs_mem_macro_shell hard-assigns zero ("MACRO is a backend impl, not a sim
+    # model") and synthesis faithfully preserves that tie-off, so the flat
+    # netlist's memories read zero: PnR is fine (the shell is replaced by
+    # LEF/GDS at placement) but the design cannot be gate-simulated -- the
+    # first read of real data diverges. Binding used to run on the finished
+    # netlist and only recorded collateral for PnR. Resolve each geometry to a
+    # concrete macro HERE instead, and swap in a shell that instantiates it, so
+    # one artifact serves synthesis (via `read_verilog -lib`), PnR and sim.
+    if os.environ.get("CORESMITH_MACRO_PREBIND", "1").strip().lower() \
+            not in ("0", "false", "no", "off"):
+        try:
+            from orchestrator.langgraph import macro_prebind as _mp
+            _pb_srcs = [_p for _p in _input_paths if _p]
+            if _sram_wrapper_lib:
+                _pb_srcs.append(_sram_wrapper_lib)
+            _pb = _mp.resolve_prebindings(_pb_srcs, allow_generate=True)
+            for _w in _pb.warnings:
+                log(f"  [PREBIND] {_w}", YELLOW)
+            if _pb.errors or _pb.unresolved:
+                # Loud, and deliberately NOT substituted: a memory we cannot
+                # bind must not be quietly wired to something that reads zero.
+                for _e in _pb.errors:
+                    log(f"  [PREBIND] {_e}", RED)
+                for _u in _pb.unresolved:
+                    log(f"  [PREBIND] unresolved geometry: {_u.describe()}", RED)
+            elif _pb.bindings and _sram_wrapper_lib:
+                _pbs = _mp.prepare_synth_sources(
+                    _sram_wrapper_lib, _pb, Path(pr) / ".coresmith" / "prebind")
+                input_lines = [_l for _l in input_lines
+                               if "SRAM wrapper library" not in _l]
+                _sram_wrapper_lib = _pbs["wrapper_lib"]
+                input_lines.append(
+                    f"- SRAM wrapper library: `{_sram_wrapper_lib}`")
+                input_lines.append(
+                    "- Bound macro shell (REPLACES the zero-driving "
+                    f"cs_mem_macro_shell; read as a normal source): "
+                    f"`{_pbs['bound_shell']}`")
+                for _m in _pbs["models"]:
+                    input_lines.append(
+                        "- Macro model -- read with `read_verilog -lib` so only "
+                        f"its interface is taken and it is NOT synthesized: `{_m}`")
+                log(f"  [PREBIND] bound {len(_pb.bindings)} memory geometry(ies) "
+                    "to concrete macros before synthesis", YELLOW)
+        except Exception as _exc:  # noqa: BLE001
+            log(f"  [PREBIND] skipped: {_exc!r}", YELLOW)
+
     with _tracer.start_as_current_span(f"Flat Top Synthesis [{design_name}]") as span:
         span.set_attribute("design_name", design_name)
 
@@ -772,6 +845,10 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
             "chip_gate_sim_ok": _gs_ok,
             "chip_gate_sim_status": _gs_status,
             "chip_gate_sim_reason": _gs_reason,
+            # Hand diagnose something to work with. Only on a real FAIL: a
+            # not_run must not look like an error downstream.
+            **({"previous_error":
+                f"chip_top gate-sim FAIL: {_gs_reason}"} if _gs_ok is False else {}),
         }
     else:
         return {
@@ -901,11 +978,23 @@ def _composition_plan_bindings(
 
 
 def route_after_flat_synth(state: BackendState) -> str:
-    """Route after flat synthesis: success -> run_pnr, fail -> diagnose."""
+    """Route after flat synthesis: success -> run_pnr, fail -> diagnose.
+
+    A chip_top gate-sim FAIL is a synthesis failure, not an advisory. The flat
+    netlist provably does not reproduce the verified RTL, so P&R would harden a
+    design that does not work -- and it was recorded in state and ignored, which
+    is the one outcome an honest gate must not have.
+
+    ``chip_gate_sim_ok is None`` means the gate did not APPLY (disabled, no
+    integration TB, toolchain absent). That is not a verdict and must not block:
+    it is already logged with a reason at the point it happened.
+    """
     netlist = state.get("flat_netlist_path", "")
-    if netlist and Path(netlist).exists():
-        return "run_pnr"
-    return "diagnose"
+    if not (netlist and Path(netlist).exists()):
+        return "diagnose"
+    if state.get("chip_gate_sim_ok") is False:
+        return "diagnose"
+    return "run_pnr"
 
 
 route_after_flat_synth.__edge_labels__ = {
@@ -1957,7 +2046,14 @@ async def mpw_precheck_node(state: BackendState) -> dict:
     write_graph_event(pr, "MPW Precheck", "graph_node_exit", {
         "block": block_name,
         "pass": submission_ready,
-        "checks": {k: v.get("pass") for k, v in precheck_result.get("checks", {}).items()},
+        # Tri-state on purpose: True / False / None, where None is "could not
+        # be measured" (see langgraph.drc_verdict). Collapsing None to False
+        # would report a check that never ran as a check that FAILED, which is
+        # the exact dishonesty the verdict states were introduced to remove.
+        "checks": {
+            k: (v.get("pass") if v.get("status") != "not_run" else None)
+            for k, v in precheck_result.get("checks", {}).items()
+        },
         "assessment": analysis.get("assessment", ""),
         "graph": "backend",
     })

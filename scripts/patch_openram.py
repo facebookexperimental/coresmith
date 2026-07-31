@@ -1026,6 +1026,56 @@ def patch_openram(*, check_only: bool = False) -> PatchResult:
             except OSError as e:
                 res.errors.append(f"SPICE micron-unit patch failed ({e})")
 
+    # (10) Deep arrays need a 4-input NAND row decoder, but only freepdk45
+    # -- OpenRAM's reference technology -- defines nand4_leakage.  sky130,
+    # gf180mcu and scn3me_subm copied the leakage block and dropped that one
+    # key, so pnand4.analytical_power() raises KeyError on every ported PDK.
+    # A 64-deep array (6 address bits) never instantiates pnand4; a 4096-deep
+    # one (12 bits) always does, which is why small macros build and large
+    # ones die.  Every sibling value in these files is a placeholder 1 nW
+    # analytical constant -- OpenRAM runs with characterization disabled --
+    # so supplying the missing key costs no fidelity that was ever there.
+    _leak_pending: list[tuple[Path, str, str]] = []
+    _leak_have = 0
+    for _tech in ("sky130", "gf180mcu", "scn3me_subm"):
+        _tf = pkg / "technology" / _tech / "tech" / "tech.py"
+        if not _tf.exists():
+            continue
+        _old = _tf.read_text(errors="ignore")
+        if 'spice["nand4_leakage"]' in _old:
+            _leak_have += 1
+            continue
+        _idx = _old.find('spice["nand3_leakage"]')
+        if _idx < 0:
+            continue
+        _eol = _old.find("\n", _idx)
+        if _eol < 0:
+            continue
+        _new = (
+            _old[:_eol + 1]
+            + 'spice["nand4_leakage"] = 1       # Leakage power of 4-input nand in nW\n'
+            + _old[_eol + 1:]
+        )
+        _leak_pending.append((_tf, _old, _new))
+
+    if not _leak_pending:
+        res.already.append(
+            "nand4-leakage" if _leak_have else "nand4-leakage-unavailable")
+    elif check_only:
+        res.errors.append(
+            f"{len(_leak_pending)} technology tech.py missing nand4_leakage"
+        )
+    else:
+        try:
+            for _path, _old, _new in _leak_pending:
+                _bak = _path.with_suffix(".py.coresmith-bak")
+                if not _bak.exists():
+                    _bak.write_text(_old, encoding="utf-8")
+                _path.write_text(_new, encoding="utf-8")
+            res.applied.append("nand4-leakage")
+        except OSError as e:
+            res.errors.append(f"nand4_leakage patch failed ({e})")
+
     # Runnable iff __main__ importable now.
     try:
         importlib.invalidate_caches()

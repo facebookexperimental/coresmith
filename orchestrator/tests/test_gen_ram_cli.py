@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
 from pathlib import Path
 
 import pytest
@@ -110,6 +111,75 @@ class TestHonestVerdicts:
     def test_liberty_missing_file_fails(self, gen_ram):
         ok, detail, cyc = gen_ram.check_liberty(Path("/nonexistent/x.lib"))
         assert not ok and cyc is None
+
+
+class TestUnmeasuredStagesAreNotFailures:
+    """A stage the tool never measured must not be rendered as a result.
+
+    The macro DRC stage used to emit ``{"ok": false, "violations": -1}`` for a
+    DRC that produced no report at all (see the ``exp-raster-macro-20260727``
+    w32_d64 / w9_d512 reports, whose named precheck_magic_drc.rpt was never
+    written): every consumer read that as "this macro HAS DRC violations". The
+    emitted report must instead carry the engine's three-state vocabulary --
+    ``status: not_run`` + a ``reason``, ``ok: null``, ``violations: null``.
+    """
+
+    def _emit_report(self, gen_ram, monkeypatch, tmp_path):
+        lib = tmp_path / "fake.lib"
+        lib.write_text("library (fake) { }\n")
+        monkeypatch.setattr(gen_ram, "stage_patch",
+                            lambda check_only: (True, "patched"))
+        monkeypatch.setattr(
+            gen_ram, "stage_generate",
+            lambda width, depth, ports, out, timeout: (
+                True, "generated", {"name": "fake_macro", "lib": str(lib)}))
+        monkeypatch.setattr(gen_ram, "check_liberty",
+                            lambda p: (True, "minimum_period 2.0000 ns", 2.0))
+
+        rc = gen_ram.main(["--width", "16", "--depth", "128",
+                           "--out", str(tmp_path)])
+        report = json.loads((tmp_path / "gen_ram_report.json").read_text())
+        return rc, report
+
+    def test_drc_stage_is_not_run_with_a_reason(self, gen_ram, monkeypatch,
+                                               tmp_path):
+        rc, report = self._emit_report(gen_ram, monkeypatch, tmp_path)
+        assert rc == 0 and report["verdict"] == "PASS"
+
+        drc = report["stages"]["drc"]
+        assert drc["status"] == "not_run"
+        # NOT False -- False claims a measured violation count.
+        assert drc["ok"] is None
+        # NOT -1 and NOT 0 -- there is no count.
+        assert drc["violations"] is None
+        assert drc["measured"] is False
+        assert "check_lvs=False" in drc["reason"]
+        assert "-1" not in json.dumps(drc)
+
+    def test_lvs_stage_uses_the_same_vocabulary(self, gen_ram, monkeypatch,
+                                               tmp_path):
+        _, report = self._emit_report(gen_ram, monkeypatch, tmp_path)
+        lvs = report["stages"]["lvs"]
+        assert lvs["status"] == "not_run" and lvs["ok"] is None
+
+    def test_unmeasured_stages_are_named_next_to_the_verdict(
+            self, gen_ram, monkeypatch, tmp_path):
+        """`verdict: PASS` must not be readable as "DRC/LVS clean"."""
+        _, report = self._emit_report(gen_ram, monkeypatch, tmp_path)
+        assert report["unmeasured"] == ["drc", "lvs"]
+
+    def test_measured_stages_keep_their_boolean_verdicts(self, gen_ram,
+                                                        monkeypatch, tmp_path):
+        """Only the unmeasured case changed: a real failure still fails."""
+        monkeypatch.setattr(gen_ram, "stage_patch",
+                            lambda check_only: (False, "patcher raised: boom"))
+        rc = gen_ram.main(["--width", "16", "--depth", "128",
+                           "--out", str(tmp_path)])
+        report = json.loads((tmp_path / "gen_ram_report.json").read_text())
+        assert rc == 1
+        assert report["verdict"] == "FAIL"
+        assert report["stages"]["patch"]["ok"] is False
+        assert report["unmeasured"] == []
 
 
 class TestOpenramAvailability:

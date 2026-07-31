@@ -17,6 +17,12 @@ running the individual checks directly via Nix-wrapped EDA tools:
   - Magic DRC (full Sky130 design rules)
   - Netgen LVS (layout vs schematic)
   - Directory/file structure validation
+
+Both DRC runners return the honest three-state verdict built by
+``orchestrator.langgraph.drc_verdict`` (``pass`` / ``fail`` / ``not_run`` + a
+``reason``): a DRC that produced no report, an empty report or no parseable
+count is ``not_run`` with ``violation_count = None``, never a fabricated ``-1``
+that reads as violations and never a ``0`` that reads as clean.
 """
 
 from __future__ import annotations
@@ -33,6 +39,12 @@ from orchestrator.langgraph.backend_helpers import (
     LIBERTY,
     TECH_LEF,
     _resolve_tool,
+)
+from orchestrator.langgraph.drc_verdict import (
+    STATUS_NOT_RUN,
+    classify_drc,
+    drc_summary,
+    unmeasured_drc,
 )
 from orchestrator.langgraph.pipeline_helpers import (
     GREEN,
@@ -915,26 +927,41 @@ def run_mpw_precheck_native(
     # ---- Check 5: KLayout DRC (advisory -- not a hard gate) ----
     if gds_path and Path(gds_path).exists():
         klayout_result = _run_klayout_drc(gds_path, str(sub), timeout)
+        # Marked advisory so an UNMEASURED KLayout run stays non-blocking (as a
+        # missing binary always has) while a MEASURED violation count keeps
+        # blocking exactly as before -- see the hard_checks filter below.
+        klayout_result["advisory"] = True
         results["checks"]["klayout_drc"] = klayout_result
         if not klayout_result.get("pass"):
             if klayout_result.get("skipped"):
-                results["warnings"].append("KLayout DRC skipped (binary not available)")
-            else:
                 results["warnings"].append(
-                    f"KLayout DRC: {klayout_result.get('violation_count', '?')} violations")
+                    "KLayout DRC skipped (binary not available): "
+                    + (klayout_result.get("reason") or "no reason recorded"))
+            else:
+                # drc_summary distinguishes "N violations" from "COULD NOT BE
+                # MEASURED: <why>"; the old text claimed "-1 violations".
+                results["warnings"].append(drc_summary(klayout_result))
 
     # ---- Check 6: Magic DRC (authoritative -- on top-level GDS) ----
     if gds_path and Path(gds_path).exists():
         magic_result = _run_magic_drc_on_gds(gds_path, str(sub), timeout)
         results["checks"]["magic_drc"] = magic_result
-        if not magic_result["pass"]:
+        if not magic_result.get("pass"):
+            # Still fail-closed: signing off a shuttle submission requires a
+            # DRC MEASUREMENT, and an unmeasured DRC is not one. But the text
+            # now says WHICH it is -- "12 violation(s)" vs "COULD NOT BE
+            # MEASURED: Magic left NO DRC report at ..." -- instead of
+            # asserting "-1 violations" about a report that never existed.
             results["pass"] = False
-            results["errors"].append(
-                f"Magic DRC: {magic_result.get('violation_count', '?')} violations")
+            results["errors"].append(drc_summary(magic_result))
 
+    # An ADVISORY check that could not be measured is not evidence of anything,
+    # so it must not flip the hard verdict -- the same posture a missing binary
+    # (``skipped``) has always had. A measured advisory FAILURE still counts.
     hard_checks = {
         k: v for k, v in results["checks"].items()
         if not v.get("skipped")
+        and not (v.get("advisory") and v.get("status") == STATUS_NOT_RUN)
     }
     derived_pass = all(c.get("pass") for c in hard_checks.values()) if hard_checks else False
     if results["pass"] and not derived_pass:
@@ -1223,38 +1250,60 @@ end
 
         _write_step_log("openframe_wrapper", "klayout_drc", cmd, result, 1)
 
-        # Parse the KLayout DRC XML report
-        violation_count = 0
-        if report_path.exists():
-            report_text = report_path.read_text()
-            violation_count = report_text.count("<item>")
+        # Parse the KLayout DRC XML report. A MISSING report is not zero
+        # violations: this used to leave violation_count at 0, which made
+        # "KLayout produced nothing" read as "clean layout".
+        violation_count: int | None = None
+        if report_path.is_file():
+            report_text = report_path.read_text(errors="replace")
+            if report_text.strip():
+                violation_count = report_text.count("<item>")
 
-        return {
-            "pass": violation_count == 0,
-            "violation_count": violation_count,
-            "report_path": str(report_path),
-            "returncode": result.returncode,
-            "stderr": result.stderr[:500] if result.stderr else "",
-        }
+        verdict = classify_drc(
+            violation_count=violation_count,
+            report_path=str(report_path),
+            tool_ran=result.returncode == 0,
+            tool_error=(result.stderr or result.stdout or "")[-500:],
+            tool="KLayout",
+        )
+        verdict["returncode"] = result.returncode
+        verdict["stderr"] = result.stderr[:500] if result.stderr else ""
+        if verdict["status"] == STATUS_NOT_RUN:
+            log(f"  [PRECHECK] {drc_summary(verdict)}", YELLOW)
+        return verdict
     except subprocess.TimeoutExpired:
-        return {
-            "pass": False,
-            "violation_count": -1,
-            "error": f"KLayout DRC timed out ({timeout}s)",
-        }
+        return unmeasured_drc(
+            f"KLayout DRC timed out after {timeout}s, so it produced no "
+            "violation count.",
+            report_path=str(report_path), tool="KLayout")
     except FileNotFoundError:
         log("  [PRECHECK] KLayout not available -- skipping KLayout DRC", YELLOW)
+        # ``skipped`` keeps a missing binary out of the hard verdict, as before.
         return {
-            "pass": False,
-            "violation_count": 0,
-            "error": f"KLayout binary not found: {KLAYOUT_BIN}. Skipped.",
+            **unmeasured_drc(
+                f"KLayout binary not found: {KLAYOUT_BIN} -- the check never "
+                "ran, so nothing about this layout was measured.",
+                report_path=str(report_path), tool="KLayout"),
             "skipped": True,
         }
 
 
 def _run_magic_drc_on_gds(gds_path: str, output_dir: str, timeout: int = 600) -> dict:
-    """Run Magic DRC directly on a GDS file (precheck variant)."""
-    from orchestrator.langgraph.backend_helpers import run_magic
+    """Run Magic DRC directly on a GDS file (precheck variant).
+
+    Returns the honest three-state verdict from
+    :func:`orchestrator.langgraph.drc_verdict.classify_drc`: ``pass`` (report
+    present, count 0), ``fail`` (a measured N > 0) or ``not_run`` + ``reason``
+    when no measurement exists. This function used to return
+    ``{"pass": False, "violation_count": -1}`` when Magic produced nothing at
+    all, which every consumer read as "this layout HAS violations" -- see the
+    ``exp-raster-macro-20260727`` w32_d64 / w9_d512 macro reports, whose named
+    ``precheck_magic_drc.rpt`` was never written.
+    """
+    from orchestrator.langgraph.backend_helpers import (
+        _parse_magic_drc_count,
+        run_magic,
+    )
 
     out = Path(output_dir)
     tcl_path = out / "precheck_magic_drc.tcl"
@@ -1288,9 +1337,30 @@ quit -noprompt
 """)
 
     result = run_magic(str(tcl_path), "precheck", "precheck_drc", timeout=timeout)
+    report_path = out / "precheck_magic_drc.rpt"
 
-    return {
-        "pass": result.get("drc_count", -1) == 0 and result.get("success", False),
-        "violation_count": result.get("drc_count", -1),
-        "report_path": str(out / "precheck_magic_drc.rpt"),
-    }
+    # run_magic's false-clean recount only knows the BACKEND flow's
+    # ``magic_drc.rpt`` filename, so this flow's report was never consulted: a
+    # blank Magic stdout count parsed as 0 while precheck_magic_drc.rpt could
+    # hold thousands of rects. Recount from THIS report before judging.
+    count = result.get("drc_count")
+    if report_path.is_file():
+        try:
+            report_text = report_path.read_text(errors="replace")
+        except OSError:
+            report_text = ""
+        if report_text.strip():
+            count = _parse_magic_drc_count(result.get("stdout", "") or "",
+                                           report_text)
+
+    verdict = classify_drc(
+        violation_count=count,
+        report_path=str(report_path),
+        tool_ran=bool(result.get("success")),
+        tool_error=(result.get("stderr") or result.get("stdout") or "")[-500:],
+        tool="Magic",
+    )
+    verdict["log_path"] = result.get("log_path", "")
+    if verdict["status"] == STATUS_NOT_RUN:
+        log(f"  [PRECHECK] {drc_summary(verdict)}", YELLOW)
+    return verdict

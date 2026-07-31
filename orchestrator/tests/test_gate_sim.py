@@ -6,10 +6,12 @@
 
 The gate replays the verified RTL's own port vectors through the SYNTHESIZED
 NETLIST and fails closed on divergence. These tests pin (a) both branches of the
-``CORESMITH_GATE_SIM`` env gate, (b) the netlist/VCD plumbing that has to be
-exactly right for the comparison to mean anything, and (c) every fail-closed
-path -- blank verdict, zero cycles, zero compared bits, vacuous stimulus,
-unmodelled macro, netlist that will not elaborate.
+``CORESMITH_GATE_SIM`` env gate and of the scope guard, (b) the netlist/VCD
+plumbing that has to be exactly right for the comparison to mean anything,
+(c) every fail-closed path -- blank verdict, zero cycles, zero compared bits,
+vacuous stimulus, unmodelled macro, netlist that will not elaborate, (d) that a
+generated hard-macro stand-in matches the REAL macro's declared interface, and
+(e) that a power-only tri-state boundary is judged while a signal one is not.
 
 The live Verilator build is exercised at the LOGIC level here via an injected
 runner: the mechanism and the fail semantics are what these tests pin, not the
@@ -39,7 +41,33 @@ module blk(clk, rst_n, en, q, valid);
 endmodule
 """
 
-_BLOCK = {"name": "blk"}
+# The same netlist with a Caravel-style POWER-ONLY bidirectional boundary.
+_NETLIST_RAILS = _NETLIST.replace(
+    "module blk(clk, rst_n, en, q, valid);",
+    "module blk(clk, rst_n, en, q, valid, vccd1, vssd1);",
+).replace(
+    "  sky130_fd_sc_hd__dfxtp_1",
+    "  inout vccd1;\n  wire vccd1;\n  inout vssd1;\n  wire vssd1;\n"
+    "  sky130_fd_sc_hd__dfxtp_1",
+)
+
+# The same netlist with a real bidirectional SIGNAL on the boundary.
+_NETLIST_TRISTATE = _NETLIST.replace(
+    "module blk(clk, rst_n, en, q, valid);",
+    "module blk(clk, rst_n, en, q, valid, sda);",
+).replace(
+    "  sky130_fd_sc_hd__dfxtp_1",
+    "  inout sda;\n  wire sda;\n  sky130_fd_sc_hd__dfxtp_1",
+)
+
+# The subject under test declares itself the chip top. The gate's DEFAULT SCOPE
+# is chip_top -- a per-block netlist is an intermediate whose stimulus is that
+# block's own testbench, not the artifact that becomes silicon -- so a subject
+# that is not marked would be `not_run` before any verdict logic ran, and these
+# tests are about the verdict logic. The leaf-block behaviour has its own test
+# (``test_leaf_block_is_not_run_under_the_default_scope``); it is deliberately
+# NOT worked around by weakening the guard.
+_BLOCK = {"name": "blk", "is_chip_top": True}
 
 
 # --------------------------------------------------------------------------- #
@@ -88,6 +116,73 @@ def test_enabled_gate_actually_evaluates_the_netlist(monkeypatch, tmp_path):
     assert "NO NETLIST" in res.reason
 
 
+# --------------------------------------------------------------------------- #
+# scope guard -- the gate judges chip_top by default
+# --------------------------------------------------------------------------- #
+def test_scope_defaults_to_chip_top(monkeypatch):
+    monkeypatch.delenv(gs.GATE_SIM_SCOPE_ENV, raising=False)
+    assert gs.gate_sim_scope() == "chip_top"
+    monkeypatch.setenv(gs.GATE_SIM_SCOPE_ENV, "block")
+    assert gs.gate_sim_scope() == "block"
+    monkeypatch.setenv(gs.GATE_SIM_SCOPE_ENV, "any")
+    assert gs.gate_sim_scope() == "any"
+    monkeypatch.setenv(gs.GATE_SIM_SCOPE_ENV, "nonsense")
+    assert gs.gate_sim_scope() == "chip_top", "an unknown scope must not widen it"
+
+
+@pytest.mark.parametrize("block", [
+    {"name": "blk", "is_chip_top": True},
+    {"name": "blk", "scope": "chip_top"},
+    {"name": "chip_top"},
+    {"name": "integration"},
+    {"name": "my_design_chip_top"},
+])
+def test_block_is_chip_top_recognises_the_top(block):
+    assert gs.block_is_chip_top(block) is True
+
+
+@pytest.mark.parametrize("block", [{"name": "blk"}, {"name": "fifo"}, {}])
+def test_block_is_chip_top_rejects_a_leaf(block):
+    assert gs.block_is_chip_top(block) is False
+
+
+def test_leaf_block_is_not_run_under_the_default_scope(monkeypatch, tmp_path):
+    """NEW BEHAVIOUR: with the default scope the gate judges the integrated
+    chip_top netlist only. A LEAF block is ``not_run`` -- never a pass and never
+    a failure -- and the reason has to say why and how to opt in, because a
+    silent skip is indistinguishable from a check that passed."""
+    monkeypatch.delenv(gs.GATE_SIM_ENV, raising=False)          # default ON
+    monkeypatch.delenv(gs.GATE_SIM_SCOPE_ENV, raising=False)    # default chip_top
+    net = tmp_path / "n.v"
+    net.write_text(_NETLIST)
+    res = gs.check_gate_sim({"name": "fifo"}, str(net), "r.v", "tb.py")
+    assert res.status == gs.STATUS_NOT_RUN
+    assert res.ran is False and res.blocking is False
+    assert "fifo" in res.reason and "chip_top" in res.reason
+    assert gs.GATE_SIM_SCOPE_ENV in res.reason
+
+
+def test_scope_block_admits_a_leaf_again(monkeypatch, tmp_path):
+    """The per-block replay is still available -- it is how a synthesis-side
+    stub scoring 143/144 line coverage was caught."""
+    monkeypatch.setenv(gs.GATE_SIM_ENV, "1")
+    monkeypatch.setenv(gs.GATE_SIM_SCOPE_ENV, "block")
+    monkeypatch.setattr(gs.shutil, "which", lambda _n: "/usr/bin/verilator")
+    res = gs.check_gate_sim({"name": "fifo"}, str(tmp_path / "gone.v"),
+                            "r.v", "tb.py")
+    assert res.status == gs.STATUS_NOT_RUN
+    assert "NO NETLIST" in res.reason, "reached the netlist check, not the guard"
+
+
+def test_disabled_outranks_out_of_scope(monkeypatch, tmp_path):
+    """A reader of a leaf block's report must be told the gate is OFF, not that
+    the subject was out of scope -- nothing would have run either way."""
+    monkeypatch.setenv(gs.GATE_SIM_ENV, "0")
+    monkeypatch.delenv(gs.GATE_SIM_SCOPE_ENV, raising=False)
+    res = gs.check_gate_sim({"name": "fifo"}, str(tmp_path / "n.v"), "r.v", "tb.py")
+    assert res.status == gs.STATUS_DISABLED
+
+
 def test_strict_gate_both_branches(monkeypatch):
     monkeypatch.delenv("CORESMITH_GATE_SIM_STRICT", raising=False)
     assert gs.gate_sim_strict() is False
@@ -111,6 +206,19 @@ def test_macro_model_mode_env(monkeypatch):
     assert gs.gate_sim_macro_model_mode() == "generated"
     monkeypatch.setenv("CORESMITH_GATE_SIM_MACRO_MODEL", "pdk")
     assert gs.gate_sim_macro_model_mode() == "pdk"
+
+
+def test_debug_env_both_branches(monkeypatch):
+    monkeypatch.delenv(gs.GATE_SIM_DEBUG_ENV, raising=False)
+    assert gs.gate_sim_debug() is False
+    monkeypatch.setenv(gs.GATE_SIM_DEBUG_ENV, "1")
+    assert gs.gate_sim_debug() is True
+    monkeypatch.delenv("CORESMITH_GATE_SIM_MAX_DIVERGENCES", raising=False)
+    assert gs.gate_sim_max_divergences() == 32
+    monkeypatch.setenv("CORESMITH_GATE_SIM_MAX_DIVERGENCES", "4")
+    assert gs.gate_sim_max_divergences() == 4
+    monkeypatch.setenv("CORESMITH_GATE_SIM_MAX_DIVERGENCES", "garbage")
+    assert gs.gate_sim_max_divergences() == 32
 
 
 # --------------------------------------------------------------------------- #
@@ -248,11 +356,114 @@ def test_cell_model_files_absent_pdk(tmp_path):
     assert gs.cell_model_files(tmp_path / "nothing", _NETLIST) == ([], ())
 
 
-def test_macro_model_source_1rw1r_geometry():
-    src = gs.macro_model_source("m8x1024", "1rw1r", 8, 1024, 8)
+# --------------------------------------------------------------------------- #
+# hard-macro stand-in: the interface is READ from the real macro, not guessed
+# --------------------------------------------------------------------------- #
+def _openram_model(tmp_path, name, *, data_bits, addr_bits, nmask=0, gran=8,
+                   extra_port=""):
+    """Write a structurally faithful OpenRAM sky130 1rw1r behavioural model.
+
+    Reproduces exactly the shape the PDK ships -- non-ANSI header, geometry
+    behind ``parameter``s, supplies behind ```ifdef USE_POWER_PINS``, and the
+    ``merge_write0`` function whose ``if (write_mask[i])`` arms are the ground
+    truth for which data bits each mask bit covers. ``nmask=0`` models the
+    ``word_size == write_size`` case, where OpenRAM omits ``wmask0`` ENTIRELY.
+    """
+    wm_hdr = "wmask0," if nmask else ""
+    wm_decl = ("  input [NUM_WMASKS-1:0]   wmask0; // write mask\n"
+               if nmask else "")
+    wm_arg = "    input [NUM_WMASKS-1:0] write_mask;\n" if nmask else ""
+    if nmask:
+        arms = "".join(
+            f"      if (write_mask[{i}])\n"
+            f"        merge_write0[{min((i + 1) * gran - 1, data_bits - 1)}:"
+            f"{i * gran}] = new_word[{min((i + 1) * gran - 1, data_bits - 1)}:"
+            f"{i * gran}];\n"
+            for i in range(nmask))
+    else:
+        arms = (f"      merge_write0[{data_bits - 1}:0] = "
+                f"new_word[{data_bits - 1}:0];\n")
+    src = f"""`timescale 1ns/1ps
+
+// OpenRAM SRAM model
+// Words: {1 << addr_bits}
+// Word size: {data_bits}
+
+module {name}(
+`ifdef USE_POWER_PINS
+    vccd1,
+    vssd1,
+`endif
+// Port 0: RW
+    clk0,csb0,web0,{wm_hdr}addr0,din0,dout0,
+// Port 1: R
+    clk1,csb1,addr1,dout1{"," + extra_port if extra_port else ""}
+  );
+
+  parameter NUM_WMASKS = {nmask} ;
+  parameter DATA_WIDTH = {data_bits} ;
+  parameter ADDR_WIDTH = {addr_bits} ;
+  parameter RAM_DEPTH = 1 << ADDR_WIDTH;
+  parameter T_HOLD = 1 ;
+
+`ifdef USE_POWER_PINS
+    inout vccd1;
+    inout vssd1;
+`endif
+  input  clk0; // clock
+  input   csb0; // active low chip select
+  input  web0; // active low write control
+{wm_decl}  input [ADDR_WIDTH-1:0]  addr0;
+  input [DATA_WIDTH-1:0]  din0;
+  output [DATA_WIDTH-1:0] dout0;
+  input  clk1; // clock
+  input   csb1; // active low chip select
+  input [ADDR_WIDTH-1:0]  addr1;
+  output [DATA_WIDTH-1:0] dout1;
+{"  input  " + extra_port + ";" if extra_port else ""}
+
+  reg [DATA_WIDTH-1:0]    mem [0:RAM_DEPTH-1];
+
+  function [DATA_WIDTH-1:0] merge_write0;
+    input [DATA_WIDTH-1:0] old_word;
+    input [DATA_WIDTH-1:0] new_word;
+{wm_arg}    begin
+      merge_write0 = old_word;
+{arms}    end
+  endfunction
+endmodule
+"""
+    p = tmp_path / f"{name}.v"
+    p.write_text(src)
+    return p
+
+
+def test_macro_interface_reads_the_real_declarations(tmp_path):
+    p = _openram_model(tmp_path, "m32x256", data_bits=32, addr_bits=8, nmask=4)
+    iface = gs.macro_interface("m32x256", p)
+    assert iface is not None
+    assert iface.order == ["clk0", "csb0", "web0", "wmask0", "addr0", "din0",
+                           "dout0", "clk1", "csb1", "addr1", "dout1"]
+    assert iface.widths["wmask0"] == 4
+    assert iface.widths["addr0"] == 8
+    assert iface.widths["din0"] == 32
+    # supplies are NOT functional ports; they stay behind the ifdef
+    assert iface.power_pins == ["vccd1", "vssd1"]
+    assert "vccd1" not in iface.order
+    # the merge function is the ground truth for the mask slicing
+    assert iface.mask_slices == [(7, 0), (15, 8), (23, 16), (31, 24)]
+
+
+def test_macro_stand_in_geometry_comes_from_the_declarations(tmp_path):
+    p = _openram_model(tmp_path, "m8x1024", data_bits=8, addr_bits=10, nmask=1)
+    src = gs.macro_model_source("m8x1024", "1rw1r", 8, 1024, 8,
+                                iface=gs.macro_interface("m8x1024", p))
     assert "module m8x1024" in src
     assert "input  wire [9:0] addr0;" in src
-    assert "output reg  [7:0] dout0;" in src
+    assert "output reg [7:0] dout0;" in src
+    # depth is `1 << ADDR_WIDTH`, exactly as the PDK model declares RAM_DEPTH --
+    # sizing from the registry's word count would leave an addressable index out
+    # of range on a non-power-of-two macro.
     assert "reg [7:0] mem [0:1023];" in src
     assert "always @(posedge clk1)" in src
     # a cycle-accurate model must not carry the PDK model's delays or tracing
@@ -260,13 +471,124 @@ def test_macro_model_source_1rw1r_geometry():
     assert "#(" not in code and "$display" not in code
 
 
-def test_macro_model_source_write_mask_slices():
-    src = gs.macro_model_source("m32x256", "1rw1r", 32, 256, 8)
+def test_macro_stand_in_write_mask_slices(tmp_path):
+    p = _openram_model(tmp_path, "m32x256", data_bits=32, addr_bits=8, nmask=4)
+    src = gs.macro_model_source("m32x256", "1rw1r", 32, 256, 8,
+                                iface=gs.macro_interface("m32x256", p))
+    assert "input  wire [3:0] wmask0;" in src
     assert "if (wmask0[3]) mem[addr0][31:24]" in src
 
 
-def test_macro_model_source_unknown_ports_is_empty():
+def test_macro_stand_in_omits_a_port_the_real_macro_does_not_declare(tmp_path):
+    """REGRESSION -- the false FAIL this file exists to prevent.
+
+    ``sram_1rw1r_8_4096_8`` has word_size == write_size == 8, so a single
+    whole-word mask bit IS the write enable and OpenRAM omits ``wmask0``
+    entirely. The old generator emitted it anyway and gated writes on
+    ``wmask0[0]``; the flat netlist correctly left the pin unconnected,
+    Verilator tied the floating input LOW, every write was suppressed, every
+    read returned zero, and a correctly synthesized netlist "failed" gate sim.
+    """
+    p = _openram_model(tmp_path, "m8x4096", data_bits=8, addr_bits=12, nmask=0)
+    iface = gs.macro_interface("m8x4096", p)
+    assert "wmask0" not in iface.order
+    src = gs.macro_model_source("m8x4096", "1rw1r", 8, 4096, 8, iface=iface)
+    assert "wmask0" not in src, "declared a pin the real macro does not have"
+    # ...and the write must not silently vanish with the mask
+    assert "if (!web0) begin\n        mem[addr0] <= din0;" in src
+
+
+def test_macro_stand_in_matches_a_declared_mask_width_exactly(tmp_path):
+    """REGRESSION -- the second, opposite instance of the same defect.
+
+    ``sram_1rw1r_9_4096_8`` DOES declare ``wmask0``, as ``[1:0]``
+    (NUM_WMASKS == ceil(9/8) == 2). The old generator computed ``9 // 8 == 1``
+    and declared ``[0:0]``, so the netlist drove ``2'h3`` into a 1-bit port --
+    harmless only because that mask happened to be a constant.
+    """
+    p = _openram_model(tmp_path, "m9x4096", data_bits=9, addr_bits=12, nmask=2)
+    src = gs.macro_model_source("m9x4096", "1rw1r", 9, 4096, 8,
+                                iface=gs.macro_interface("m9x4096", p))
+    assert "input  wire [1:0] wmask0;" in src
+    assert "[0:0] wmask0" not in src
+    # the partial final mask group covers exactly one bit, as the real
+    # merge_write0 says -- not a rounded-up byte
+    assert "if (wmask0[0]) mem[addr0][7:0] <= din0[7:0];" in src
+    assert "if (wmask0[1]) mem[addr0][8:8] <= din0[8:8];" in src
+
+
+def test_macro_stand_in_without_an_interface_is_unresolved():
+    """No macro source => no interface => UNRESOLVED, which the caller turns
+    into a FAIL. It must never fall back to arithmetic on registry metadata:
+    that guess is what shipped two wrong stand-ins."""
+    assert gs.macro_model_source("m8x1024", "1rw1r", 8, 1024, 8) == ""
     assert gs.macro_model_source("weird", "3q", 8, 16, 8) == ""
+
+
+def test_macro_interface_unreadable_source_is_none(tmp_path):
+    assert gs.macro_interface("gone", tmp_path / "absent.v") is None
+    assert gs.macro_interface("gone", "") is None
+    other = tmp_path / "other.v"
+    other.write_text("module something_else(input clk);\nendmodule\n")
+    assert gs.macro_interface("gone", other) is None
+
+
+def test_macro_interface_unresolvable_width_is_none(tmp_path):
+    """A width we cannot evaluate is UNKNOWN, not 1 and not a default."""
+    p = tmp_path / "m.v"
+    p.write_text(
+        "module m(clk0, csb0, web0, addr0, din0, dout0);\n"
+        "  parameter DATA_WIDTH = 8;\n"
+        "  input clk0;\n  input csb0;\n  input web0;\n"
+        "  input [$clog2(SOMETHING)-1:0] addr0;\n"
+        "  input [DATA_WIDTH-1:0] din0;\n"
+        "  output [DATA_WIDTH-1:0] dout0;\n"
+        "endmodule\n")
+    assert gs.macro_interface("m", p) is None
+
+
+def test_macro_stand_in_refuses_an_unrecognised_pin(tmp_path):
+    """A pin this generator does not understand means we do not understand this
+    macro. Declaring it as something plausible would be a guess with a verdict
+    attached to it."""
+    p = _openram_model(tmp_path, "mx", data_bits=8, addr_bits=8, nmask=1,
+                       extra_port="rdmode0")
+    iface = gs.macro_interface("mx", p)
+    assert "rdmode0" in iface.order
+    assert gs.macro_model_source("mx", "1rw1r", 8, 256, 8, iface=iface) == ""
+
+
+def test_macro_stand_in_reads_select_polarity_from_the_macro(tmp_path):
+    """OpenRAM SRAMs declare active-LOW ``csb0``; the OpenROM mask-ROM models
+    declare active-HIGH ``cs0``. Hard-coding either one inverts every access to
+    the other, which reads as plausible garbage rather than an obvious failure.
+    A read-only memory also has to load its contents or the stand-in models
+    hardware that was never simulated."""
+    data = tmp_path / "rom_data.bin"
+    data.write_text("00000000\n00000001\n")
+    p = tmp_path / "rom_1r_8_4_sky130.v"
+    p.write_text(
+        "module rom_1r_8_4_sky130(clk0, cs0, addr0, dout0);\n"
+        "  parameter DATA_WIDTH = 8 ;\n"
+        "  parameter ADDR_WIDTH = 2 ;\n"
+        "  input  clk0;\n"
+        "  input  cs0; // active high chip select\n"
+        "  input [ADDR_WIDTH-1:0] addr0;\n"
+        "  output [DATA_WIDTH-1:0] dout0;\n"
+        "  reg [DATA_WIDTH-1:0] mem [0:3];\n"
+        '  initial $readmemb("rom_data.bin", mem, 0, 3);\n'
+        "endmodule\n")
+    iface = gs.macro_interface("rom_1r_8_4_sky130", p)
+    src = gs.macro_model_source("rom_1r_8_4_sky130", "1r", 8, 4, 0, iface=iface)
+    assert "if (cs0) dout0 <= mem[addr0];" in src
+    assert "!cs0" not in src, "inverted an active-HIGH select"
+    assert f'$readmemb("{data}"' in src
+
+    # ...and a ROM whose contents are not on disk is UNRESOLVED, not a memory
+    # full of zeros with a verdict attached.
+    data.unlink()
+    assert gs.macro_model_source("rom_1r_8_4_sky130", "1r", 8, 4, 0,
+                                 iface=iface) == ""
 
 
 def test_render_driver_cpp_is_design_agnostic():
@@ -288,6 +610,161 @@ def test_render_driver_cpp_handles_wide_ports():
     cpp = gs.render_driver_cpp("blk", ports, "clk")
     assert "parse_wide(in_tok[0], w, 3)" in cpp
     assert "uint32_t w[5]; parse_wide" in cpp
+
+
+# --------------------------------------------------------------------------- #
+# power/ground boundary vs a real tri-state boundary
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("name,level", [
+    ("vccd1", 1), ("vccd2", 1), ("vdda1", 1), ("vdda2", 1), ("vdd", 1),
+    ("vpwr", 1), ("vpb", 1), ("VCCD1", 1),
+    ("vssd1", 0), ("vssd2", 0), ("vssa1", 0), ("vssa2", 0), ("vss", 0),
+    ("vgnd", 0), ("vnb", 0), ("gnd", 0),
+])
+def test_power_inout_level_knows_the_rails(name, level):
+    assert gs.power_inout_level(name) == level
+
+
+@pytest.mark.parametrize("name", ["sda", "scl", "io_out", "gpio", "flash_io0",
+                                  "dq", "vddish", "my_vccd1", "data"])
+def test_power_inout_level_calls_anything_else_a_signal(name):
+    """Conservative on purpose: mis-classifying a tri-state SIGNAL as a rail
+    would tie it to a constant and then not compare it -- i.e. fabricate a
+    pass on the exact port the gate could not judge."""
+    assert gs.power_inout_level(name) is None
+
+
+def test_split_inouts_separates_rails_from_signals():
+    ports = [gs.Port("clk", "input"), gs.Port("vccd1", "inout"),
+             gs.Port("vssd1", "inout"), gs.Port("sda", "inout"),
+             gs.Port("q", "output", 8, 7, 0)]
+    rails, signals = gs.split_inouts(ports)
+    assert [p.name for p in rails] == ["vccd1", "vssd1"]
+    assert [p.name for p in signals] == ["sda"]
+
+
+def test_a_wide_inout_is_never_treated_as_a_rail():
+    """A supply is one bit. A bus that happens to share a rail's name is not a
+    rail we understand, so it stays a signal and still vetoes the gate."""
+    rails, signals = gs.split_inouts([gs.Port("vccd1", "inout", 8, 7, 0)])
+    assert rails == []
+    assert [p.name for p in signals] == ["vccd1"]
+
+
+def test_driver_ties_power_rails_and_never_compares_them():
+    ports = gs.parse_netlist_ports(_NETLIST_RAILS, "blk")
+    cpp = gs.render_driver_cpp("blk", ports, "clk")
+    assert "dut->vccd1 = 1;" in cpp
+    assert "dut->vssd1 = 0;" in cpp
+    # a rail carries no behaviour: it is never a recorded input nor a compared
+    # output
+    assert "dut->vccd1 = parse_scalar" not in cpp
+    assert 'record("vccd1"' not in cpp and 'record("vssd1"' not in cpp
+
+
+def test_power_only_boundary_is_judged_not_vetoed(monkeypatch, tmp_path):
+    """A Caravel ``user_project_wrapper``'s only inouts are the eight supplies,
+    and that wrapper is the artifact the external grader drives. Refusing on any
+    ``inout`` made the gate structurally unable to judge it -- a hole exactly
+    where the gate is supposed to be strongest."""
+    net, pdk = _stub_env(monkeypatch, tmp_path, netlist=_NETLIST_RAILS)
+    monkeypatch.setattr(
+        gs, "build_and_run_gate_sim",
+        lambda **_k: {"ok": True, "cycles_compared": 6,
+                      "output_bits_compared": 54, "diverged": False},
+    )
+    res = gs.check_gate_sim(_BLOCK, str(net), "r.v", "tb.py",
+                            sim_runner=_runner_for(_good_ref(tmp_path)),
+                            pdk_root=pdk, work_root=tmp_path / "work")
+    assert res.status == gs.STATUS_PASS
+    assert res.detail["power_rails_tied"] == ["vccd1", "vssd1"]
+
+
+def test_signal_tristate_boundary_still_has_no_honest_verdict(monkeypatch, tmp_path):
+    net, pdk = _stub_env(monkeypatch, tmp_path, netlist=_NETLIST_TRISTATE)
+    res = gs.check_gate_sim(_BLOCK, str(net), "r.v", "tb.py",
+                            sim_runner=_runner_for(_good_ref(tmp_path)),
+                            pdk_root=pdk, work_root=tmp_path / "work")
+    assert res.status == gs.STATUS_NOT_RUN
+    assert "sda" in res.reason and "tri-state" in res.reason
+    assert "vccd1" not in res.reason
+
+
+# --------------------------------------------------------------------------- #
+# debug mode -- see past the first divergence (opt-in, verdict unchanged)
+# --------------------------------------------------------------------------- #
+def test_default_driver_stops_at_the_first_divergence():
+    cpp = gs.render_driver_cpp("blk", _ports(), "clk", debug=False)
+    assert "if (div_cycle >= 0) break;" in cpp
+    # the default verdict JSON must carry nothing extra
+    assert "divergence_count" not in cpp
+    assert "div_all" not in cpp
+    # the verdict is still one JSON object with the two anti-blank counters and
+    # the single first_divergence record
+    assert "cycles_compared" in cpp and "output_bits_compared" in cpp
+    assert "first_divergence" in cpp
+
+
+def test_debug_driver_keeps_comparing_and_counts_them_all():
+    cpp = gs.render_driver_cpp("blk", _ports(), "clk", debug=True,
+                              max_divergences=5)
+    assert "if (div_cycle >= 0) break;" not in cpp, "must not stop early"
+    assert "div_count++;" in cpp
+    assert "DIV_LIMIT = 5" in cpp
+    assert "divergence_count" in cpp and "divergences" in cpp
+    # first_divergence is still recorded exactly once, so the default report
+    # text is unaffected
+    assert "if (div_cycle >= 0) return;" in cpp
+
+
+def test_debug_mode_is_read_from_the_env(monkeypatch):
+    monkeypatch.setenv(gs.GATE_SIM_DEBUG_ENV, "1")
+    monkeypatch.setenv("CORESMITH_GATE_SIM_MAX_DIVERGENCES", "7")
+    cpp = gs.render_driver_cpp("blk", _ports(), "clk")
+    assert "DIV_LIMIT = 7" in cpp
+    monkeypatch.setenv(gs.GATE_SIM_DEBUG_ENV, "0")
+    assert "DIV_LIMIT" not in gs.render_driver_cpp("blk", _ports(), "clk")
+
+
+def test_debug_divergence_totals_reach_the_result(monkeypatch, tmp_path):
+    net, pdk = _stub_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        gs, "build_and_run_gate_sim",
+        lambda **_k: {"ok": True, "cycles_compared": 200000,
+                      "output_bits_compared": 999, "diverged": True,
+                      "first_divergence": {"cycle": 5151, "port": "q",
+                                           "expected": "1010", "actual": "0000"},
+                      "divergence_count": 1234,
+                      "divergences": [{"cycle": 5151, "port": "q",
+                                       "expected": "1010", "actual": "0000"}]},
+    )
+    res = gs.check_gate_sim(_BLOCK, str(net), "r.v", "tb.py",
+                            sim_runner=_runner_for(_good_ref(tmp_path)),
+                            pdk_root=pdk, work_root=tmp_path / "work")
+    assert res.status == gs.STATUS_FAIL
+    assert res.cycles_compared == 200000, "debug compares the whole stimulus"
+    assert res.detail["divergence_count"] == 1234
+    assert len(res.detail["divergences"]) == 1
+    assert "1234 diverging port-cycles" in res.as_prev_error("blk")
+
+
+def test_default_result_carries_no_divergence_total(monkeypatch, tmp_path):
+    """Without debug the driver stopped at the first mismatch, so it does NOT
+    know a total -- and must not imply one."""
+    net, pdk = _stub_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        gs, "build_and_run_gate_sim",
+        lambda **_k: {"ok": True, "cycles_compared": 5151,
+                      "output_bits_compared": 999, "diverged": True,
+                      "first_divergence": {"cycle": 5151, "port": "q",
+                                           "expected": "1010", "actual": "0000"}},
+    )
+    res = gs.check_gate_sim(_BLOCK, str(net), "r.v", "tb.py",
+                            sim_runner=_runner_for(_good_ref(tmp_path)),
+                            pdk_root=pdk, work_root=tmp_path / "work")
+    assert res.status == gs.STATUS_FAIL
+    assert "divergence_count" not in res.detail
+    assert "diverging port-cycles" not in res.as_prev_error("blk")
 
 
 # --------------------------------------------------------------------------- #
@@ -331,11 +808,40 @@ def test_empty_netlist_fails_closed(monkeypatch, tmp_path):
 
 
 def test_wrong_top_in_netlist_fails_closed(monkeypatch, tmp_path):
+    """A top the netlist does not declare is a FAIL, not a skip: there is an
+    artifact on disk and it is not the design under test.
+
+    The top is otherwise resolved from the netlist's STRUCTURE (the one module
+    nothing instantiates), so the only way to name a missing top is an explicit
+    ``block["top"]`` override -- which is exactly what this pins."""
     net, pdk = _stub_env(monkeypatch, tmp_path)
-    res = gs.check_gate_sim({"name": "other"}, str(net), "r.v", "tb.py",
+    res = gs.check_gate_sim({"name": "other", "top": "other",
+                             "is_chip_top": True},
+                            str(net), "r.v", "tb.py",
                             pdk_root=pdk, work_root=tmp_path / "work")
     assert res.status == gs.STATUS_FAIL
     assert "not found" in res.reason
+
+
+def test_top_is_resolved_from_netlist_structure_not_the_block_name(monkeypatch,
+                                                                  tmp_path):
+    """The block's architectural name is not a stable key -- an external
+    contract (a Caravel ``user_project_wrapper``) fixes the module name while the
+    block keeps its own. Keying the gate off the block name made it FAIL CLOSED
+    on a correctly synthesized netlist."""
+    assert gs.resolve_netlist_top(_NETLIST) == "blk"
+    net, pdk = _stub_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        gs, "build_and_run_gate_sim",
+        lambda **_k: {"ok": True, "cycles_compared": 6,
+                      "output_bits_compared": 54, "diverged": False},
+    )
+    res = gs.check_gate_sim({"name": "totally_different_name",
+                             "is_chip_top": True},
+                            str(net), "r.v", "tb.py",
+                            sim_runner=_runner_for(_good_ref(tmp_path)),
+                            pdk_root=pdk, work_root=tmp_path / "work")
+    assert res.status == gs.STATUS_PASS
 
 
 def test_toolchain_check_precedes_the_netlist_verdict(monkeypatch, tmp_path):

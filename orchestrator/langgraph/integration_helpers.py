@@ -22,10 +22,12 @@ from pathlib import Path
 
 from orchestrator.langgraph.pipeline_helpers import (
     PROJECT_ROOT,
+    RED,
     _write_step_log,
     _write_step_log_error,
     apply_build_fingerprint,
     clear_build_products,
+    log,
     run_wavekit_vcd_audit,
 )
 
@@ -1006,6 +1008,41 @@ def generate_caravel_wrapper_top(
                 return p
         return None
 
+    def _channel_fields(bn: str, chan: str) -> list[VerilogPort]:
+        """Ports implementing a CHANNEL named ``chan``, ordered by suffix.
+
+        A contract edge names a channel; the RTL exposes it prefix-expanded
+        (contract ``framebuffer_read`` -> ports ``framebuffer_read_req_addr``,
+        ``framebuffer_read_read_enable``, ``framebuffer_read_rdata``,
+        ``framebuffer_read_rvalid``, ``framebuffer_read_fault``). Without this,
+        every such edge failed ``_port_exact``, counted as a wiring hazard, and
+        took the whole deterministic Caravel assembly down with it -- on this
+        engine's own RTL conventions, i.e. always.
+
+        Ordered by the suffix FOLLOWING the prefix, so when both sides name the
+        same channel the caller's positional pairing is suffix-to-suffix. Shared
+        clock/reset, power pins and the wrapper's pad vector are excluded for the
+        same reasons ``_bundle_ports`` excludes them: they are wired globally,
+        not per edge.
+
+        Returns [] when nothing matches, which the caller already treats as a
+        hazard. This only ever ADDS resolutions -- every width, count and suffix
+        check downstream still applies.
+        """
+        pre = str(chan).lower() + "_"
+        out: list[tuple[str, VerilogPort]] = []
+        for p in modules[bn].ports:
+            low = p.name.lower()
+            if not low.startswith(pre) or len(low) == len(pre):
+                continue
+            if _wrap_shared_signal(p.name) or _is_power_pin(p.name):
+                continue
+            if bn == wrapper_block and p.name in _PAD_IO_PORTS:
+                continue
+            out.append((low[len(pre):], p))
+        out.sort(key=lambda t: t[0])
+        return [p for _sfx, p in out]
+
     keyed = {bn: _bundle_ports(bn) for bn in modules}
     uf = _WireUnion()
     # Wiring hazards that make the deterministic top UNSAFE. When non-empty the
@@ -1038,9 +1075,16 @@ def generate_caravel_wrapper_top(
         out: list[VerilogPort] = []
         for part in parts:
             p = _port_exact(bn, part)
-            if p is None:
+            if p is not None:
+                out.append(p)
+                continue
+            # Not a port name -- try it as a CHANNEL whose fields the RTL
+            # prefix-expanded. Exact match is still preferred, so a block that
+            # really has a port of this name is unaffected.
+            grp = _channel_fields(bn, part)
+            if not grp:
                 return []
-            out.append(p)
+            out.extend(grp)
         return out
 
     edge_bound: set[frozenset] = set()
@@ -1802,6 +1846,60 @@ def _dedup_module_sources(
     return out_paths
 
 
+def chip_rtl_sources(
+    top_rtl_path: str,
+    block_rtl_paths: dict[str, str],
+    dedup_dir=None,
+) -> list[str]:
+    """Every Verilog source needed to elaborate the ASSEMBLED chip, top first.
+
+    Single definition on purpose. The integration/validation DV sims and the
+    chip_top gate-sim's REFERENCE run must elaborate the identical source set:
+    the gate compares the flat netlist against that reference, so a reference
+    built from a different source list is not a reference at all -- it is a
+    second design, and any verdict against it is meaningless.
+
+    Top-first ordering matters: callers resolve the Verilator TOPLEVEL from the
+    first entry.
+    """
+    sources = [top_rtl_path]
+    for bp in block_rtl_paths.values():
+        if Path(bp).exists() and bp != top_rtl_path:
+            sources.append(bp)
+    # Include the generic SRAM wrapper lib if any block instantiates cs_sram, so
+    # the chip-level Verilator build can resolve cs_sram_1rw/1rw1r (without it
+    # the sim hard-fails with "Cannot find module cs_sram_1rw1r"). Best-effort.
+    try:
+        from orchestrator.langgraph.sram_wrapper import (
+            uses_wrapper as _uses_wrapper,
+        )
+        from orchestrator.langgraph.sram_wrapper import (
+            wrapper_lib_path as _wrapper_lib_path,
+        )
+        _all_rtl = "".join(
+            Path(p).read_text(errors="replace")
+            for p in sources if Path(p).exists()
+        )
+        _wlib = _wrapper_lib_path()
+        if _uses_wrapper(_all_rtl) and _wlib not in sources:
+            sources.append(_wlib)
+    except Exception:
+        pass
+    # A deterministically-assembled Caravel top and the pad-adapter BLOCK it was
+    # built from both declare `module user_project_wrapper`, and blocks commonly
+    # each bundle the same shared macro. Two compilation units defining one
+    # module is a Verilator MODDUP abort before any transaction runs, so a caller
+    # that hands this list straight to a simulator must dedup. Pass a scratch dir
+    # to get an elaborable list back; omit it to get raw paths.
+    if dedup_dir is not None:
+        # _dedup_module_sources WRITES the stripped copies and does not create
+        # its own output dir, so a caller passing a fresh scratch path would get
+        # back paths to files that do not exist.
+        Path(dedup_dir).mkdir(parents=True, exist_ok=True)
+        sources = _dedup_module_sources(sources, dedup_dir)
+    return sources
+
+
 def run_integration_simulation(
     design_name: str,
     top_rtl_path: str,
@@ -1843,28 +1941,7 @@ def run_integration_simulation(
     # so validation_dv never overwrites integration_dv's raw sim log.
     _log_step = f"{sim_scope}_sim"
 
-    all_sources = [top_rtl_path]
-    for bp in block_rtl_paths.values():
-        if Path(bp).exists() and bp != top_rtl_path:
-            all_sources.append(bp)
-    # Include the generic SRAM wrapper lib if any block instantiates cs_sram, so
-    # the chip-level Verilator build can resolve cs_sram_1rw/1rw1r (this fn backs
-    # BOTH integration_dv and validation_dv sims; without it both hard-fail with
-    # "Cannot find module cs_sram_1rw1r"). Best-effort.
-    try:
-        from orchestrator.langgraph.sram_wrapper import (
-            uses_wrapper as _uses_wrapper,
-        )
-        from orchestrator.langgraph.sram_wrapper import (
-            wrapper_lib_path as _wrapper_lib_path,
-        )
-        _all_rtl = "".join(
-            Path(p).read_text() for p in all_sources if Path(p).exists()
-        )
-        if _uses_wrapper(_all_rtl):
-            all_sources.append(_wrapper_lib_path())
-    except Exception:
-        pass
+    all_sources = chip_rtl_sources(top_rtl_path, block_rtl_paths)
     # Dedup shared macro modules (e.g. SRAM) bundled by multiple blocks, else
     # Verilator MODDUP-aborts elaboration before any transaction.
     all_sources = _dedup_module_sources(all_sources, sim_dir)
@@ -2079,14 +2156,42 @@ include $(shell cocotb-config --makefiles)/Makefile.sim
         return {"passed": False, "log": f"Tool not found: {e}", "log_path": log_path}
 
 
+def _eligible_blocks(completed_blocks: list[dict]) -> list[tuple[str, dict]]:
+    """(name, block) for every block that is supposed to be in the chip."""
+    out = []
+    for block in completed_blocks:
+        name = block.get("name", block.get("block_name", ""))
+        if not name:
+            continue
+        if block.get("aborted") or block.get("skipped"):
+            continue
+        out.append((name, block))
+    return out
+
+
 def discover_block_rtl(
     project_root: str,
     completed_blocks: list[dict],
 ) -> dict[str, str]:
     """Discover RTL file paths for all completed blocks.
 
-    Uses completed_blocks state to find RTL paths, falling back to
-    convention-based discovery.  Also searches subdirectories of rtl/.
+    Resolution order: the block result's own ``rtl_path``, then the block
+    spec's ``rtl_target``, then filename convention.
+
+    ``rtl_target`` is NOT optional politeness -- it is the only correct answer
+    whenever a block's Verilog file is not named after the block, which is
+    exactly the case for a block whose module name is locked by an interface
+    contract (a Caravel ``user_project_wrapper``, a vendor-mandated top). Before
+    it was consulted, such a block resolved to nothing and was dropped from the
+    returned dict with no error, which structurally DELETED it from the
+    assembled chip: the pad adapter never reached ``modules``, so
+    ``detect_wrapper_block`` returned None, the deterministic Caravel assembler
+    never ran, and the resulting top -- and netlist, and GDS -- carried no
+    io_in/io_out/io_oeb at all.
+
+    An eligible block that still resolves to nothing is logged as an ERROR
+    rather than omitted quietly. Callers that must not assemble a partial chip
+    should gate on :func:`unresolved_block_rtl`.
 
     Returns:
         Dict mapping block_name -> rtl_file_path.
@@ -2094,20 +2199,23 @@ def discover_block_rtl(
     root = Path(project_root)
     rtl_paths: dict[str, str] = {}
 
-    for block in completed_blocks:
-        name = block.get("name", block.get("block_name", ""))
-        if not name:
-            continue
-
-        # Skip failed/aborted blocks
-        if block.get("aborted") or block.get("skipped"):
-            continue
-
+    for name, block in _eligible_blocks(completed_blocks):
         # Try rtl_path from block result
         rtl_path = block.get("rtl_path", "")
         if rtl_path and Path(rtl_path).exists():
             rtl_paths[name] = rtl_path
             continue
+
+        # The block spec's declared target. Accepts absolute or
+        # project-root-relative, since both forms appear in block_specs.json.
+        target = block.get("rtl_target", "") or ""
+        if target:
+            for cand in (Path(target), root / target):
+                if cand.is_file():
+                    rtl_paths[name] = str(cand)
+                    break
+            if name in rtl_paths:
+                continue
 
         # Convention-based discovery
         candidates = [
@@ -2130,7 +2238,43 @@ def discover_block_rtl(
                             rtl_paths[name] = str(candidate)
                             break
 
+        if name not in rtl_paths:
+            log(f"  [INTEGRATION] NO RTL FOUND for block '{name}' "
+                f"(rtl_target={target or '<unset>'}) -- it will be ABSENT from "
+                f"the assembled chip. A block that silently stops existing is "
+                f"how a locked pad adapter was dropped and the chip shipped "
+                f"with no GPIO boundary.", RED)
+
     return rtl_paths
+
+
+def missing_from(
+    rtl_paths: dict[str, str],
+    completed_blocks: list[dict],
+) -> list[str]:
+    """Eligible blocks absent from a resolution the CALLER already has.
+
+    This is the form a gate wants. It judges the exact dict the caller is about
+    to assemble from, rather than re-deriving one -- so a caller (or a test)
+    that supplied or patched its own discovery cannot end up gated on a second,
+    different answer.
+    """
+    return [n for n, _ in _eligible_blocks(completed_blocks) if n not in rtl_paths]
+
+
+def unresolved_block_rtl(
+    project_root: str,
+    completed_blocks: list[dict],
+) -> list[str]:
+    """Eligible blocks whose RTL could not be located, so a caller can fail
+    closed instead of assembling a chip that is missing a block.
+
+    Standalone query: it runs its own discovery. A caller that ALREADY has a
+    resolution should use :func:`missing_from` on that, so the gate and the
+    assembler can never be judging two different dicts.
+    """
+    return missing_from(
+        discover_block_rtl(project_root, completed_blocks), completed_blocks)
 
 
 def detect_glue_block_needs(

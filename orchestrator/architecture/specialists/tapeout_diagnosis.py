@@ -104,13 +104,28 @@ async def diagnose_tapeout_failure(
 
 
 def _format_drc(result: dict | None, root: Path) -> str:
+    from orchestrator.langgraph.drc_verdict import STATUS_NOT_RUN
+
     if not result:
         return "No DRC result available."
 
-    lines = [
-        f"Clean: {result.get('clean', False)}",
-        f"Violation count: {result.get('violation_count', '?')}",
-    ]
+    if result.get("status") == STATUS_NOT_RUN:
+        # NOT MEASURED is not a violation count. Telling the diagnosis agent
+        # "Clean: False / Violation count: -1" for a DRC that produced no
+        # report sends it hunting for layout violations that were never found.
+        lines = [
+            "DRC COULD NOT BE MEASURED (status=not_run): "
+            f"{result.get('reason') or 'no reason recorded'}",
+            "There is NO violation count for this layout -- diagnose why the "
+            "DRC tool produced no result, do NOT diagnose layout violations.",
+        ]
+    else:
+        count = result.get("violation_count")
+        lines = [
+            f"Clean: {result.get('clean', result.get('pass', False))}",
+            "Violation count: "
+            + ("NOT MEASURED" if count is None or count < 0 else str(count)),
+        ]
 
     if result.get("error"):
         lines.append(f"Error: {result['error']}")
@@ -177,11 +192,21 @@ def _format_precheck(result: dict | None) -> str:
     if not result:
         return "No precheck result available."
 
+    from orchestrator.langgraph.drc_verdict import STATUS_NOT_RUN
+
     lines = [f"Overall pass: {result.get('pass', False)}"]
 
     checks = result.get("checks", {})
     for name, check_result in checks.items():
         if isinstance(check_result, dict):
+            if check_result.get("status") == STATUS_NOT_RUN:
+                # A check that produced no measurement is not a FAILED check.
+                # Rendering it as FAIL is how "Magic wrote no report" reached
+                # this agent as "the layout has DRC violations".
+                lines.append(
+                    f"  {name}: NOT MEASURED (status=not_run) -- "
+                    f"{check_result.get('reason') or 'no reason recorded'}")
+                continue
             passed = check_result.get("pass", False)
             lines.append(f"  {name}: {'PASS' if passed else 'FAIL'}")
             if not passed and check_result.get("errors"):
