@@ -2,7 +2,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Two fail-opens observed on the raster validation run.
+"""Three fail-opens observed on the raster validation run.
 
 D2  A contract audit describing a PREVIOUS failure sat at the stage-derived
     (therefore stable) audit path next to a new, different failure, and was
@@ -10,11 +10,14 @@ D2  A contract audit describing a PREVIOUS failure sat at the stage-derived
 D1  All 8 uArch calls carried an EMPTY `--- Python Golden Model ---` block --
     the section was appended unconditionally while every reader of the golden
     returned "" on failure.
+D5  `/run/state` kept `pending_interrupt_count: 1` while `status: running` after
+    a consumed resume, driving outer agents to resume the same interrupt twice.
 """
 
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -176,3 +179,108 @@ def test_promised_hardware_golden_that_cannot_be_read_fails_rtl_generation():
     src = inspect.getsource(rg.RTLGeneratorAgent.generate)
     assert "if not _hw_src.strip():" in src
     assert "CORESMITH_RTL_FROM_HW_GOLDEN" in src
+
+
+# ===========================================================================
+# D5 -- pending_interrupt_count reflects LIVE interrupts
+# ===========================================================================
+class _Intr:
+    def __init__(self, iid, value):
+        self.id = iid
+        self.value = value
+
+
+class _Task:
+    def __init__(self, interrupts):
+        self.interrupts = interrupts
+
+
+class _Snap:
+    def __init__(self, values, tasks, nxt=()):
+        self.values = values
+        self.tasks = tasks
+        self.next = nxt
+
+
+class _RunningTask:
+    @staticmethod
+    def done():
+        return False
+
+
+class _FinishedTask:
+    @staticmethod
+    def done():
+        return True
+
+
+@pytest.fixture
+def daemon(monkeypatch):
+    from orchestrator.daemon import server as ds
+
+    ds._consumed_interrupt_ids.clear()
+    yield ds
+    ds._consumed_interrupt_ids.clear()
+
+
+def _snap_with(iid="intr-1", block="blk"):
+    return _Snap(
+        {"completed_blocks": [], "block_queue": [{"name": "blk"}],
+         "pipeline_done": False},
+        [_Task([_Intr(iid, {"type": "dv_failure", "block": block})])],
+    )
+
+
+def test_parked_interrupt_is_pending(daemon, monkeypatch):
+    monkeypatch.setattr(daemon._pipeline, "task", _FinishedTask())
+    st = daemon._shape_state(_snap_with())
+    assert st["pending_interrupt_count"] == 1
+    assert st["consumed_interrupt_count"] == 0
+    assert st["interrupt_type"] == "dv_failure"
+
+
+def test_consumed_resume_on_a_running_pipeline_is_not_pending(daemon, monkeypatch):
+    """THE BUG: after a consumed resume the checkpoint still carries the
+    interrupt until the graph writes its next one, so state said
+    pending_interrupt_count=1 with status=running and the outer agent resumed
+    the same decision twice."""
+    monkeypatch.setattr(daemon._pipeline, "task", _RunningTask())
+    daemon._consumed_interrupt_ids.add("intr-1")
+    st = daemon._shape_state(_snap_with())
+    assert st["pending_interrupt_count"] == 0
+    assert st["consumed_interrupt_count"] == 1
+    assert st["interrupt_type"] is None
+    # still LISTED -- discounted, never hidden (PR #73's lesson)
+    assert len(st["interrupts"]) == 1
+    assert st["interrupts"][0]["consumed_by_resume"] is True
+
+
+def test_a_new_interrupt_while_running_is_still_pending(daemon, monkeypatch):
+    monkeypatch.setattr(daemon._pipeline, "task", _RunningTask())
+    daemon._consumed_interrupt_ids.add("intr-1")
+    st = daemon._shape_state(_snap_with(iid="intr-2"))
+    assert st["pending_interrupt_count"] == 1
+
+
+def test_the_discount_expires_the_moment_the_run_stops(daemon, monkeypatch):
+    """A run that parks again -- even on the same interrupt id -- is reported at
+    full strength. The suppression lasts exactly one in-flight resume."""
+    monkeypatch.setattr(daemon._pipeline, "task", _RunningTask())
+    daemon._consumed_interrupt_ids.add("intr-1")
+    assert daemon._shape_state(_snap_with())["pending_interrupt_count"] == 0
+    monkeypatch.setattr(daemon._pipeline, "task", _FinishedTask())
+    assert daemon._shape_state(_snap_with())["pending_interrupt_count"] == 1
+    assert daemon._consumed_interrupt_ids == set()
+
+
+def test_suspected_stale_labelling_is_unchanged(daemon, monkeypatch):
+    monkeypatch.setattr(daemon._pipeline, "task", _FinishedTask())
+    snap = _Snap(
+        {"completed_blocks": [{"name": "blk", "success": True}],
+         "block_queue": [{"name": "blk"}]},
+        [_Task([_Intr("i1", {"type": "dv_failure", "block": "blk"})])],
+    )
+    st = daemon._shape_state(snap)
+    assert st["interrupts"][0]["stale_suspected"] is True
+    assert st["pending_interrupt_count"] == 1      # surfaced, not hidden
+    assert st["suspected_stale_interrupt_count"] == 1

@@ -76,6 +76,45 @@ _last_resume_ts: float = time.time()   # bumped on every /run/start + /run/resum
 _STALL_THRESHOLD_S = float(os.environ.get("CORESMITH_INTERRUPT_STALL_S", "1800"))
 _STALL_POLL_S = float(os.environ.get("CORESMITH_INTERRUPT_STALL_POLL_S", "300"))
 
+# ---------------------------------------------------------------------------
+# D5: interrupt ids this daemon has already forwarded a resume for.
+# ---------------------------------------------------------------------------
+# `aget_state` reads the CHECKPOINT. Between a consumed `/run/resume` and the
+# graph's next checkpoint write, that snapshot still carries the interrupt the
+# resume just answered -- so `/run/state` reported `pending_interrupt_count: 1`
+# while `status: running`. An outer agent polling state sees a pending interrupt
+# on a run that is actively working and resumes it AGAIN. Double-resume is not
+# harmless: the second decision lands on whatever the graph parks at next.
+#
+# The remedy has to be evidence-based, not a blanket "hide interrupts while
+# running" -- PR #73 landed specifically because hiding live interrupts cost ~70
+# minutes of a parked run. So: record the exact ids we forwarded a resume for,
+# and discount ONLY those, and ONLY while the runner task is actually in flight.
+# The moment the run stops (parked, done, error), the set is cleared and every
+# count is raw again.
+_consumed_interrupt_ids: set[str] = set()
+
+
+def _pipeline_task_in_flight() -> bool:
+    """True while the runner task is actually executing the graph."""
+    return _pipeline.task is not None and not _pipeline.task.done()
+
+
+def _consumed_now() -> set[str]:
+    """Interrupt ids a live resume has already answered.
+
+    Empty whenever the runner task is not in flight -- and the set is CLEARED
+    then too, so a run that parks again on a same-id interrupt is reported at
+    full strength. The suppression can only ever last as long as one in-flight
+    resume.
+    """
+    global _consumed_interrupt_ids
+    if not _pipeline_task_in_flight():
+        if _consumed_interrupt_ids:
+            _consumed_interrupt_ids = set()
+        return set()
+    return set(_consumed_interrupt_ids)
+
 
 async def _count_pending_interrupts() -> int | None:
     """Count parked interrupts. ``None`` means COULD NOT DETERMINE, not zero.
@@ -97,10 +136,11 @@ async def _count_pending_interrupts() -> int | None:
         snap = await _pipeline.graph.aget_state(
             {"configurable": {"thread_id": _pipeline.thread_id}}
         )
+        consumed = _consumed_now()
         n = 0
         if snap and snap.tasks:
             for t in snap.tasks:
-                n += len(t.interrupts)
+                n += sum(1 for i in t.interrupts if i.id not in consumed)
         return n
     except Exception as exc:  # noqa: BLE001
         log.warning(
@@ -379,6 +419,7 @@ async def run_state():
 async def run_start(req: StartRequest):
     global _last_resume_ts
     _last_resume_ts = time.time()  # Section 7b: run start resets the stall clock
+    _consumed_interrupt_ids.clear()   # a fresh run answers nothing from the old
     if _pipeline.task is not None and not _pipeline.task.done():
         raise HTTPException(409, "pipeline already running; call /run/pause first")
 
@@ -528,7 +569,7 @@ def _resume_tick_or_park(has_pending_interrupt: bool, has_next_nodes: bool) -> s
 
 @app.post("/run/resume")
 async def run_resume(req: ResumeRequest):
-    global _last_resume_ts
+    global _last_resume_ts, _consumed_interrupt_ids
     _last_resume_ts = time.time()  # Section 7b: the driver is alive
     with contextlib.suppress(OSError):
         _mk = Path(_PROJECT_ROOT) / "STALLED_INTERRUPT"
@@ -562,6 +603,7 @@ async def run_resume(req: ResumeRequest):
     if _mode == "tick":
         # No parked interrupt but the graph still has next nodes: plain tick
         # (cmd=None) to advance a stranded/paused run without a fake action.
+        _consumed_interrupt_ids.clear()
         await _pipeline.safe_resume(None, graph_config)
         return {
             "resumed": True,
@@ -596,6 +638,12 @@ async def run_resume(req: ResumeRequest):
         cmd = Command(resume={iid: resume_value for iid, _ in interrupts})
     else:
         cmd = Command(resume=resume_value)
+
+    # D5: remember exactly which interrupts this resume answers, BEFORE the
+    # graph starts running. Until it checkpoints again, aget_state still returns
+    # them; without this record /run/state reports them as pending on a running
+    # run and the outer agent resumes a second time.
+    _consumed_interrupt_ids = {iid for iid, _ in interrupts}
 
     await _pipeline.safe_resume(cmd, graph_config)
     return {"resumed": True, "interrupts": len(interrupts), "action": req.action}
@@ -1151,8 +1199,17 @@ def _shape_state(state_snapshot) -> dict:
     # Surface every interrupt and LABEL the suspicion instead of acting on it --
     # a driver can then skip suspected-stale ones deliberately, which is a
     # different thing from never being told.
+    #
+    # D5: an interrupt a LIVE resume has already answered is not pending. The
+    # checkpoint still carries it until the graph writes its next one, which is
+    # how `/run/state` came to report `pending_interrupt_count: 1` alongside
+    # `status: running` and drove outer agents to resume the same interrupt
+    # twice. Discounted by ID, only while the runner task is in flight, and
+    # still LISTED (with `consumed_by_resume`) so nothing is hidden.
+    consumed = _consumed_now()
     interrupts: list[dict] = []
     suspected_stale = 0
+    consumed_count = 0
     if state_snapshot.tasks:
         for task in state_snapshot.tasks:
             for intr in task.interrupts:
@@ -1163,11 +1220,17 @@ def _shape_state(state_snapshot) -> dict:
                     stale = bool(blk) and blk in completed_names
                 if stale:
                     suspected_stale += 1
+                was_consumed = intr.id in consumed
+                if was_consumed:
+                    consumed_count += 1
                 interrupts.append({
                     "id": intr.id,
                     "payload": payload,
                     "stale_suspected": stale,
+                    "consumed_by_resume": was_consumed,
                 })
+
+    pending_interrupts = [i for i in interrupts if not i["consumed_by_resume"]]
 
     base.update({
         "completed_count": len(latest_by_name),
@@ -1181,14 +1244,19 @@ def _shape_state(state_snapshot) -> dict:
         "pipeline_done": values.get("pipeline_done", False),
         "next_nodes": list(state_snapshot.next) if state_snapshot.next else [],
         "interrupts": interrupts,
-        "pending_interrupt_count": len(interrupts),
+        # PENDING = still waiting on a decision. An interrupt whose resume is
+        # already in flight is not waiting on anything.
+        "pending_interrupt_count": len(interrupts) - consumed_count,
         # Split out so a driver can choose to skip suspected-stale ones
         # DELIBERATELY, rather than never being told they exist.
         "suspected_stale_interrupt_count": suspected_stale,
-        "live_interrupt_count": len(interrupts) - suspected_stale,
+        "consumed_interrupt_count": consumed_count,
+        "live_interrupt_count": max(
+            0, len(interrupts) - consumed_count - suspected_stale),
         "interrupt_type": (
-            interrupts[0]["payload"].get("type", "")
-            if interrupts and isinstance(interrupts[0]["payload"], dict)
+            pending_interrupts[0]["payload"].get("type", "")
+            if pending_interrupts
+            and isinstance(pending_interrupts[0]["payload"], dict)
             else None
         ),
     })
