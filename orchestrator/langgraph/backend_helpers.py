@@ -155,6 +155,227 @@ def render_layout_image(
 
 
 # ---------------------------------------------------------------------------
+# Synthesis attempt history (self-recovery must never be silent)
+# ---------------------------------------------------------------------------
+#
+# The flat-synth driver runs Yosys inside an LLM step that retries on its own.
+# On a live run it reported "Synthesis succeeded on attempt 2" -- and attempt 1's
+# failure reason was retained NOWHERE: not in ``attempt_history``, not in
+# ``previous_error``, not in ``synth_result.json``. A driver that heals itself in
+# silence teaches nobody: the same script defect recurs every run, and the only
+# trace is a sentence in a chat transcript that is discarded.
+#
+# Everything below is a PURE function of (result dict, on-disk logs, reply text)
+# so it can be unit-tested without an LLM, and it NEVER raises: retaining history
+# is diagnostics, and diagnostics must not be able to fail a synthesis that
+# succeeded.
+
+#: Yosys prints hard failures as ``ERROR: ...``; Verilog front-end syntax errors
+#: come through as ``... syntax error ...``. Both are attempt-ending.
+_SYNTH_ERROR_RE = re.compile(
+    r"^(?:\s*)(ERROR:.*|.*\bsyntax error\b.*)$", re.MULTILINE | re.IGNORECASE
+)
+#: "succeeded on attempt 3", "attempt 2 succeeded", "on the 2nd attempt", ...
+_ATTEMPT_CLAIM_RE = re.compile(r"attempt\s*#?\s*(\d+)", re.IGNORECASE)
+_SYNTH_LOG_GLOBS = ("*.log", "*.txt", "*.out")
+_MAX_SUMMARY_CHARS = 800
+
+
+def _clip(text: str, limit: int = _MAX_SUMMARY_CHARS) -> str:
+    t = " ".join(str(text or "").split())
+    return t if len(t) <= limit else t[: limit - 3] + "..."
+
+
+def _first_error_line(text: str) -> str:
+    m = _SYNTH_ERROR_RE.search(str(text or ""))
+    return _clip(m.group(1)) if m else ""
+
+
+def collect_synth_attempt_history(
+    result: dict | None,
+    *,
+    output_dir: str = "",
+    llm_reply: str = "",
+    prior_error: str = "",
+    node_attempt: int = 1,
+    now: str = "",
+) -> list[dict]:
+    """Per-attempt failure records for ONE synthesis-driver invocation.
+
+    Merges every source of attempt evidence that exists, de-duplicated and
+    ordered by attempt number. Each record is
+    ``{attempt, error_summary, source, timestamp}``.
+
+      * ``result["attempt_history"]`` / ``["attempts"]`` -- what the driver
+        itself recorded (the prompt now asks for it explicitly).
+      * on-disk logs under ``output_dir`` -- any log carrying a Yosys ``ERROR:``
+        line. Deterministic evidence that does not depend on the driver being
+        honest about its own retries.
+      * ``prior_error`` -- the failure this NODE-level attempt is retrying, which
+        otherwise only survives until the next node overwrites it.
+      * ``llm_reply`` -- the driver's own summary. When it claims success on
+        attempt N and fewer than N-1 failures were recovered above, the missing
+        attempts are recorded EXPLICITLY as ``not retained``. That entry is the
+        point: a gap we can see beats a gap we cannot.
+
+    Returns ``[]`` when nothing failed and nothing claims anything did.
+    """
+    try:
+        return _collect_synth_attempt_history(
+            result or {}, output_dir, llm_reply, prior_error, node_attempt, now)
+    except Exception:  # noqa: BLE001 - diagnostics never fail a synthesis
+        return []
+
+
+def _collect_synth_attempt_history(
+    result: dict, output_dir: str, llm_reply: str, prior_error: str,
+    node_attempt: int, now: str,
+) -> list[dict]:
+    import time as _time
+
+    stamp = now or _time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    by_attempt: dict[int, dict] = {}
+
+    def _record(attempt: int, summary: str, source: str, timestamp: str = "") -> None:
+        summary = _clip(summary)
+        if not summary:
+            return
+        n = max(1, int(attempt))
+        prev = by_attempt.get(n)
+        # First writer wins per attempt, EXCEPT that a real error summary always
+        # displaces a "not retained" placeholder.
+        if prev is not None and not prev.get("unrecorded"):
+            return
+        by_attempt[n] = {
+            "attempt": n,
+            "error_summary": summary,
+            "source": source,
+            "timestamp": timestamp or stamp,
+            "unrecorded": source == "unrecorded",
+        }
+
+    # 1. What the driver recorded about itself.
+    declared = result.get("attempt_history")
+    if not isinstance(declared, list):
+        declared = result.get("attempts")
+    if isinstance(declared, list):
+        for i, entry in enumerate(declared):
+            if isinstance(entry, dict):
+                n = entry.get("attempt", entry.get("n", i + 1))
+                summary = (
+                    entry.get("error_summary") or entry.get("error")
+                    or entry.get("reason") or entry.get("summary") or ""
+                )
+                try:
+                    n = int(n)
+                except (TypeError, ValueError):
+                    n = i + 1
+                _record(n, summary, "driver_reported",
+                        str(entry.get("timestamp", "")))
+            elif isinstance(entry, str):
+                _record(i + 1, entry, "driver_reported")
+
+    # 2. Deterministic on-disk evidence.
+    log_hits: list[tuple[float, str, str]] = []
+    if output_dir:
+        d = Path(output_dir)
+        if d.is_dir():
+            seen: set[str] = set()
+            for pattern in _SYNTH_LOG_GLOBS:
+                for p in sorted(d.glob(pattern)):
+                    if str(p) in seen or not p.is_file():
+                        continue
+                    seen.add(str(p))
+                    try:
+                        line = _first_error_line(
+                            p.read_text(encoding="utf-8", errors="replace"))
+                    except OSError:
+                        continue
+                    if line:
+                        log_hits.append((p.stat().st_mtime, p.name, line))
+    log_hits.sort()
+    for i, (mtime, name, line) in enumerate(log_hits):
+        import time as _t
+        _record(i + 1, f"{line}  [{name}]", "yosys_log",
+                _t.strftime("%Y-%m-%dT%H:%M:%S", _t.localtime(mtime)))
+
+    # 3. The node-level failure this invocation is retrying.
+    if prior_error and str(prior_error).strip().lower() not in ("", "none"):
+        _record(max(1, int(node_attempt) - 1), prior_error, "node_previous_error")
+
+    # 4. The driver's own claim about how many attempts it took.
+    claimed = 0
+    for m in _ATTEMPT_CLAIM_RE.finditer(str(llm_reply or "")):
+        try:
+            claimed = max(claimed, int(m.group(1)))
+        except ValueError:
+            continue
+    if claimed > 1:
+        for n in range(1, claimed):
+            if n not in by_attempt:
+                _record(
+                    n,
+                    f"(not retained) the synthesis driver reported reaching "
+                    f"attempt {claimed}, so attempt {n} failed, but no error "
+                    f"text for it was written to the result JSON or to any log "
+                    f"under the output dir",
+                    "unrecorded",
+                )
+
+    return [by_attempt[k] for k in sorted(by_attempt)]
+
+
+def persist_synth_attempt_history(
+    result_json_path: str, history: list[dict]
+) -> bool:
+    """Merge ``history`` into the synthesis result artifact. True when written.
+
+    The artifact is the thing a later reader (diagnose, the final report, a
+    human) actually opens, so the record has to live THERE and not only in
+    graph state that dies with the process. Never raises.
+    """
+    if not result_json_path or not history:
+        return False
+    try:
+        import json as _json
+
+        p = Path(result_json_path)
+        data: dict = {}
+        if p.exists():
+            try:
+                loaded = _json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    data = loaded
+            except (OSError, ValueError):
+                data = {}
+        data["attempt_history"] = history
+        data["attempt_failures"] = len(history)
+        data["attempt_history_unrecorded"] = sum(
+            1 for h in history if h.get("unrecorded"))
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def describe_synth_attempt_history(history: list[dict]) -> str:
+    """One-line-per-attempt human summary ('' when nothing failed)."""
+    if not history:
+        return ""
+    lines = [
+        f"{len(history)} failed synthesis attempt(s) BEFORE the reported outcome:"
+    ]
+    for h in history:
+        tag = " [NOT RETAINED]" if h.get("unrecorded") else ""
+        lines.append(
+            f"  attempt {h.get('attempt')}{tag} ({h.get('source')}, "
+            f"{h.get('timestamp')}): {h.get('error_summary')}"
+        )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Flat Top-Level Synthesis (Yosys)
 # ---------------------------------------------------------------------------
 

@@ -1290,8 +1290,9 @@ def _classify_gap(project_root: str, expected: Any, observed: Any) -> str:
     composed correctly and ONE downstream block emitted wrong/short content. That
     is ``block_math`` (route to a single-block re-spec, not a whole-chip re-fan).
     Only a divergence at/near offset 0 (no shared framing) is a true ``contract``
-    width/framing mismatch. Keystone fix: the length-only heuristic sent the Opus
-    codec's entropy coding bug (byte-32 residual) down the contract path and re-fanned all
+    width/framing mismatch. Keystone fix: the length-only heuristic sent a
+    measured single-block content defect (a divergence starting at byte 32, well
+    past the shared framing prefix) down the contract path and re-fanned all
     8 blocks twice (>55% of that run's token budget).
     """
     if _prefix_classify_enabled() and _is_byteseq(expected) and _is_byteseq(observed):
@@ -1489,6 +1490,189 @@ def _attach_stall_autopsy(project_root: str, violations: list[dict]) -> list[dic
         except Exception:  # noqa: BLE001
             pass
     return violations
+
+
+# ---------------------------------------------------------------------------
+# Per-block localization fallback for a composition TIMEOUT
+# ---------------------------------------------------------------------------
+#
+# When the composed model runs unbounded, there is no divergence offset to trace
+# and no traceback to read, so the failure reported "First-divergence block:
+# (unlocalized)" -> broadcast re-spec of every block. A timeout is exactly the
+# case where saying WHERE matters most (a stall has ONE first cause), and it was
+# the case that said the least.
+#
+# The stall autopsy above is the dynamic answer, but it only exists when an edge
+# monitor wrote the file. This is the deterministic fallback that always runs: a
+# per-block probe over the composition itself. Nothing here simulates anything --
+# it reads what the composition wired and what each block model can even be
+# imported to be -- so it is fast, safe on a hung run, and unit-testable.
+
+def stall_localization_enabled() -> bool:
+    """True (default) -> a composition timeout is localized by the block probe.
+
+    ``CORESMITH_GATE_STALL_LOCALIZE=0`` restores the pre-fix behaviour (report
+    ``(unlocalized)`` and broadcast). Both branches are tested.
+    """
+    return os.environ.get(
+        "CORESMITH_GATE_STALL_LOCALIZE", "1"
+    ).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _instance_ports(chip_model_src: str) -> dict[str, list[str]]:
+    """``{block_name: [signal identifiers wired into it]}`` from the composition.
+
+    Parses ``m.submodules.<inst> = <BlockClass>(<name>, kw=<name>, ...)`` out of
+    ``_chip_model.py`` with the ast module -- no regex guessing at Python syntax.
+    Blocks are keyed by the CLASS name (which is the block-model module name, the
+    identifier every other localization path uses). ``{}`` on any parse failure.
+    """
+    import ast as _ast
+
+    out: dict[str, list[str]] = {}
+    try:
+        tree = _ast.parse(chip_model_src)
+    except SyntaxError:
+        return out
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.Assign) or not isinstance(node.value, _ast.Call):
+            continue
+        call = node.value
+        cls = ""
+        if isinstance(call.func, _ast.Name):
+            cls = call.func.id
+        elif isinstance(call.func, _ast.Attribute):
+            cls = call.func.attr
+        if not cls:
+            continue
+        # only ``m.submodules.<x> = ...`` / ``m.submodules += ...`` targets
+        targets_submodule = False
+        for tgt in node.targets:
+            src = _ast.dump(tgt)
+            if "submodules" in src:
+                targets_submodule = True
+        if not targets_submodule:
+            continue
+        names: list[str] = []
+        for arg in list(call.args) + [kw.value for kw in call.keywords]:
+            if isinstance(arg, _ast.Name):
+                names.append(arg.id)
+        if names:
+            out.setdefault(cls, []).extend(names)
+    return out
+
+
+def _identifier_counts(chip_model_src: str) -> dict[str, int]:
+    """How many times each identifier is READ in the composition source.
+
+    LOAD contexts only: a signal's own ``x = Signal(8)`` declaration is not a
+    use of it, and counting it would hide the very thing we are looking for (a
+    signal whose ONLY use is the one block instantiation it is passed to).
+    """
+    import ast as _ast
+
+    counts: dict[str, int] = {}
+    try:
+        tree = _ast.parse(chip_model_src)
+    except SyntaxError:
+        return counts
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Name) and isinstance(node.ctx, _ast.Load):
+            counts[node.id] = counts.get(node.id, 0) + 1
+    return counts
+
+
+def probe_composition_stall(project_root: str, models_dir) -> dict:
+    """Per-block probe for a composition that never returned. NEVER raises.
+
+    Two deterministic checks, both of which name a BLOCK:
+
+      * ``import_failures`` -- the block model does not even import standalone.
+        A composition that hangs around an unimportable block is localized.
+      * ``dangling`` -- signals wired into exactly ONE block instance and read
+        nowhere else in the composition. A block output nothing consumes never
+        moves a downstream handshake, and a block input nothing drives is stuck
+        at its reset value: both are stall causes with a name attached.
+
+    Returns ``{"blocks": [...], "import_failures": {...}, "dangling": {...},
+    "candidates": [...], "summary": str}``. ``candidates`` is the ordered list of
+    blocks the evidence points at; empty means the probe found nothing and the
+    caller must keep saying ``(unlocalized)`` rather than guess.
+    """
+    report: dict = {
+        "blocks": [], "import_failures": {}, "dangling": {},
+        "candidates": [], "summary": "",
+    }
+    try:
+        d = Path(models_dir)
+        if not d.is_dir():
+            return report
+        blocks = sorted(
+            p.stem for p in d.glob("*.py")
+            if not p.name.startswith("__") and p.stem != "_chip_model"
+        )
+        report["blocks"] = blocks
+
+        for name in blocks:
+            try:
+                _import_module_from_path(d / f"{name}.py", f"_cs_probe_{name}")
+            except Exception as exc:  # noqa: BLE001 - that IS the finding
+                report["import_failures"][name] = f"{type(exc).__name__}: {exc}"
+
+        chip = d / "_chip_model.py"
+        if chip.exists():
+            try:
+                src = chip.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                src = ""
+            if src:
+                ports = _instance_ports(src)
+                counts = _identifier_counts(src)
+                for cls, names in sorted(ports.items()):
+                    if cls not in blocks:
+                        continue
+                    # A signal referenced ONCE in the whole composition is
+                    # referenced only by this instantiation: nothing on the other
+                    # side of it.
+                    lonely = sorted({n for n in names if counts.get(n, 0) <= 1})
+                    if lonely:
+                        report["dangling"][cls] = lonely
+
+        candidates = list(report["import_failures"]) + [
+            b for b in report["dangling"] if b not in report["import_failures"]
+        ]
+        report["candidates"] = candidates
+        report["summary"] = _format_stall_localization(report)
+    except Exception:  # noqa: BLE001 - a diagnostic must not replace the failure
+        return report
+    return report
+
+
+def _format_stall_localization(report: dict) -> str:
+    """Human/LLM-readable rendering of :func:`probe_composition_stall`."""
+    lines: list[str] = []
+    imports = report.get("import_failures") or {}
+    dangling = report.get("dangling") or {}
+    if not imports and not dangling:
+        return ""
+    lines.append(
+        "PER-BLOCK STALL PROBE (the composed sim never returned, so there is no "
+        "divergence offset and no traceback -- this is what the composition "
+        "itself says):"
+    )
+    for name, err in sorted(imports.items()):
+        lines.append(
+            f"  block {name}: its block model DOES NOT IMPORT standalone -- {err}"
+        )
+    for name, ports in sorted(dangling.items()):
+        lines.append(
+            f"  block {name}: {len(ports)} signal(s) wired into this instance and "
+            f"read NOWHERE else in _chip_model.py -- an output nothing consumes "
+            f"never advances a downstream handshake, and an input nothing drives "
+            f"holds at its reset value: {', '.join(ports[:12])}"
+            + (" ..." if len(ports) > 12 else "")
+        )
+    return "\n".join(lines)
 
 
 _SIGNATURE_ERROR_MARKERS = (
@@ -1814,23 +1998,41 @@ def _run_full_model_dv(
                 _state.write_text(_json.dumps({"timeouts": _prior + 1}))
             except Exception:  # noqa: BLE001
                 pass
+            # Same localization fallback as the default-tier timeout: a stall
+            # that cannot say WHERE broadcasts a re-spec to every block.
+            _fmdv_probe: dict = {}
+            _fmdv_block = _first_divergence_block(project_root)
+            if stall_localization_enabled():
+                _fmdv_probe = probe_composition_stall(project_root, models_dir)
+                _c = _fmdv_probe.get("candidates") or []
+                if len(_c) == 1 and not _fmdv_block:
+                    _fmdv_block = _c[0]
+            _fmdv_where = (
+                _fmdv_block,
+                (f" LOCALIZED to block {_fmdv_block!r}." if _fmdv_block
+                 else " NOT localized to a single block (the probe found no "
+                      "single-block evidence)."),
+            )
             violations.append(_attach_stall_autopsy(project_root, [{
                 "type": "model_integration_failure",
                 "criterion": "full_model_dv_timeout",
                 "stimulus_tier": "acceptance",
                 "acceptance_case": str(name),
-                "first_divergence_block": _first_divergence_block(project_root),
+                "first_divergence_block": _fmdv_where[0],
                 "expected": expected,
                 "observed": f"full-model-dv simulate() did not return within "
-                            f"{budget:.0f}s on acceptance case {name!r}",
+                            f"{budget:.0f}s on acceptance case {name!r}."
+                            + _fmdv_where[1],
                 "gap_class": "contract",
+                "stall_localization": _fmdv_probe,
                 "suggested_fix": (
                     "The composed model cannot process the mission-scale "
                     "acceptance stimulus within the Full Model DV budget. "
                     "Next attempt auto-extends (x1.5, cap "
                     f"{_cap:.0f}s); use CORESMITH_SIM_PYTHON=pypy3 to JIT the "
                     "Amaranth sim if not already."
-                ),
+                ) + (("\n\n" + str(_fmdv_probe.get("summary") or ""))
+                     if _fmdv_probe.get("summary") else ""),
             }])[0])
             break
         if sim_exc is not None:
@@ -2306,15 +2508,35 @@ def _run_gate_inner(
         simulate, chip_model_path, models_dir, stimulus, sim_timeout
     )
     if timed_out:
+        # LOCALIZE. "(unlocalized)" on a timeout broadcasts a re-spec to every
+        # block, and a stall has ONE first cause. The per-block probe reads what
+        # the composition wired and what each block model imports to; when it
+        # points at exactly ONE block that block is NAMED, and the evidence is
+        # attached either way.
+        _probe: dict = {}
+        _fdb_timeout = _first_divergence_block(project_root)
+        if stall_localization_enabled():
+            _probe = probe_composition_stall(project_root, models_dir)
+            _cands = _probe.get("candidates") or []
+            if len(_cands) == 1 and not _fdb_timeout:
+                _fdb_timeout = _cands[0]
+        _probe_txt = str(_probe.get("summary") or "")
+        _where = (
+            f" LOCALIZED to block {_fdb_timeout!r}." if _fdb_timeout
+            else " NOT localized to a single block (the probe found no "
+                 "single-block evidence)."
+        )
         return _attach_stall_autopsy(project_root, [
             {
                 "type": "model_integration_failure",
-                "first_divergence_block": _first_divergence_block(project_root),
+                "first_divergence_block": _fdb_timeout,
                 "expected": expected,
                 "observed": f"simulate() did not return within {sim_timeout:.0f}s "
-                            "(no output frame-end / runaway emission / deadlock)",
+                            "(no output frame-end / runaway emission / deadlock)."
+                            + _where,
                 "criterion": "simulate_timeout",
                 "gap_class": "contract",
+                "stall_localization": _probe,
                 "suggested_fix": (
                     "The integrated chip model's simulate() ran unbounded. Usually "
                     "the pipeline never asserts the output frame-end (m_axis_tlast) "
@@ -2322,7 +2544,7 @@ def _run_gate_inner(
                     "emission to the frame, and that simulate() has a hard cycle cap "
                     "(see prompt). Raise CORESMITH_GATE_SIM_TIMEOUT for a legitimately "
                     "long sim."
-                ),
+                ) + (("\n\n" + _probe_txt) if _probe_txt else ""),
             }
         ])
     if sim_exc is not None:
@@ -2475,7 +2697,8 @@ def _run_gate_inner(
             # Legacy escape hatch (opt-in): the OLD, too-weak Tier-B check that
             # accepted any NON-DEGENERATE output WITHOUT comparing it to the
             # reference. This let a composition streaming a handful of garbage
-            # bytes pass (e.g. the codec that emitted ~0.5% of the reference
+            # bytes pass (e.g. a measured composition that emitted ~0.5% of the
+            # reference
             # bytes yet "passed"). Kept only for designs with genuinely no usable
             # oracle comparison.
             if _is_degenerate(observed_norm):

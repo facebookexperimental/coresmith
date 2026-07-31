@@ -104,6 +104,25 @@ def _carried_forward_defects(project_root: str) -> list:
     return []
 
 
+def _retired_blocks(state: dict, project_root: str) -> list:
+    """Blocks a declared PRD pin map RETIRED before µarch/RTL.
+
+    Without this the scorecard reads as "7 blocks" with no account of the
+    eighth: a reader comparing it to the architecture's 8-block diagram cannot
+    tell a deliberate retirement from a block that silently vanished. State
+    first (authoritative for the run that just executed), then the carried
+    artifact (so a report built from a bare project root still explains it).
+    """
+    rows = state.get("retired_blocks") or []
+    if isinstance(rows, list) and rows:
+        return [r for r in rows if isinstance(r, dict)]
+    try:
+        from orchestrator.architecture.pin_map_retire import read_retired_blocks
+        return read_retired_blocks(project_root)
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _chip_throughput(project_root: str) -> dict:
     """Chip-level measured-throughput record (v3): read the persisted
     ``.coresmith/chip_throughput.json`` (from the deterministic-BFM integration
@@ -494,6 +513,10 @@ def build_final_report(state: dict, project_root: str, *,
     # a quantified divergence.
     carried_defects = _carried_forward_defects(project_root)
 
+    # Blocks a declared pin map retired before µarch/RTL: deliberately absent
+    # from the chip, so the block count below is short by design, not by defect.
+    retired_blocks = _retired_blocks(state, project_root)
+
     # Section 7a: engine provenance -- which engine build produced this run, and
     # whether the code was hot-swapped mid-run.
     engine_prov = _engine_provenance(project_root)
@@ -535,12 +558,14 @@ def build_final_report(state: dict, project_root: str, *,
             "integration_dv": _verdict_word(integ_ok, integ_stage["ran"]),
             "validation_dv": _verdict_word(valid_ok, valid_stage["ran"]),
             "carried_forward_defect_count": len(carried_defects),
+            "retired_block_count": len(retired_blocks),
             "throughput_blocks_gated": len(tput_gated),
             "throughput_blocks_failed": tput_failed,
             "chip_measured_cyc_per_op": chip_throughput.get(
                 "measured_cyc_per_op_chip"),
         },
         "carried_forward_defects": carried_defects,
+        "retired_blocks": retired_blocks,
         "blocks": blocks_out,
         "chip": {
             "integration_dv": integ_stage,
@@ -684,7 +709,34 @@ def render_markdown(report: dict) -> str:
     if cfd:
         lines.append(f"- Carried-forward defects: **{len(cfd)}** "
                      f"(advisory bypasses that did not hard-block)")
+    rtb = report.get("retired_blocks", []) or []
+    if rtb:
+        lines.append(
+            f"- Retired blocks: **{len(rtb)}** "
+            f"({', '.join(str(r.get('block', '?')) for r in rtb)}) — "
+            f"deliberately absent, not missing"
+        )
     lines.append("")
+
+    # ---- retired blocks (a pin map replaced them) ----
+    if rtb:
+        lines.append("## Retired blocks (replaced by the PRD pin map)")
+        lines.append("")
+        lines.append(
+            "These blocks were NOT microarchitected, generated, simulated or "
+            "synthesized, and are deliberately ABSENT from the assembled chip. "
+            "The block count above is short by exactly this many, by design."
+        )
+        lines.append("")
+        lines.append("| Block | Reason | Signals routed by the top instead |")
+        lines.append("|---|---|---|")
+        for r in rtb:
+            sigs = ", ".join(str(s) for s in (r.get("covered_signals") or []))
+            lines.append(
+                f"| `{r.get('block', '?')}` | {r.get('reason', '')} | "
+                f"{sigs or 'n/a'} |"
+            )
+        lines.append("")
 
     # ---- carried-forward defects (advisory-bypass observations) ----
     if cfd:

@@ -55,6 +55,8 @@ from .codegen import (
     render_conformance_test_fn,
     render_contract_literal,
     render_integration_tb,
+    render_maxgeo_case_marker,
+    render_maxgeo_functional_test_fn,
     render_maxgeo_markers,
     render_maxgeo_probe_block,
     render_rom_bfm_module,
@@ -62,14 +64,29 @@ from .codegen import (
 )
 from .maxgeo import (
     BusMaxgeoCoverage,
+    MaxgeoDemand,
     bus_maxgeo_coverage,
     classify_dim_role,
+    declared_dimensional_maxima,
+    functional_maxgeo_dims,
     max_burst_bytes,
+    maxgeo_demand,
+    schema_dimensional_maxima,
+    token_match,
 )
 from .qspi_contract import QSPIContract
 from .qspi_master_bfm import QSPIMasterBFM
 from .qspi_rom_bfm import QSPIRomContract, QSPIRomResponderBFM
-from .stimulus import StimulusPlan, build_plan_from_run
+from .stimulus import (
+    MaxGeoCase,
+    StimulusPlan,
+    build_max_geometry_case,
+    build_plan_from_run,
+    load_acceptance_cases,
+    map_stimulus,
+    select_max_geometry_case,
+    stimulus_scalars,
+)
 
 __all__ = [
     "STATUS_BOUNDARY_OFF_TOP",
@@ -78,6 +95,8 @@ __all__ = [
     "STATUS_QSPI_TOP",
     "BusMaxgeoCoverage",
     "BusVerdict",
+    "MaxGeoCase",
+    "MaxgeoDemand",
     "PinBoundary",
     "QSPIContract",
     "QSPIMasterBFM",
@@ -86,28 +105,40 @@ __all__ = [
     "StimulusPlan",
     "arch_indicates_qspi_slave",
     "boundary_gate_enabled",
+    "build_max_geometry_case",
     "build_plan_from_run",
     "bus_maxgeo_coverage",
     "classify_bus_verdict",
     "classify_chip_bus",
     "classify_dim_role",
     "conformance_enabled",
+    "declared_dimensional_maxima",
     "describe_unmodeled_roles",
     "detect_bus_roles",
     "detect_dut_mastered_buses",
     "deterministic_bfm_enabled",
     "find_pin_boundary",
+    "functional_maxgeo_dims",
+    "load_acceptance_cases",
+    "map_stimulus",
     "max_burst_bytes",
+    "maxgeo_demand",
     "plan_deterministic_dv",
     "render_bfm_module",
     "render_conformance_tb",
     "render_conformance_test_fn",
     "render_contract_literal",
     "render_integration_tb",
+    "render_maxgeo_case_marker",
+    "render_maxgeo_functional_test_fn",
     "render_maxgeo_markers",
     "render_maxgeo_probe_block",
     "render_rom_bfm_module",
     "render_rom_contract_literal",
+    "schema_dimensional_maxima",
+    "select_max_geometry_case",
+    "stimulus_scalars",
+    "token_match",
     "write_deterministic_integration_tb",
     "write_qspi_conformance_tb",
 ]
@@ -231,18 +262,43 @@ def write_deterministic_integration_tb(
 
     ``declared_dims`` is the design's dimensional maxima; the bus-drivable subset
     is driven at maximum extent and advertised with a ``# MAXGEO`` marker.
+
+    The MAX-CONFIGURATION acceptance case is selected + baked here too (see
+    :func:`stimulus.build_max_geometry_case`): the primary plan is whichever case
+    the run declared FIRST -- the small canonical KAT -- so on its own it proves
+    nothing about the declared maxima. When a larger case exists it becomes a
+    second host-flow test in the same module, and the dims it drives at their
+    declared maximum are subtracted from the confession (and only those).
     """
+    maxgeo_case = None
+    schema_dims: dict = {}
+    try:
+        maxgeo_case = build_max_geometry_case(
+            project_root, contract, plan.case_name)
+    except Exception:  # noqa: BLE001 - a max case we cannot bake is simply absent
+        maxgeo_case = None
+    try:
+        schema_dims = schema_dimensional_maxima(project_root)
+    except Exception:  # noqa: BLE001
+        schema_dims = {}
     tb_src = render_integration_tb(
         contract, design_name, plan, include_conformance=include_conformance,
-        declared_dims=declared_dims,
+        declared_dims=declared_dims, maxgeo_case=maxgeo_case,
+        schema_dims=schema_dims,
+    )
+    functional = (
+        functional_maxgeo_dims(
+            maxgeo_case.scalars, schema_dims or declared_dims)
+        if maxgeo_case is not None else {}
     )
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(tb_src, encoding="utf-8")
+    extra_test = 1 if (maxgeo_case is not None and not maxgeo_case.is_primary) else 0
     return {
         "tb_path": str(out),
         "testbench_path": str(out),
-        "test_count": 2 if include_conformance else 1,
+        "test_count": (2 if include_conformance else 1) + extra_test,
         "deterministic_bfm": True,
         "qspi_conformance": bool(include_conformance),
         "contract_fingerprint": contract.fingerprint(),
@@ -250,6 +306,21 @@ def write_deterministic_integration_tb(
         # testbench was CAPABLE of driving instead of trusting what it claimed.
         "contract": contract.to_dict(),
         "case_name": plan.case_name,
+        # The MAX-CONFIGURATION case, so the gate reads the generator's record
+        # rather than re-deriving it (and can tell "no larger case exists" from
+        # "the generator skipped it").
+        "maxgeo_case": (
+            {
+                "name": maxgeo_case.plan.case_name,
+                "cfg0": maxgeo_case.cfg0,
+                "in_bytes": maxgeo_case.in_bytes,
+                "out_bytes": maxgeo_case.out_bytes,
+                "is_primary": maxgeo_case.is_primary,
+                "emitted_test": bool(extra_test),
+            }
+            if maxgeo_case is not None else None
+        ),
+        "maxgeo_functional": functional,
     }
 
 

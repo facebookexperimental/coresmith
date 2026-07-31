@@ -449,7 +449,7 @@ class UarchSpecGenerator:
             # used to append the section unconditionally, so a block whose
             # python_source resolved to "" got `--- Python Golden Model ---`
             # followed by an empty code fence -- indistinguishable, to the spec
-            # author, from a golden that says nothing. Measured on the raster
+            # author, from a golden that says nothing. Measured on a
             # validation run: all 8 uArch calls carried an empty golden block,
             # silently. Say what actually happened instead.
             if python_source.strip():

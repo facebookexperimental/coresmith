@@ -305,7 +305,9 @@ class TestMaxgeoEndToEndFromSchema:
         tb = _write_tb(
             tmp_path / "tb" / "t.py",
             "import cocotb\n# MAXGEO: frame_width=640 frame_height=352\n")
-        assert pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb) is None
+        # run3-followups: full coverage is an explicit PASS verdict, not None.
+        v = pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb)
+        assert v is not None and v.get("verdict") == "pass"
 
     def test_aes_nonvideo_schema_end_to_end(self, tmp_path):
         # NON-video two-domain proof: the deterministic gate fires identically
@@ -316,7 +318,8 @@ class TestMaxgeoEndToEndFromSchema:
         tb_ok = _write_tb(
             tmp_path / "tb" / "g.py",
             "import cocotb\n# MAXGEO: max_message_blocks=1024\n")
-        assert pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb_ok) is None
+        v_ok = pipeline_graph._maxgeo_gate_verdict(str(tmp_path), tb_ok)
+        assert v_ok is not None and v_ok.get("verdict") == "pass"
 
     def test_legacy_prose_ers_still_noops(self, tmp_path):
         _write_ers(tmp_path, _LEGACY_PROSE)

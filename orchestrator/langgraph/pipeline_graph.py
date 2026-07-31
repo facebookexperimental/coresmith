@@ -344,6 +344,13 @@ class OrchestratorState(TypedDict):
     # Results (accumulated via reducer from all Send branches) ──────────────
     completed_blocks: Annotated[list[dict], operator.add]
 
+    # Blocks a declared PRD pin map RETIRED before µarch/RTL (init_tier_node).
+    # Each record is {block, reason: "retired_by_pin_map", skipped: True,
+    # contract_signals, pin_map_signals, covered_signals, explanation}. They are
+    # NOT failures and NOT missing: the chip top emits their routing itself, so
+    # they are deliberately absent from block_queue and from the assembly.
+    retired_blocks: Annotated[list[dict], _last]
+
     # Integration review decision (set by integration_review_node) ────────
     integration_review_action: str | None
 
@@ -5206,6 +5213,14 @@ async def block_done_node(state: BlockState) -> dict:
     constr_path = block_dir / "constraints.json"
     constraints = _load_constraints_safe(constr_path)
 
+    # When this completion event happened. `completed_blocks` is append-only, so
+    # membership alone cannot tell a LEFTOVER interrupt (the graph moved past it
+    # and the block then finished) from a LIVE one (the block finished a pass
+    # ago and is parked again now). The daemon compares this against when the
+    # interrupt was raised; without it every pass-2 interrupt in a two-pass run
+    # was labelled stale on arrival and live_interrupt_count read 0.
+    completed_at = _time.time()
+
     if all_passed:
         result = {
             "name": block_name,
@@ -5216,6 +5231,7 @@ async def block_done_node(state: BlockState) -> dict:
             "constraints_learned": len(constraints),
             "step_log_paths": step_log_paths,
             "phase": phase,
+            "completed_at": completed_at,
         }
         log(f"  [{block_name}] PASSED (attempt {attempt})", GREEN)
     else:
@@ -5234,6 +5250,7 @@ async def block_done_node(state: BlockState) -> dict:
             "synth_success": synth_success,
             "step_log_paths": step_log_paths,
             "phase": phase,
+            "completed_at": completed_at,
         }
         reason = (
             "aborted" if is_abort
@@ -5521,9 +5538,156 @@ def _current_phase_completed(state: OrchestratorState) -> list[dict]:
     return list(seen.values())
 
 
+#: Defensive ceiling on consecutive partial-pin-map re-parks, mirroring
+#: ``_INTEGRATION_REPARK_CAP``. In production each re-park is a real
+#: ``interrupt()`` that SUSPENDS the graph, so this is never a CPU loop -- it
+#: bounds an operator/outer-agent that keeps sending ``retry`` without fixing
+#: the map, and stops a plain-return ``interrupt`` test double from spinning.
+_PINMAP_REPARK_CAP = 20
+
+
+async def _retire_pin_mapped_blocks(
+    state: OrchestratorState, pr: str, block_queue: list,
+) -> tuple[list, list[dict]]:
+    """Drop pad-adapter blocks a declared PRD pin map already covers.
+
+    Runs at the HEAD of the dispatch path, so a retired block is never
+    microarchitected, generated, linted or gated -- the flow simply does not ask
+    for a module the design does not contain. Returns ``(block_queue,
+    retirement_records)``; the queue is returned unchanged when nothing is
+    retired, and the records are what state / the final report carry.
+
+    PARTIAL coverage never retires: it raises an interrupt so an operator
+    resolves the contradiction (see ``pin_map_retire.plan_retirement``).
+    """
+    from orchestrator.architecture import pin_map_retire as _pmr
+
+    if not _pmr.retirement_enabled():
+        return block_queue, []
+
+    already = {r.get("block") for r in (state.get("retired_blocks") or [])
+               if isinstance(r, dict)}
+    records: list[dict] = list(state.get("retired_blocks") or [])
+    rounds = 0
+
+    while True:
+        try:
+            plan = _pmr.plan_retirement(pr, block_queue)
+        except Exception as _pe:  # noqa: BLE001 - never crash the dispatch path
+            log(f"  [PIN-MAP] retirement check skipped ({_pe})", YELLOW)
+            return block_queue, records
+
+        if plan.retire:
+            if plan.block in already:
+                # Already retired on an earlier tier entry; the queue in state
+                # no longer carries it, so this is the idempotent no-op path.
+                return _pmr.apply_retirement(block_queue, plan), records
+            log(f"\n{'='*60}", YELLOW)
+            log(f"  [PIN-MAP] RETIRING block '{plan.block}' from the flow: "
+                f"{plan.message}", YELLOW)
+            log(f"  [PIN-MAP] it will NOT be microarchitected, generated or "
+                f"gated, and it is DELIBERATELY absent from the assembled chip "
+                f"(reason={_pmr.RETIRE_REASON})", YELLOW)
+            log(f"{'='*60}\n", YELLOW)
+            records.append(_pmr.record_retirement(pr, plan))
+            already.add(plan.block)
+            write_graph_event(pr, "Init Tier", "block_retired_by_pin_map", {
+                "block": plan.block,
+                "reason": _pmr.RETIRE_REASON,
+                "covered_signals": plan.covered,
+                "pin_map_signals": plan.pin_map_signals,
+            })
+            return _pmr.apply_retirement(block_queue, plan), records
+
+        if not plan.park:
+            if plan.reason and plan.block:
+                log(f"  [PIN-MAP] '{plan.block}' NOT retired: {plan.reason}",
+                    YELLOW)
+            return block_queue, records
+
+        # ---- partial coverage: a half-routed boundary, so PARK ----
+        rounds += 1
+        log(f"\n{'='*60}", RED)
+        log(f"  [PIN-MAP] PARTIAL COVERAGE for '{plan.block}' -- refusing to "
+            f"retire it AND refusing to pretend the boundary is whole", RED)
+        log(f"  [PIN-MAP] {plan.message}", RED)
+        log(f"{'='*60}\n", RED)
+        write_graph_event(pr, "Init Tier", "pin_map_partial_coverage", {
+            "block": plan.block,
+            "covered_signals": plan.covered,
+            "uncovered_signals": plan.uncovered,
+            "round": rounds,
+        })
+        if rounds > _PINMAP_REPARK_CAP:
+            raise RuntimeError(
+                f"pin_map partially covers '{plan.block}' and the contradiction "
+                f"was not resolved after {_PINMAP_REPARK_CAP} re-parks "
+                f"(uncovered: {plan.uncovered}). Fix prd.pin_map or remove it.")
+        response = interrupt({
+            "type": "pin_map_partial_coverage",
+            "block": plan.block,
+            "reason": plan.reason,
+            "message": plan.message,
+            "contract_signals": plan.contract_signals,
+            "pin_map_signals": plan.pin_map_signals,
+            "covered_signals": plan.covered,
+            "uncovered_signals": plan.uncovered,
+            "supported_actions": ["retry", "override", "keep_block"],
+            "outer_agent_guidance": (
+                "The PRD's structured pin_map routes SOME of the signals this "
+                "pad-adapter block is contracted to translate, and not the "
+                "rest. The chip top emits routing for the mapped bits while "
+                "the block would route the others -- two drivers on one pad "
+                "bus, and no gate downstream can tell which was intended. "
+                "Resolve it: (a) extend prd.pin_map in "
+                ".coresmith/prd_spec.json to cover the uncovered signals and "
+                "resume `retry`; or (b) resume `keep_block` to generate the "
+                "adapter as before and leave the pin map to the assembler; or "
+                "(c) resume `override` to retire the block anyway -- ONLY when "
+                "you have verified the uncovered signals are genuinely routed "
+                "elsewhere."
+            ),
+            "reference_files": {
+                "prd": ".coresmith/prd_spec.json",
+                "interface_contracts": ".coresmith/interface_contracts.json",
+            },
+        }) or {}
+        action = (response.get("action") if isinstance(response, dict)
+                  else "retry") or "retry"
+        write_graph_event(pr, "Init Tier", "pin_map_partial_coverage_resume", {
+            "block": plan.block, "action": action,
+        })
+        if action == "keep_block":
+            log(f"  [PIN-MAP] operator KEPT '{plan.block}' in the flow despite "
+                f"partial pin-map coverage -- generating it as before", YELLOW)
+            return block_queue, records
+        if action == "override":
+            log(f"  [PIN-MAP] operator OVERRIDE: retiring '{plan.block}' with "
+                f"{len(plan.uncovered)} signal(s) NOT covered by the pin map "
+                f"({plan.uncovered})", YELLOW)
+            plan.retire = True
+            plan.message = (plan.message
+                            + " -- RETIRED ANYWAY by operator override")
+            records.append(_pmr.record_retirement(pr, plan))
+            return _pmr.apply_retirement(block_queue, plan), records
+        # retry -> re-plan against the (hopefully amended) PRD and loop
+
+
 async def init_tier_node(state: OrchestratorState) -> dict:
     """Compute the tier list (once) and log the current tier."""
+    pr = state.get("project_root", str(PROJECT_ROOT))
+
+    # A declared pin map REPLACES the pad-adapter block, so the flow must not
+    # ask for it. Done here -- the head of the dispatch path, before tier_list
+    # and before any Send() -- so the block is skipped ahead of µarch/RTL rather
+    # than generated, refused by the conformance gate and dropped at assembly.
+    # Idempotent, so every tier re-entry and checkpoint resume agrees.
     block_queue = state["block_queue"]
+    _retired_before = len(block_queue)
+    block_queue, _retired_records = await _retire_pin_mapped_blocks(
+        state, pr, block_queue)
+    _queue_reduced = len(block_queue) != _retired_before
+
     tier_list = state.get("tier_list") or sorted(
         set(b.get("tier", 1) for b in block_queue)
     )
@@ -5531,8 +5695,6 @@ async def init_tier_node(state: OrchestratorState) -> dict:
 
     tier = tier_list[current_idx]
     tier_blocks = [b for b in block_queue if b.get("tier", 1) == tier]
-
-    pr = state.get("project_root", str(PROJECT_ROOT))
 
     # Section 7a: stamp the engine git SHA at run start + WARN in the daemon log
     # if it changes mid-run (a hot-swap that flipped behavior under the run).
@@ -5586,6 +5748,15 @@ async def init_tier_node(state: OrchestratorState) -> dict:
     })
 
     out = {"tier_list": tier_list}
+    # Publish the reduced queue + the retirement record so EVERY downstream
+    # consumer agrees the block is deliberately absent rather than missing:
+    # pipeline_complete / integration_check size `expected` off block_queue,
+    # discover_block_rtl + missing_from work off the same set, and the daemon's
+    # total_blocks / remaining_count stop waiting on it.
+    if _queue_reduced:
+        out["block_queue"] = block_queue
+    if _retired_records:
+        out["retired_blocks"] = _retired_records
     # Seed the two-pass phase on the FIRST entry only. fan_out_tier defaults an
     # unset pipeline_phase to "rtl", so without this a block-goldens run would
     # send every block straight down the single-pass RTL path and pass 1
@@ -6597,7 +6768,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
 
         # BLOCK-RTL COMPLETENESS GATE: refuse to assemble a chip that is MISSING
         # a block. `discover_block_rtl` used to drop an unresolvable block
-        # SILENTLY, which structurally DELETES it from the chip: the raster run
+        # SILENTLY, which structurally DELETES it from the chip: one graded run
         # lost its locked Caravel pad adapter (whose file is
         # rtl/user_project_wrapper.v, NOT <block_name>.v, because an interface
         # contract locks the module name), so `detect_wrapper_block` returned
@@ -8437,9 +8608,14 @@ async def begin_rtl_pass_node(state: OrchestratorState) -> dict:
     the already-computed list (R8).
     """
     pr = state.get("project_root", str(PROJECT_ROOT))
-    log(f"\n{'='*60}", CYAN)
-    log("  µARCH GATE CLEAN -> beginning RTL pass (pass 2)", CYAN)
-    log(f"{'='*60}", CYAN)
+    # run3-followups: the banner reflects the ACTUAL gate outcome -- a green
+    # CLEAN was printed four lines after an advisory-dismissed model mismatch,
+    # suppressing a true early detection for ~2.5 h of downstream work.
+    from orchestrator.langgraph.pipeline_helpers import uarch_gate_banner
+    _banner, _colour = uarch_gate_banner(state.get("model_integration_result"))
+    log(f"\n{'='*60}", _colour)
+    log(f"  {_banner}", _colour)
+    log(f"{'='*60}", _colour)
     write_graph_event(pr, "Begin RTL Pass", "graph_node_exit", {
         "pipeline_phase": "rtl",
     })
@@ -9126,6 +9302,33 @@ def _tb_maxgeo_pairs(tb_path: str) -> dict:
     return pairs
 
 
+_MAXGEO_CASE_RE = re.compile(r"#\s*MAXGEO_CASE:\s*(.+)$")
+
+
+def _tb_maxgeo_case(tb_path: str) -> dict:
+    """Parse the ``# MAXGEO_CASE: name=<s> cfg0=<int> in_bytes=<int>
+    out_bytes=<int>`` marker the deterministic codegen emits for its
+    maximum-configuration functional test. ``{}`` when absent."""
+    out: dict = {}
+    try:
+        text = Path(tb_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        m = _MAXGEO_CASE_RE.search(line)
+        if not m:
+            continue
+        for tok in m.group(1).split():
+            if "=" not in tok:
+                continue
+            k, _, v = tok.partition("=")
+            try:
+                out[k] = int(v)
+            except ValueError:
+                out[k] = v
+    return out
+
+
 def _maxgeo_conformance_scope_enabled() -> bool:
     """Scope the MAX-GEOMETRY demand for the ENGINE'S OWN compute-lane-independent
     conformance testbench. Default ON; ``CORESMITH_MAXGEO_CONFORMANCE_SCOPE=0``
@@ -9159,7 +9362,7 @@ def _maxgeo_conformance_scope(
         the gate exactly as before.
 
     What it relaxes is only this: a compute-lane dimension (frame_width,
-    num_triangles, ...) cannot be driven by a testbench that has no compute
+    record counts, coordinate extents, ...) cannot be driven by a testbench that has no compute
     oracle, so demanding it makes the gate a permanent brick wall for that whole
     class of run rather than a defect detector. Those dims are reported, logged
     loudly, and carried forward as a defect -- never silently dropped.
@@ -9230,9 +9433,12 @@ def _maxgeo_conformance_scope(
 def _maxgeo_gate_verdict(
     project_root: str, tb_path: str, tb_result: dict | None = None
 ) -> dict | None:
-    """``None`` -> gate passes / no-ops. Otherwise a violation dict: the design
-    declares dimensional maxima but the testbench's ``# MAXGEO`` marker does not
-    prove a max-geometry case for every declared dimension.
+    """``None`` -> gate disabled or no declared dims (a true no-op).
+    ``{"verdict": "pass", ...}`` -> evaluated and fully covered (callers LOG
+    it). ``{"advisory": True, ...}`` -> covered in scope with a loud recorded
+    gap. Anything else -> violation dict: the design declares dimensional
+    maxima but the testbench's ``# MAXGEO`` marker does not prove a
+    max-geometry case for every declared dimension.
 
     NAME-AGNOSTIC: each declared dimension's max VALUE must appear as a marker
     ``key=value`` pair (the key name is free-form data). Testing at the declared
@@ -9249,20 +9455,65 @@ def _maxgeo_gate_verdict(
     try:
         if not _maxgeo_gate_enabled():
             return None
-        dims = _declared_dimensions(project_root)
+        # run3-followups: single-sourced declared table (byte-equality with
+        # the legacy _declared_dimensions is pinned by test).
+        from orchestrator.langgraph.bfm_lib import maxgeo as _maxgeo_lib
+        dims = _maxgeo_lib.declared_dimensional_maxima(project_root)
         if not dims:
             return None
         marker = _tb_maxgeo_pairs(tb_path)
-        marker_values = set(marker.values())
-        missing = {
-            name: mx for name, mx in dims.items() if mx not in marker_values
-        }
+        # run3-followups: single-sourced demand partition (bfm_lib.maxgeo).
+        # `missing` is provably identical to the old value-set computation;
+        # `value_only` newly NAMES the dims whose only evidence is a value
+        # collision with another marker pair, so the gate's number and the
+        # TB's confession finally agree.
+        _demand = _maxgeo_lib.maxgeo_demand(dims, marker)
+        missing = _demand.missing
+        value_only = _demand.value_only
         if not missing:
-            return None
+            # run3-followups: an evaluated PASS is a verdict, not a silence --
+            # the caller logs it so a suppressed gate can never read as green.
+            return {"verdict": "pass", "declared_dims": dims,
+                    "marker_pairs": marker,
+                    "value_only_dims": value_only}
         scoped = _maxgeo_conformance_scope(
             project_root, tb_path, tb_result, dims, marker, missing)
         if scoped is not None:
             return scoped
+        # run3-followups: a functional MAXIMUM-CONFIGURATION case (baked by the
+        # deterministic codegen, advertised via # MAXGEO_CASE) drives the max
+        # config register value and the full IN/OUT payload extents end-to-end
+        # against the golden -- the 2^n index/address wrap class this gate
+        # exists to catch IS exercised. Remaining per-dimension attainment is
+        # downgraded to a LOUD advisory gap (carried-forward defect), the same
+        # treatment as the bus-scoped conformance path. The gate stays HARD
+        # when no such case exists or its extents miss the declared maxima.
+        case = _tb_maxgeo_case(tb_path)
+        if case:
+            dim_values = set(dims.values())
+            attained = all(
+                isinstance(case.get(k), int) and case[k] in dim_values
+                for k in ("cfg0", "in_bytes", "out_bytes")
+            )
+            if attained:
+                return {
+                    "advisory": True,
+                    "scope": "functional-max-case",
+                    "uncovered_dims": missing,
+                    "value_only_dims": value_only,
+                    "declared_dims": dims,
+                    "marker_pairs": marker,
+                    "functional_max_case": case,
+                    "reason": (
+                        "MAX-GEOMETRY gate: functional max-configuration case "
+                        f"{case} drives the maximum configuration and full "
+                        "payload extents end-to-end against the golden "
+                        "reference, exercising the 2^n index/address wrap "
+                        "class. Per-dimension attainment for "
+                        f"{sorted(missing)} is not individually proven -- "
+                        "recorded as a loud advisory gap, not a hard failure."
+                    ),
+                }
         reason = (
             "MAX-GEOMETRY DV GATE FAILED: the design declares dimensional "
             "maxima but the testbench does not exercise them. A chip can pass "
@@ -9275,13 +9526,15 @@ def _maxgeo_gate_verdict(
             f"  declared maxima : {dims}\n"
             f"  marker pairs    : {marker or '(no # MAXGEO marker found)'}\n"
             f"  uncovered dims  : {missing}\n"
+            f"  value-collision-only (not individually proven): {value_only}\n"
             "Fix: regenerate/edit the testbench to drive a max-geometry case "
             "(sparse/short content at the maximum dimensions is acceptable if a "
             "full workload is too slow -- the point is to exercise the index/"
             "address widths at maximum extent) and emit the marker."
         )
         return {"reason": reason, "declared_dims": dims,
-                "marker_pairs": marker, "uncovered_dims": missing}
+                "marker_pairs": marker, "uncovered_dims": missing,
+                "value_only_dims": value_only}
     except Exception:  # noqa: BLE001
         return None
 
@@ -9507,7 +9760,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                         # advisory and PROCEEDED on the LLM-authored, DUT-co-tuned
                         # BFM: DV was silently downgraded exactly when the design
                         # is most likely to be non-conformant, and the run still
-                        # reported "INTEGRATION DV PASSED" (exp-raster-macro-
+                        # reported "INTEGRATION DV PASSED" (observed live on a graded run
                         # 20260727). It is now the run's normal tb_generation
                         # interrupt (retry/fix_rtl/fix_tb/abort), per the local
                         # honest-gate idiom.
@@ -9664,6 +9917,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                 sim_log=error_msg,
                 sim_log_path="",
                 block_rtl_paths=block_rtl_paths,
+                            supported_actions=["retry", "fix_rtl", "fix_tb", "abort"],
             )
             payload = {
                 "type": "integration_dv_failure",
@@ -9701,35 +9955,28 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                     "contract_audit": contract_audit.get("audit_path", ""),
                 },
             }
-            response = interrupt(payload)
-            action = response.get("action", "abort")
+            # run3-followups: park in integration_dv_decision instead of a
+            # tail interrupt() (see the sim-failure branch for the
+            # one-cycle-late defect).
             write_graph_event(pr, "Integration DV", "graph_node_exit", {
                 "error": str(e),
                 "phase": "tb_generation",
-                "action": action,
+                "action": "pending_decision",
             })
-            dv_result = {
-                "passed": False,
-                "error": error_msg,
-                "phase": "tb_generation",
-                "test_count": 0,
-                "testbench_path": "",
-                "design_name": design_name,
-                "action_taken": action,
-                "contract_audit": contract_audit,
-                "contract_audit_path": contract_audit.get("audit_path", ""),
-            }
-            if action == "abort":
-                dv_result["aborted"] = True
-                log("  [INTEG-DV] Aborted", RED)
-            elif action in ("retry", "fix_rtl", "fix_tb"):
-                fix_desc = response.get("rtl_fix_description", "")
-                dv_result["fix_applied"] = fix_desc
-                log(f"  [INTEG-DV] Fix applied: {fix_desc}", GREEN)
             return {
-                "integration_dv_result": dv_result,
+                "integration_dv_result": {
+                    "passed": False,
+                    "pending_decision": True,
+                    "interrupt_payload": payload,
+                    "error": error_msg,
+                    "phase": "tb_generation",
+                    "test_count": 0,
+                    "testbench_path": "",
+                    "design_name": design_name,
+                    "contract_audit": contract_audit,
+                    "contract_audit_path": contract_audit.get("audit_path", ""),
+                },
                 "pipeline_done": False,
-                "pipeline_aborted": action == "abort",
             }
 
         tb_path = tb_result.get("testbench_path", "")
@@ -9784,26 +10031,46 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                     f"(non-blocking): {chip_equiv_result.get('reason','')}", YELLOW)
 
         # MAX-GEOMETRY gate (rung3-fixes-2): a green sim is NOT sufficient when
-        # the design declares dimensional maxima but the (freshly generated) TB
-        # never exercised them -- that is how a truncated index-width bug ships
-        # in a "verified" chip. Flip the DV to failed -> existing failure
-        # interrupt. Operator-reused TBs (fix_tb/fix_rtl) are trusted as-is.
-        if passed and not reuse_existing_tb:
+        # the design declares dimensional maxima but the TB never exercised
+        # them -- that is how a truncated index-width bug ships in a "verified"
+        # chip. Flip the DV to failed -> existing failure interrupt.
+        # run3-followups: the gate runs on EVERY passing cycle, including
+        # operator-reused TBs (fix_tb/fix_rtl). "Trusted as-is" silently
+        # DISARMED the gate on exactly the cycles that deserve more scrutiny --
+        # proven live when a clobbered 2-test TB passed DV with no MAXGEO line
+        # at all. Every evaluated outcome logs a verdict; silence now means
+        # only "gate disabled or no declared dims".
+        if passed:
             _mg = _maxgeo_gate_verdict(pr, tb_path, tb_result)
-            if _mg is not None and _mg.get("advisory"):
-                # SCOPED, not silent. The engine's own compute-lane-independent
-                # conformance TB drove every BUS maximum and cannot drive the
-                # compute lane; the gap is logged RED, written to the event
-                # stream, and carried forward as a defect so the final report
-                # and validation DV both see it.
-                log("  [INTEG-DV] MAX-GEOMETRY gate SCOPED to the bus contract "
-                    "(deterministic conformance TB, compute lane UNMODELED) -- "
-                    "this is NOT full max-geometry coverage. NOT COVERED: "
-                    f"{_mg['uncovered_dims']}", RED)
+            if reuse_existing_tb and _mg is not None:
+                log("  [INTEG-DV] MAX-GEOMETRY gate: evaluating an OPERATOR-"
+                    "REUSED testbench (fix_tb/fix_rtl) -- operator edits get "
+                    "more scrutiny, not less.", YELLOW)
+            if _mg is not None and _mg.get("verdict") == "pass":
+                log("  [INTEG-DV] MAX-GEOMETRY gate PASS -- every declared "
+                    f"maximum appears in the TB markers: "
+                    f"{_mg.get('marker_pairs', {})}", GREEN)
+                write_graph_event(pr, "Integration DV", "maxgeo_gate_pass", {
+                    "gate": "maxgeo",
+                    "marker_pairs": _mg.get("marker_pairs", {}),
+                })
+            elif _mg is not None and _mg.get("advisory"):
+                # SCOPED, not silent. Either the engine's compute-lane-
+                # independent conformance TB drove every BUS maximum and cannot
+                # drive the compute lane, or a functional max-configuration
+                # case covered the wrap class without per-dimension proof; the
+                # gap is logged RED, written to the event stream, and carried
+                # forward as a defect so the final report and validation DV
+                # both see it.
+                _mg_scope = _mg.get("scope", "bus-contract-only")
+                log("  [INTEG-DV] MAX-GEOMETRY gate ADVISORY "
+                    f"(scope={_mg_scope}) -- this is NOT full max-geometry "
+                    f"coverage. NOT COVERED: {_mg['uncovered_dims']}", RED)
                 write_graph_event(pr, "Integration DV", "maxgeo_gate_scoped", {
                     "gate": "maxgeo",
-                    "scope": "bus-contract-only",
+                    "scope": _mg_scope,
                     "bus_covered": _mg.get("bus_covered", {}),
+                    "functional_max_case": _mg.get("functional_max_case", {}),
                     "uncovered_dims": _mg.get("uncovered_dims", {}),
                 })
                 record_carried_forward_defect(pr, {
@@ -9811,10 +10078,9 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                     "kind": "max_geometry_not_covered",
                     "advisory": True,
                     "unmodeled": (
-                        "compute-lane dimensional maxima never driven at "
+                        "dimensional maxima never individually driven at "
                         f"maximum extent: {_mg.get('uncovered_dims', {})} "
-                        "(integration DV is the deterministic QSPI conformance "
-                        "TB -- no compute oracle)"
+                        f"(scope={_mg_scope})"
                     ),
                     "first_divergence_block": "",
                     "note": _mg["reason"],
@@ -9907,6 +10173,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
             sim_log=sim_log,
             sim_log_path=sim_result.get("log_path", ""),
             block_rtl_paths=block_rtl_paths,
+                    supported_actions=["retry", "fix_rtl", "fix_tb", "abort"],
         )
         _record_dv_row(
             pr, block=design_name, scope="chip", source="gate", passed=False,
@@ -9967,56 +10234,116 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
         ):
             payload["supported_actions"].insert(-1, "skip")
 
-        response = interrupt(payload)
-
-        action = response.get("action", "abort")
+        # run3-followups: do NOT call interrupt() here. LangGraph re-executes
+        # this entire node from the top on resume, so a response delivered to
+        # a tail interrupt() is consumed ONE FULL CYCLE LATE -- the intervening
+        # default cycle regenerates the testbench and destroys operator fix_tb
+        # edits (proven live: three consecutive clobbers, then a false PASS on
+        # the clobbered TB). The failure parks in integration_dv_decision,
+        # whose re-execution is just the interrupt() call: the response lands
+        # immediately and the TB on disk at decision time is the TB the next
+        # cycle sees.
         write_graph_event(pr, "Integration DV", "graph_node_exit", {
-            "action": action,
+            "action": "pending_decision",
             "passed": False,
             "test_count": test_count,
         })
-
-        dv_result = {
-            "passed": False,
-            "test_count": test_count,
-            "testbench_path": tb_path,
-            "sim_log_path": sim_result.get("log_path", ""),
-            "design_name": design_name,
-            "action_taken": action,
-            "contract_audit": contract_audit,
-            "contract_audit_path": contract_audit.get("audit_path", ""),
-            "chip_equiv_result": chip_equiv_result,
-        }
-
-        if action == "skip":
-            dv_result["skipped_by_user"] = True
-            log("  [INTEG-DV] Skipped by user/agent", YELLOW)
-        elif action == "abort":
-            dv_result["aborted"] = True
-            log("  [INTEG-DV] Aborted", RED)
-        elif action in ("retry", "fix_rtl", "fix_tb"):
-            fix_desc = response.get("rtl_fix_description", "")
-            log(f"  [INTEG-DV] Fix applied: {fix_desc}", GREEN)
-            dv_result["fix_applied"] = fix_desc
-            if action == "fix_tb":
-                # A-Fix 5(c): the operator hand-edited the testbench. The chip
-                # sim will re-run trusting that TB, but the chip-top equivalence
-                # gate (A-Fix 5d) remains the gate of record -- record + LOUDLY
-                # flag the operator TB edit so a loosened TB can't quietly pass.
-                dv_result["tb_operator_edited"] = True
-                log(
-                    "  [INTEG-DV] fix_tb: operator EDITED the testbench "
-                    "(tb_operator_edited=True). A green sim on an operator-edited "
-                    "TB is NOT sufficient -- the chip-top RTL-vs-model "
-                    "equivalence gate is the gate of record.",
-                    YELLOW,
-                )
-
         return {
-            "integration_dv_result": dv_result,
+            "integration_dv_result": {
+                "passed": False,
+                "pending_decision": True,
+                "interrupt_payload": payload,
+                "test_count": test_count,
+                "testbench_path": tb_path,
+                "sim_log_path": sim_result.get("log_path", ""),
+                "design_name": design_name,
+                "contract_audit": contract_audit,
+                "contract_audit_path": contract_audit.get("audit_path", ""),
+                "chip_equiv_result": chip_equiv_result,
+            },
             "pipeline_done": False,
-            "pipeline_aborted": action == "abort",
         }
+
+
+async def integration_dv_decision_node(state: OrchestratorState) -> dict:
+    """Consume the operator's decision for a parked integration-DV failure.
+
+    Split out of ``integration_dv_node`` (run3-followups): a LangGraph resume
+    re-executes the interrupted node from the top, so an ``interrupt()`` at the
+    tail of the big DV node consumed its response one full default cycle late,
+    regenerating the testbench over operator edits before the action landed.
+    This node's body is ONLY the interrupt + response handling: re-execution is
+    free, the response lands immediately, and a fix_tb reuse sees the disk
+    state as of decision time."""
+    pr = state["project_root"]
+    dv = dict(state.get("integration_dv_result") or {})
+    payload = dv.get("interrupt_payload") or {
+        "type": "integration_dv_failure",
+        "supported_actions": ["retry", "fix_rtl", "fix_tb", "abort"],
+    }
+    response = interrupt(payload) or {}
+    action = response.get("action", "abort")
+    test_count = dv.get("test_count", 0)
+    write_graph_event(pr, "Integration DV", "graph_node_exit", {
+        "action": action,
+        "passed": False,
+        "test_count": test_count,
+    })
+
+    dv_result = dict(dv)
+    dv_result.pop("interrupt_payload", None)
+    dv_result["passed"] = False
+    dv_result["pending_decision"] = False
+    dv_result["action_taken"] = action
+
+    if action == "skip":
+        dv_result["skipped_by_user"] = True
+        log("  [INTEG-DV] Skipped by user/agent", YELLOW)
+    elif action == "abort":
+        dv_result["aborted"] = True
+        log("  [INTEG-DV] Aborted", RED)
+    elif action in ("retry", "fix_rtl", "fix_tb"):
+        fix_desc = response.get("rtl_fix_description", "")
+        log(
+            f"  [INTEG-DV] Fix applied (action={action}): "
+            f"{fix_desc or '(no description provided)'}",
+            GREEN,
+        )
+        dv_result["fix_applied"] = fix_desc
+        if action == "fix_tb":
+            # A-Fix 5(c): the operator hand-edited the testbench. The chip sim
+            # re-runs trusting that TB, and the MAX-GEOMETRY + chip-top
+            # equivalence gates evaluate it with MORE scrutiny -- record +
+            # LOUDLY flag the operator TB edit so a loosened TB can't quietly
+            # pass.
+            dv_result["tb_operator_edited"] = True
+            log(
+                "  [INTEG-DV] fix_tb: operator EDITED the testbench "
+                "(tb_operator_edited=True). A green sim on an operator-edited "
+                "TB is NOT sufficient -- the MAX-GEOMETRY and chip-top "
+                "equivalence gates still evaluate it.",
+                YELLOW,
+            )
+
+    return {
+        "integration_dv_result": dv_result,
+        "pipeline_done": False,
+        "pipeline_aborted": action == "abort",
+    }
+
+
+def route_after_integration_dv_decision(state: OrchestratorState) -> str:
+    """Route the operator's decision back into integration DV or terminate."""
+    result = state.get("integration_dv_result") or {}
+    if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
+        return "integration_dv"
+    return END
+
+
+route_after_integration_dv_decision.__edge_labels__ = {
+    "integration_dv": "RETRY / FIX",
+    END: "DONE",
+}
 
 
 def _load_ers_validation_context(project_root: str) -> tuple[str, int]:
@@ -10067,7 +10394,7 @@ def _load_ers_validation_context(project_root: str) -> tuple[str, int]:
 # therefore STABLE, path: every integration-DV failure of the same stage writes
 # the same filename. So a failed or skipped audit leaves the PREVIOUS failure's
 # verdict lying in the exact place the next one is read from. Observed on the
-# raster run: a 0.99-confidence TESTBENCH_BUG audit describing an already-fixed
+# graded run: a 0.99-confidence TESTBENCH_BUG audit describing an already-fixed
 # crash sat next to a new, different failure and was quoted as its diagnosis.
 #
 # A verdict is only about the failure it actually read, so it now carries that
@@ -10149,6 +10476,7 @@ async def _run_top_level_contract_audit(
     sim_log: str = "",
     sim_log_path: str = "",
     block_rtl_paths: dict[str, str] | None = None,
+    supported_actions: list[str] | None = None,
 ) -> dict:
     """Run contract audit for a top-level DV failure.
 
@@ -10231,6 +10559,28 @@ async def _run_top_level_contract_audit(
     )
     if stale:
         log(f"  [CONTRACT-AUDIT] {stale}", RED)
+    # run3-followups: the audit's SEMANTIC recommendation (e.g. revise_uarch,
+    # forced by the agent for spec-level categories) may not be an offerable
+    # resume action for the parked interrupt -- the operator was told to take
+    # an action the resume endpoint rejects. Keep the semantic recommendation,
+    # and add the closest OFFERABLE action plus how to use it.
+    rec = str(result.get("recommended_action", "") or "")
+    if supported_actions and rec and rec not in supported_actions:
+        resume_action = ("retry" if "retry" in supported_actions
+                         else supported_actions[0])
+        result["recommended_resume_action"] = resume_action
+        result["recommended_action_note"] = (
+            f"'{rec}' is the audit's semantic recommendation but is not an "
+            "offerable resume action for this interrupt "
+            f"(offerable: {supported_actions}). Apply the fix at its source "
+            f"(spec/uarch documents), then resume with '{resume_action}' -- "
+            "regeneration will read the corrected documents."
+        )
+        log(
+            f"  [CONTRACT-AUDIT] recommended '{rec}' is not an offerable "
+            f"resume action; operator path: fix at source + '{resume_action}'",
+            YELLOW,
+        )
     result["audit_path"] = str(output_path)
     result["context_path"] = str(context_path)
     return result
@@ -10241,6 +10591,8 @@ def route_after_integration_dv(state: OrchestratorState) -> str:
     result = state.get("integration_dv_result") or {}
     if result.get("passed") is True:
         return "validation_dv"
+    if result.get("pending_decision"):
+        return "integration_dv_decision"
     if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
         return "integration_dv"
     return END
@@ -10248,6 +10600,7 @@ def route_after_integration_dv(state: OrchestratorState) -> str:
 
 route_after_integration_dv.__edge_labels__ = {
     "validation_dv": "Validation DV",
+    "integration_dv_decision": "Park for decision",
     "integration_dv": "Retry",
     END: "DONE",
 }
@@ -10471,6 +10824,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                 sim_log=error_msg,
                 sim_log_path="",
                 block_rtl_paths=block_rtl_paths,
+                            supported_actions=["retry", "fix_rtl", "fix_tb", "abort"],
             )
             payload = {
                 "type": "validation_dv_failure",
@@ -10511,36 +10865,28 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     "contract_audit": contract_audit.get("audit_path", ""),
                 },
             }
-            response = interrupt(payload)
-            action = response.get("action", "abort")
+            # run3-followups: park in validation_dv_decision instead of a tail
+            # interrupt() (see integration_dv for the one-cycle-late defect).
             write_graph_event(pr, "Validation DV", "graph_node_exit", {
                 "error": str(e),
                 "phase": "tb_generation",
-                "action": action,
+                "action": "pending_decision",
             })
-            dv_result = {
-                "passed": False,
-                "error": error_msg,
-                "phase": "tb_generation",
-                "requirement_count": requirement_count,
-                "test_count": 0,
-                "testbench_path": "",
-                "design_name": design_name,
-                "action_taken": action,
-                "contract_audit": contract_audit,
-                "contract_audit_path": contract_audit.get("audit_path", ""),
-            }
-            if action == "abort":
-                dv_result["aborted"] = True
-                log("  [VALIDATION-DV] Aborted", RED)
-            elif action in ("retry", "fix_rtl", "fix_tb"):
-                fix_desc = response.get("rtl_fix_description", "")
-                dv_result["fix_applied"] = fix_desc
-                log(f"  [VALIDATION-DV] Fix applied: {fix_desc}", GREEN)
             return {
-                "validation_dv_result": dv_result,
+                "validation_dv_result": {
+                    "passed": False,
+                    "pending_decision": True,
+                    "interrupt_payload": payload,
+                    "error": error_msg,
+                    "phase": "tb_generation",
+                    "requirement_count": requirement_count,
+                    "test_count": 0,
+                    "testbench_path": "",
+                    "design_name": design_name,
+                    "contract_audit": contract_audit,
+                    "contract_audit_path": contract_audit.get("audit_path", ""),
+                },
                 "pipeline_done": False,
-                "pipeline_aborted": action == "abort",
             }
 
         tb_path = tb_result.get("testbench_path", "")
@@ -10690,6 +11036,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
             sim_log=sim_log,
             sim_log_path=sim_result.get("log_path", ""),
             block_rtl_paths=block_rtl_paths,
+                    supported_actions=["retry", "fix_rtl", "fix_tb", "abort"],
         )
         _record_dv_row(
             pr, block=design_name, scope="validation", source="gate", passed=False,
@@ -10743,54 +11090,106 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
         ):
             payload["supported_actions"].insert(-1, "skip")
 
-        response = interrupt(payload)
-        action = response.get("action", "abort")
+        # run3-followups: park in validation_dv_decision instead of a tail
+        # interrupt() (see integration_dv for the one-cycle-late defect).
         write_graph_event(pr, "Validation DV", "graph_node_exit", {
-            "action": action,
+            "action": "pending_decision",
             "passed": False,
             "test_count": test_count,
             "requirement_count": requirement_count,
         })
-
-        dv_result = {
-            "passed": False,
-            "test_count": test_count,
-            "requirement_count": requirement_count,
-            "testbench_path": tb_path,
-            "sim_log_path": sim_result.get("log_path", ""),
-            "design_name": design_name,
-            "action_taken": action,
-            "contract_audit": contract_audit,
-            "contract_audit_path": contract_audit.get("audit_path", ""),
-        }
-
-        if action == "skip":
-            dv_result["skipped_by_user"] = True
-            log("  [VALIDATION-DV] Skipped by explicit configuration", YELLOW)
-        elif action == "abort":
-            dv_result["aborted"] = True
-            log("  [VALIDATION-DV] Aborted", RED)
-        elif action in ("retry", "fix_rtl", "fix_tb"):
-            fix_desc = response.get("rtl_fix_description", "")
-            log(f"  [VALIDATION-DV] Fix applied: {fix_desc}", GREEN)
-            dv_result["fix_applied"] = fix_desc
-
         return {
-            "validation_dv_result": dv_result,
+            "validation_dv_result": {
+                "passed": False,
+                "pending_decision": True,
+                "interrupt_payload": payload,
+                "test_count": test_count,
+                "requirement_count": requirement_count,
+                "testbench_path": tb_path,
+                "sim_log_path": sim_result.get("log_path", ""),
+                "design_name": design_name,
+                "contract_audit": contract_audit,
+                "contract_audit_path": contract_audit.get("audit_path", ""),
+            },
             "pipeline_done": False,
-            "pipeline_aborted": action == "abort",
         }
 
 
-def route_after_validation_dv(state: OrchestratorState) -> str:
-    """Route after validation DV: terminal frontend pipeline."""
+async def validation_dv_decision_node(state: OrchestratorState) -> dict:
+    """Consume the operator's decision for a parked validation-DV failure.
+
+    Same split as ``integration_dv_decision_node`` (run3-followups): the
+    interrupt lives in its own node so the resume response is consumed
+    immediately instead of one regeneration cycle late."""
+    pr = state["project_root"]
+    dv = dict(state.get("validation_dv_result") or {})
+    payload = dv.get("interrupt_payload") or {
+        "type": "validation_dv_failure",
+        "supported_actions": ["retry", "fix_rtl", "fix_tb", "abort"],
+    }
+    response = interrupt(payload) or {}
+    action = response.get("action", "abort")
+    write_graph_event(pr, "Validation DV", "graph_node_exit", {
+        "action": action,
+        "passed": False,
+        "phase": dv.get("phase", "simulation"),
+        "test_count": dv.get("test_count", 0),
+        "requirement_count": dv.get("requirement_count", 0),
+    })
+
+    dv_result = dict(dv)
+    dv_result.pop("interrupt_payload", None)
+    dv_result["pending_decision"] = False
+    dv_result["action_taken"] = action
+
+    if action == "skip":
+        dv_result["skipped_by_user"] = True
+        log("  [VALIDATION-DV] Skipped by explicit configuration", YELLOW)
+    elif action == "abort":
+        dv_result["aborted"] = True
+        log("  [VALIDATION-DV] Aborted", RED)
+    elif action in ("retry", "fix_rtl", "fix_tb"):
+        fix_desc = response.get("rtl_fix_description", "")
+        log(
+            f"  [VALIDATION-DV] Fix applied (action={action}): "
+            f"{fix_desc or '(no description provided)'}",
+            GREEN,
+        )
+        dv_result["fix_applied"] = fix_desc
+
+    return {
+        "validation_dv_result": dv_result,
+        "pipeline_done": False,
+        "pipeline_aborted": action == "abort",
+    }
+
+
+def route_after_validation_dv_decision(state: OrchestratorState) -> str:
+    """Route the operator's decision back into validation DV or terminate."""
     result = state.get("validation_dv_result") or {}
     if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
         return "validation_dv"
     return END
 
 
+route_after_validation_dv_decision.__edge_labels__ = {
+    "validation_dv": "RETRY / FIX",
+    END: "DONE",
+}
+
+
+def route_after_validation_dv(state: OrchestratorState) -> str:
+    """Route after validation DV: terminal frontend pipeline."""
+    result = state.get("validation_dv_result") or {}
+    if result.get("pending_decision"):
+        return "validation_dv_decision"
+    if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
+        return "validation_dv"
+    return END
+
+
 route_after_validation_dv.__edge_labels__ = {
+    "validation_dv_decision": "Park for decision",
     "validation_dv": "Retry",
     END: "DONE",
 }
@@ -10899,7 +11298,13 @@ def build_pipeline_graph(checkpointer=None):
     orchestrator.add_node("pipeline_complete", pipeline_complete_node)
     orchestrator.add_node("integration_check", integration_check_node)
     orchestrator.add_node("integration_dv", integration_dv_node)
+    # run3-followups: interrupts live in dedicated decision nodes so a resume
+    # re-executes only the interrupt() call -- the big DV nodes never replay a
+    # default cycle over an operator's response (the one-cycle-late defect).
+    orchestrator.add_node(
+        "integration_dv_decision", integration_dv_decision_node)
     orchestrator.add_node("validation_dv", validation_dv_node)
+    orchestrator.add_node("validation_dv_decision", validation_dv_decision_node)
     # Deterministic signoff scorecard: the single pre-END funnel for every
     # GENUINE terminal (validation_dv done, integration_dv terminal-fail,
     # pipeline_complete abort). It does NOT sit on the interrupt()-based
@@ -10932,11 +11337,27 @@ def build_pipeline_graph(checkpointer=None):
         {
             "validation_dv": "validation_dv",
             "integration_dv": "integration_dv",
+            "integration_dv_decision": "integration_dv_decision",
+            END: "final_report",
+        },
+    )
+    orchestrator.add_conditional_edges(
+        "integration_dv_decision", route_after_integration_dv_decision,
+        {
+            "integration_dv": "integration_dv",
             END: "final_report",
         },
     )
     orchestrator.add_conditional_edges(
         "validation_dv", route_after_validation_dv,
+        {
+            "validation_dv": "validation_dv",
+            "validation_dv_decision": "validation_dv_decision",
+            END: "final_report",
+        },
+    )
+    orchestrator.add_conditional_edges(
+        "validation_dv_decision", route_after_validation_dv_decision,
         {
             "validation_dv": "validation_dv",
             END: "final_report",

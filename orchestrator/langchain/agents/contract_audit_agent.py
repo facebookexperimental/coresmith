@@ -40,8 +40,8 @@ class ContractAuditAgent:
         The output path is stage-derived and therefore STABLE across failures,
         so a file left by a PREVIOUS audit is already sitting there when this
         call begins -- and the "did the agent write the result?" check was a
-        bare ``out.exists()``, which that stale file satisfies. Observed on the
-        raster run: a 0.99-confidence TESTBENCH_BUG audit for an already-fixed
+        bare ``out.exists()``, which that stale file satisfies. Observed on a
+        validation run: a 0.99-confidence TESTBENCH_BUG audit for an already-fixed
         crash was adopted verbatim as the verdict on a new and completely
         different failure.
 

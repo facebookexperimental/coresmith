@@ -168,7 +168,7 @@ def macro_ports(verilog_path) -> set[str]:
     A missing name here is read by ``_ports_for`` as "the macro has no such pin",
     so the binder leaves it unconnected and it floats low -- a dropped ``addr0``
     is a memory stuck at word zero, and a dropped ``wmask0`` is what suppressed
-    every framebuffer write in exp-raster-macro-20260727. The previous regex
+    every write to a wrapped memory on a validation run. The previous regex
     (``[^;)]*``) could not cross a ``)``, so it lost the name in
     ``input [$clog2(DEPTH)-1:0] addr0;`` -- a form the sky130 macro family and
     plenty of generated models use.
