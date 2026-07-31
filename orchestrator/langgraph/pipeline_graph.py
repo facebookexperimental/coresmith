@@ -344,6 +344,13 @@ class OrchestratorState(TypedDict):
     # Results (accumulated via reducer from all Send branches) ──────────────
     completed_blocks: Annotated[list[dict], operator.add]
 
+    # Blocks a declared PRD pin map RETIRED before µarch/RTL (init_tier_node).
+    # Each record is {block, reason: "retired_by_pin_map", skipped: True,
+    # contract_signals, pin_map_signals, covered_signals, explanation}. They are
+    # NOT failures and NOT missing: the chip top emits their routing itself, so
+    # they are deliberately absent from block_queue and from the assembly.
+    retired_blocks: Annotated[list[dict], _last]
+
     # Integration review decision (set by integration_review_node) ────────
     integration_review_action: str | None
 
@@ -5521,9 +5528,156 @@ def _current_phase_completed(state: OrchestratorState) -> list[dict]:
     return list(seen.values())
 
 
+#: Defensive ceiling on consecutive partial-pin-map re-parks, mirroring
+#: ``_INTEGRATION_REPARK_CAP``. In production each re-park is a real
+#: ``interrupt()`` that SUSPENDS the graph, so this is never a CPU loop -- it
+#: bounds an operator/outer-agent that keeps sending ``retry`` without fixing
+#: the map, and stops a plain-return ``interrupt`` test double from spinning.
+_PINMAP_REPARK_CAP = 20
+
+
+async def _retire_pin_mapped_blocks(
+    state: OrchestratorState, pr: str, block_queue: list,
+) -> tuple[list, list[dict]]:
+    """Drop pad-adapter blocks a declared PRD pin map already covers.
+
+    Runs at the HEAD of the dispatch path, so a retired block is never
+    microarchitected, generated, linted or gated -- the flow simply does not ask
+    for a module the design does not contain. Returns ``(block_queue,
+    retirement_records)``; the queue is returned unchanged when nothing is
+    retired, and the records are what state / the final report carry.
+
+    PARTIAL coverage never retires: it raises an interrupt so an operator
+    resolves the contradiction (see ``pin_map_retire.plan_retirement``).
+    """
+    from orchestrator.architecture import pin_map_retire as _pmr
+
+    if not _pmr.retirement_enabled():
+        return block_queue, []
+
+    already = {r.get("block") for r in (state.get("retired_blocks") or [])
+               if isinstance(r, dict)}
+    records: list[dict] = list(state.get("retired_blocks") or [])
+    rounds = 0
+
+    while True:
+        try:
+            plan = _pmr.plan_retirement(pr, block_queue)
+        except Exception as _pe:  # noqa: BLE001 - never crash the dispatch path
+            log(f"  [PIN-MAP] retirement check skipped ({_pe})", YELLOW)
+            return block_queue, records
+
+        if plan.retire:
+            if plan.block in already:
+                # Already retired on an earlier tier entry; the queue in state
+                # no longer carries it, so this is the idempotent no-op path.
+                return _pmr.apply_retirement(block_queue, plan), records
+            log(f"\n{'='*60}", YELLOW)
+            log(f"  [PIN-MAP] RETIRING block '{plan.block}' from the flow: "
+                f"{plan.message}", YELLOW)
+            log(f"  [PIN-MAP] it will NOT be microarchitected, generated or "
+                f"gated, and it is DELIBERATELY absent from the assembled chip "
+                f"(reason={_pmr.RETIRE_REASON})", YELLOW)
+            log(f"{'='*60}\n", YELLOW)
+            records.append(_pmr.record_retirement(pr, plan))
+            already.add(plan.block)
+            write_graph_event(pr, "Init Tier", "block_retired_by_pin_map", {
+                "block": plan.block,
+                "reason": _pmr.RETIRE_REASON,
+                "covered_signals": plan.covered,
+                "pin_map_signals": plan.pin_map_signals,
+            })
+            return _pmr.apply_retirement(block_queue, plan), records
+
+        if not plan.park:
+            if plan.reason and plan.block:
+                log(f"  [PIN-MAP] '{plan.block}' NOT retired: {plan.reason}",
+                    YELLOW)
+            return block_queue, records
+
+        # ---- partial coverage: a half-routed boundary, so PARK ----
+        rounds += 1
+        log(f"\n{'='*60}", RED)
+        log(f"  [PIN-MAP] PARTIAL COVERAGE for '{plan.block}' -- refusing to "
+            f"retire it AND refusing to pretend the boundary is whole", RED)
+        log(f"  [PIN-MAP] {plan.message}", RED)
+        log(f"{'='*60}\n", RED)
+        write_graph_event(pr, "Init Tier", "pin_map_partial_coverage", {
+            "block": plan.block,
+            "covered_signals": plan.covered,
+            "uncovered_signals": plan.uncovered,
+            "round": rounds,
+        })
+        if rounds > _PINMAP_REPARK_CAP:
+            raise RuntimeError(
+                f"pin_map partially covers '{plan.block}' and the contradiction "
+                f"was not resolved after {_PINMAP_REPARK_CAP} re-parks "
+                f"(uncovered: {plan.uncovered}). Fix prd.pin_map or remove it.")
+        response = interrupt({
+            "type": "pin_map_partial_coverage",
+            "block": plan.block,
+            "reason": plan.reason,
+            "message": plan.message,
+            "contract_signals": plan.contract_signals,
+            "pin_map_signals": plan.pin_map_signals,
+            "covered_signals": plan.covered,
+            "uncovered_signals": plan.uncovered,
+            "supported_actions": ["retry", "override", "keep_block"],
+            "outer_agent_guidance": (
+                "The PRD's structured pin_map routes SOME of the signals this "
+                "pad-adapter block is contracted to translate, and not the "
+                "rest. The chip top emits routing for the mapped bits while "
+                "the block would route the others -- two drivers on one pad "
+                "bus, and no gate downstream can tell which was intended. "
+                "Resolve it: (a) extend prd.pin_map in "
+                ".coresmith/prd_spec.json to cover the uncovered signals and "
+                "resume `retry`; or (b) resume `keep_block` to generate the "
+                "adapter as before and leave the pin map to the assembler; or "
+                "(c) resume `override` to retire the block anyway -- ONLY when "
+                "you have verified the uncovered signals are genuinely routed "
+                "elsewhere."
+            ),
+            "reference_files": {
+                "prd": ".coresmith/prd_spec.json",
+                "interface_contracts": ".coresmith/interface_contracts.json",
+            },
+        }) or {}
+        action = (response.get("action") if isinstance(response, dict)
+                  else "retry") or "retry"
+        write_graph_event(pr, "Init Tier", "pin_map_partial_coverage_resume", {
+            "block": plan.block, "action": action,
+        })
+        if action == "keep_block":
+            log(f"  [PIN-MAP] operator KEPT '{plan.block}' in the flow despite "
+                f"partial pin-map coverage -- generating it as before", YELLOW)
+            return block_queue, records
+        if action == "override":
+            log(f"  [PIN-MAP] operator OVERRIDE: retiring '{plan.block}' with "
+                f"{len(plan.uncovered)} signal(s) NOT covered by the pin map "
+                f"({plan.uncovered})", YELLOW)
+            plan.retire = True
+            plan.message = (plan.message
+                            + " -- RETIRED ANYWAY by operator override")
+            records.append(_pmr.record_retirement(pr, plan))
+            return _pmr.apply_retirement(block_queue, plan), records
+        # retry -> re-plan against the (hopefully amended) PRD and loop
+
+
 async def init_tier_node(state: OrchestratorState) -> dict:
     """Compute the tier list (once) and log the current tier."""
+    pr = state.get("project_root", str(PROJECT_ROOT))
+
+    # A declared pin map REPLACES the pad-adapter block, so the flow must not
+    # ask for it. Done here -- the head of the dispatch path, before tier_list
+    # and before any Send() -- so the block is skipped ahead of µarch/RTL rather
+    # than generated, refused by the conformance gate and dropped at assembly.
+    # Idempotent, so every tier re-entry and checkpoint resume agrees.
     block_queue = state["block_queue"]
+    _retired_before = len(block_queue)
+    block_queue, _retired_records = await _retire_pin_mapped_blocks(
+        state, pr, block_queue)
+    _queue_reduced = len(block_queue) != _retired_before
+
     tier_list = state.get("tier_list") or sorted(
         set(b.get("tier", 1) for b in block_queue)
     )
@@ -5531,8 +5685,6 @@ async def init_tier_node(state: OrchestratorState) -> dict:
 
     tier = tier_list[current_idx]
     tier_blocks = [b for b in block_queue if b.get("tier", 1) == tier]
-
-    pr = state.get("project_root", str(PROJECT_ROOT))
 
     # Section 7a: stamp the engine git SHA at run start + WARN in the daemon log
     # if it changes mid-run (a hot-swap that flipped behavior under the run).
@@ -5586,6 +5738,15 @@ async def init_tier_node(state: OrchestratorState) -> dict:
     })
 
     out = {"tier_list": tier_list}
+    # Publish the reduced queue + the retirement record so EVERY downstream
+    # consumer agrees the block is deliberately absent rather than missing:
+    # pipeline_complete / integration_check size `expected` off block_queue,
+    # discover_block_rtl + missing_from work off the same set, and the daemon's
+    # total_blocks / remaining_count stop waiting on it.
+    if _queue_reduced:
+        out["block_queue"] = block_queue
+    if _retired_records:
+        out["retired_blocks"] = _retired_records
     # Seed the two-pass phase on the FIRST entry only. fan_out_tier defaults an
     # unset pipeline_phase to "rtl", so without this a block-goldens run would
     # send every block straight down the single-pass RTL path and pass 1

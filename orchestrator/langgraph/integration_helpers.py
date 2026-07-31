@@ -1091,6 +1091,18 @@ def generate_caravel_wrapper_top(
     #
     # The contract edges that reference it describe that same translation, so
     # they are dropped with it: they are no longer block-to-block channels.
+    #
+    # Two ways to arrive here with no adapter, and BOTH must assemble:
+    #   1. the adapter exists and is dropped below (`dropped_adapter` set), and
+    #   2. it never existed, because `pin_map_retire` retired it from the block
+    #      queue before any µarch/RTL was generated -- so `wrapper_block` is
+    #      None and `modules` never contained it.
+    # Case 2 needs no special handling and must not grow any: every edge loop
+    # below already skips an edge whose producer or consumer is absent from
+    # `modules` (see the `pb not in modules` guards), which is exactly the
+    # edge-dropping case 1 does explicitly. The postcondition in
+    # integration_check is likewise satisfied for free -- a block that is not
+    # in `modules` cannot be reported as an un-instantiated one.
     dropped_adapter = ""
     if (pin_map is not None and getattr(pin_map, "ok", False)
             and wrapper_block is not None):
