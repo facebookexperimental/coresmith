@@ -28,7 +28,6 @@ from .qspi_contract import QSPIContract
 from .qspi_rom_bfm import QSPIRomContract
 from .stimulus import StimulusPlan
 
-
 # ---------------------------------------------------------------------------
 # CFG read-back probe patterns (bus-protocol conformance, phase A)
 # ---------------------------------------------------------------------------

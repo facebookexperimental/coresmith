@@ -17,7 +17,6 @@ D5  `/run/state` kept `pending_interrupt_count: 1` while `status: running` after
 from __future__ import annotations
 
 import json
-import time
 
 import pytest
 
@@ -115,8 +114,9 @@ async def test_agent_does_not_adopt_a_file_from_a_previous_call(tmp_path):
 # D1 -- a missing golden is never silent
 # ===========================================================================
 def test_uarch_prompt_never_ships_an_empty_golden_fence():
-    from orchestrator.langchain.agents import uarch_spec_generator as u
     import inspect
+
+    from orchestrator.langchain.agents import uarch_spec_generator as u
 
     src = inspect.getsource(u.UarchSpecGenerator.generate)
     assert "if python_source.strip():" in src
@@ -173,8 +173,9 @@ def test_present_golden_says_nothing(monkeypatch):
 
 
 def test_promised_hardware_golden_that_cannot_be_read_fails_rtl_generation():
-    from orchestrator.langchain.agents import rtl_generator as rg
     import inspect
+
+    from orchestrator.langchain.agents import rtl_generator as rg
 
     src = inspect.getsource(rg.RTLGeneratorAgent.generate)
     assert "if not _hw_src.strip():" in src

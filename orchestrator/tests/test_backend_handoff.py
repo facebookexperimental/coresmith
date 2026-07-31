@@ -192,8 +192,9 @@ async def test_launch_backend_defaults_to_the_full_physical_flow(
     tmp_path, monkeypatch
 ):
     """Every pre-existing caller (the MCP tool) keeps P&R/DRC/LVS."""
-    from orchestrator import mcp_server as mcp
     import inspect
+
+    from orchestrator import mcp_server as mcp
     sig = inspect.signature(mcp.launch_backend)
     assert sig.parameters["stop_after_gate_sim"].default is False
     sig_tool = inspect.signature(mcp.start_backend)
