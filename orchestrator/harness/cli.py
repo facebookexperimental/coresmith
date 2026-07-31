@@ -260,9 +260,19 @@ def cmd_golden_check(args) -> int:
         return EXIT_INFRA
     res = check_golden_feasibility(str(root), args.block)
     ran, passed, skipped = res.get("ran"), res.get("passed"), res.get("skipped")
-    status = ("SKIP" if skipped or not ran else "PASS" if passed else "FAIL")
+    # The WORDS follow the probe's tri-state verdict: PASS only when a
+    # discriminating check concluded, NOT RUN when the probe ran but nothing
+    # capable of returning the other answer did. Exit codes are deliberately
+    # unchanged -- this probe is advisory by design (see
+    # golden_feasibility_gate_enabled), and a caller keying on EXIT_PASS should
+    # not start seeing EXIT_SKIP because the report got more precise.
+    status = ("SKIP" if skipped or not ran else
+              "PASS" if res.get("verdict") == "pass" else
+              "NOT RUN" if passed else "FAIL")
     reach = (res.get("checks", {}) or {}).get("slice_reachability", {}) or {}
     human = f"golden-check {args.block}: {status}  ({res.get('reason') or 'ok'})"
+    if res.get("not_run_reason"):
+        human += f"\n  {res['not_run_reason']}"
     if reach:
         human += (f"\n  slice reachability: {reach.get('verdict')} -- "
                   f"{reach.get('reason', '')}")

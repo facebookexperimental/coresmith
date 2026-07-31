@@ -1565,10 +1565,21 @@ async def _maybe_generate_block_golden(block: dict, callbacks: list = None) -> N
                     (PROJECT_ROOT / ".coresmith" / "blocks" / block_name
                      / "golden_feasibility_failed").write_text(
                         fr.get("reason", "degenerate golden"))
+            elif fr.get("verdict") == "pass":
+                _reach = (fr.get("checks", {})
+                          .get("slice_reachability", {}) or {})
+                log(f"  [BLOCK-MODEL] {block_name}: golden-feasibility PASS -- "
+                    f"the block's golden slice is REACHED by the reference "
+                    f"({_reach.get('reason') or 'slice exercised'})", GREEN)
             elif fr.get("ran"):
-                log(f"  [BLOCK-MODEL] {block_name}: golden-feasibility OK "
-                    f"({fr.get('checks', {}).get('slice_reachability', {}).get('verdict','')})",
-                    GREEN)
+                # NOT RUN, reported the way the gate-sim gate reports it: full
+                # reason, no green. The old line printed "OK (skipped)" in
+                # GREEN -- an OK whose own parenthetical said the discriminating
+                # check had not run. Every block of the first hands-off run got
+                # that line.
+                log(f"  [BLOCK-MODEL] {block_name}: golden-feasibility NOT RUN "
+                    f"-- {fr.get('not_run_reason') or 'no discriminating check concluded'}",
+                    YELLOW)
         except Exception as _fexc:  # noqa: BLE001 - probe is best-effort
             log(f"  [BLOCK-MODEL] {block_name}: feasibility probe skipped "
                 f"({_fexc})", YELLOW)

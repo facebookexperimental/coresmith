@@ -1151,16 +1151,68 @@ def _slice_reachability_probe(project_root: str, ref_path: str,
     return out
 
 
+#: A probe verdict that says what actually happened, not just that nothing
+#: complained. ``pass`` requires a DISCRIMINATING check to have concluded --
+#: one capable of returning the other answer. ``not_run`` is the honest verdict
+#: when only the structural checks ran: the model imports and exposes a factory,
+#: which says nothing about whether its math is ever exercised.
+VERDICT_PASS = "pass"
+VERDICT_FAIL = "fail"
+VERDICT_NOT_RUN = "not_run"
+
+
+def _golden_feasibility_verdict(result: dict) -> dict:
+    """Fill in the tri-state ``verdict`` (+ its reason) from the checks that ran.
+
+    Every block of the first hands-off run logged
+    ``golden-feasibility OK (skipped)`` in GREEN -- an OK whose parenthetical
+    said, in the same breath, that the only discriminating check had not run.
+    The probe's CONTENT is unchanged here; what it CLAIMS is not.
+    """
+    checks = result.get("checks") or {}
+    reach = checks.get("slice_reachability") or {}
+    if not result.get("ran"):
+        result["verdict"] = VERDICT_NOT_RUN
+        result["discriminating"] = False
+        return result
+    if not result.get("passed"):
+        result["verdict"] = VERDICT_FAIL
+        result["discriminating"] = True
+        return result
+    if reach.get("verdict") == "reachable":
+        result["verdict"] = VERDICT_PASS
+        result["discriminating"] = True
+        return result
+    result["verdict"] = VERDICT_NOT_RUN
+    result["discriminating"] = False
+    result["not_run_reason"] = (
+        "the model imports and exposes a @block factory, but the only "
+        "DISCRIMINATING check -- slice reachability, which runs the golden "
+        "reference and watches whether this block's slice functions are "
+        "actually called and produce output -- did not conclude: "
+        + (str(reach.get("reason") or "no reachability result")) + ". "
+        "Nothing here has exercised the model's math, so this is not evidence "
+        "the model is non-degenerate."
+    )
+    return result
+
+
 def check_golden_feasibility(project_root: str, block_name: str) -> dict:
     """Probe whether a generated block golden/model is non-degenerate.
 
-    Returns ``{block, ran, passed, skipped, reason, checks}``; never raises. Used
-    by ``_maybe_generate_block_golden`` (to close the swallow) and by the
-    ``coresmith golden-check`` CLI. Writes the verdict to
-    ``.coresmith/blocks/<b>/golden_feasibility.json``.
+    Returns ``{block, ran, passed, skipped, verdict, discriminating, reason,
+    checks}``; never raises. Used by ``_maybe_generate_block_golden`` (to close
+    the swallow) and by the ``coresmith golden-check`` CLI. Writes the verdict
+    to ``.coresmith/blocks/<b>/golden_feasibility.json``.
+
+    ``passed`` keeps its meaning (nothing the probe checked came back bad) and
+    still drives ``CORESMITH_GOLDEN_FEASIBILITY_GATE``; ``verdict`` is the
+    honest tri-state -- ``pass`` only when a check that COULD have said
+    otherwise concluded.
     """
     result = {"block": block_name, "ran": False, "passed": True,
-              "skipped": False, "reason": "", "checks": {}}
+              "skipped": False, "verdict": VERDICT_NOT_RUN,
+              "discriminating": False, "reason": "", "checks": {}}
     try:
         from orchestrator.architecture import composition as _composition
         if not _composition.block_goldens_enabled():
@@ -1200,6 +1252,7 @@ def check_golden_feasibility(project_root: str, block_name: str) -> dict:
 
 def _persist_golden_feasibility(project_root: str, block_name: str,
                                 result: dict) -> dict:
+    _golden_feasibility_verdict(result)
     try:
         import json as _json
         bdir = Path(project_root) / ".coresmith" / "blocks" / block_name
