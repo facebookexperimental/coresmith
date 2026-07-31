@@ -41,6 +41,25 @@ from .coresmith_llm import ClaudeLLM
 
 _tracer = trace.get_tracer(__name__)
 
+
+def _chip_model_attempts() -> int:
+    """Chip-model generation rounds (default 2).
+
+    A rejected model leaves the composition gate with nothing to compose, so it
+    NO-OPS for the whole run -- an expensive outcome for a fault the validator
+    already localised to one line. One retry carrying that exact complaint back
+    is cheap next to losing the gate. ``CORESMITH_CHIP_MODEL_ATTEMPTS=1``
+    restores single-shot.
+    """
+    import os as _os
+
+    try:
+        return max(1, int(
+            _os.environ.get("CORESMITH_CHIP_MODEL_ATTEMPTS", "2") or "2"))
+    except ValueError:
+        return 2
+
+
 _PROMPT_FILE = (
     Path(__file__).resolve().parent.parent
     / "prompts"
@@ -204,14 +223,6 @@ class ModelIntegrationGenerator:
                 ]
             )
 
-            content = await self.llm.call(
-                system=SYSTEM_PROMPT,
-                prompt=user_message,
-                run_name="Generate Model Integration [chip_model]",
-            )
-
-            code = self._extract_python(content)
-
             out = Path(output_path)
             out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -222,30 +233,60 @@ class ModelIntegrationGenerator:
                 except OSError:
                     on_disk = ""
 
-            chosen = self._choose_chip_model(code, on_disk, block_models_dir)
-            if not chosen:
-                raise RuntimeError(
-                    "Model integration generation produced no usable Python "
-                    f"(no fenced code block and no on-disk file at {output_path})."
+            # RETRY ONCE with the rejection quoted back. A rejected chip model
+            # leaves the composition gate with nothing to compose, so the gate
+            # NO-OPS -- the most expensive possible outcome for a fault the
+            # validator has already localised to one line. The rules were in
+            # the prompt the first time; what was missing was the feedback.
+            problem = None
+            _attempts = _chip_model_attempts()
+            for _round in range(_attempts):
+                prompt = user_message if problem is None else "\n".join([
+                    user_message,
+                    "\n--- YOUR PREVIOUS ATTEMPT WAS REJECTED ---",
+                    problem,
+                    "Fix EXACTLY that and re-emit the COMPLETE _chip_model.py. "
+                    "Do not change anything else, and do not respond with a "
+                    "diff or a partial file.",
+                ])
+                content = await self.llm.call(
+                    system=SYSTEM_PROMPT,
+                    prompt=prompt,
+                    run_name=("Generate Model Integration [chip_model]"
+                              + (f" retry {_round}" if _round else "")),
                 )
+                code = self._extract_python(content)
+                chosen = self._choose_chip_model(code, on_disk, block_models_dir)
+                if not chosen:
+                    raise RuntimeError(
+                        "Model integration generation produced no usable Python "
+                        f"(no fenced code block and no on-disk file at "
+                        f"{output_path})."
+                    )
 
-            # Gate-observation hardening (the internal-memory snoop the
-            # reference output keys require, and the frame-done/tlast count) is
-            # implemented inside the generated Amaranth model via real Signals /
-            # debug ports -- the engine no longer post-processes the generated
-            # source to inject an observation shim.
+                # Gate-observation hardening (the internal-memory snoop the
+                # reference output keys require, and the frame-done/tlast count)
+                # is implemented inside the generated Amaranth model via real
+                # Signals / debug ports -- the engine no longer post-processes
+                # the generated source to inject an observation shim.
 
-            out.write_text(chosen, encoding="utf-8")
+                out.write_text(chosen, encoding="utf-8")
 
-            problem = _validate_chip_model_file(
-                str(out), block_models_dir, reference_entry_name
-            )
+                problem = _validate_chip_model_file(
+                    str(out), block_models_dir, reference_entry_name
+                )
+                if problem is None:
+                    break
+                span.set_attribute(f"rejected_round_{_round}", problem[:300])
+
             if problem is not None:
                 raise RuntimeError(
-                    f"Integrated chip model at {output_path} is invalid: {problem}"
+                    f"Integrated chip model at {output_path} is invalid after "
+                    f"{_attempts} attempt(s): {problem}"
                 )
 
             span.set_attribute("path", str(out))
+            span.set_attribute("attempts", _round + 1)
             return {"path": str(out)}
 
     @staticmethod
@@ -313,6 +354,25 @@ def _validate_chip_model_text(
         return "chip_model must inherit amaranth.Elaboratable"
 
     ren = (reference_entry_name or "").strip().lower()
+
+    # Which names in this module are bound to a LOCAL object? A chip model
+    # writes ``sim = Simulator(m)`` and then ``sim.run()`` -- and when the
+    # reference entry happens to be called ``run``, the blanket attribute-name
+    # match below read that as "the chip model calls the oracle" and rejected
+    # the model. The composition gate then no-op'd, on two consecutive runs,
+    # over the Amaranth simulator API. A method call on an object this module
+    # constructed cannot be the oracle: reaching the oracle needs an import,
+    # and importing it is already rejected above.
+    #
+    # The relaxation is scoped hard. Only an attribute call whose receiver is a
+    # plain local name is spared, and only when the receiver is not itself
+    # oracle-shaped and the module does no dynamic importing -- a module that
+    # touches importlib/__import__/exec/eval could bind the oracle to a local,
+    # so it keeps the strict rule. A bare ``run(...)``, an unbound receiver
+    # (``mod.run()``), and a chained one (``a.b.run()``) all still fail.
+    _local_names = _locally_bound_names(tree)
+    _dynamic = bool(re.search(r"\b(?:importlib|__import__|exec|eval)\b", text))
+
     for node in ast.walk(tree):
         # No import of a *_golden module (the reference implementation).
         if isinstance(node, ast.Import):
@@ -349,13 +409,75 @@ def _validate_chip_model_text(
             if isinstance(node, ast.Call):
                 fn = node.func
                 called = getattr(fn, "id", None) or getattr(fn, "attr", None)
-                if called and called.lower().strip("_") == ren:
-                    return (
-                        f"ANTI-CHEAT: chip model calls {called!r}, matching the "
-                        f"reference entry {reference_entry_name!r}. Never call "
-                        f"the oracle from the chip model."
-                    )
+                if not called or called.lower().strip("_") != ren:
+                    continue
+                recv = (fn.value.id
+                        if isinstance(fn, ast.Attribute)
+                        and isinstance(fn.value, ast.Name) else None)
+                if (recv and not _dynamic and recv in _local_names
+                        and recv.lower().strip("_") not in _ORACLE_RECEIVERS):
+                    continue    # method on a locally-built object, not the oracle
+                return (
+                    f"ANTI-CHEAT: chip model calls {called!r}, matching the "
+                    f"reference entry {reference_entry_name!r}. Never call "
+                    f"the oracle from the chip model."
+                )
     return None
+
+
+#: Receiver names that read as the reference even when locally bound, so
+#: ``golden.run()`` is never spared by the local-object exception above.
+_ORACLE_RECEIVERS = frozenset({
+    "golden", "gold", "ref", "reference", "oracle", "impl", "model_ref",
+    "reference_impl", "reference_module", "ref_mod", "golden_mod",
+})
+
+
+def _locally_bound_names(tree) -> set:
+    """Names this module BINDS to a value it constructed.
+
+    Assignment targets, walrus targets, ``with ... as``, ``for`` targets,
+    comprehension targets, ``except ... as`` and function parameters. Import
+    bindings are deliberately EXCLUDED -- an imported handle is exactly the way
+    the oracle would arrive, and importing it is rejected separately.
+    """
+    import ast
+
+    out: set = set()
+
+    def _bind(target) -> None:
+        if isinstance(target, ast.Name):
+            out.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for e in target.elts:
+                _bind(e)
+        elif isinstance(target, ast.Starred):
+            _bind(target.value)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                _bind(t)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            _bind(node.target)
+        elif isinstance(node, ast.NamedExpr):
+            _bind(node.target)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            _bind(node.target)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    _bind(item.optional_vars)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            out.add(node.name)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                               ast.Lambda)):
+            a = node.args
+            for arg in (list(a.posonlyargs) + list(a.args) + list(a.kwonlyargs)
+                        + [a.vararg, a.kwarg]):
+                if arg is not None:
+                    out.add(arg.arg)
+    return out
 
 
 def _validate_chip_model_file(

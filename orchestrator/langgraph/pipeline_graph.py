@@ -7739,8 +7739,32 @@ async def _maybe_generate_chip_model(pr: str) -> None:
         )
         log(f"  [MODEL-INTEGRATION] Wrote {chip_model_path}", GREEN)
     except Exception as exc:  # noqa: BLE001 - best-effort; gate is the backstop
+        # A rejected chip model means the composition gate has nothing to
+        # compose: it NO-OPS, and the run proceeds with its strongest
+        # model-vs-golden check silently absent. On the two runs that hit this,
+        # the only trace was this one line, 400 lines up a daemon log. Carry it
+        # forward so the final report and the validation-DV context both say a
+        # gate did not run, and why.
         log(f"  [MODEL-INTEGRATION] chip-model generation failed ({exc}); the "
-            f"gate will no-op or flag any divergence", YELLOW)
+            f"COMPOSITION GATE will NO-OP (no _chip_model.py to compose) -- "
+            f"the run loses its model-vs-golden check", RED)
+        record_carried_forward_defect(pr, {
+            "gate": "model_integration",
+            "kind": "chip_model_generation_failed",
+            "advisory": True,
+            "first_divergence_block": "",
+            "violation_count": 0,
+            "unmodeled": (
+                "the integrated chip model (_chip_model.py) was not produced, "
+                "so the composition gate no-opped: NOTHING compared the wired "
+                "block models against the golden reference on this run"),
+            "detail": (
+                f"chip-model generation failed: {exc}. The composition gate is "
+                f"the run's model-vs-golden check; with no composed model it "
+                f"returns 'not applicable' and every downstream verdict rests "
+                f"on per-block DV alone."),
+            "note": "",
+        })
 
 
 async def model_integration_node(state: OrchestratorState) -> dict:
