@@ -666,10 +666,10 @@ def _conflict(a: Quantity, b: Quantity) -> str:
     floor vs floor, and an empty cap/floor interval. A POINT-vs-BOUND
     comparison is deliberately NOT judged -- a value merely mentioned in
     passing frequently sits outside an unrelated declared limit that happens
-    to share an anchor ("a 20 ns core period" vs "SCK phase >= 80 ns"), and
-    that produced pure noise on real artifacts. A genuinely stale operating
-    point restates itself as a point AND as a bound somewhere in the same
-    document set, so the like-for-like pair still catches it.
+    to carry the same name, and that produced pure noise on real artifacts.
+    A genuinely stale operating point restates itself as a point AND as a
+    bound somewhere in the same document set, so the like-for-like pair
+    still catches it.
     """
     ca, cb = a.comparator, b.comparator
     if ca == "eq" and cb == "eq":
@@ -712,41 +712,34 @@ def find_quantity_conflicts(
     for q in quantities:
         grouped.setdefault((q.name, q.dimension), []).append(q)
 
-    findings: list[dict] = []
-    seen: set[tuple] = set()
-    for (name, dimension), members in sorted(grouped.items()):
-        artifacts = {q.artifact for q in members}
-        if len(artifacts) < 2:
-            continue
+    def _first_conflicting_pair(
+        members: list[Quantity],
+    ) -> tuple[Quantity, Quantity, str] | None:
         for i, a in enumerate(members):
             for b in members[i + 1:]:
                 if a.artifact == b.artifact:
                     continue
                 reason = _conflict(a, b)
-                if not reason:
-                    continue
-                key = tuple(sorted([
-                    (a.artifact, a.location, a.raw_value, a.unit),
-                    (b.artifact, b.location, b.raw_value, b.unit),
-                ]))
-                if key in seen:
-                    continue
-                seen.add(key)
-                others = [
-                    q for q in members if q is not a and q is not b
-                ][:6]
-                findings.append({
-                    "name": name,
-                    "dimension": dimension,
-                    "reason": reason,
-                    "a": a,
-                    "b": b,
-                    "related": others,
-                })
-                break
-            else:
-                continue
-            break
+                if reason:
+                    return a, b, reason
+        return None
+
+    findings: list[dict] = []
+    for (name, dimension), members in sorted(grouped.items()):
+        if len({q.artifact for q in members}) < 2:
+            continue
+        pair = _first_conflicting_pair(members)
+        if pair is None:
+            continue
+        a, b, reason = pair
+        findings.append({
+            "name": name,
+            "dimension": dimension,
+            "reason": reason,
+            "a": a,
+            "b": b,
+            "related": [q for q in members if q is not a and q is not b][:6],
+        })
     return findings[:max_findings]
 
 
