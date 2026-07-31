@@ -208,6 +208,24 @@ _AUTO_BACKEND_POLL_S = float(os.environ.get("CORESMITH_AUTO_BACKEND_POLL_S", "30
 _auto_backend_fired = False
 
 
+def _daemon_log(level: str, msg: str, *args, **kw) -> None:
+    """Log somewhere a human will actually see it.
+
+    The module's ``coresmithd`` logger has no handler: under uvicorn only the
+    ``uvicorn.*`` loggers are configured, so everything sent to ``log`` goes
+    nowhere -- the same trap ``_lifespan`` already documents for the profile-seed
+    line. An autonomy step that starts real EDA by itself must not announce
+    itself into a black hole, so route through ``uvicorn.error`` (which lands in
+    daemon.log) and keep ``log`` as the fallback for a non-uvicorn host.
+    """
+    for logger in (logging.getLogger("uvicorn.error"), log):
+        try:
+            getattr(logger, level)(msg, *args, **kw)
+            return
+        except Exception:  # noqa: BLE001
+            continue
+
+
 def _auto_backend_enabled() -> bool:
     """True when the daemon should enter the backend itself on pipeline_done.
 
@@ -248,7 +266,8 @@ async def _auto_backend_watch() -> None:
     global _auto_backend_fired
     if not _auto_backend_enabled():
         return
-    log.info(
+    _daemon_log(
+        "warning",
         "CORESMITH_AUTO_BACKEND=1: this daemon will enter flat synthesis + the "
         "chip_top gate-sim by itself when the frontend reaches pipeline_done "
         "(P&R/DRC/LVS still require an explicit `backend start --full`).")
@@ -258,7 +277,8 @@ async def _auto_backend_watch() -> None:
             if not await _frontend_is_done():
                 continue
             _auto_backend_fired = True     # one-shot, even if the launch fails
-            log.warning(
+            _daemon_log(
+                "warning",
                 "AUTO-BACKEND: frontend reached pipeline_done with no parked "
                 "interrupt -- entering flat synthesis + chip_top gate-sim.")
             from orchestrator import mcp_server as _mcp
@@ -271,14 +291,16 @@ async def _auto_backend_watch() -> None:
             except Exception:  # noqa: BLE001
                 pass
             if result.get("error"):
-                log.error("AUTO-BACKEND: launch refused: %s", result)
+                _daemon_log("error", "AUTO-BACKEND: launch refused: %s", result)
             else:
-                log.warning("AUTO-BACKEND: backend running (thread_id=%s)",
+                _daemon_log("warning",
+                            "AUTO-BACKEND: backend running (thread_id=%s)",
                             result.get("thread_id"))
         except asyncio.CancelledError:
             break
         except Exception:  # noqa: BLE001 - a handoff watch must never crash
-            log.warning("AUTO-BACKEND: watch iteration failed", exc_info=True)
+            _daemon_log("warning", "AUTO-BACKEND: watch iteration failed",
+                        exc_info=True)
             continue
 
 

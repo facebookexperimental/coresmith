@@ -229,3 +229,81 @@ def test_backend_start_defaults_to_stopping_at_the_gate_sim_verdict():
     from orchestrator.daemon import server as ds
 
     assert ds.BackendStartRequest().full is False
+
+
+@pytest.mark.asyncio
+async def test_frontend_is_done_is_conservative(monkeypatch):
+    """All four conditions must hold. A parked interrupt is NOT 'done' even with
+    pipeline_done set -- the run is waiting on a decision that could still change
+    the RTL the backend would synthesize."""
+    from orchestrator.daemon import server as ds
+
+    class _Snap:
+        def __init__(self, values, tasks=()):
+            self.values = values
+            self.tasks = tasks
+
+    class _Graph:
+        def __init__(self, snap):
+            self._snap = snap
+
+        async def aget_state(self, _cfg):
+            return self._snap
+
+    class _Intr:
+        id = "i1"
+        value = {}
+
+    class _Task:
+        interrupts = [_Intr()]
+
+    async def _noop():
+        return None
+
+    monkeypatch.setattr(ds._pipeline, "ensure_graph", _noop)
+    monkeypatch.setattr(ds._pipeline, "task", None)
+
+    monkeypatch.setattr(ds._pipeline, "graph", _Graph(_Snap({"pipeline_done": True})))
+    assert await ds._frontend_is_done() is True
+
+    monkeypatch.setattr(ds._pipeline, "graph", _Graph(_Snap({"pipeline_done": False})))
+    assert await ds._frontend_is_done() is False
+
+    monkeypatch.setattr(
+        ds._pipeline, "graph",
+        _Graph(_Snap({"pipeline_done": True}, tasks=[_Task()])))
+    assert await ds._frontend_is_done() is False, "parked interrupt is not done"
+
+    monkeypatch.setattr(ds._pipeline, "graph", _Graph(_Snap({"pipeline_done": True})))
+
+    class _Running:
+        @staticmethod
+        def done():
+            return False
+
+    monkeypatch.setattr(ds._pipeline, "task", _Running())
+    assert await ds._frontend_is_done() is False, "still running is not done"
+
+
+def test_auto_backend_announcements_reach_daemon_log(monkeypatch):
+    """The `coresmithd` logger has NO handler under uvicorn -- the same trap the
+    profile-seed line hit. An autonomy step that starts real EDA by itself must
+    not announce into a black hole."""
+    import logging
+
+    from orchestrator.daemon import server as ds
+
+    seen: list[str] = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record):
+            seen.append(record.getMessage())
+
+    uv = logging.getLogger("uvicorn.error")
+    h = _Sink()
+    uv.addHandler(h)
+    try:
+        ds._daemon_log("warning", "AUTO-BACKEND: %s", "hello")
+    finally:
+        uv.removeHandler(h)
+    assert seen == ["AUTO-BACKEND: hello"]
