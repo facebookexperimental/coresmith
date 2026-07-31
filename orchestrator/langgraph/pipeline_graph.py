@@ -53,10 +53,12 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import operator
 import os
 import re
+import time as _time
 from pathlib import Path
 from typing import Annotated, TypedDict
 
@@ -8524,6 +8526,12 @@ def _format_dv_retry_context(previous_result: dict | None) -> str:
     ]
     if evidence_text:
         parts.append("Evidence:\n" + evidence_text)
+    # A retry prompt quoting a verdict about a DIFFERENT failure is worse than
+    # quoting nothing: it reads as a confident diagnosis and sends the fix at
+    # the wrong thing. Label it, first line, before anything it says.
+    _stale = contract_audit_staleness(audit, audit.get("context_path", ""))
+    if _stale:
+        parts.insert(0, "!! " + _stale)
     return smart_truncate("\n".join(p for p in parts if p), 12000, "head_tail")
 
 
@@ -9734,6 +9742,83 @@ def _load_ers_validation_context(project_root: str) -> tuple[str, int]:
     return json.dumps(data, indent=2), req_count
 
 
+# ---------------------------------------------------------------------------
+# Contract-audit staleness
+# ---------------------------------------------------------------------------
+# `.coresmith/contract_audit/<stage>_contract_audit.json` is a STAGE-derived,
+# therefore STABLE, path: every integration-DV failure of the same stage writes
+# the same filename. So a failed or skipped audit leaves the PREVIOUS failure's
+# verdict lying in the exact place the next one is read from. Observed on the
+# raster run: a 0.99-confidence TESTBENCH_BUG audit describing an already-fixed
+# crash sat next to a new, different failure and was quoted as its diagnosis.
+#
+# A verdict is only about the failure it actually read, so it now carries that
+# failure's identity: the sha256 + mtime of the failure-context JSON it audited.
+# Anything reading an audit can then ask "is this about the failure in front of
+# me?" instead of assuming yes because the file exists.
+
+CONTRACT_AUDIT_STAMP_KEY = "audited_context"
+
+
+def _context_fingerprint(context_path: str) -> dict:
+    """Identity of a failure-context file: ``{sha256, mtime, path}``.
+
+    Empty dict when it cannot be read -- an unknown identity must never be
+    mistaken for a matching one.
+    """
+    try:
+        p = Path(context_path)
+        blob = p.read_bytes()
+        return {
+            "path": str(p),
+            "sha256": hashlib.sha256(blob).hexdigest()[:32],
+            "mtime": round(p.stat().st_mtime, 3),
+        }
+    except (OSError, ValueError):
+        return {}
+
+
+def contract_audit_staleness(audit: dict | None, context_path: str = "") -> str:
+    """"" when the audit provably describes the failure context in front of us.
+
+    Otherwise a human-readable STALE description. Two ways to be stale:
+    unstamped (written before stamping existed, or by a path that skipped it),
+    and stamped for a DIFFERENT failure context.
+
+    Deliberately not a gate: a stale audit is still evidence, and deleting it
+    would lose the trail. It is a LABEL, so a reader (and an outer agent acting
+    on `recommended_action`) can tell "this is about your failure" from "this is
+    about the last one".
+    """
+    if not isinstance(audit, dict) or not audit:
+        return ""
+    stamp = audit.get(CONTRACT_AUDIT_STAMP_KEY) or {}
+    path = context_path or (stamp.get("path") if isinstance(stamp, dict) else "")
+    if not isinstance(stamp, dict) or not stamp.get("sha256"):
+        return ("STALE? this contract audit carries no failure-context stamp, so "
+                "there is no evidence it describes the CURRENT failure rather "
+                "than a previous one at the same stage. Treat its category / "
+                "recommended_action as unverified.")
+    if not path:
+        return ""
+    live = _context_fingerprint(path)
+    if not live:
+        return (f"STALE? the failure context this audit claims to describe "
+                f"({stamp.get('path', '?')}) can no longer be read, so the "
+                "verdict cannot be matched to a failure.")
+    if live.get("sha256") != stamp.get("sha256"):
+        return (
+            "STALE CONTRACT AUDIT: this verdict was produced for a DIFFERENT "
+            f"failure context (audited sha256={stamp.get('sha256')} at "
+            f"mtime={stamp.get('mtime')}; the context on disk now is "
+            f"sha256={live.get('sha256')} at mtime={live.get('mtime')}). The "
+            "audit path is stage-derived and stable, so a previous failure's "
+            "verdict sits exactly where this one is read from. Do NOT act on "
+            "its category or recommended_action -- re-run the audit."
+        )
+    return ""
+
+
 async def _run_top_level_contract_audit(
     *,
     stage: str,
@@ -9783,6 +9868,11 @@ async def _run_top_level_contract_audit(
         },
     }
     context_path.write_text(json.dumps(context, indent=2), encoding="utf-8")
+    # Identity of THIS failure, captured before the audit runs. It is stamped
+    # into the verdict below so every later reader can tell whether the audit
+    # in front of it is about the failure in front of it.
+    context_stamp = _context_fingerprint(str(context_path))
+    call_start = _time.time()
 
     log(f"  [CONTRACT-AUDIT] Auditing {stage} failure...", YELLOW)
     agent = ContractAuditAgent(temperature=0.1)
@@ -9793,6 +9883,16 @@ async def _run_top_level_contract_audit(
         output_path=str(output_path),
     )
 
+    # Stamp + persist. Done here rather than inside the agent so EVERY return
+    # path is stamped, including the agent's own exception fallback.
+    result[CONTRACT_AUDIT_STAMP_KEY] = context_stamp
+    result["audited_at"] = round(call_start, 3)
+    try:
+        output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+    stale = contract_audit_staleness(result, str(context_path))
+
     write_graph_event(project_root, "Contract Audit", "graph_node_exit", {
         "stage": stage,
         "category": result.get("category", "UNKNOWN"),
@@ -9800,14 +9900,19 @@ async def _run_top_level_contract_audit(
         "recommended_action": result.get("recommended_action", ""),
         "confidence": result.get("confidence", 0),
         "audit_path": str(output_path),
+        "audited_context_sha256": context_stamp.get("sha256", ""),
+        "stale": bool(stale),
     })
     log(
         "  [CONTRACT-AUDIT] "
         f"{result.get('category', 'UNKNOWN')} "
         f"action={result.get('recommended_action', 'ask_human')} "
-        f"confidence={result.get('confidence', 0)}",
+        f"confidence={result.get('confidence', 0)} "
+        f"ctx={context_stamp.get('sha256', '?')[:12]}",
         RED if result.get("contract_failure") else YELLOW,
     )
+    if stale:
+        log(f"  [CONTRACT-AUDIT] {stale}", RED)
     result["audit_path"] = str(output_path)
     result["context_path"] = str(context_path)
     return result

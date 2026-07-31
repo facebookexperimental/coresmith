@@ -35,7 +35,21 @@ class ContractAuditAgent:
         output_path: str,
         callbacks: list | None = None,
     ) -> dict[str, Any]:
-        """Run the contract audit and return the structured JSON result."""
+        """Run the contract audit and return the structured JSON result.
+
+        The output path is stage-derived and therefore STABLE across failures,
+        so a file left by a PREVIOUS audit is already sitting there when this
+        call begins -- and the "did the agent write the result?" check was a
+        bare ``out.exists()``, which that stale file satisfies. Observed on the
+        raster run: a 0.99-confidence TESTBENCH_BUG audit for an already-fixed
+        crash was adopted verbatim as the verdict on a new and completely
+        different failure.
+
+        So the file is snapshotted (bytes) BEFORE the LLM call and adopted only
+        if it CHANGED. Content, not mtime: no clock skew, no filesystem
+        granularity, and an agent that rewrites an identical verdict loses
+        nothing (the parsed fallback produces the same thing).
+        """
         with _tracer.start_as_current_span(f"Contract Audit [{stage}]") as span:
             span.set_attribute("stage", stage)
             span.set_attribute("context_path", context_path)
@@ -43,6 +57,18 @@ class ContractAuditAgent:
 
             out = Path(output_path)
             out.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                _before = out.read_bytes() if out.exists() else None
+            except OSError:
+                _before = None
+
+            def _written_by_this_call() -> bool:
+                try:
+                    if not out.exists():
+                        return False
+                    return out.read_bytes() != _before
+                except OSError:
+                    return False
 
             default = self._default_result(stage, context_path)
             try:
@@ -64,7 +90,7 @@ class ContractAuditAgent:
                     run_name=f"Contract Audit [{stage}]",
                 )
 
-                if out.exists():
+                if _written_by_this_call():
                     result = json.loads(out.read_text(encoding="utf-8"))
                 else:
                     result = self._parse_json(content, default)
