@@ -5213,6 +5213,14 @@ async def block_done_node(state: BlockState) -> dict:
     constr_path = block_dir / "constraints.json"
     constraints = _load_constraints_safe(constr_path)
 
+    # When this completion event happened. `completed_blocks` is append-only, so
+    # membership alone cannot tell a LEFTOVER interrupt (the graph moved past it
+    # and the block then finished) from a LIVE one (the block finished a pass
+    # ago and is parked again now). The daemon compares this against when the
+    # interrupt was raised; without it every pass-2 interrupt in a two-pass run
+    # was labelled stale on arrival and live_interrupt_count read 0.
+    completed_at = _time.time()
+
     if all_passed:
         result = {
             "name": block_name,
@@ -5223,6 +5231,7 @@ async def block_done_node(state: BlockState) -> dict:
             "constraints_learned": len(constraints),
             "step_log_paths": step_log_paths,
             "phase": phase,
+            "completed_at": completed_at,
         }
         log(f"  [{block_name}] PASSED (attempt {attempt})", GREEN)
     else:
@@ -5241,6 +5250,7 @@ async def block_done_node(state: BlockState) -> dict:
             "synth_success": synth_success,
             "step_log_paths": step_log_paths,
             "phase": phase,
+            "completed_at": completed_at,
         }
         reason = (
             "aborted" if is_abort

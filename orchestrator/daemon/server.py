@@ -77,6 +77,74 @@ _STALL_THRESHOLD_S = float(os.environ.get("CORESMITH_INTERRUPT_STALL_S", "1800")
 _STALL_POLL_S = float(os.environ.get("CORESMITH_INTERRUPT_STALL_POLL_S", "300"))
 
 # ---------------------------------------------------------------------------
+# When was each interrupt RAISED? (first observed pending, which is the closest
+# thing to a raise time available -- LangGraph interrupts carry no timestamp.)
+# ---------------------------------------------------------------------------
+# Both staleness answers used to be keyed to the wrong clock:
+#
+#   * ``_driver_liveness_watch`` measured "idle" as time since the last
+#     /run/resume. On a HANDS-OFF run there is no resume after /run/start, so
+#     the stall clock is already an hour old the moment the first interrupt is
+#     raised -- the daemon logged STALLED_INTERRUPT for an interrupt that was
+#     15 minutes old and dropped the marker file with idle_seconds=4488.
+#   * ``_shape_state`` labelled an interrupt "stale_suspected" purely because
+#     its block appears in the append-only ``completed_blocks``. In a two-pass
+#     run EVERY block completes pass 1, so EVERY pass-2 interrupt is born
+#     stale: the parked raster run reported ``stale_suspected: true`` and
+#     ``live_interrupt_count: 0`` on a freshly raised, entirely live
+#     ``contract_conformance_unrepairable`` -- and an automated consumer
+#     reading ``live_interrupt_count == 0`` concludes there is nothing to act
+#     on.
+#
+# A just-raised interrupt must read LIVE. So both are keyed to the interrupt
+# itself: the stall clock runs from when THIS interrupt was raised, and the
+# leftover suspicion needs the block's completion to be NEWER than the
+# interrupt (i.e. the graph really did move past it) rather than merely present.
+_interrupt_first_seen: dict[str, float] = {}
+
+
+def _note_interrupts_seen(ids: set[str], now: float | None = None) -> None:
+    """Record first-observation time for each pending interrupt id.
+
+    Ids that are no longer pending are forgotten, so an id LangGraph reuses
+    after a resume is timed from its new appearance rather than its old one.
+    """
+    t = time.time() if now is None else now
+    for i in ids:
+        _interrupt_first_seen.setdefault(i, t)
+    for gone in set(_interrupt_first_seen) - ids:
+        _interrupt_first_seen.pop(gone, None)
+
+
+def _interrupt_raised_ts(intr_id: str, now: float | None = None) -> float:
+    """When this interrupt was first seen pending. Unknown ids read as NOW --
+    an interrupt we have never observed before is, by definition, new."""
+    return _interrupt_first_seen.get(
+        intr_id, time.time() if now is None else now)
+
+
+def _completion_times(completed: list) -> dict:
+    """block -> the time of its LATEST completion event (0.0 when unstamped).
+
+    ``block_done_node`` stamps ``completed_at``; checkpoints written before that
+    have none, and an unstamped completion is treated as NO EVIDENCE rather
+    than as proof an interrupt is a leftover.
+    """
+    out: dict = {}
+    for b in completed or []:
+        if not isinstance(b, dict):
+            continue
+        name = b.get("name")
+        if not name:
+            continue
+        try:
+            ts = float(b.get("completed_at") or 0.0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        out[name] = max(ts, out.get(name, 0.0))
+    return out
+
+# ---------------------------------------------------------------------------
 # D5: interrupt ids this daemon has already forwarded a resume for.
 # ---------------------------------------------------------------------------
 # `aget_state` reads the CHECKPOINT. Between a consumed `/run/resume` and the
@@ -138,9 +206,17 @@ async def _count_pending_interrupts() -> int | None:
         )
         consumed = _consumed_now()
         n = 0
+        ids: set[str] = set()
         if snap and snap.tasks:
             for t in snap.tasks:
-                n += sum(1 for i in t.interrupts if i.id not in consumed)
+                for i in t.interrupts:
+                    ids.add(i.id)
+                    if i.id not in consumed:
+                        n += 1
+        # Stamp first-seen here too: this poll runs every _STALL_POLL_S whether
+        # or not anyone calls /run/state, so an unattended run still learns when
+        # its interrupt was raised.
+        _note_interrupts_seen(ids)
         return n
     except Exception as exc:  # noqa: BLE001
         log.warning(
@@ -163,20 +239,33 @@ async def _driver_liveness_watch() -> None:
                     "zero -- inspect the run.", _PROJECT_ROOT)
                 continue
             if pending > 0:
-                idle = time.time() - _last_resume_ts
+                # Measure how long THIS interrupt has gone unanswered, not how
+                # long since the last resume. On a hands-off run the only
+                # resume is /run/start, so the old clock declared every
+                # interrupt stalled the moment it was raised (observed:
+                # idle_seconds=4488 on an interrupt 15 minutes old).
+                now = time.time()
+                oldest = min(
+                    (_interrupt_first_seen[i] for i in _interrupt_first_seen),
+                    default=now)
+                # A resume after the interrupt appeared also restarts the clock:
+                # the driver is demonstrably alive.
+                unanswered_since = max(oldest, _last_resume_ts)
+                idle = now - unanswered_since
                 if idle >= _STALL_THRESHOLD_S:
                     log.warning(
-                        "STALLED_INTERRUPT: %d pending interrupt(s) with no "
-                        "/run/resume for %.0f min (project_root=%s). The outer "
-                        "driver may be dead -- resume or restart it.",
+                        "STALLED_INTERRUPT: %d pending interrupt(s) unanswered "
+                        "for %.0f min (project_root=%s). The outer driver may "
+                        "be dead -- resume or restart it.",
                         pending, idle / 60.0, _PROJECT_ROOT,
                     )
                     try:
                         marker.write_text(json.dumps({
                             "pending_interrupt_count": pending,
                             "idle_seconds": round(idle),
+                            "interrupt_raised_ts": oldest,
                             "last_resume_ts": _last_resume_ts,
-                            "noted_at": time.time(),
+                            "noted_at": now,
                         }, indent=2))
                     except OSError:
                         pass
@@ -1228,7 +1317,26 @@ def _shape_state(state_snapshot) -> dict:
     # `status: running` and drove outer agents to resume the same interrupt
     # twice. Discounted by ID, only while the runner task is in flight, and
     # still LISTED (with `consumed_by_resume`) so nothing is hidden.
+    #
+    # But "the block is in completed_blocks" alone is not evidence of a
+    # leftover -- in a two-pass run EVERY block completes pass 1, so EVERY
+    # pass-2 interrupt was born ``stale_suspected: true`` with
+    # ``live_interrupt_count: 0``, and an automated driver reading that
+    # concludes there is nothing to act on. The suspicion is now keyed to WHEN
+    # THE INTERRUPT WAS RAISED: a leftover is an interrupt the graph has since
+    # moved PAST, so the block's completion must be NEWER than the interrupt.
+    # A just-raised interrupt reads LIVE, and an unstamped completion (a
+    # checkpoint predating ``completed_at``) is no evidence at all -- absence of
+    # evidence is not evidence of absence, which is this file's whole thesis.
     consumed = _consumed_now()
+    now_ts = time.time()
+    completion_ts = _completion_times(completed)
+    _note_interrupts_seen(
+        {intr.id
+         for task in (state_snapshot.tasks or [])
+         for intr in task.interrupts},
+        now=now_ts,
+    )
     interrupts: list[dict] = []
     suspected_stale = 0
     consumed_count = 0
@@ -1236,10 +1344,24 @@ def _shape_state(state_snapshot) -> dict:
         for task in state_snapshot.tasks:
             for intr in task.interrupts:
                 payload = intr.value
+                raised_ts = _interrupt_raised_ts(intr.id, now=now_ts)
                 stale = False
+                basis = "not_a_block_interrupt"
                 if isinstance(payload, dict):
                     blk = payload.get("block", payload.get("block_name", ""))
-                    stale = bool(blk) and blk in completed_names
+                    if not blk:
+                        basis = "not_a_block_interrupt"
+                    elif blk not in completed_names:
+                        basis = "block_not_completed"
+                    else:
+                        done_ts = completion_ts.get(blk, 0.0)
+                        if not done_ts:
+                            basis = "completion_unstamped"
+                        elif raised_ts > done_ts:
+                            basis = "raised_after_block_completed"
+                        else:
+                            basis = "raised_before_block_completed"
+                            stale = True
                 if stale:
                     suspected_stale += 1
                 was_consumed = intr.id in consumed
@@ -1249,6 +1371,9 @@ def _shape_state(state_snapshot) -> dict:
                     "id": intr.id,
                     "payload": payload,
                     "stale_suspected": stale,
+                    "stale_basis": basis,
+                    "raised_ts": raised_ts,
+                    "age_seconds": round(max(0.0, now_ts - raised_ts), 3),
                     "consumed_by_resume": was_consumed,
                 })
 
