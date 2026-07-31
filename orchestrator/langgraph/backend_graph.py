@@ -539,6 +539,55 @@ def _format_constraints(state: BackendState) -> str:
 # Node: flat_top_synthesis  (LLM-driven Yosys synthesis)
 # ---------------------------------------------------------------------------
 
+_INTEGRATION_TB_DIRS = ("sim_build/integration", "tb/integration")
+
+
+def find_integration_tb(root: Path, design_name: str) -> tuple[str, str]:
+    """Locate the integration-DV testbench. Returns ``(path, note)``.
+
+    ``path`` is "" when none can be chosen, and ``note`` then explains why.
+
+    Why this is not just ``test_<design_name>.py``: the integration testbench is
+    named after the FRONTEND design (``integration_result["design_name"]``),
+    while the backend's ``design_name`` is the actual top MODULE that
+    ``init_design_node`` read out of the integration RTL -- on a Caravel design
+    that is ``user_project_wrapper``. The two are routinely different names for
+    the same chip, and the exact-name lookup then found nothing and silently
+    reported ``not_run``: the flat netlist that becomes silicon went un-simulated
+    because of a filename.
+
+    So: try the design_name form first (unambiguous when it exists), and
+    otherwise fall back to the single ``test_*.py`` present. REFUSE on ambiguity
+    -- picking one of several testbenches by sort order is how a gate ends up
+    grading the wrong stimulus and calling it a pass.
+    """
+    for rel in _INTEGRATION_TB_DIRS:
+        cand = root / rel / f"test_{design_name}.py"
+        if cand.is_file():
+            return str(cand), ""
+    for rel in _INTEGRATION_TB_DIRS:
+        d = root / rel
+        if not d.is_dir():
+            continue
+        found = sorted(p for p in d.glob("test_*.py") if p.is_file())
+        if len(found) == 1:
+            return str(found[0]), (
+                f"no test_{design_name}.py; using the only integration "
+                f"testbench present, {found[0].name} (the TB is named after the "
+                "frontend design, the backend top module is "
+                f"'{design_name}')")
+        if len(found) > 1:
+            names = ", ".join(p.name for p in found)
+            return "", (
+                f"AMBIGUOUS integration testbench: no test_{design_name}.py, and "
+                f"{len(found)} candidates in {rel} ({names}). Refusing to guess "
+                "which stimulus is the chip's -- grading the wrong testbench "
+                "would report a pass for a netlist nothing verified. Name the "
+                f"chip's TB test_{design_name}.py, or remove the others.")
+    return "", ("no integration-DV testbench found -- chip_top gate-sim needs "
+                "the integration vectors as its reference stimulus")
+
+
 def _run_chip_top_gate_sim(state: "BackendState", netlist: str) -> tuple:
     """Replay the integration-DV vectors through the FLAT CHIP NETLIST.
 
@@ -570,17 +619,12 @@ def _run_chip_top_gate_sim(state: "BackendState", netlist: str) -> tuple:
 
     # Integration DV is the reference stimulus: real traffic through the
     # assembled chip, and the run that already matched the golden.
-    tb = ""
-    for cand in (root / "sim_build" / "integration" / f"test_{design}.py",
-                 root / "tb" / "integration" / f"test_{design}.py"):
-        if cand.is_file():
-            tb = str(cand)
-            break
+    tb, tb_reason = find_integration_tb(root, design)
     if not tb:
-        reason = ("no integration-DV testbench found -- chip_top gate-sim needs "
-                  "the integration vectors as its reference stimulus")
-        log(f"  [CHIP-GATE-SIM] not run -- {reason}", YELLOW)
-        return (None, _gs.STATUS_NOT_RUN, reason)
+        log(f"  [CHIP-GATE-SIM] not run -- {tb_reason}", YELLOW)
+        return (None, _gs.STATUS_NOT_RUN, tb_reason)
+    if tb_reason:
+        log(f"  [CHIP-GATE-SIM] {tb_reason}", YELLOW)
 
     # The reference stimulus is the integration DV's own source set, rebuilt
     # from the SAME builder that DV used -- never a single path. `top_rtl_path`
