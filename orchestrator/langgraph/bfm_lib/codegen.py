@@ -23,6 +23,7 @@ import inspect
 from . import qspi_contract as _contract_mod
 from . import qspi_master_bfm as _bfm_mod
 from . import qspi_rom_bfm as _rom_mod
+from .maxgeo import BusMaxgeoCoverage, bus_maxgeo_coverage
 from .qspi_contract import QSPIContract
 from .qspi_rom_bfm import QSPIRomContract
 from .stimulus import StimulusPlan
@@ -115,17 +116,107 @@ def render_bfm_module(contract: QSPIContract) -> str:
     )
 
 
+def render_maxgeo_probe_block(coverage: BusMaxgeoCoverage | None) -> str:
+    """Emit phase (D): drive every BUS maximum the design declares, at maximum.
+
+    Empty string when the design declares no bus-drivable maximum -- the emitted
+    testbench is then byte-identical to before this phase existed.
+
+    What it proves, and what it does NOT: each probe drives a real dimensional
+    maximum on the pins (full-width address, longest legal write burst, longest
+    legal read burst, largest command opcode) and then re-checks two things a
+    truncated index/length counter breaks -- the frontend returned to idle, and a
+    nibble-distinct CFG1 sentinel written BEFORE the traffic is still intact.
+    Content is sparse on purpose; the MAX-GEOMETRY gate's own message says sparse
+    content at maximum extent is the accepted shape when a full workload is too
+    slow. It does NOT check compute results: this testbench has no golden model,
+    which is exactly why the compute-lane dims are reported as NOT covered.
+    """
+    if coverage is None:
+        return ""
+    probes: list[str] = []
+    if coverage.address:
+        probes.append(
+            "    # address at FULL declared extent: a frontend whose address\n"
+            "    # register is narrower aliases this into a decoded aperture.\n"
+            "    await bfm.write(0x%X, bytes([0xA5]))\n"
+            "    _ = await bfm.read(0x%X, 1)\n"
+            "    await _still_conformant('a full-extent address transfer "
+            "@0x%X')\n" % (coverage.address, coverage.address, coverage.address)
+        )
+    if coverage.write_bytes:
+        probes.append(
+            "    # longest declared IN write burst (sparse content: the point is\n"
+            "    # the write pointer/length counter at maximum extent).\n"
+            "    _n = %d\n"
+            "    await bfm.write(c.in_addr, bytes(((_i * 7 + 0x5A) & 0xFF) "
+            "for _i in range(_n)))\n"
+            "    await _still_conformant('a %d-byte IN write burst')\n"
+            % (coverage.write_bytes, coverage.write_bytes)
+        )
+    if coverage.read_bytes:
+        probes.append(
+            "    # longest declared OUT read burst. The returned bytes are NOT\n"
+            "    # checked (no compute oracle here); a read-length counter that\n"
+            "    # underflows leaves the DUT driving the lanes, which the\n"
+            "    # sentinel read-back immediately after detects.\n"
+            "    _rd = await bfm.read(c.out_addr, %d)\n"
+            "    dut._log.info('[qspi-conformance] max-extent OUT read of %d B: "
+            "head=%%s tail=%%s', _rd[:8].hex(), _rd[-8:].hex())\n"
+            "    await _still_conformant('a %d-byte OUT read burst')\n"
+            % (coverage.read_bytes, coverage.read_bytes, coverage.read_bytes)
+        )
+    if coverage.opcode:
+        probes.append(
+            "    # largest declared command opcode -- the command decoder at the\n"
+            "    # top of its field. Must return to idle like any other opcode.\n"
+            "    await bfm.send_opcode_only(0x%02X)\n"
+            "    await _still_conformant('command opcode 0x%02X (declared max)')\n"
+            % (coverage.opcode, coverage.opcode)
+        )
+    if not probes:
+        return ""
+    header = (
+        "\n"
+        "    # -- (D) MAX-EXTENT BUS probes (index/address width at maximum) ----\n"
+        "    # A chip can pass every fixed-small test and still ship a counter\n"
+        "    # that wraps at a 2^n boundary BELOW the declared maximum. These\n"
+        "    # probes drive the BUS maxima this design declares. Compute-lane\n"
+        "    # geometry is NOT covered here -- see the MAXGEO_NOT_COVERED marker\n"
+        "    # at the top of this file.\n"
+        "    await bfm.reset_dut(10)\n"
+        "    _sent = 0x%08X & _wm          # nibble-distinct sentinel\n"
+        "    await bfm.write_reg(c.cfg1_addr, _sent, _w)\n"
+        "\n"
+        "    async def _still_conformant(_what):\n"
+        "        _s = await bfm.read_status()\n"
+        "        assert (_s & busy_bit) == 0, (\n"
+        "            'QSPI-slave MAX-EXTENT probe: frontend still BUSY after %%s '\n"
+        "            '-- it WEDGED at maximum extent. An index/length counter '\n"
+        "            'sized below the declared maximum stalls exactly here.' %% _what)\n"
+        "        _rb = int.from_bytes(await bfm.read(c.cfg1_addr, _w), 'little')\n"
+        "        assert _rb == _sent, (\n"
+        "            'QSPI-slave MAX-EXTENT probe: the CFG1 sentinel changed from '\n"
+        "            '0x%%x to 0x%%x after %%s. A truncated address/length counter '\n"
+        "            'wrapped out of its aperture and into the decoded register '\n"
+        "            'file.' %% (_sent, _rb, _what))\n"
+        "\n" % (CFG_PROBE_A,)
+    )
+    return header + "\n".join(probes)
+
+
 def render_conformance_test_fn(
     contract: QSPIContract,
     *,
     start_clock: bool = True,
     with_op_probe: bool = True,
+    coverage: BusMaxgeoCoverage | None = None,
 ) -> str:
     """Emit the QSPI-slave BUS-PROTOCOL conformance ``@cocotb.test()`` as source.
 
     COMPUTE-LANE INDEPENDENT: the test needs no golden compute model -- it exercises
     only the standard chassis QSPI-slave contract the frontend keeps re-deriving
-    and losing a command / turnaround from. Three phases:
+    and losing a command / turnaround from. Four phases:
 
       (A) cmd 0x02 write + cmd 0x03 read-back through the dummy-byte turnaround
           (catches a read launched a NIBBLE EARLY -- short/missing dummy -- and
@@ -133,7 +224,10 @@ def render_conformance_test_fn(
       (B) cmd 0x05 READ_STATUS decodes to a well-formed idle status, and the
           frontend does not wedge on a bad opcode (ERROR-on-bad-opcode is advisory);
       (C) cmd 0x05 status is LIVE after START (catches a DROPPED 0x05 read_status,
-          the image codec class where the host's wait_done() times out).
+          the image codec class where the host's wait_done() times out);
+      (D) every BUS maximum the design declares, driven at maximum extent
+          (:func:`render_maxgeo_probe_block`) -- omitted entirely when
+          ``coverage`` is None or the design declares no bus-drivable maximum.
 
     ``start_clock`` is retained for signature compatibility but NO LONGER
     changes the emitted code: every generated ``@cocotb.test()`` starts its own
@@ -152,6 +246,7 @@ def render_conformance_test_fn(
         f'    cocotb.start_soon(Clock(dut.{clk}, c.clk_period_ns, '
         'unit="ns").start())\n'
     )
+    maxgeo_block = render_maxgeo_probe_block(coverage)
     op_probe = ""
     if with_op_probe:
         op_probe = '''
@@ -255,10 +350,44 @@ async def qspi_slave_protocol_conformance(dut):
             "[qspi-conformance] ADVISORY: bad opcode 0xAB did not raise "
             "STATUS.ERROR (status=0x%02x). The chassis protocol flags unknown "
             "opcodes via STATUS.ERROR (bit %d).", _st_bad, c.status_error_bit)
-{op_probe}'''
+{op_probe}{maxgeo_block}'''
 
 
-def render_conformance_tb(contract: QSPIContract, design_name: str) -> str:
+def render_maxgeo_markers(coverage: BusMaxgeoCoverage | None) -> str:
+    """The ``# MAXGEO`` header block for a generated testbench.
+
+    Three lines, all machine-readable:
+
+      ``# MAXGEO: <dim>=<max> ...``       -- ONLY dims this TB drives at maximum
+      ``# MAXGEO_SCOPE: ...``             -- what kind of coverage this is
+      ``# MAXGEO_NOT_COVERED: <dim>=<max> ...`` -- what it does NOT reach
+
+    The last two deliberately do NOT match the gate's ``# MAXGEO\\b`` marker
+    regex (``MAXGEO_`` has no word boundary after ``MAXGEO``), so recording an
+    UNCOVERED dim can never be misread as coverage. A marker is a claim; a claim
+    without the traffic behind it is worse than no claim at all.
+    """
+    if coverage is None:
+        return ""
+    lines = [ln for ln in (coverage.marker_line(),) if ln]
+    if not lines and not coverage.uncovered:
+        return ""
+    lines.append(
+        "# MAXGEO_SCOPE: bus-contract-only -- this testbench is the deterministic "
+        "QSPI-slave\n#   conformance DV. It has NO compute oracle, so it drives the "
+        "BUS dimensions at\n#   their declared maxima and cannot drive compute-lane "
+        "geometry at all."
+    )
+    if coverage.uncovered_line():
+        lines.append(coverage.uncovered_line())
+    return "\n".join(lines) + "\n"
+
+
+def render_conformance_tb(
+    contract: QSPIContract,
+    design_name: str,
+    declared_dims: dict | None = None,
+) -> str:
     """Emit a standalone, hermetic QSPI-slave BUS-PROTOCOL conformance testbench.
 
     Used at integration DV when a golden host-flow plan cannot be derived (the
@@ -267,9 +396,22 @@ def render_conformance_tb(contract: QSPIContract, design_name: str) -> str:
     conformance test enforces the standard command set + timing, so a frontend
     that dropped 0x05 or mistimed the read turnaround FAILS at generation instead
     of slipping through to the secret grader on the LLM-authored BFM.
+
+    ``declared_dims`` is the design's machine-readable dimensional maxima
+    (``{name: max}``, from the caller's ``_declared_dimensions``). The bus-drivable
+    subset becomes real max-extent traffic plus a ``# MAXGEO`` marker; everything
+    else is recorded as NOT covered. ``None`` keeps the emitted TB byte-identical
+    to before max-geometry coverage existed.
     """
+    coverage = (
+        bus_maxgeo_coverage(contract, declared_dims)
+        if declared_dims else None
+    )
     bfm_src = render_bfm_module(contract)
-    fn = render_conformance_test_fn(contract, start_clock=True, with_op_probe=True)
+    fn = render_conformance_test_fn(
+        contract, start_clock=True, with_op_probe=True, coverage=coverage
+    )
+    maxgeo_markers = render_maxgeo_markers(coverage)
     return f'''# Copyright (c) Meta Platforms, Inc. and affiliates.
 # AUTO-GENERATED by orchestrator.langgraph.bfm_lib -- DO NOT HAND-EDIT.
 #
@@ -279,7 +421,7 @@ def render_conformance_tb(contract: QSPIContract, design_name: str) -> str:
 # the exercise-specific compute oracle is NOT modeled. This is the gate a frontend
 # that dropped 0x05 or mistimed the read turnaround must fail at generation -- the
 # the image codec gap where such a frontend slipped through on the co-tuned LLM BFM.
-from __future__ import annotations
+{maxgeo_markers}from __future__ import annotations
 # The future import is REQUIRED, not style: the BFM class source is inlined
 # below via inspect.getsource, and its `-> QSPIContract` method annotations
 # only defer (instead of evaluating at class-body time, where the name does
@@ -303,6 +445,7 @@ def render_integration_tb(
     rom_data: bytes = b"",
     *,
     include_conformance: bool = False,
+    declared_dims: dict | None = None,
 ) -> str:
     """Emit a hermetic deterministic cocotb integration testbench.
 
@@ -322,7 +465,18 @@ def render_integration_tb(
     to the SAME module so one sim run enforces BOTH the golden host-flow output AND
     the raw bus contract (CFG read-back through the dummy turnaround, 0x05 status,
     bad-opcode robustness). Default False keeps the emitted TB byte-identical.
+
+    ``declared_dims`` (with ``include_conformance``) additionally drives the
+    design's BUS maxima at maximum extent and emits the matching ``# MAXGEO``
+    marker. It never invents coverage for the compute lane: the golden host-flow
+    case above is whatever geometry the golden reference chose, and this
+    testbench does not claim otherwise.
     """
+    coverage = (
+        bus_maxgeo_coverage(contract, declared_dims)
+        if (declared_dims and include_conformance) else None
+    )
+    maxgeo_markers = render_maxgeo_markers(coverage)
     bfm_src = render_bfm_module(contract)
     cfg_lits = ", ".join(f"({a}, {v}, {w})" for (a, v, w) in plan.cfg)
     write_lits = ", ".join(f"({a}, bytes.fromhex({d.hex()!r}))" for (a, d) in plan.writes)
@@ -349,7 +503,7 @@ def render_integration_tb(
 # supplies only the golden MODEL, evaluated at generation time into the
 # expected bytes below. A DUT that violates the QSPI-slave read/dummy/serialize
 # contract de-aligns and is caught -- the property the co-tuned LLM BFM lacked.
-from __future__ import annotations
+{maxgeo_markers}from __future__ import annotations
 # The future import is REQUIRED, not style: the BFM class source is inlined
 # below via inspect.getsource, and its `-> QSPIContract` method annotations
 # only defer (instead of evaluating at class-body time, where the name does
@@ -438,6 +592,6 @@ async def deterministic_qspi_dv(dut):
         # the CFG read-back-through-dummy and bad-opcode robustness coverage the
         # host-flow alone does not exercise.
         tb += render_conformance_test_fn(
-            contract, start_clock=False, with_op_probe=False
+            contract, start_clock=False, with_op_probe=False, coverage=coverage
         )
     return tb

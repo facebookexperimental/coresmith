@@ -55,8 +55,16 @@ from .codegen import (
     render_conformance_test_fn,
     render_contract_literal,
     render_integration_tb,
+    render_maxgeo_markers,
+    render_maxgeo_probe_block,
     render_rom_bfm_module,
     render_rom_contract_literal,
+)
+from .maxgeo import (
+    BusMaxgeoCoverage,
+    bus_maxgeo_coverage,
+    classify_dim_role,
+    max_burst_bytes,
 )
 from .qspi_contract import QSPIContract
 from .qspi_master_bfm import QSPIMasterBFM
@@ -68,6 +76,7 @@ __all__ = [
     "STATUS_CONTRADICTION",
     "STATUS_NOT_QSPI",
     "STATUS_QSPI_TOP",
+    "BusMaxgeoCoverage",
     "BusVerdict",
     "PinBoundary",
     "QSPIContract",
@@ -78,20 +87,25 @@ __all__ = [
     "arch_indicates_qspi_slave",
     "boundary_gate_enabled",
     "build_plan_from_run",
+    "bus_maxgeo_coverage",
     "classify_bus_verdict",
     "classify_chip_bus",
+    "classify_dim_role",
     "conformance_enabled",
     "describe_unmodeled_roles",
     "detect_bus_roles",
     "detect_dut_mastered_buses",
     "deterministic_bfm_enabled",
     "find_pin_boundary",
+    "max_burst_bytes",
     "plan_deterministic_dv",
     "render_bfm_module",
     "render_conformance_tb",
     "render_conformance_test_fn",
     "render_contract_literal",
     "render_integration_tb",
+    "render_maxgeo_markers",
+    "render_maxgeo_probe_block",
     "render_rom_bfm_module",
     "render_rom_contract_literal",
     "write_deterministic_integration_tb",
@@ -205,6 +219,7 @@ def write_deterministic_integration_tb(
     plan: StimulusPlan,
     output_path: str,
     include_conformance: bool = False,
+    declared_dims: dict | None = None,
 ) -> dict:
     """Render + persist the deterministic integration TB. Mirrors the LLM
     generator's return contract (``tb_path``, ``testbench_path``, ``test_count``).
@@ -213,9 +228,13 @@ def write_deterministic_integration_tb(
     bus-protocol conformance test to the same module (CFG read-back through the
     dummy turnaround + 0x05 status + bad-opcode robustness), so one sim run gates
     both the golden host-flow output and the raw bus contract.
+
+    ``declared_dims`` is the design's dimensional maxima; the bus-drivable subset
+    is driven at maximum extent and advertised with a ``# MAXGEO`` marker.
     """
     tb_src = render_integration_tb(
-        contract, design_name, plan, include_conformance=include_conformance
+        contract, design_name, plan, include_conformance=include_conformance,
+        declared_dims=declared_dims,
     )
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -227,6 +246,9 @@ def write_deterministic_integration_tb(
         "deterministic_bfm": True,
         "qspi_conformance": bool(include_conformance),
         "contract_fingerprint": contract.fingerprint(),
+        # The BUS CONTRACT itself, so a downstream gate can recompute what this
+        # testbench was CAPABLE of driving instead of trusting what it claimed.
+        "contract": contract.to_dict(),
         "case_name": plan.case_name,
     }
 
@@ -236,6 +258,7 @@ def write_qspi_conformance_tb(
     design_name: str,
     contract: QSPIContract,
     output_path: str,
+    declared_dims: dict | None = None,
 ) -> dict:
     """Render + persist a standalone QSPI-slave bus-protocol conformance TB.
 
@@ -244,8 +267,16 @@ def write_qspi_conformance_tb(
     still drives the pins and the conformance test enforces the standard command
     set + timing (COMPUTE-LANE INDEPENDENT). Mirrors the LLM generator's return
     contract so the caller treats it like any other integration TB.
+
+    ``declared_dims`` is the design's dimensional maxima (``{name: max}``). The
+    BUS-drivable subset (full-extent address, longest legal write/read burst,
+    largest command opcode) becomes real max-extent traffic plus a ``# MAXGEO``
+    marker; the compute-lane remainder is recorded in the returned
+    ``maxgeo_uncovered`` and in the testbench's own ``# MAXGEO_NOT_COVERED``
+    line. Nothing is ever marked covered that was not driven.
     """
-    tb_src = render_conformance_tb(contract, design_name)
+    coverage = bus_maxgeo_coverage(contract, declared_dims) if declared_dims else None
+    tb_src = render_conformance_tb(contract, design_name, declared_dims=declared_dims)
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(tb_src, encoding="utf-8")
@@ -257,5 +288,8 @@ def write_qspi_conformance_tb(
         "qspi_conformance": True,
         "conformance_only": True,
         "contract_fingerprint": contract.fingerprint(),
+        "contract": contract.to_dict(),
         "case_name": "qspi_slave_protocol_conformance",
+        "maxgeo_covered": dict(coverage.covered) if coverage else {},
+        "maxgeo_uncovered": dict(coverage.uncovered) if coverage else {},
     }

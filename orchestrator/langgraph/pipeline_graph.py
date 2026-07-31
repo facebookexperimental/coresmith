@@ -9003,10 +9003,17 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                             PROJECT_ROOT / "tb" / "integration"
                             / f"test_{design_name}.py"
                         )
+                        # The design's own declared dimensional maxima -- the
+                        # same dict the MAX-GEOMETRY gate reads. Threading it in
+                        # here is what lets the deterministic TB drive the BUS
+                        # maxima at full extent and mark them per design,
+                        # instead of the generator inventing dimension names.
+                        _dims = await asyncio.to_thread(_declared_dimensions, pr)
                         if _bfm_lib.deterministic_bfm_enabled() and _plan is not None:
                             tb_result = _bfm_lib.write_deterministic_integration_tb(
                                 pr, design_name, _contract, _plan, _out,
                                 include_conformance=True,
+                                declared_dims=_dims,
                             )
                             log(
                                 "  [INTEG-DV] DETERMINISTIC BFM ACTIVE (QSPI-slave; "
@@ -9023,8 +9030,17 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                             # QSPI-slave BUS PROTOCOL with a compute-lane-independent
                             # conformance DV instead of silently using the LLM BFM.
                             tb_result = _bfm_lib.write_qspi_conformance_tb(
-                                pr, design_name, _contract, _out
+                                pr, design_name, _contract, _out,
+                                declared_dims=_dims,
                             )
+                            if tb_result.get("maxgeo_covered"):
+                                log(
+                                    "  [INTEG-DV] MAX-EXTENT bus coverage: "
+                                    f"{tb_result['maxgeo_covered']} driven at "
+                                    "maximum; NOT covered (no compute oracle): "
+                                    f"{tb_result.get('maxgeo_uncovered', {})}",
+                                    YELLOW,
+                                )
                             _lane = (
                                 "unmodeled"
                                 if _plan is None
