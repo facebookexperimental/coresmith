@@ -81,9 +81,9 @@ Full payload schemas and resume semantics are in the [Interrupts catalog](../ref
 
 ## What runs on what model
 
-- `DEFAULT_MODEL = "opus-4.8"` for load-bearing steps (integration lead, integration review, contract audit, backend EDA).
-- `BLOCK_MODEL = "sonnet-4.6"` for per-block agents (uArch, RTL, TB, debug).
+- `DEFAULT_MODEL = "opus-5"` for load-bearing steps (integration lead, integration review, contract audit, backend EDA).
+- `BLOCK_MODEL = "sonnet-5"` for per-block agents (uArch, RTL, TB, debug).
 - Set `CORESMITH_MODEL` and `CORESMITH_BLOCK_MODEL` to override.
-- Set `CORESMITH_LLM_PROVIDER=codex` to swap Claude CLI for Codex CLI (gpt-5.6) — same prompts, different backend.
+- Set `CORESMITH_LLM_PROVIDER=codex` to swap Claude CLI for Codex CLI (gpt-5.6-sol) — same prompts, different backend.
 
 See [LLM abstraction](../agents/llm-abstraction.md) for details.

@@ -1,7 +1,44 @@
 # Authentication
 
-coresmith supports Claude Code (default), Codex CLI, and Kimi Code CLI. Select
-Kimi with `CORESMITH_LLM_PROVIDER=kimi`.
+coresmith supports Claude Code (default), Codex CLI, OpenCode with OpenRouter's
+hosted Kimi K3, and the Kimi Code CLI. Select OpenCode with
+`CORESMITH_LLM_PROVIDER=opencode`, or Kimi Code with `CORESMITH_LLM_PROVIDER=kimi`.
+
+## OpenCode + OpenRouter (Kimi K3)
+
+Install the official OpenCode CLI and authenticate OpenRouter locally:
+
+```bash
+npm install -g opencode-ai
+opencode auth login     # select OpenRouter and enter the key locally
+export CORESMITH_LLM_PROVIDER=opencode
+```
+
+For CI, Docker, or RunPod, use an environment secret instead of the interactive
+credential store:
+
+```bash
+export OPENROUTER_API_KEY=...
+export CORESMITH_LLM_PROVIDER=opencode
+export CORESMITH_OPENCODE_MODEL=openrouter/moonshotai/kimi-k3  # optional; default
+```
+
+OpenCode stores interactive credentials at
+`${XDG_DATA_HOME:-~/.local/share}/opencode/auth.json`. Never commit this file or
+paste the API key into CoreSmith configuration. Verify the route with:
+
+```bash
+opencode --version
+printf 'Reply with exactly: ready' | opencode --pure run --format json \
+  --model openrouter/moonshotai/kimi-k3
+```
+
+CoreSmith passes prompts on stdin, adds OpenCode's `--thinking` flag, and
+consumes the NDJSON event stream. Every valid event—including model-exposed
+`reasoning` parts—is appended to `.coresmith/opencode_turns.jsonl`; final answers
+and usage remain in `.coresmith/llm_calls.jsonl`. The trajectory file can contain
+sensitive prompt, reasoning, and tool content, so protect it like other run
+artifacts. CoreSmith uses `permission: "deny"` when tools are disabled.
 
 ## Kimi Code
 
@@ -42,11 +79,12 @@ export CORESMITH_KIMI_WORKDIR=/path/to/project
 
 coresmith communicates with `kimi acp` over stdin/stdout JSON-RPC. This avoids
 command-line length limits for large RTL prompts and preserves streaming token
-usage. Run a quick integration check with:
+usage.
 
-```bash
+## Claude Code
 
-coresmith's pipeline calls Anthropic's API through the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code/overview). The CLI accepts three credential sources, checked in this order:
+The [Claude Code CLI](https://docs.claude.com/en/docs/claude-code/overview)
+accepts three credential sources, checked in this order:
 
 1. **`CLAUDE_CODE_OAUTH_TOKEN`** — long-lived OAuth token from `claude setup-token`. Recommended for CI, Docker, RunPod, GitHub Codespaces.
 2. **`ANTHROPIC_API_KEY`** — raw API key from <https://console.anthropic.com/>. Bills your console workspace; *not* your Claude.ai/Pro subscription.
@@ -132,11 +170,11 @@ If `claude -p` hangs or returns an auth error, neither token nor key are being s
 
 ## What model gets used
 
-coresmith defaults to `opus-4.8` (the most capable model). Override with `CORESMITH_MODEL`:
+coresmith defaults to `opus-5` (the most capable model). Override with `CORESMITH_MODEL`:
 
 ```bash
-export CORESMITH_MODEL=sonnet-4.6   # ~5x cheaper, slightly less reliable on hard blocks
+export CORESMITH_MODEL=sonnet-5   # ~5x cheaper, slightly less reliable on hard blocks
 export CORESMITH_MODEL=haiku-4.5    # cheapest; fine for trivial blocks
 ```
 
-The mapping from short names (`opus-4.8`, `sonnet-4.6`, `haiku-4.5`, …) to full CLI model IDs lives in `orchestrator/langchain/agents/coresmith_llm.py`. Unknown short names pass through verbatim, so any model the CLI accepts works.
+The mapping from short names (`opus-5`, `sonnet-5`, `haiku-4.5`, …) to full CLI model IDs lives in `orchestrator/langchain/agents/coresmith_llm.py`. Unknown short names pass through verbatim, so any model the CLI accepts works.

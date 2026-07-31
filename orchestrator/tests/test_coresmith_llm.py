@@ -15,6 +15,7 @@ Tests:
 
 from __future__ import annotations
 
+import json
 import subprocess
 import threading
 import time
@@ -27,10 +28,13 @@ from orchestrator.langchain.agents.coresmith_llm import (
     _CLI_MODEL_MAP,
     _CODEX_MODEL_MAP,
     _KIMI_MODEL_MAP,
+    _OPENCODE_MODEL_MAP,
     _RESUME_FLAGS_CACHE,
+    BLOCK_MODEL,
     DEFAULT_CODEX_MODEL,
     DEFAULT_KIMI_MODEL,
     DEFAULT_MODEL,
+    DEFAULT_OPENCODE_MODEL,
     ClaudeLLM,
     _active_processes,
     _active_processes_lock,
@@ -40,8 +44,10 @@ from orchestrator.langchain.agents.coresmith_llm import (
     _llm_breakers,
     _llm_breakers_lock,
     _log_llm_call,
+    _log_opencode_turns,
     _parse_codex_json,
     _parse_kimi_acp_json,
+    _parse_opencode_json,
     _register_process,
     _resolve_model,
     _unregister_process,
@@ -60,6 +66,8 @@ def _reset_breakers():
 def _clear_provider_env(monkeypatch):
     monkeypatch.delenv("CORESMITH_LLM_PROVIDER", raising=False)
     monkeypatch.delenv("CORESMITH_CODEX_MODEL", raising=False)
+    monkeypatch.delenv("CORESMITH_OPENCODE_MODEL", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
     monkeypatch.delenv("CORESMITH_KIMI_MODEL", raising=False)
     monkeypatch.delenv("KIMI_MODEL_NAME", raising=False)
     # Keep the JSONL-log path tests hermetic: _llm_log_root() prefers these
@@ -70,6 +78,12 @@ def _clear_provider_env(monkeypatch):
 
 
 class TestModelNameMapping:
+    def test_opus_5_maps_to_latest_cli_alias(self):
+        assert _resolve_model("opus-5") == "opus"
+
+    def test_sonnet_5_maps_to_latest_cli_alias(self):
+        assert _resolve_model("sonnet-5") == "sonnet"
+
     def test_opus_48_maps_correctly(self):
         assert _resolve_model("opus-4.8") == "claude-opus-4-8"
 
@@ -91,11 +105,23 @@ class TestModelNameMapping:
         assert _resolve_model("custom-model-123") == "custom-model-123"
 
     def test_all_cli_models_have_mappings(self):
-        expected_shorts = ["opus-4.8", "opus-4.7", "opus-4.6", "sonnet-4.6", "sonnet-4.5", "haiku-4.5", "haiku-3.5"]
+        expected_shorts = [
+            "opus-5",
+            "sonnet-5",
+            "opus-4.8",
+            "opus-4.7",
+            "opus-4.6",
+            "sonnet-4.6",
+            "sonnet-4.5",
+            "haiku-4.5",
+            "haiku-3.5",
+        ]
         for short in expected_shorts:
             assert short in _CLI_MODEL_MAP, f"Missing CLI mapping: {short}"
 
     def test_default_model_constant(self):
+        assert DEFAULT_MODEL == "opus-5"
+        assert BLOCK_MODEL == "sonnet-5"
         assert DEFAULT_MODEL in _CLI_MODEL_MAP
 
     def test_empty_model_falls_back_to_default(self, monkeypatch):
@@ -114,16 +140,29 @@ class TestModelNameMapping:
         monkeypatch.setenv("CORESMITH_MODEL", "")
         assert _resolve_model("opus-4.7") == "claude-opus-4-8"
 
-    def test_codex_opus_maps_to_gpt_56(self):
-        assert _resolve_model("opus-4.8", "codex_cli") == "gpt-5.6"
+    def test_codex_default_tiers_map_to_gpt_56_family(self):
+        assert _resolve_model("opus-5", "codex_cli") == "gpt-5.6-sol"
+        assert _resolve_model("sonnet-5", "codex_cli") == "gpt-5.6-terra"
 
     def test_codex_default_model_constant(self):
-        assert DEFAULT_CODEX_MODEL == "gpt-5.6"
-        assert _CODEX_MODEL_MAP["opus-4.8"] == DEFAULT_CODEX_MODEL
+        assert DEFAULT_CODEX_MODEL == "gpt-5.6-sol"
+        assert _CODEX_MODEL_MAP["opus-5"] == DEFAULT_CODEX_MODEL
 
     def test_coresmith_codex_model_env_overrides_passed_value(self, monkeypatch):
         monkeypatch.setenv("CORESMITH_CODEX_MODEL", "gpt-5.5")
         assert _resolve_model("sonnet-4.6", "codex_cli") == "gpt-5.5"
+
+    def test_opencode_all_tiers_target_hosted_kimi_k3(self):
+        expected = "openrouter/moonshotai/kimi-k3"
+        assert DEFAULT_OPENCODE_MODEL == expected
+        assert set(_OPENCODE_MODEL_MAP.values()) == {expected}
+        assert _resolve_model(DEFAULT_MODEL, "opencode_cli") == expected
+        assert _resolve_model(BLOCK_MODEL, "opencode_cli") == expected
+
+    def test_opencode_model_env_overrides_passed_value(self, monkeypatch):
+        custom = "openrouter/moonshotai/kimi-k3:exacto"
+        monkeypatch.setenv("CORESMITH_OPENCODE_MODEL", custom)
+        assert _resolve_model("opus-4.8", "opencode_cli") == custom
 
     def test_kimi_model_tiers_map_to_catalog_aliases(self):
         assert _resolve_model("opus-4.7", "kimi_cli") == "kimi-code/k3"
@@ -154,6 +193,81 @@ class TestProviderDetection:
     def test_kimi_provider_env(self, monkeypatch):
         monkeypatch.setenv("CORESMITH_LLM_PROVIDER", "kimi")
         assert _detect_provider() == "kimi_cli"
+
+    @pytest.mark.parametrize("alias", ["opencode", "opencode_cli", "openrouter"])
+    def test_opencode_provider_aliases(self, monkeypatch, alias):
+        monkeypatch.setenv("CORESMITH_LLM_PROVIDER", alias)
+        assert _detect_provider() == "opencode_cli"
+
+
+class TestOpenCodeJsonParsing:
+    def test_parse_text_and_usage(self):
+        stdout = (
+            '{"type":"step_start","part":{"type":"step-start"}}\n'
+            '{"type":"text","part":{"type":"text","text":"ready"}}\n'
+            '{"type":"step_finish","part":{"type":"step-finish","cost":0.25,'
+            '"tokens":{"total":8237,"input":6430,"output":4,"reasoning":11,'
+            '"cache":{"write":0,"read":1792}}}}\n'
+        )
+        text, usage = _parse_opencode_json(stdout)
+        assert text == "ready"
+        assert usage == {
+            "input_tokens": 6430,
+            "output_tokens": 4,
+            "total_tokens": 8237,
+            "cache_read_input_tokens": 1792,
+            "cache_creation_input_tokens": 0,
+            "reasoning_output_tokens": 11,
+            "total_cost_usd": 0.25,
+        }
+
+
+class TestOpenCodeTrajectoryLogging:
+    def test_persists_reasoning_and_text_events(self, tmp_path):
+        stdout = (
+            '{"type":"reasoning","part":{"type":"reasoning","text":"consider"}}\n'
+            'not-json\n'
+            '{"type":"text","part":{"type":"text","text":"ready"}}\n'
+        )
+        count = _log_opencode_turns(stdout, str(tmp_path), 123, 456.0)
+
+        assert count == 2
+        path = tmp_path / ".coresmith" / "opencode_turns.jsonl"
+        records = [json.loads(line) for line in path.read_text().splitlines()]
+        assert [record["event"]["type"] for record in records] == ["reasoning", "text"]
+        assert records[0]["pid"] == 123
+        assert records[0]["wall_start"] == 456.0
+        assert records[0]["event"]["part"]["text"] == "consider"
+
+
+class TestOpenCodeInvocation:
+    @patch(
+        "orchestrator.langchain.agents.coresmith_llm._find_opencode_binary",
+        return_value="/usr/bin/opencode",
+    )
+    def test_kimi_k3_command_stdin_and_tool_deny_config(
+        self, _mock_find, monkeypatch, tmp_path,
+    ):
+        monkeypatch.setenv("CORESMITH_LLM_PROVIDER", "openrouter")
+        monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", '{"theme":"system"}')
+        model = ClaudeLLM(model="opus-4.8", timeout=10, disable_tools=True)
+
+        with patch.object(model, "_run_cli_with_watchdog") as watchdog:
+            watchdog.return_value = ("ready", "", 0, 1.0, False, False, {})
+            output = model._generate_via_cli("system", "hello")
+
+        assert output == "ready"
+        cmd = watchdog.call_args.args[0]
+        assert cmd == [
+            "/usr/bin/opencode", "--pure", "run", "--format", "json",
+            "--thinking", "--model", "openrouter/moonshotai/kimi-k3",
+            "--dir", str(tmp_path), "--auto",
+        ]
+        assert "<system>\nsystem\n</system>" in watchdog.call_args.args[1]
+        assert "<user>\nhello\n</user>" in watchdog.call_args.args[1]
+        config = json.loads(watchdog.call_args.kwargs["process_env"]["OPENCODE_CONFIG_CONTENT"])
+        assert config == {"theme": "system", "permission": "deny"}
 
 
 class TestCodexJsonParsing:
@@ -439,7 +553,7 @@ class TestCommandConstruction:
         monkeypatch.delenv("CORESMITH_MODEL", raising=False)
         mock_find.return_value = "/usr/bin/codex"
 
-        model = ClaudeLLM(model="opus-4.8", timeout=10)
+        model = ClaudeLLM(model="opus-5", timeout=10)
 
         with patch.object(model, "_run_cli_with_watchdog") as mock_watchdog:
             mock_watchdog.return_value = ("test output", "", 0, 1.0, False, False, {})
@@ -449,7 +563,7 @@ class TestCommandConstruction:
             assert cmd[:2] == ["/usr/bin/codex", "exec"]
             assert "--json" in cmd
             assert "-m" in cmd
-            assert cmd[cmd.index("-m") + 1] == "gpt-5.6"
+            assert cmd[cmd.index("-m") + 1] == "gpt-5.6-sol"
             assert "--dangerously-bypass-approvals-and-sandbox" in cmd
 
 

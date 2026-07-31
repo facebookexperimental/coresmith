@@ -47,7 +47,7 @@ Optional Temporal workflow configuration. Used only when multi-machine orchestra
 
 LLM agent defaults.
 
-- `model` — `opus-4.8`.
+- `model` — `opus-5`.
 - `temperature` — `0.1`.
 - `max_tokens` — `16000`.
 - `agents` — per-agent prompts + tool exposure (kept here for backward compatibility; the actual prompts now live in `orchestrator/langchain/prompts/`).
@@ -87,9 +87,9 @@ Optional. If absent, blocks come from `blocks.yaml` (in the run dir) or `.coresm
 | Var | Effect |
 |---|---|
 | `CORESMITH_LLM_PROVIDER` | `claude` (default) or `codex` |
-| `CORESMITH_MODEL` | Override `DEFAULT_MODEL` (default `opus-4.8`) |
-| `CORESMITH_BLOCK_MODEL` | Override `BLOCK_MODEL` (default `sonnet-4.6`) |
-| `CORESMITH_CODEX_MODEL` | Override Codex default (`gpt-5.6`) |
+| `CORESMITH_MODEL` | Override `DEFAULT_MODEL` (default `opus-5`) |
+| `CORESMITH_BLOCK_MODEL` | Override `BLOCK_MODEL` (default `sonnet-5`) |
+| `CORESMITH_CODEX_MODEL` | Override Codex default (`gpt-5.6-sol`) |
 | `CORESMITH_CODEX_SANDBOX` | Codex sandbox level (`danger-full-access` for unrestricted) |
 | `CORESMITH_TIMEOUT_MULTIPLIER` | Scales every per-agent timeout. |
 
@@ -147,9 +147,9 @@ mkdir -p $RUN_DIR/inputs && cp <spec>.md $RUN_DIR/inputs/requirements.md
 
 export CORESMITH_PROJECT_ROOT=$RUN_DIR
 export CORESMITH_LLM_PROVIDER=codex             # or claude
-export CORESMITH_CODEX_MODEL=gpt-5.6
-export CORESMITH_MODEL=gpt-5.6
-export CORESMITH_BLOCK_MODEL=gpt-5.6
+export CORESMITH_CODEX_MODEL=gpt-5.6-sol
+export CORESMITH_MODEL=gpt-5.6-sol
+export CORESMITH_BLOCK_MODEL=gpt-5.6-sol
 export CORESMITH_CODEX_SANDBOX=danger-full-access
 export CORESMITH_SKIP_SYNTH=1                   # unless Sky130 PDK is local
 export CORESMITH_ENABLE_MEMORY_MAP=0

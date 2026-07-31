@@ -62,7 +62,7 @@
           py.pkgs.virtualenv
           gnumake
           git
-          unstablePkgs.nodejs_22 # Kimi Code requires Node 22.19+
+          unstablePkgs.nodejs_22 # Kimi Code needs Node 22.19+; also used by Claude Code and OpenCode (`npm install -g opencode-ai`)
         ];
       in {
         # Default devShell: `nix develop`
@@ -96,7 +96,8 @@
             echo
             echo "Next: python -m venv venv && source venv/bin/activate &&"
             echo "      pip install -r requirements.txt && pip install -e orchestrator/"
-            echo "      claude login   # if not already authenticated"
+            echo "      claude login   # default provider; if not already authenticated"
+            echo "      npm install -g opencode-ai  # for CORESMITH_LLM_PROVIDER=opencode"
             echo "      make pipeline  # or: make mcp"
           '';
         };

@@ -45,9 +45,9 @@ mkdir -p $RUN_DIR/inputs && cp <spec>.md $RUN_DIR/inputs/requirements.md
 # Export the project root + LLM provider env vars (Codex shown; Claude also works)
 export CORESMITH_PROJECT_ROOT=$RUN_DIR
 export CORESMITH_LLM_PROVIDER=codex
-export CORESMITH_CODEX_MODEL=gpt-5.6
-export CORESMITH_MODEL=gpt-5.6
-export CORESMITH_BLOCK_MODEL=gpt-5.6
+export CORESMITH_CODEX_MODEL=gpt-5.6-sol
+export CORESMITH_MODEL=gpt-5.6-sol
+export CORESMITH_BLOCK_MODEL=gpt-5.6-sol
 export CORESMITH_CODEX_SANDBOX=danger-full-access
 export CORESMITH_SKIP_SYNTH=1            # unless Sky130 PDK is local
 export CORESMITH_ENABLE_MEMORY_MAP=0

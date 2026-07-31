@@ -38,9 +38,11 @@ is fine. There's no GPU dependency.
 | Variable | Purpose | Required |
 |----------|---------|----------|
 | `ANTHROPIC_API_KEY` | API key from console.anthropic.com | one of API key / OAuth required for non-shell modes |
-| `CLAUDE_CODE_OAUTH_TOKEN` | OAuth token from `claude setup-token` | alternate to API key |
+| `CLAUDE_CODE_OAUTH_TOKEN` | OAuth token from `claude setup-token` | alternate to Anthropic API key |
+| `CORESMITH_LLM_PROVIDER` | Set `opencode` for hosted Kimi K3 through OpenRouter | optional; defaults to Claude |
+| `OPENROUTER_API_KEY` | OpenRouter secret consumed by OpenCode | required when provider is `opencode` unless auth store is mounted |
 | `CORESMITH_MODE` | `shell` (default), `pipeline`, `mcp`, `mcp-http`, `test` | optional |
-| `CORESMITH_MODEL` | Override default model (e.g. `opus-4.8`, `sonnet-4.6`, `haiku-4.5`) | optional |
+| `CORESMITH_MODEL` | Override default model (e.g. `opus-5`, `sonnet-5`, `haiku-4.5`) | optional |
 | `MCP_PORT` | Port for `mcp-http` mode (default `8765`) | optional |
 
 ## RunPod template (JSON)

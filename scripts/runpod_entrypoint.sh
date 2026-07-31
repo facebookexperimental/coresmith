@@ -21,7 +21,7 @@
 #     a RunPod hour on a misconfigured pod.
 #
 # Optional overrides:
-#   CORESMITH_MODEL=sonnet-4.6   Pin a specific model (short name or full ID)
+#   CORESMITH_MODEL=sonnet-5   Pin a specific model (short name or full ID)
 #   CORESMITH_REQUIREMENTS_FILE  Path to a text file with architecture requirements
 #                              (used in mcp / pipeline modes that need a starter prompt)
 #   PUBLIC_KEY                 SSH public key to install for root. If set, the
@@ -42,6 +42,7 @@ if [[ -f /etc/coresmith.env ]]; then
     # shellcheck disable=SC1091
     . /etc/coresmith.env
     [[ -n "${CLAUDE_CLI_PATH:-}" ]] && export CLAUDE_CLI_PATH
+    [[ -n "${OPENCODE_CLI_PATH:-}" ]] && export OPENCODE_CLI_PATH
     [[ -n "${KIMI_CLI_PATH:-}" ]] && export KIMI_CLI_PATH
 fi
 
@@ -81,6 +82,28 @@ maybe_start_sshd
 # --- Auth check (skipped in shell mode so users can poke around) ------------
 require_auth() {
     local provider="${CORESMITH_LLM_PROVIDER:-claude}"
+    if [[ "${provider}" == "opencode" || "${provider}" == "opencode_cli" || "${provider}" == "openrouter" ]]; then
+        if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+            echo "[coresmith] auth: using OPENROUTER_API_KEY with OpenCode"
+            export OPENROUTER_API_KEY
+            return 0
+        fi
+        local opencode_auth="${XDG_DATA_HOME:-${HOME:-/root}/.local/share}/opencode/auth.json"
+        if [[ -f "${opencode_auth}" ]] && grep -q '"openrouter"' "${opencode_auth}"; then
+            echo "[coresmith] auth: using OpenCode credentials at ${opencode_auth}"
+            return 0
+        fi
+        cat <<'MSG' >&2
+
+[coresmith] ERROR: no OpenRouter credentials found for OpenCode.
+
+Set OPENROUTER_API_KEY in the pod/container environment, or persist the
+OpenCode auth directory after running `opencode auth login` and selecting
+OpenRouter. Set CORESMITH_MODE=shell to authenticate interactively.
+
+MSG
+        exit 2
+    fi
     if [[ "${provider}" == "kimi" || "${provider}" == "kimi_cli" ]]; then
         if [[ -n "${KIMI_MODEL_NAME:-}" && -n "${KIMI_MODEL_API_KEY:-}" ]]; then
             echo "[coresmith] auth: using KIMI_MODEL_NAME/KIMI_MODEL_API_KEY"
@@ -107,6 +130,7 @@ Set CORESMITH_MODE=shell to enter the container and run `kimi login`.
 MSG
         exit 2
     fi
+
     if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
 
         echo "[coresmith] auth: using CLAUDE_CODE_OAUTH_TOKEN"

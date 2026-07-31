@@ -109,9 +109,9 @@ SRAM macros, so read-mux symmetry defeats a unique match), not a proven-benign t
 > backend signoffs.
 
 ## LLM Cost
-You must have a Claude Code Max or OpenAI Codex Pro subscription. Codex is recommended and GPT 5.6 is superior at silicon design.
+You must have a Claude Code Max or OpenAI Codex Pro subscription. Codex is recommended and GPT 5.6 Sol is superior at silicon design.
 
-| Design  | Opus 4.8 | GPT 5.6 |
+| Design  | Opus 5 | GPT 5.6 Sol |
 |------|---------|---------|
 | MCU | OK | OK |
 | JPEG | Exceeds 5hr limit on Max 5x | OK |
@@ -245,7 +245,7 @@ pytest orchestrator/tests/ -v -m "not requires_nix and not e2e"
 
 ## Further reading
 
-- [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) — wiring up the Claude CLI (OAuth token, API key, GitHub Codespaces secret)
+- [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) — Claude Code or OpenCode/OpenRouter (hosted Kimi K3) credentials
 - [docs/LOCAL-DEV.md](docs/LOCAL-DEV.md) — running and iterating without containers
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — common failures (Yosys version, missing PDK, OpenROAD OOM, …)
 - [docs/RUNPOD.md](docs/RUNPOD.md) — hosted runs with a ready-to-paste pod template

@@ -110,6 +110,16 @@ def preflight_check(phases: list[str] | None = None) -> dict:
 
     if "pipeline" in phases:
         provider = os.environ.get("CORESMITH_LLM_PROVIDER", "").strip().lower()
+        if provider in {"opencode", "opencode_cli", "openrouter"}:
+            opencode_path = os.environ.get("OPENCODE_CLI_PATH", "").strip()
+            if opencode_path:
+                if not (Path(opencode_path).is_file() and os.access(opencode_path, os.X_OK)):
+                    errors.append(f"OpenCode CLI is not executable: {opencode_path}")
+            elif not shutil.which("opencode"):
+                errors.append(
+                    "OpenCode CLI not found on PATH; install with "
+                    "`npm install -g opencode-ai` or set OPENCODE_CLI_PATH"
+                )
         if provider in {"kimi", "kimi_cli"}:
             configured_kimi = os.environ.get("KIMI_CLI_PATH", "").strip()
             kimi_ok = (

@@ -512,6 +512,36 @@ def _parse_codex_json(stdout: str) -> tuple[str, dict]:
     return final_text, usage
 
 
+def _parse_opencode_json(stdout: str) -> tuple[str, dict]:
+    """Parse OpenCode ``run --format json`` NDJSON events."""
+    chunks: list[str] = []
+    usage: dict = {}
+    for raw in stdout.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            obj = _json.loads(raw)
+        except _json.JSONDecodeError:
+            continue
+        ev_type = obj.get("type")
+        if ev_type == "text":
+            part = obj.get("part") or {}
+            if part.get("type") == "text":
+                chunks.append(part.get("text", "") or "")
+        elif ev_type == "step_finish":
+            tokens = (obj.get("part") or {}).get("tokens") or {}
+            usage = {
+                "input_tokens": tokens.get("input", 0),
+                "output_tokens": tokens.get("output", 0),
+                "total_tokens": tokens.get("total", 0),
+                "cache_read_input_tokens": (tokens.get("cache") or {}).get("read", 0),
+                "cache_creation_input_tokens": (tokens.get("cache") or {}).get("write", 0),
+                "reasoning_output_tokens": tokens.get("reasoning", 0),
+                "total_cost_usd": (obj.get("part") or {}).get("cost", 0),
+            }
+    return "".join(chunks), usage
+
 
 def _parse_kimi_acp_json(stdout: str) -> tuple[str, dict]:
     """Parse a captured Kimi Code ACP JSON-RPC transcript.
@@ -602,12 +632,50 @@ def _log_codex_turns(stdout: str, project_root: str, pid: int, wall_start: float
         return 0
 
 
+def _log_opencode_turns(stdout: str, project_root: str, pid: int, wall_start: float) -> int:
+    """Append OpenCode NDJSON events to ``.coresmith/opencode_turns.jsonl``.
+
+    ``opencode run --thinking --format json`` emits exposed reasoning, text,
+    tool, and step events. Persist the complete valid-JSON event stream so a
+    run can be audited or replayed without mixing reasoning into the final
+    response returned to agents. Malformed lines and all logging failures are
+    deliberately non-fatal.
+    """
+    try:
+        log = Path(project_root) / ".coresmith" / "opencode_turns.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        n = 0
+        with log.open("a", encoding="utf-8") as f:
+            for raw in stdout.splitlines():
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    obj = _json.loads(raw)
+                except _json.JSONDecodeError:
+                    continue
+                rec = {
+                    "ts": _time_mod.time(),
+                    "wall_start": wall_start,
+                    "pid": pid,
+                    "event": obj,
+                }
+                f.write(_json.dumps(rec, default=str))
+                f.write("\n")
+                n += 1
+        return n
+    except Exception:
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Model name mapping: short names -> Claude CLI model IDs
 # ---------------------------------------------------------------------------
 
 _CLI_MODEL_MAP = {
-    "opus-4.8":  "claude-opus-4-8",          # current Opus
+    "opus-5":    "opus",                       # latest Claude Opus 5
+    "sonnet-5":  "sonnet",                     # latest Claude Sonnet 5
+    "opus-4.8":  "claude-opus-4-8",          # pinned previous Opus
     "opus-4.7":  "claude-opus-4-8",          # legacy alias -> current Opus
     "opus-4.6":  "claude-opus-4-8",          # legacy alias -> current Opus
     "sonnet-4.6": "claude-sonnet-4-6",
@@ -618,6 +686,8 @@ _CLI_MODEL_MAP = {
 
 _CODEX_MODEL_MAP = {
     # Preserve existing CoreSmith model tiers when switching providers.
+    "opus-5": "gpt-5.6-sol",
+    "sonnet-5": "gpt-5.6-terra",
     "opus-4.8": "gpt-5.6",
     "opus-4.7": "gpt-5.6",                    # legacy alias -> current Codex tier
     "opus-4.6": "gpt-5.6",                    # legacy alias -> current Codex tier
@@ -643,6 +713,8 @@ _KIMI_MODEL_MAP = {
 # so "high effort" is selected by choosing the "(High)" variant, not a flag.
 # Maps the CoreSmith opus/sonnet/haiku tiers onto Gemini tiers.
 _AGY_MODEL_MAP = {
+    "opus-5": "Gemini 3.1 Pro (High)",
+    "sonnet-5": "Gemini 3.1 Pro (High)",
     "opus-4.8": "Gemini 3.1 Pro (High)",
     "opus-4.7": "Gemini 3.1 Pro (High)",
     "opus-4.6": "Gemini 3.1 Pro (High)",
@@ -652,19 +724,34 @@ _AGY_MODEL_MAP = {
     "haiku-3.5": "Gemini 3.5 Flash (High)",
 }
 
+_OPENCODE_MODEL_MAP = {
+    # OpenRouter's hosted Kimi K3 for every CoreSmith tier.
+    "opus-5": "openrouter/moonshotai/kimi-k3",
+    "sonnet-5": "openrouter/moonshotai/kimi-k3",
+    "opus-4.8": "openrouter/moonshotai/kimi-k3",
+    "opus-4.7": "openrouter/moonshotai/kimi-k3",
+    "opus-4.6": "openrouter/moonshotai/kimi-k3",
+    "sonnet-4.6": "openrouter/moonshotai/kimi-k3",
+    "sonnet-4.5": "openrouter/moonshotai/kimi-k3",
+    "haiku-4.5": "openrouter/moonshotai/kimi-k3",
+    "haiku-3.5": "openrouter/moonshotai/kimi-k3",
+}
+
+
 # Default model used by every agent unless overridden. Set the CORESMITH_MODEL
 # environment variable (to either a short name above or a full Claude CLI
 # model ID) to override at runtime without code changes -- useful when the
 # default version is unavailable on a fresh CLI install.
-DEFAULT_MODEL = "opus-4.8"
-DEFAULT_CODEX_MODEL = "gpt-5.6"
+DEFAULT_MODEL = "opus-5"
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_KIMI_MODEL = "kimi-code/k3"
 DEFAULT_AGY_MODEL = "Gemini 3.1 Pro (High)"
 
+DEFAULT_OPENCODE_MODEL = "openrouter/moonshotai/kimi-k3"
 # Cheaper model for per-block agents (uarch, rtl, testbench, diagnose, lint
 # fix, tb fix).  Integration and review agents still call DEFAULT_MODEL.
 # Override with CORESMITH_BLOCK_MODEL env var.
-BLOCK_MODEL = "sonnet-4.6"
+BLOCK_MODEL = "sonnet-5"
 
 
 def _resolve_model(model: str, provider: str = "claude_cli") -> str:
@@ -710,6 +797,16 @@ def _resolve_model(model: str, provider: str = "claude_cli") -> str:
         if not model:
             return DEFAULT_AGY_MODEL
         return _AGY_MODEL_MAP.get(model, model)
+    if provider == "opencode_cli":
+        env_override = (
+            os.environ.get("CORESMITH_OPENCODE_MODEL", "").strip()
+            or os.environ.get("CORESMITH_MODEL", "").strip()
+        )
+        if env_override:
+            return _OPENCODE_MODEL_MAP.get(env_override, env_override)
+        if not model:
+            return DEFAULT_OPENCODE_MODEL
+        return _OPENCODE_MODEL_MAP.get(model, model)
 
     env_override = os.environ.get("CORESMITH_MODEL", "").strip()
     if env_override:
@@ -788,6 +885,8 @@ def _detect_provider() -> str:
     provider = os.environ.get("CORESMITH_LLM_PROVIDER", "").strip().lower()
     if provider in {"codex", "codex_cli"}:
         return "codex_cli"
+    if provider in {"opencode", "opencode_cli", "openrouter"}:
+        return "opencode_cli"
     if provider in {"kimi", "kimi_cli"}:
         return "kimi_cli"
     if provider in {"claude", "claude_cli", ""}:
@@ -797,8 +896,10 @@ def _detect_provider() -> str:
     if provider in _TESTING_PROVIDERS:
         return provider
     raise ValueError(
-        "Unsupported CORESMITH_LLM_PROVIDER={!r}. Use 'claude', 'codex', 'kimi', 'agy', "
-        "or a testing provider ({}).".format(provider, ", ".join(sorted(_TESTING_PROVIDERS)))
+        "Unsupported CORESMITH_LLM_PROVIDER={!r}. Use 'claude', 'codex', "
+        "'opencode', 'kimi', 'agy', or a testing provider ({}).".format(
+            provider, ", ".join(sorted(_TESTING_PROVIDERS))
+        )
     )
 
 
@@ -966,6 +1067,32 @@ def _invalidate_resume_flags(codex_path: str) -> None:
         _RESUME_FLAGS_CACHE.pop(codex_path, None)
 
 
+def _find_opencode_binary() -> str:
+    """Locate the official OpenCode CLI binary."""
+    env_path = os.environ.get("OPENCODE_CLI_PATH", "")
+    if env_path and os.path.isfile(env_path) and os.access(env_path, os.X_OK):
+        return env_path
+
+    which_path = shutil.which("opencode")
+    if which_path:
+        return which_path
+
+    candidates = [
+        os.path.expanduser("~/.opencode/bin/opencode"),
+        os.path.expanduser("~/.local/bin/opencode"),
+        os.path.expanduser("~/.npm-global/bin/opencode"),
+        os.path.expanduser("~/.npm/bin/opencode"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+
+    raise FileNotFoundError(
+        "OpenCode CLI not found. Install it with: npm install -g opencode-ai\n"
+        "Or set OPENCODE_CLI_PATH to the binary location."
+    )
+
+
 # ---------------------------------------------------------------------------
 # ClaudeLLM -- plain Python class (no LangChain)
 # ---------------------------------------------------------------------------
@@ -995,6 +1122,7 @@ class ClaudeLLM:
         kimi_path: str = "",
         codex_path: str = "",
         agy_path: str = "",
+        opencode_path: str = "",
         timeout: int = 1200,
         max_turns: int = 50,
         disable_tools: bool = False,
@@ -1005,6 +1133,7 @@ class ClaudeLLM:
         self.kimi_path = kimi_path
         self.codex_path = codex_path
         self.agy_path = agy_path
+        self.opencode_path = opencode_path
         self.timeout = timeout
         self.max_turns = max_turns
         self.disable_tools = disable_tools
@@ -1046,6 +1175,9 @@ class ClaudeLLM:
             if not self.agy_path:
                 self.agy_path = _find_agy_binary()
                 logger.info(f"Found agy CLI at: {self.agy_path}")
+        elif self._provider == "opencode_cli" and not self.opencode_path:
+            self.opencode_path = _find_opencode_binary()
+            logger.info("Found OpenCode CLI at: %s", self.opencode_path)
 
     async def call(
         self,
@@ -1193,6 +1325,9 @@ class ClaudeLLM:
             return _get_testing_backend(self._provider).generate(
                 self, system_prompt, user_prompt, resume_session_id,
             )
+
+        if self._provider == "opencode_cli":
+            return self._generate_via_opencode_cli(system_prompt, user_prompt)
 
         if self._provider == "codex_cli":
             return self._generate_via_codex_cli(
@@ -2067,6 +2202,120 @@ class ClaudeLLM:
         )
 
 
+    def _generate_via_opencode_cli(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        """Call OpenCode with Kimi through its built-in OpenRouter provider."""
+        resolved_model = _resolve_model(self.model, self._provider)
+        workdir = (
+            os.environ.get("CORESMITH_OPENCODE_WORKDIR", "").strip()
+            or os.environ.get("CORESMITH_PROJECT_ROOT", "").strip()
+            or _default_project_root()
+        )
+        Path(workdir).mkdir(parents=True, exist_ok=True)
+        project_root = _llm_log_root()
+        combined_prompt = self._build_codex_prompt(system_prompt, user_prompt)
+
+        cmd = [
+            self.opencode_path,
+            "--pure",
+            "run",
+            "--format", "json",
+            "--thinking",
+            "--model", resolved_model,
+            "--dir", workdir,
+            "--auto",
+        ]
+
+        process_env = os.environ.copy()
+        if self.disable_tools:
+            try:
+                inline_config = _json.loads(
+                    process_env.get("OPENCODE_CONFIG_CONTENT", "{}") or "{}"
+                )
+            except _json.JSONDecodeError as exc:
+                raise ValueError(
+                    "OPENCODE_CONFIG_CONTENT must be valid JSON when disable_tools=True"
+                ) from exc
+            if not isinstance(inline_config, dict):
+                raise ValueError("OPENCODE_CONFIG_CONTENT must contain a JSON object")
+            inline_config["permission"] = "deny"
+            process_env["OPENCODE_CONFIG_CONTENT"] = _json.dumps(inline_config)
+
+        logger.info(
+            "OpenCode invocation: model=%s prompt_len=%d system_len=%d",
+            resolved_model,
+            len(user_prompt),
+            len(system_prompt),
+        )
+        t0 = _time_mod.monotonic()
+        span_start_ns = _time_mod.time_ns()
+        try:
+            output, stderr_text, returncode, elapsed, timed_out, stalled, usage = (
+                self._run_cli_with_watchdog(
+                    cmd,
+                    combined_prompt,
+                    project_root,
+                    resolved_model,
+                    t0,
+                    process_env=process_env,
+                )
+            )
+        except FileNotFoundError:
+            elapsed = _time_mod.monotonic() - t0
+            error_msg = "OpenCode CLI binary not found"
+            output = (
+                "[ClaudeLLM error: OpenCode CLI binary not found. "
+                "Install: npm install -g opencode-ai]"
+            )
+            _log_llm_call(
+                model=resolved_model,
+                provider="opencode_cli",
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response=output,
+                duration_s=elapsed,
+                timeout=self.timeout,
+                error=error_msg,
+                start_ts_ns=span_start_ns,
+            )
+            return output
+
+        if timed_out or stalled:
+            reason = "stalled" if stalled else "timed out"
+            error_msg = f"OpenCode CLI {reason} after {elapsed:.0f}s"
+            if stderr_text:
+                error_msg += f" | stderr: {stderr_text[:300]}"
+            output = f"[ClaudeLLM error: {error_msg}]"
+        elif returncode != 0:
+            error_msg = (
+                f"OpenCode CLI exited with code {returncode}: "
+                f"{stderr_text[:500] or output[:500]}"
+            )
+            output = f"[ClaudeLLM error: {error_msg}]"
+        elif not output:
+            error_msg = f"OpenCode CLI returned empty response: {stderr_text[:500]}"
+            output = f"[ClaudeLLM error: {error_msg}]"
+        else:
+            error_msg = ""
+
+        _log_llm_call(
+            model=resolved_model,
+            provider="opencode_cli",
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response=output,
+            duration_s=elapsed,
+            timeout=self.timeout,
+            error=error_msg,
+            timed_out=timed_out or stalled,
+            usage=usage,
+            start_ts_ns=span_start_ns,
+        )
+        return output
+
     @staticmethod
     def _build_codex_prompt(system_prompt: str, user_prompt: str) -> str:
         if not system_prompt:
@@ -2264,6 +2513,7 @@ class ClaudeLLM:
         resolved_model: str,
         t0: float,
         cwd: str | None = None,
+        process_env: dict[str, str] | None = None,
     ) -> tuple[str, str, int, float, bool, bool, dict]:
         """Run the CLI via ``Popen`` with stall detection and heartbeats.
 
@@ -2289,6 +2539,7 @@ class ClaudeLLM:
             stderr=subprocess.PIPE,
             text=True,
             cwd=cwd,
+            env=process_env,
             # Own session/group so we can reap the ENTIRE tree (the CLI plus any
             # sim/tool grandchildren it spawns) at the end -- see
             # _reap_process_group. Isolating the group also means killpg can't
@@ -2485,6 +2736,20 @@ class ClaudeLLM:
             # llm_start event that carries the human-readable run_name.
             try:
                 _log_codex_turns(
+                    stdout_text,
+                    project_root,
+                    process.pid if process.pid else 0,
+                    wall_start,
+                )
+            except Exception:
+                pass
+        elif self._provider == "opencode_cli":
+            response_text, usage = _parse_opencode_json(stdout_text)
+            # OpenCode stores sessions internally, but CoreSmith also keeps a
+            # project-local raw trajectory so exposed reasoning remains with
+            # the run artifacts and can be correlated by pid/run_name.
+            try:
+                _log_opencode_turns(
                     stdout_text,
                     project_root,
                     process.pid if process.pid else 0,

@@ -206,7 +206,9 @@ RUN mkdir -p /opt/npm-global \
  && npm install -g --force --libc=musl \
         @moonshot-ai/kimi-code \
         @anthropic-ai/claude-code \
-        @anthropic-ai/claude-code-linux-x64-musl
+        @anthropic-ai/claude-code-linux-x64-musl \
+        opencode-ai \
+        opencode-linux-x64-musl
 
 # `npm install -g`'s postinstall on the wrapper package may have copied
 # the glibc binary over bin/claude.exe (because Nix Node is glibc-
@@ -217,17 +219,29 @@ RUN set -eux \
  && test -x "${MUSL_BIN}" \
  && ln -sf "${MUSL_BIN}" /opt/npm-global/bin/claude
 
-# Capture the resolved agent CLI paths at build time so PATH changes cannot
-# break runtime discovery. Fail the build loudly if either CLI is unusable.
+# OpenCode also ships glibc and musl native variants. This image needs the
+# explicit x64-musl binary for the same reason as Claude Code above.
+RUN set -eux \
+ && OPENCODE_MUSL_BIN=/opt/npm-global/lib/node_modules/opencode-linux-x64-musl/bin/opencode \
+ && test -x "${OPENCODE_MUSL_BIN}" \
+ && ln -sf "${OPENCODE_MUSL_BIN}" /opt/npm-global/bin/opencode
+
+# Capture the resolved agent CLI paths at build time and bake them so runtime
+# resolution can't drift if PATH changes under us. Fail the build loud if any
+# CLI is unusable -- the runtime "PermissionError: ''" failure mode is much
+# harder to debug.
 RUN set -eux \
  && CLAUDE_BIN="$(command -v claude)" \
+ && OPENCODE_BIN="$(command -v opencode)" \
  && KIMI_BIN="$(command -v kimi)" \
  && test -x "${CLAUDE_BIN}" \
+ && test -x "${OPENCODE_BIN}" \
  && test -x "${KIMI_BIN}" \
  && claude --version \
+ && opencode --version \
  && kimi --version \
- && printf 'CLAUDE_CLI_PATH=%s\nKIMI_CLI_PATH=%s\n' \
-        "${CLAUDE_BIN}" "${KIMI_BIN}" > /etc/coresmith.env
+ && printf 'CLAUDE_CLI_PATH=%s\nOPENCODE_CLI_PATH=%s\nKIMI_CLI_PATH=%s\n' \
+      "${CLAUDE_BIN}" "${OPENCODE_BIN}" "${KIMI_BIN}" > /etc/coresmith.env
 
 # sshd setup so RunPod / interactive users can ssh in (and the web
 # terminal works because PID 1 stays alive even after the pipeline
