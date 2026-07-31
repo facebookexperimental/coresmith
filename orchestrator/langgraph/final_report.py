@@ -701,7 +701,11 @@ def render_markdown(report: dict) -> str:
                 + (f", first at `{d.get('first_divergence_block')}`"
                    if d.get('first_divergence_block') else "")
             )
-            if d.get("unmodeled"):
+            # The explanation first -- a gate/kind pair with a violation count
+            # tells a reader nothing they can act on.
+            if d.get("detail"):
+                lines.append(f"  - {d['detail']}")
+            if d.get("unmodeled") and d.get("unmodeled") != d.get("detail"):
                 lines.append(f"  - unmodeled: {d['unmodeled']}")
         lines.append("")
 

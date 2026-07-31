@@ -512,8 +512,20 @@ def record_carried_forward_defect(project_root: str, defect: dict) -> None:
     second bus), not a generic single-role label. De-dups on (gate, kind,
     unmodeled, first_divergence_block) so a re-entered node does not spam the
     ledger. Never raises -- this is a record, never a gate.
+
+    Every entry leaves here with a ``detail``: the EXPLANATION a reader needs
+    to act on it. Most recorders had built that sentence and then dropped it
+    (or stored it under a key nothing rendered), so the ledger's entries read
+    ``detail: None`` and the final report printed a gate/kind pair with no
+    account of what happened. Callers that supply one keep it; the rest fall
+    back to the most specific text the entry does carry.
     """
     try:
+        if not str(defect.get("detail") or "").strip():
+            defect = dict(defect)
+            defect["detail"] = (str(defect.get("unmodeled") or "").strip()
+                                or str(defect.get("note") or "").strip()
+                                or str(defect.get("reason") or "").strip())
         existing = read_carried_forward_defects(project_root)
         key = (defect.get("gate"), defect.get("kind"),
                defect.get("unmodeled"), defect.get("first_divergence_block"))
@@ -10331,8 +10343,10 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                     f"{d.get('violation_count',0)} violation(s)"
                     + (f", first at {d.get('first_divergence_block')}"
                        if d.get('first_divergence_block') else "")
+                    + (f"; {d.get('detail')}" if d.get('detail') else "")
                     + (f"; UNMODELED: {d.get('unmodeled')}"
-                       if d.get('unmodeled') else ""))
+                       if d.get('unmodeled')
+                       and d.get('unmodeled') != d.get('detail') else ""))
             ers_context = ers_context + "\n".join(_cfd_lines)
             log(f"  [VALIDATION-DV] {len(_cfd)} carried-forward defect(s) added "
                 f"to validation context", YELLOW)

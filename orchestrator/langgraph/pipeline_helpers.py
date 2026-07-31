@@ -800,6 +800,10 @@ def _report_uarch_golden(block_name: str, ref: str, resolved: str) -> None:
             "kind": kind,
             "advisory": True,
             "unmodeled": detail,
+            # The explanation the report renders. It was built right above and
+            # then went nowhere the report reads, so every uarch_golden entry
+            # in the ledger carried a gate/kind pair and no account of itself.
+            "detail": detail,
             "first_divergence_block": block_name,
             "note": "",
         })
