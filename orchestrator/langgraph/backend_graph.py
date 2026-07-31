@@ -95,6 +95,12 @@ class BackendState(TypedDict):
     target_clock_mhz: float
     max_attempts: int
     block_queue: list[dict]
+    # Stop the backend after flat synthesis + the chip_top gate-sim verdict,
+    # WITHOUT entering P&R/DRC/LVS. This is what the frontend->backend handoff
+    # asks for: the flat netlist and its gate-sim verdict are the deliverable,
+    # and hardening a chip nobody asked to harden costs hours of EDA. Absent /
+    # False keeps the full physical flow (every existing caller).
+    stop_after_gate_sim: bool
 
     # Backend Lead fields (set by init_design, consumed downstream) ────────
     frontend_blocks: list[dict]           # completed blocks from pipeline
@@ -110,6 +116,10 @@ class BackendState(TypedDict):
     chip_gate_sim_status: str
     chip_gate_sim_reason: str
     flat_sdc_path: str                   # syn/output/<design>/<design>.sdc
+    # Per-attempt synthesis failure reasons retained even when a LATER attempt
+    # succeeded ([{attempt, error_summary, source, timestamp, unrecorded}]).
+    # Empty when nothing failed. Also merged into synth_result.json.
+    synth_attempt_history: list[dict]
     synth_gate_count: int
     synth_area_um2: float
     macro_bindings: list                 # Part C: [{name,lef,gds,lib,...}] bound shells
@@ -233,6 +243,7 @@ async def _run_llm_eda_step(
     context: dict,
     result_json_path: str,
     timeout: int = 1200,
+    capture_reply: bool = False,
 ) -> dict:
     """Run an EDA step entirely within the inner Claude LLM.
 
@@ -246,6 +257,12 @@ async def _run_llm_eda_step(
         context: Dict of template variables to fill into the prompt.
         result_json_path: Path where the LLM must write the result JSON.
         timeout: Max seconds for the LLM call.
+        capture_reply: Attach the step's own summary text under ``_llm_reply``.
+            Default OFF so every other EDA step's result dict is byte-identical
+            (these dicts land in graph state and the final report). The
+            synthesis driver opts in because a step that RETRIED internally says
+            so only in that text -- the transcript is otherwise discarded, which
+            is how "succeeded on attempt 2" left no record of attempt 1.
 
     Returns:
         Parsed result dict from the JSON file, or a failure dict.
@@ -263,23 +280,33 @@ async def _run_llm_eda_step(
 
     llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=timeout)
 
+    reply = ""
     try:
-        await llm.call(
+        reply = await llm.call(
             system=system_prompt,
             prompt=user_message,
             run_name=step_name,
-        )
+        ) or ""
     except Exception as e:
         return {"success": False, "error": f"LLM call failed: {e}"}
 
     result_path = Path(result_json_path)
     if result_path.exists():
         try:
-            return json.loads(result_path.read_text(encoding="utf-8"))
+            parsed = json.loads(result_path.read_text(encoding="utf-8"))
+            if capture_reply and isinstance(parsed, dict):
+                parsed.setdefault("_llm_reply", str(reply)[:4000])
+            return parsed
         except (json.JSONDecodeError, OSError):
             pass
 
-    return {"success": False, "error": f"LLM did not write result JSON to {result_json_path}"}
+    failed = {
+        "success": False,
+        "error": f"LLM did not write result JSON to {result_json_path}",
+    }
+    if capture_reply:
+        failed["_llm_reply"] = str(reply)[:4000]
+    return failed
 
 
 def _block_name(state: BackendState) -> str:
@@ -539,6 +566,55 @@ def _format_constraints(state: BackendState) -> str:
 # Node: flat_top_synthesis  (LLM-driven Yosys synthesis)
 # ---------------------------------------------------------------------------
 
+_INTEGRATION_TB_DIRS = ("sim_build/integration", "tb/integration")
+
+
+def find_integration_tb(root: Path, design_name: str) -> tuple[str, str]:
+    """Locate the integration-DV testbench. Returns ``(path, note)``.
+
+    ``path`` is "" when none can be chosen, and ``note`` then explains why.
+
+    Why this is not just ``test_<design_name>.py``: the integration testbench is
+    named after the FRONTEND design (``integration_result["design_name"]``),
+    while the backend's ``design_name`` is the actual top MODULE that
+    ``init_design_node`` read out of the integration RTL -- on a Caravel design
+    that is ``user_project_wrapper``. The two are routinely different names for
+    the same chip, and the exact-name lookup then found nothing and silently
+    reported ``not_run``: the flat netlist that becomes silicon went un-simulated
+    because of a filename.
+
+    So: try the design_name form first (unambiguous when it exists), and
+    otherwise fall back to the single ``test_*.py`` present. REFUSE on ambiguity
+    -- picking one of several testbenches by sort order is how a gate ends up
+    grading the wrong stimulus and calling it a pass.
+    """
+    for rel in _INTEGRATION_TB_DIRS:
+        cand = root / rel / f"test_{design_name}.py"
+        if cand.is_file():
+            return str(cand), ""
+    for rel in _INTEGRATION_TB_DIRS:
+        d = root / rel
+        if not d.is_dir():
+            continue
+        found = sorted(p for p in d.glob("test_*.py") if p.is_file())
+        if len(found) == 1:
+            return str(found[0]), (
+                f"no test_{design_name}.py; using the only integration "
+                f"testbench present, {found[0].name} (the TB is named after the "
+                "frontend design, the backend top module is "
+                f"'{design_name}')")
+        if len(found) > 1:
+            names = ", ".join(p.name for p in found)
+            return "", (
+                f"AMBIGUOUS integration testbench: no test_{design_name}.py, and "
+                f"{len(found)} candidates in {rel} ({names}). Refusing to guess "
+                "which stimulus is the chip's -- grading the wrong testbench "
+                "would report a pass for a netlist nothing verified. Name the "
+                f"chip's TB test_{design_name}.py, or remove the others.")
+    return "", ("no integration-DV testbench found -- chip_top gate-sim needs "
+                "the integration vectors as its reference stimulus")
+
+
 def _run_chip_top_gate_sim(state: "BackendState", netlist: str) -> tuple:
     """Replay the integration-DV vectors through the FLAT CHIP NETLIST.
 
@@ -570,17 +646,12 @@ def _run_chip_top_gate_sim(state: "BackendState", netlist: str) -> tuple:
 
     # Integration DV is the reference stimulus: real traffic through the
     # assembled chip, and the run that already matched the golden.
-    tb = ""
-    for cand in (root / "sim_build" / "integration" / f"test_{design}.py",
-                 root / "tb" / "integration" / f"test_{design}.py"):
-        if cand.is_file():
-            tb = str(cand)
-            break
+    tb, tb_reason = find_integration_tb(root, design)
     if not tb:
-        reason = ("no integration-DV testbench found -- chip_top gate-sim needs "
-                  "the integration vectors as its reference stimulus")
-        log(f"  [CHIP-GATE-SIM] not run -- {reason}", YELLOW)
-        return (None, _gs.STATUS_NOT_RUN, reason)
+        log(f"  [CHIP-GATE-SIM] not run -- {tb_reason}", YELLOW)
+        return (None, _gs.STATUS_NOT_RUN, tb_reason)
+    if tb_reason:
+        log(f"  [CHIP-GATE-SIM] {tb_reason}", YELLOW)
 
     # The reference stimulus is the integration DV's own source set, rebuilt
     # from the SAME builder that DV used -- never a single path. `top_rtl_path`
@@ -805,16 +876,43 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
                 "sram_wrapper_lib": _sram_wrapper_lib or "(already in inputs)",
             },
             result_json_path=result_json_path,
+            # the driver retries Yosys internally -- its own summary is the only
+            # place that says so (see collect_synth_attempt_history)
+            capture_reply=True,
         )
 
         span.set_attribute("success", result.get("success", False))
         if result.get("success"):
             span.set_attribute("gate_count", result.get("gate_count", 0))
 
+    # SELF-RECOVERY MUST NOT BE SILENT. The driver retries Yosys internally; a
+    # live run logged "Synthesis succeeded on attempt 2" and attempt 1's reason
+    # survived nowhere -- not in attempt_history, not in previous_error, not in
+    # synth_result.json. Retain every attempt's failure reason (driver-reported,
+    # harvested from the Yosys logs on disk, and the node's own prior failure),
+    # and record EXPLICITLY when the driver claims a retry we cannot account for.
+    from orchestrator.langgraph.backend_helpers import (
+        collect_synth_attempt_history,
+        describe_synth_attempt_history,
+        persist_synth_attempt_history,
+    )
+    _synth_history = collect_synth_attempt_history(
+        result,
+        output_dir=output_dir,
+        llm_reply=str(result.get("_llm_reply", "")),
+        prior_error=str(state.get("previous_error", "")),
+        node_attempt=int(state.get("attempt", 1) or 1),
+    )
+    if _synth_history:
+        persist_synth_attempt_history(result_json_path, _synth_history)
+        log("  [FLAT-SYNTH] " + describe_synth_attempt_history(_synth_history),
+            YELLOW)
+
     write_graph_event(pr, "Flat Top Synthesis", "graph_node_exit", {
         "design_name": design_name,
         "success": result.get("success", False),
         "gate_count": result.get("gate_count", 0),
+        "synth_attempt_failures": len(_synth_history),
         "graph": "backend",
     })
 
@@ -835,6 +933,7 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
             })
             return {
                 "phase": "synth",
+                "synth_attempt_history": _synth_history,
                 "previous_error": _bind_err,
                 "flat_netlist_path": "",
                 "flat_sdc_path": "",
@@ -842,6 +941,7 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
         _gs_ok, _gs_status, _gs_reason = _run_chip_top_gate_sim(state, _netlist)
         return {
             "phase": "synth",
+            "synth_attempt_history": _synth_history,
             "flat_netlist_path": _netlist,
             "flat_sdc_path": result.get("sdc_path", ""),
             "synth_gate_count": result.get("gate_count", 0),
@@ -856,9 +956,15 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
                 f"chip_top gate-sim FAIL: {_gs_reason}"} if _gs_ok is False else {}),
         }
     else:
+        # A FAILED synthesis carries its per-attempt history into previous_error
+        # too: diagnose reads that string, and "attempt 3 failed" without the two
+        # reasons before it is what made the same script defect recur every run.
+        _err = result.get("error", "Flat synthesis failed")
+        _hist_txt = describe_synth_attempt_history(_synth_history)
         return {
             "phase": "synth",
-            "previous_error": result.get("error", "Flat synthesis failed"),
+            "synth_attempt_history": _synth_history,
+            "previous_error": (f"{_err}\n\n{_hist_txt}" if _hist_txt else _err),
             "flat_netlist_path": "",
             "flat_sdc_path": "",
         }
@@ -993,8 +1099,22 @@ def route_after_flat_synth(state: BackendState) -> str:
     ``chip_gate_sim_ok is None`` means the gate did not APPLY (disabled, no
     integration TB, toolchain absent). That is not a verdict and must not block:
     it is already logged with a reason at the point it happened.
+
+    ``stop_after_gate_sim`` ends the graph here in EVERY outcome -- pass, fail
+    and did-not-apply alike. The caller asked for the flat netlist plus the
+    gate-sim verdict and nothing more, so a FAIL must not silently pull the run
+    into the diagnose/retry loop (hours of LLM-driven EDA the caller did not ask
+    for). The verdict is in ``chip_gate_sim_ok`` / ``_status`` / ``_reason``,
+    and a synth failure is in ``previous_error``; both are read from the final
+    state, so ending is not the same as hiding.
     """
     netlist = state.get("flat_netlist_path", "")
+    if state.get("stop_after_gate_sim"):
+        log("  [BACKEND] stopping after flat synthesis + chip gate-sim "
+            f"(gate-sim={state.get('chip_gate_sim_status', 'n/a')}); P&R/DRC/LVS "
+            "NOT run -- pass full=true / --full to continue into the physical "
+            "flow.", CYAN)
+        return END
     if not (netlist and Path(netlist).exists()):
         return "diagnose"
     if state.get("chip_gate_sim_ok") is False:
@@ -1005,6 +1125,7 @@ def route_after_flat_synth(state: BackendState) -> str:
 route_after_flat_synth.__edge_labels__ = {
     "run_pnr": "SUCCESS",
     "diagnose": "FAIL",
+    END: "STOP AFTER GATE-SIM",
 }
 
 

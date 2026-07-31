@@ -346,3 +346,83 @@ class TestUarchGateAdvisoryBypass:
         assert mir.get("passed") is not True
         assert mir.get("first_divergence_block") == "raster"
         assert route_after_uarch_gate(result) == "begin_rtl_pass"
+
+
+# ---------------------------------------------------------------------------
+# The gate's EXIT BANNER must state the actual outcome (run3-followups #4a)
+# ---------------------------------------------------------------------------
+#
+# Measured live: the gate detected a model-level mismatch, logged it, and
+# DISMISSED it as advisory -- a legitimate non-blocking decision. Four lines
+# later the run printed a green "µARCH GATE CLEAN". Two true statements composed
+# into a false one, and the green line is the one a reader carries away.
+#
+# ``uarch_gate_banner`` does not change what the gate DOES (the bypass stays
+# advisory and the run still proceeds) -- only what it SAYS.
+
+class TestUarchGateBanner:
+    def _banner(self, result):
+        from orchestrator.langgraph.pipeline_helpers import uarch_gate_banner
+        return uarch_gate_banner(result)
+
+    def test_clean_only_when_nothing_fired(self):
+        from orchestrator.langgraph.pipeline_helpers import CYAN
+        for res in (None, {}, {"passed": True}):
+            text, colour = self._banner(res)
+            assert text.startswith("µARCH GATE CLEAN"), res
+            assert colour == CYAN
+            assert "beginning RTL pass" in text
+
+    def test_an_advisory_dismissal_is_NOT_reported_as_clean(self):
+        """THE defect. A dismissed mismatch must never print CLEAN."""
+        from orchestrator.langgraph.pipeline_helpers import YELLOW
+        text, colour = self._banner({
+            "passed": False,
+            "advisory_bypass": True,
+            "first_divergence_block": "stage_b",
+            "violations": [{"expected": "0102", "observed": "0000"}],
+        })
+        assert "GATE CLEAN" not in text        # the green claim, gone
+        assert "NOT CLEAN" in text
+        assert colour == YELLOW
+        # it names the finding, says it was non-blocking, and still says the
+        # run proceeds -- all three, because all three are true
+        assert "1 model-level mismatch(es)" in text
+        assert "ADVISORY" in text and "non-blocking" in text
+        assert "stage_b" in text
+        assert "beginning RTL pass" in text
+
+    def test_an_advisory_dismissal_without_localization_says_so(self):
+        text, _ = self._banner({"passed": False, "advisory_bypass": True,
+                                "violations": []})
+        assert "NOT CLEAN" in text
+        assert "(unlocalized)" in text
+
+    def test_a_signed_off_derate_is_not_plain_clean_either(self):
+        from orchestrator.langgraph.pipeline_helpers import YELLOW
+        text, colour = self._banner({"passed": True, "derate_signed_off": True})
+        assert "DERATE" in text and colour == YELLOW
+        assert "GATE CLEAN" not in text
+
+    def test_a_non_advisory_failure_is_also_never_clean(self):
+        text, _ = self._banner({"passed": False, "action_taken": "retry"})
+        assert "NOT CLEAN" in text and "retry" in text
+
+    @pytest.mark.asyncio
+    async def test_the_advisory_bypass_result_the_NODE_produces_is_not_clean(
+            self, tmp_path, monkeypatch):
+        """PRODUCTION SHAPE: feed the banner the dict the real advisory-bypass
+        branch returns, not a hand-written one -- the shapes cannot drift."""
+        monkeypatch.setenv("CORESMITH_DETERMINISTIC_BFM", "1")
+        calls = _install_failing_gate(monkeypatch)
+        result = await pipeline_graph.uarch_integration_gate_node(
+            {"project_root": str(tmp_path)}
+        )
+        mir = result["model_integration_result"]
+        assert mir.get("advisory_bypass") is True
+        assert calls["interrupt"] == 0
+        # ...and the run proceeds to the RTL pass, which is exactly where the
+        # green banner used to be printed.
+        assert route_after_uarch_gate(result) == "begin_rtl_pass"
+        text, _ = self._banner(mir)
+        assert "NOT CLEAN" in text and "ADVISORY" in text

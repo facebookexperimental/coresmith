@@ -837,6 +837,52 @@ def parse_sdc_period_ns(sdc_text: str) -> float | None:
     return min(vals) if vals else None
 
 
+def implausible_slack_ns() -> float:
+    """|WNS| above which a slack number is a SENTINEL, not a measurement.
+
+    OpenSTA answers ``worst_slack`` with its internal infinity when the design
+    it linked has no timing endpoints at all -- nothing to constrain, so nothing
+    to be late. That comes back as ``1.0000000433293989e+39``, and the block PPA
+    gate happily compared it to a budget and announced "within budget". Three
+    blocks of the first hands-off run passed their timing dimension on that
+    number, two of them the SRAM-bearing blocks whose timing is the whole
+    question.
+
+    No real pre-layout slack is anywhere near this: a 20 ns clock puts an honest
+    WNS in the tens of ns, and even a pathological unbuffered fan-out cone tops
+    out in the hundreds. A megasecond of slack is a tool sentinel.
+    Override with ``CORESMITH_PPA_MAX_PLAUSIBLE_WNS_NS``.
+    """
+    try:
+        return abs(float(os.environ.get(
+            "CORESMITH_PPA_MAX_PLAUSIBLE_WNS_NS", "1e6") or "1e6"))
+    except ValueError:
+        return 1e6
+
+
+def slack_is_implausible(wns_ns: float | None) -> bool:
+    """True when a slack value can only be a sentinel / uninitialised read."""
+    if wns_ns is None:
+        return False
+    try:
+        v = float(wns_ns)
+    except (TypeError, ValueError):
+        return False
+    return not (v == v) or abs(v) > implausible_slack_ns()  # NaN or huge
+
+
+def implausible_slack_detail(wns_ns: float, where: str = "") -> str:
+    """The reason string a sentinel slack travels with. States WHAT it saw."""
+    return (
+        f"implausible slack{f' from {where}' if where else ''}: "
+        f"{wns_ns:.6g} ns exceeds the plausibility bound "
+        f"{implausible_slack_ns():g} ns -- this is a tool SENTINEL (OpenSTA "
+        f"answers worst_slack with infinity when the linked design has no "
+        f"timing endpoints), not a measurement. Timing is NOT MEASURED for "
+        f"this block."
+    )
+
+
 def parse_sta_report(report_text: str) -> dict[str, float | None]:
     """Parse WNS/TNS (ns) from an OpenSTA ``report_wns``/``report_tns`` dump.
 
@@ -845,13 +891,19 @@ def parse_sta_report(report_text: str) -> dict[str, float | None]:
     legacy form, so on a modern OpenSTA (which prints the ``max`` corner token)
     the parse returned nothing and WNS/TNS silently came back ``None`` -- a
     dependency on the box's ``sta`` sed-wrapper that the engine must not rely on.
+
+    The number pattern accepts scientific notation deliberately. Without the
+    exponent the old pattern read ``wns max 1.0000000433293989e+39`` as the
+    MANTISSA, 1.0 -- a sentinel silently laundered into a plausible-looking
+    1 ns of slack, which is a worse outcome than either the sentinel or a parse
+    failure. :func:`slack_is_implausible` then rejects it honestly.
     """
     out: dict[str, float | None] = {"wns_ns": None, "tns_ns": None}
     for key, tag in (("wns_ns", "wns"), ("tns_ns", "tns")):
         # ``(?:\s+max)?`` optionally swallows the OpenSTA 3.x corner token so
         # both ``wns -3.42`` and ``wns max -3.42`` parse to the same number.
         m = re.search(
-            rf"\b{tag}\b(?:\s+max)?\s+(-?\d+(?:\.\d+)?)",
+            rf"\b{tag}\b(?:\s+max)?\s+(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)",
             report_text or "", re.IGNORECASE,
         )
         if m:
@@ -1035,6 +1087,17 @@ def evaluate_ppa(
                     f"{area_budget_um2:,.0f} µm² by >{area_tolerance_pct:.0f}%"
                 )
 
+    # A sentinel slack is NOT a measurement, wherever it came from. This is the
+    # gate's own backstop: the measurement sites reject it too, but the gate is
+    # what declares "within budget", and it must never do so on a number no
+    # timing analysis produced. Demoted to the UNMEASURED branch below, which is
+    # the tri-state house convention -- pass / fail / not-measured + reason --
+    # so it can neither silently pass nor silently fail.
+    if wns_ns is not None and slack_is_implausible(wns_ns):
+        sta_error = implausible_slack_detail(float(wns_ns), "the PPA gate input")
+        logger.warning("PPA gate: %s", sta_error)
+        wns_ns = None
+
     if wns_ns is not None:
         # Grader alignment: the accelerator-chassis grader checks only cells/area/FF +
         # functional correctness and DEFERS timing to signoff (the golden
@@ -1083,19 +1146,27 @@ def evaluate_ppa(
         _timing_advisory = os.environ.get(
             "CORESMITH_PPA_TIMING_ADVISORY", "0").strip().lower() in (
             "1", "true", "yes", "on")
+        _implausible = sta_error.startswith("implausible slack")
         checks.append({
             "metric": "wns_ns", "actual": None, "passed": bool(_timing_advisory),
             "sta_error": sta_error, "unmeasured_timing": True,
+            "implausible_slack": _implausible,
             "advisory": bool(_timing_advisory),
         })
         if not _timing_advisory:
             ok = False
             reasons.append(
-                f"pre-layout STA produced no parseable timing ({sta_error}) -- "
-                f"refusing to declare the block within budget on an UNMEASURED "
-                f"timing dimension (fail-closed). Fix the netlist / re-run STA "
-                f"(retry), or set CORESMITH_PPA_TIMING_ADVISORY=1 to accept "
-                f"unmeasurable timing for this run."
+                (f"pre-layout STA returned a SENTINEL, not a measurement "
+                 f"({sta_error}) -- the design as linked has no timing "
+                 f"endpoints (all-blackbox / no registered path), so its "
+                 f"timing is UNMEASURED and cannot be declared within budget."
+                 if _implausible else
+                 f"pre-layout STA produced no parseable timing ({sta_error}) -- "
+                 f"refusing to declare the block within budget on an UNMEASURED "
+                 f"timing dimension (fail-closed).")
+                + " Fix the netlist / re-run STA (retry), or set "
+                  "CORESMITH_PPA_TIMING_ADVISORY=1 to accept unmeasurable "
+                  "timing for this run."
             )
 
     return PpaVerdict(ok=ok, checks=checks, reasons=reasons, unmeasured=unmeasured)
@@ -1482,6 +1553,12 @@ def run_pre_layout_sta(
             if tail:
                 reason += f"; output tail: {tail}"
             return _fail(reason)
+        if slack_is_implausible(parsed["wns_ns"]):
+            # A parsed sentinel is not a timing read. Route it down the same
+            # loud "STA produced no timing" path so the gate fails closed on an
+            # UNMEASURED dimension instead of comparing infinity to a budget.
+            return _fail(implausible_slack_detail(
+                float(parsed["wns_ns"]), f"report_wns on {top_module}"))
         return parsed
     except subprocess.TimeoutExpired:
         return _fail(f"OpenSTA timed out after {timeout_s}s")
@@ -1663,7 +1740,16 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
         m = re.search(r"worst slack\s*(?:-?max)?\s*([-0-9.eE+]+)", out, re.IGNORECASE)
     if m is None:
         return None, "sta_parse_fail: " + out[-400:]
-    return float(m.group(1)), ""
+    val = float(m.group(1))
+    if slack_is_implausible(val):
+        # NOT a measurement. Returning it would let the caller max() it against
+        # a real number and win every comparison.
+        detail = implausible_slack_detail(
+            val, f"worst_slack -max on the {'buffered' if buffered else 'base'} "
+                 f"{top} netlist")
+        logger.warning("fan-out-aware STA for %s: %s", top, detail)
+        return None, detail
+    return val, ""
 
 
 def run_maxfanout_buffered_sta(

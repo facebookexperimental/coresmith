@@ -62,9 +62,14 @@ All outputs go in: `{output_dir}/`
    - Writes netlist: `write_verilog -noattr {output_dir}/{design_name}_netlist.v`
    - Generates stats: `stat -liberty $lib`
 
-2. Run `yosys -s <script_path>` via Bash
+2. Run `yosys -s <script_path>` via Bash, TEEING the output to a log file in
+   `{output_dir}/` (e.g. `yosys -s <script> 2>&1 | tee {output_dir}/synth_attempt1.log`).
+   Use a NEW numbered log per attempt -- never overwrite a failed attempt's log.
 
-3. If Yosys fails, read the error, fix the script, and retry (up to 3 times)
+3. If Yosys fails, read the error, fix the script, and retry (up to 3 times).
+   RECORD every failed attempt: its number and the error that ended it. A retry
+   whose reason is not written down teaches nobody, and the same script defect
+   recurs on the next run.
 
 4. Generate the SDC file with:
    ```
@@ -87,9 +92,18 @@ All outputs go in: `{output_dir}/`
   "gate_count": 150,
   "area_um2": 12345.6,
   "cell_count": 42,
-  "report_path": "{output_dir}/{design_name}_report.txt"
+  "report_path": "{output_dir}/{design_name}_report.txt",
+  "attempt_history": [
+    {{"attempt": 1, "error_summary": "ERROR: Module `cs_sram_1rw' referenced in module `top' is not part of the design"}}
+  ]
 }}
 ```
+
+`attempt_history` is REQUIRED whenever you retried, **including when a later
+attempt succeeded** -- one entry per FAILED attempt, with the error that ended
+it. Omit the key (or use `[]`) only when the FIRST attempt succeeded. Reporting
+"succeeded on attempt 2" in prose while leaving attempt 1's reason out of the
+JSON is the exact silence this field exists to end.
 
 If synthesis fails after all retries:
 ```json
@@ -97,7 +111,11 @@ If synthesis fails after all retries:
   "success": false,
   "error": "description of the failure",
   "gate_count": 0,
-  "area_um2": 0
+  "area_um2": 0,
+  "attempt_history": [
+    {{"attempt": 1, "error_summary": "..."}},
+    {{"attempt": 2, "error_summary": "..."}}
+  ]
 }}
 ```
 

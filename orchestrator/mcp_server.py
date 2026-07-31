@@ -2945,29 +2945,31 @@ async def run_step(
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-@server.tool()
-async def start_backend(
+async def launch_backend(
     max_attempts: int = 3,
     target_clock_mhz: float = 50.0,
-) -> str:
-    """Start the backend physical design graph as a background task.
+    stop_after_gate_sim: bool = False,
+) -> dict:
+    """Build the backend graph's initial state and launch it. Returns a dict.
 
-    Loads blocks from the frontend's completed results and launches
-    the LangGraph backend graph.  The graph runs autonomously -- it
-    only pauses when failures need human review (interrupt).
+    THE one implementation of "start the backend", shared by the MCP tool
+    :func:`start_backend` and the daemon's ``POST /backend/start`` -- the same
+    "one implementation, two transports" split ``/run/restart-block`` already
+    uses. The two must not drift: the whole point of the daemon endpoint is that
+    a run reaching ``pipeline_done`` can enter flat synthesis + the chip_top
+    gate-sim with no MCP client in the loop, and it can only do that faithfully
+    if it builds the exact state the MCP path built.
 
-    Call get_backend_state() to monitor progress.
-
-    Args:
-        max_attempts: Maximum retry attempts per block (default 3).
-        target_clock_mhz: Target clock frequency in MHz (default 50.0).
+    ``stop_after_gate_sim`` ends the graph after flat synthesis + the gate-sim
+    verdict instead of continuing into P&R/DRC/LVS. Default False -- every
+    existing caller keeps the full physical flow.
     """
     if _backend.status == "running":
-        return json.dumps({
+        return {
             "error": "Backend already running",
             "thread_id": _backend.thread_id,
             "status": _backend.status,
-        })
+        }
 
     await _backend.ensure_graph()
 
@@ -2999,7 +3001,28 @@ async def start_backend(
         frontend_blocks = block_queue
 
     if not block_queue:
-        return json.dumps({"error": "No blocks found in block_specs.json or config.yaml"})
+        return {"error": "No blocks found in block_specs.json or config.yaml"}
+
+    # Blocks retired by the pin map were deliberately never microarchitected,
+    # generated or synthesized (the chip top emits their routing itself) --
+    # they must not gate the backend launch nor enter the backend state.
+    from orchestrator.architecture.pin_map_retire import read_retired_blocks
+    _retired = {r.get("block") for r in read_retired_blocks(_project_root())
+                if isinstance(r, dict) and r.get("block")}
+    if _retired:
+        def _blk_name(b):
+            return b["name"] if isinstance(b, dict) else b
+        _before = len(block_queue)
+        block_queue = [b for b in block_queue if _blk_name(b) not in _retired]
+        frontend_blocks = [
+            b for b in frontend_blocks if _blk_name(b) not in _retired
+        ]
+        import logging
+        logging.getLogger(__name__).warning(
+            "backend gate: excluding %d pin-map-retired block(s) %s "
+            "(%d -> %d in queue)",
+            len(_retired), sorted(_retired), _before, len(block_queue),
+        )
 
     # Load architecture connections
     from orchestrator.langgraph.integration_helpers import load_architecture_connections
@@ -3038,24 +3061,24 @@ async def start_backend(
             missing_synth.append(bname)
 
     if missing_rtl or missing_synth:
-        return json.dumps({
+        return {
             "error": "Backend gate failed: not all blocks have required artifacts",
             "missing_rtl": missing_rtl,
             "missing_synthesis": missing_synth,
             "hint": "All blocks must pass frontend (RTL + synthesis) before backend. "
                     "Re-run the pipeline or restart failed blocks.",
-        })
+        }
 
     # Preflight: validate backend PDK/EDA tools exist before resetting checkpoint
     from orchestrator.langgraph.pipeline_helpers import preflight_check
     check = preflight_check(["backend"])
     if not check["ok"]:
-        return json.dumps({
+        return {
             "error": "Preflight failed — required backend tools/PDK files missing",
             "details": check["errors"],
             "warnings": check.get("warnings", []),
             "hint": "Fix the missing dependencies before starting the backend.",
-        })
+        }
 
     await _backend.reset_for_new_run()
 
@@ -3068,6 +3091,7 @@ async def start_backend(
         "target_clock_mhz": target_clock_mhz,
         "max_attempts": max_attempts,
         "block_queue": block_queue,
+        "stop_after_gate_sim": bool(stop_after_gate_sim),
         # Backend Lead fields
         "frontend_blocks": frontend_blocks,
         "architecture_connections": architecture_connections,
@@ -3114,16 +3138,45 @@ async def start_backend(
     await asyncio.sleep(0.1)
 
     result = {
+        "started": True,
         "status": _backend.status,
         "thread_id": _backend.thread_id,
         "blocks": len(block_queue),
         "block_names": [b["name"] for b in block_queue],
         "max_attempts": max_attempts,
         "target_clock_mhz": target_clock_mhz,
+        "stop_after_gate_sim": bool(stop_after_gate_sim),
     }
     if _backend.error_message:
         result["error_message"] = _backend.error_message
-    return json.dumps(result)
+    return result
+
+
+@server.tool()
+async def start_backend(
+    max_attempts: int = 3,
+    target_clock_mhz: float = 50.0,
+    stop_after_gate_sim: bool = False,
+) -> str:
+    """Start the backend physical design graph as a background task.
+
+    Loads blocks from the frontend's completed results and launches
+    the LangGraph backend graph.  The graph runs autonomously -- it
+    only pauses when failures need human review (interrupt).
+
+    Call get_backend_state() to monitor progress.
+
+    Args:
+        max_attempts: Maximum retry attempts per block (default 3).
+        target_clock_mhz: Target clock frequency in MHz (default 50.0).
+        stop_after_gate_sim: stop after flat synthesis + the chip_top gate-sim
+            verdict instead of running P&R/DRC/LVS (default False).
+    """
+    return json.dumps(await launch_backend(
+        max_attempts=max_attempts,
+        target_clock_mhz=target_clock_mhz,
+        stop_after_gate_sim=stop_after_gate_sim,
+    ))
 
 
 @server.tool()

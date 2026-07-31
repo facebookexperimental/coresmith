@@ -96,7 +96,7 @@ def preflight_check(phases: list[str] | None = None) -> dict:
         "yes",
         "on",
     }
-    # HOT-PATCH (chip-lead, codecv4-synthgated): honor CORESMITH_SYNTH_GENERIC in
+    # HOT-PATCH (chip-lead, synth-gated run): honor CORESMITH_SYNTH_GENERIC in
     # preflight. Generic (PDK-free) synth maps with abc -g and needs only yosys+
     # verilator -- NOT the sky130 Liberty/PDK. Preflight previously required the
     # PDK unconditionally whenever SKIP_SYNTH was unset, falsely blocking generic
@@ -744,8 +744,128 @@ def rtl_reference_source(block: dict) -> tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
+# µarch composition gate -- honest exit banner
+# ---------------------------------------------------------------------------
+
+def uarch_gate_banner(model_integration_result: dict | None) -> tuple[str, str]:
+    """``(banner_text, colour)`` for the µarch gate's exit banner.
+
+    CLEAN means nothing fired. Measured live: the gate detected a model-level
+    mismatch, logged it, DISMISSED it as advisory (the deterministic-BFM bypass,
+    which is a legitimate non-blocking decision) -- and four lines later the run
+    printed a green "µARCH GATE CLEAN". Two true statements were composed into a
+    false one, and the green line is the one a reader carries away.
+
+    This function does not change what the gate DOES -- the bypass stays
+    advisory, the run still proceeds -- only what it SAYS. Every outcome that is
+    not "nothing fired" gets a yellow banner naming the finding and stating
+    explicitly that it is non-blocking.
+    """
+    res = model_integration_result if isinstance(model_integration_result, dict) else {}
+    tail = " -> beginning RTL pass (pass 2)"
+
+    if res.get("advisory_bypass"):
+        n = len(res.get("violations") or [])
+        where = res.get("first_divergence_block") or ""
+        return (
+            "µARCH GATE NOT CLEAN: "
+            + (f"{n} model-level mismatch(es)" if n else "a model-level mismatch")
+            + " were DISMISSED as ADVISORY (non-blocking; the deterministic "
+            "integration DV on the real RTL is the authoritative check) and "
+            "carried forward"
+            + (f"; first-divergence block: {where}" if where else
+               "; first-divergence block: (unlocalized)")
+            + tail,
+            YELLOW,
+        )
+
+    if res and res.get("passed") is False:
+        return (
+            "µARCH GATE NOT CLEAN: the gate did not pass"
+            + (f" (action taken: {res.get('action_taken')})"
+               if res.get("action_taken") else "")
+            + tail,
+            YELLOW,
+        )
+
+    if res.get("derate_signed_off"):
+        return (
+            "µARCH GATE PASSED WITH A SIGNED-OFF DERATE (within budget, "
+            "recorded in the derate ledger)" + tail,
+            YELLOW,
+        )
+
+    # Nothing fired (or no record at all -- the gate never ran on this path).
+    return ("µARCH GATE CLEAN" + tail, CYAN)
+
+
+# ---------------------------------------------------------------------------
 # Microarchitecture Spec Generation
 # ---------------------------------------------------------------------------
+
+def _report_uarch_golden(block_name: str, ref: str, resolved: str) -> None:
+    """D1: never let an unreadable / absent golden pass SILENTLY.
+
+    Three cases, three different truths -- and the old code told none of them,
+    because every reader of a golden returns "" on failure while the uArch
+    prompt appended the golden section unconditionally. Measured on a
+    validation run: all 8 uArch calls carried an empty golden block and nothing
+    anywhere said so.
+
+      * ref declared AND resolved  -> nothing to say.
+      * ref declared, resolved ""  -> a BROKEN PROMISE. The block diagram names
+        a transcription target that cannot be read; the spec author would have
+        invented the math in its place. RED log + carried defect naming the ref.
+      * no ref at all              -> this block legitimately has no reference
+        golden (routinely most blocks of a design). Log it and carry it forward,
+        because the spec -- and every RTL lowering below it -- is then
+        unconstrained by any reference and the final report should say so.
+
+    Neither empty case raises here: the hard failure belongs where a FLAG
+    explicitly promised a golden (``CORESMITH_RTL_FROM_HW_GOLDEN`` in the RTL
+    generator, which tells the model in as many words that its output must be
+    byte-exact to a file). A block diagram ref is a weaker claim, and failing
+    every such block would trade a silent gap for a stopped run.
+    """
+    if resolved.strip():
+        return
+    if ref:
+        log(f"  [UARCH] {block_name}: DECLARED golden '{ref}' resolves to "
+            "NOTHING (missing file, bad slice name, or unreadable). The spec "
+            "author is being asked to design with no transcription target and "
+            "will invent the math. FIX THE REF.", RED)
+        kind, detail = "declared_golden_unreadable", (
+            f"block '{block_name}' declares python_source '{ref}' but it "
+            "resolves to nothing, so its uArch spec was written with an EMPTY "
+            "golden model")
+    else:
+        log(f"  [UARCH] {block_name}: NO reference golden model (no "
+            "python_source in the block diagram). The uArch spec -- and every "
+            "RTL lowering below it -- is unconstrained by any reference for "
+            "this block.", YELLOW)
+        kind, detail = "no_reference_golden", (
+            f"block '{block_name}' has no reference golden model "
+            "(python_source absent), so its uArch spec and RTL were never "
+            "checked against one")
+    try:
+        from orchestrator.langgraph.pipeline_graph import (
+            record_carried_forward_defect,
+        )
+        record_carried_forward_defect(str(PROJECT_ROOT), {
+            "gate": "uarch_golden",
+            "kind": kind,
+            "advisory": True,
+            "unmodeled": detail,
+            # The explanation the report renders. It was built right above and
+            # then went nowhere the report reads, so every uarch_golden entry
+            # in the ledger carried a gate/kind pair and no account of itself.
+            "detail": detail,
+            "first_divergence_block": block_name,
+            "note": "",
+        })
+    except Exception:  # noqa: BLE001 - reporting must never block generation
+        pass
+
 
 async def generate_uarch_spec(
     block: dict,
@@ -773,8 +893,9 @@ async def generate_uarch_spec(
     # block's OWN golden math -- not empty, not the whole chip golden). Read the
     # ref from the LIVE block_diagram.json so a chip-lead's on-disk slice edit is
     # honoured on a feasibility revise (not shadowed by the checkpoint).
-    python_source = resolve_python_source(
-        _live_python_source_ref(block, PROJECT_ROOT), PROJECT_ROOT)
+    _golden_ref = _live_python_source_ref(block, PROJECT_ROOT)
+    python_source = resolve_python_source(_golden_ref, PROJECT_ROOT)
+    _report_uarch_golden(block.get("name", ""), _golden_ref, python_source)
 
     # C13: snapshot the pre-call canonical spec + call start time. The old
     # arbitration let (a) the PRE-CALL on-disk spec compete as a "candidate"
@@ -1504,10 +1625,21 @@ async def _maybe_generate_block_golden(block: dict, callbacks: list = None) -> N
                     (PROJECT_ROOT / ".coresmith" / "blocks" / block_name
                      / "golden_feasibility_failed").write_text(
                         fr.get("reason", "degenerate golden"))
+            elif fr.get("verdict") == "pass":
+                _reach = (fr.get("checks", {})
+                          .get("slice_reachability", {}) or {})
+                log(f"  [BLOCK-MODEL] {block_name}: golden-feasibility PASS -- "
+                    f"the block's golden slice is REACHED by the reference "
+                    f"({_reach.get('reason') or 'slice exercised'})", GREEN)
             elif fr.get("ran"):
-                log(f"  [BLOCK-MODEL] {block_name}: golden-feasibility OK "
-                    f"({fr.get('checks', {}).get('slice_reachability', {}).get('verdict','')})",
-                    GREEN)
+                # NOT RUN, reported the way the gate-sim gate reports it: full
+                # reason, no green. The old line printed "OK (skipped)" in
+                # GREEN -- an OK whose own parenthetical said the discriminating
+                # check had not run. Every block of the first hands-off run got
+                # that line.
+                log(f"  [BLOCK-MODEL] {block_name}: golden-feasibility NOT RUN "
+                    f"-- {fr.get('not_run_reason') or 'no discriminating check concluded'}",
+                    YELLOW)
         except Exception as _fexc:  # noqa: BLE001 - probe is best-effort
             log(f"  [BLOCK-MODEL] {block_name}: feasibility probe skipped "
                 f"({_fexc})", YELLOW)

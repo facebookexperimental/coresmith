@@ -76,6 +76,113 @@ _last_resume_ts: float = time.time()   # bumped on every /run/start + /run/resum
 _STALL_THRESHOLD_S = float(os.environ.get("CORESMITH_INTERRUPT_STALL_S", "1800"))
 _STALL_POLL_S = float(os.environ.get("CORESMITH_INTERRUPT_STALL_POLL_S", "300"))
 
+# ---------------------------------------------------------------------------
+# When was each interrupt RAISED? (first observed pending, which is the closest
+# thing to a raise time available -- LangGraph interrupts carry no timestamp.)
+# ---------------------------------------------------------------------------
+# Both staleness answers used to be keyed to the wrong clock:
+#
+#   * ``_driver_liveness_watch`` measured "idle" as time since the last
+#     /run/resume. On a HANDS-OFF run there is no resume after /run/start, so
+#     the stall clock is already an hour old the moment the first interrupt is
+#     raised -- the daemon logged STALLED_INTERRUPT for an interrupt that was
+#     15 minutes old and dropped the marker file with idle_seconds=4488.
+#   * ``_shape_state`` labelled an interrupt "stale_suspected" purely because
+#     its block appears in the append-only ``completed_blocks``. In a two-pass
+#     run EVERY block completes pass 1, so EVERY pass-2 interrupt is born
+#     stale: a parked graded run reported ``stale_suspected: true`` and
+#     ``live_interrupt_count: 0`` on a freshly raised, entirely live
+#     ``contract_conformance_unrepairable`` -- and an automated consumer
+#     reading ``live_interrupt_count == 0`` concludes there is nothing to act
+#     on.
+#
+# A just-raised interrupt must read LIVE. So both are keyed to the interrupt
+# itself: the stall clock runs from when THIS interrupt was raised, and the
+# leftover suspicion needs the block's completion to be NEWER than the
+# interrupt (i.e. the graph really did move past it) rather than merely present.
+_interrupt_first_seen: dict[str, float] = {}
+
+
+def _note_interrupts_seen(ids: set[str], now: float | None = None) -> None:
+    """Record first-observation time for each pending interrupt id.
+
+    Ids that are no longer pending are forgotten, so an id LangGraph reuses
+    after a resume is timed from its new appearance rather than its old one.
+    """
+    t = time.time() if now is None else now
+    for i in ids:
+        _interrupt_first_seen.setdefault(i, t)
+    for gone in set(_interrupt_first_seen) - ids:
+        _interrupt_first_seen.pop(gone, None)
+
+
+def _interrupt_raised_ts(intr_id: str, now: float | None = None) -> float:
+    """When this interrupt was first seen pending. Unknown ids read as NOW --
+    an interrupt we have never observed before is, by definition, new."""
+    return _interrupt_first_seen.get(
+        intr_id, time.time() if now is None else now)
+
+
+def _completion_times(completed: list) -> dict:
+    """block -> the time of its LATEST completion event (0.0 when unstamped).
+
+    ``block_done_node`` stamps ``completed_at``; checkpoints written before that
+    have none, and an unstamped completion is treated as NO EVIDENCE rather
+    than as proof an interrupt is a leftover.
+    """
+    out: dict = {}
+    for b in completed or []:
+        if not isinstance(b, dict):
+            continue
+        name = b.get("name")
+        if not name:
+            continue
+        try:
+            ts = float(b.get("completed_at") or 0.0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        out[name] = max(ts, out.get(name, 0.0))
+    return out
+
+# ---------------------------------------------------------------------------
+# D5: interrupt ids this daemon has already forwarded a resume for.
+# ---------------------------------------------------------------------------
+# `aget_state` reads the CHECKPOINT. Between a consumed `/run/resume` and the
+# graph's next checkpoint write, that snapshot still carries the interrupt the
+# resume just answered -- so `/run/state` reported `pending_interrupt_count: 1`
+# while `status: running`. An outer agent polling state sees a pending interrupt
+# on a run that is actively working and resumes it AGAIN. Double-resume is not
+# harmless: the second decision lands on whatever the graph parks at next.
+#
+# The remedy has to be evidence-based, not a blanket "hide interrupts while
+# running" -- PR #73 landed specifically because hiding live interrupts cost ~70
+# minutes of a parked run. So: record the exact ids we forwarded a resume for,
+# and discount ONLY those, and ONLY while the runner task is actually in flight.
+# The moment the run stops (parked, done, error), the set is cleared and every
+# count is raw again.
+_consumed_interrupt_ids: set[str] = set()
+
+
+def _pipeline_task_in_flight() -> bool:
+    """True while the runner task is actually executing the graph."""
+    return _pipeline.task is not None and not _pipeline.task.done()
+
+
+def _consumed_now() -> set[str]:
+    """Interrupt ids a live resume has already answered.
+
+    Empty whenever the runner task is not in flight -- and the set is CLEARED
+    then too, so a run that parks again on a same-id interrupt is reported at
+    full strength. The suppression can only ever last as long as one in-flight
+    resume.
+    """
+    global _consumed_interrupt_ids
+    if not _pipeline_task_in_flight():
+        if _consumed_interrupt_ids:
+            _consumed_interrupt_ids = set()
+        return set()
+    return set(_consumed_interrupt_ids)
+
 
 async def _count_pending_interrupts() -> int | None:
     """Count parked interrupts. ``None`` means COULD NOT DETERMINE, not zero.
@@ -97,10 +204,19 @@ async def _count_pending_interrupts() -> int | None:
         snap = await _pipeline.graph.aget_state(
             {"configurable": {"thread_id": _pipeline.thread_id}}
         )
+        consumed = _consumed_now()
         n = 0
+        ids: set[str] = set()
         if snap and snap.tasks:
             for t in snap.tasks:
-                n += len(t.interrupts)
+                for i in t.interrupts:
+                    ids.add(i.id)
+                    if i.id not in consumed:
+                        n += 1
+        # Stamp first-seen here too: this poll runs every _STALL_POLL_S whether
+        # or not anyone calls /run/state, so an unattended run still learns when
+        # its interrupt was raised.
+        _note_interrupts_seen(ids)
         return n
     except Exception as exc:  # noqa: BLE001
         log.warning(
@@ -123,20 +239,33 @@ async def _driver_liveness_watch() -> None:
                     "zero -- inspect the run.", _PROJECT_ROOT)
                 continue
             if pending > 0:
-                idle = time.time() - _last_resume_ts
+                # Measure how long THIS interrupt has gone unanswered, not how
+                # long since the last resume. On a hands-off run the only
+                # resume is /run/start, so the old clock declared every
+                # interrupt stalled the moment it was raised (observed:
+                # idle_seconds=4488 on an interrupt 15 minutes old).
+                now = time.time()
+                oldest = min(
+                    (_interrupt_first_seen[i] for i in _interrupt_first_seen),
+                    default=now)
+                # A resume after the interrupt appeared also restarts the clock:
+                # the driver is demonstrably alive.
+                unanswered_since = max(oldest, _last_resume_ts)
+                idle = now - unanswered_since
                 if idle >= _STALL_THRESHOLD_S:
                     log.warning(
-                        "STALLED_INTERRUPT: %d pending interrupt(s) with no "
-                        "/run/resume for %.0f min (project_root=%s). The outer "
-                        "driver may be dead -- resume or restart it.",
+                        "STALLED_INTERRUPT: %d pending interrupt(s) unanswered "
+                        "for %.0f min (project_root=%s). The outer driver may "
+                        "be dead -- resume or restart it.",
                         pending, idle / 60.0, _PROJECT_ROOT,
                     )
                     try:
                         marker.write_text(json.dumps({
                             "pending_interrupt_count": pending,
                             "idle_seconds": round(idle),
+                            "interrupt_raised_ts": oldest,
                             "last_resume_ts": _last_resume_ts,
-                            "noted_at": time.time(),
+                            "noted_at": now,
                         }, indent=2))
                     except OSError:
                         pass
@@ -148,6 +277,119 @@ async def _driver_liveness_watch() -> None:
         except asyncio.CancelledError:
             break
         except Exception:  # noqa: BLE001 - liveness watch must never crash
+            continue
+
+
+# ---------------------------------------------------------------------------
+# Frontend -> backend handoff (opt-in): CORESMITH_AUTO_BACKEND=1
+# ---------------------------------------------------------------------------
+# The endpoint below is the SHAPE; this watch is what makes the handoff
+# autonomous. Without it, `pipeline_done` is a state field nobody acts on: the
+# chip_top gate-sim -- the only step that simulates the artifact that becomes
+# silicon -- has only ever been reached by a human or a hand-written driver.
+#
+# Opt-in and one-shot: it fires at most once per daemon process, only when the
+# frontend genuinely finished (pipeline_done AND no parked interrupt AND the
+# pipeline task is not running), and it stops the backend after flat synthesis +
+# the gate-sim verdict. It never runs P&R/DRC/LVS; that stays an explicit ask.
+
+_AUTO_BACKEND_POLL_S = float(os.environ.get("CORESMITH_AUTO_BACKEND_POLL_S", "30"))
+_auto_backend_fired = False
+
+
+def _daemon_log(level: str, msg: str, *args, **kw) -> None:
+    """Log somewhere a human will actually see it.
+
+    The module's ``coresmithd`` logger has no handler: under uvicorn only the
+    ``uvicorn.*`` loggers are configured, so everything sent to ``log`` goes
+    nowhere -- the same trap ``_lifespan`` already documents for the profile-seed
+    line. An autonomy step that starts real EDA by itself must not announce
+    itself into a black hole, so route through ``uvicorn.error`` (which lands in
+    daemon.log) and keep ``log`` as the fallback for a non-uvicorn host.
+    """
+    for logger in (logging.getLogger("uvicorn.error"), log):
+        try:
+            getattr(logger, level)(msg, *args, **kw)
+            return
+        except Exception:  # noqa: BLE001
+            continue
+
+
+def _auto_backend_enabled() -> bool:
+    """True when the daemon should enter the backend itself on pipeline_done.
+
+    Default OFF: entering the backend spends real EDA time, so it is an explicit
+    opt-in rather than something a run acquires by upgrading the engine.
+    """
+    return (os.environ.get("CORESMITH_AUTO_BACKEND", "0") or "0").strip().lower() \
+        not in ("", "0", "false", "no", "off")
+
+
+async def _frontend_is_done() -> bool:
+    """The frontend finished and is not waiting on anybody.
+
+    Deliberately conservative -- all four must hold. A parked interrupt is NOT
+    'done' even with pipeline_done set, because the run is waiting on a decision
+    that could still change the RTL the backend would synthesize.
+    """
+    if _pipeline.task is not None and not _pipeline.task.done():
+        return False
+    try:
+        await _pipeline.ensure_graph()
+        snap = await _pipeline.graph.aget_state(
+            {"configurable": {"thread_id": _pipeline.thread_id}}
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    if not snap or not snap.values:
+        return False
+    if not snap.values.get("pipeline_done"):
+        return False
+    if snap.tasks and any(t.interrupts for t in snap.tasks):
+        return False
+    return True
+
+
+async def _auto_backend_watch() -> None:
+    """Poll for a finished frontend and hand off to the backend, once."""
+    global _auto_backend_fired
+    if not _auto_backend_enabled():
+        return
+    _daemon_log(
+        "warning",
+        "CORESMITH_AUTO_BACKEND=1: this daemon will enter flat synthesis + the "
+        "chip_top gate-sim by itself when the frontend reaches pipeline_done "
+        "(P&R/DRC/LVS still require an explicit `backend start --full`).")
+    while not _auto_backend_fired:
+        try:
+            await asyncio.sleep(_AUTO_BACKEND_POLL_S)
+            if not await _frontend_is_done():
+                continue
+            _auto_backend_fired = True     # one-shot, even if the launch fails
+            _daemon_log(
+                "warning",
+                "AUTO-BACKEND: frontend reached pipeline_done with no parked "
+                "interrupt -- entering flat synthesis + chip_top gate-sim.")
+            from orchestrator import mcp_server as _mcp
+            result = await _mcp.launch_backend(stop_after_gate_sim=True)
+            try:
+                from orchestrator.langgraph.event_stream import write_graph_event
+                write_graph_event(_PROJECT_ROOT, "daemon", "auto_backend_start",
+                                  {k: v for k, v in result.items()
+                                   if k != "block_names"})
+            except Exception:  # noqa: BLE001
+                pass
+            if result.get("error"):
+                _daemon_log("error", "AUTO-BACKEND: launch refused: %s", result)
+            else:
+                _daemon_log("warning",
+                            "AUTO-BACKEND: backend running (thread_id=%s)",
+                            result.get("thread_id"))
+        except asyncio.CancelledError:
+            break
+        except Exception:  # noqa: BLE001 - a handoff watch must never crash
+            _daemon_log("warning", "AUTO-BACKEND: watch iteration failed",
+                        exc_info=True)
             continue
 
 
@@ -217,6 +459,14 @@ class ArchResumeRequest(BaseModel):
     rationale: str = ""
 
 
+class BackendStartRequest(BaseModel):
+    max_attempts: int = 3
+    target_clock_mhz: float = 50.0
+    # Default STOPS after flat synthesis + the chip_top gate-sim verdict.
+    # P&R/DRC/LVS is hours of EDA that must be asked for explicitly.
+    full: bool = False
+
+
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
@@ -243,12 +493,15 @@ async def _lifespan(_app: FastAPI):
         pass
     # Section 7b: start the driver-liveness watch (cheap, cancelled on shutdown).
     _watch_task = asyncio.create_task(_driver_liveness_watch())
+    # Frontend -> backend handoff. Returns immediately when the opt-in is off.
+    _auto_backend_task = asyncio.create_task(_auto_backend_watch())
     try:
         yield
     finally:
-        _watch_task.cancel()
-        with contextlib.suppress(Exception):
-            await _watch_task
+        for _t in (_watch_task, _auto_backend_task):
+            _t.cancel()
+            with contextlib.suppress(Exception):
+                await _t
 
 
 app = FastAPI(title="coresmithd", version="0.1", lifespan=_lifespan)
@@ -277,6 +530,7 @@ async def run_state():
 async def run_start(req: StartRequest):
     global _last_resume_ts
     _last_resume_ts = time.time()  # Section 7b: run start resets the stall clock
+    _consumed_interrupt_ids.clear()   # a fresh run answers nothing from the old
     if _pipeline.task is not None and not _pipeline.task.done():
         raise HTTPException(409, "pipeline already running; call /run/pause first")
 
@@ -426,7 +680,7 @@ def _resume_tick_or_park(has_pending_interrupt: bool, has_next_nodes: bool) -> s
 
 @app.post("/run/resume")
 async def run_resume(req: ResumeRequest):
-    global _last_resume_ts
+    global _last_resume_ts, _consumed_interrupt_ids
     _last_resume_ts = time.time()  # Section 7b: the driver is alive
     with contextlib.suppress(OSError):
         _mk = Path(_PROJECT_ROOT) / "STALLED_INTERRUPT"
@@ -460,6 +714,7 @@ async def run_resume(req: ResumeRequest):
     if _mode == "tick":
         # No parked interrupt but the graph still has next nodes: plain tick
         # (cmd=None) to advance a stranded/paused run without a fake action.
+        _consumed_interrupt_ids.clear()
         await _pipeline.safe_resume(None, graph_config)
         return {
             "resumed": True,
@@ -494,6 +749,12 @@ async def run_resume(req: ResumeRequest):
         cmd = Command(resume={iid: resume_value for iid, _ in interrupts})
     else:
         cmd = Command(resume=resume_value)
+
+    # D5: remember exactly which interrupts this resume answers, BEFORE the
+    # graph starts running. Until it checkpoints again, aget_state still returns
+    # them; without this record /run/state reports them as pending on a running
+    # run and the outer agent resumes a second time.
+    _consumed_interrupt_ids = {iid for iid, _ in interrupts}
 
     await _pipeline.safe_resume(cmd, graph_config)
     return {"resumed": True, "interrupts": len(interrupts), "action": req.action}
@@ -627,6 +888,107 @@ async def run_restart_node(req: RestartNodeRequest):
             " -- " + result["hint"] if result.get("hint") else ""))
     result["status"] = _pipeline.status
     return result
+
+
+# ---------------------------------------------------------------------------
+# Backend endpoints (flat synthesis -> chip_top gate-sim [-> P&R/DRC/LVS]).
+#
+# Until now the daemon's lifecycle stopped at the frontend: the chip_top
+# gate-sim -- the only thing that ever simulates the artifact that becomes
+# silicon -- lived in the backend graph and was reachable ONLY from an MCP
+# client or a hand-written driver script. A run could reach pipeline_done and
+# simply stop, with nobody to press the next button.
+#
+# Shape follows /architecture/*: a second graph gets its own
+# /<graph>/start|state|pause backed by a GraphLifecycle. The implementation is
+# shared with the MCP tool (mcp_server.launch_backend), exactly as
+# /run/restart-block shares restart_block -- one implementation, two transports.
+# ---------------------------------------------------------------------------
+
+def _backend_handle():
+    """The backend GraphLifecycle, imported lazily from the MCP server module.
+
+    Lazy for the same reason ``/run/restart-block`` is: importing mcp_server
+    pulls in the whole agent stack, and a daemon that only ever drives the
+    frontend should not pay for it. It reads ``CORESMITH_PROJECT_ROOT``, which
+    this daemon sets at import time, so both transports address the same
+    checkpoint DB.
+    """
+    from orchestrator import mcp_server as _mcp
+    return _mcp
+
+
+@app.post("/backend/start")
+async def backend_start(req: BackendStartRequest):
+    """Enter the backend: flat top synthesis + the chip_top gate-sim verdict.
+
+    Stops there unless ``full=true``. Requires every block to have RTL +
+    synthesis artifacts on disk (the shared launcher's own gate) -- so calling
+    this before the frontend finished returns the missing-artifact list rather
+    than starting a doomed run.
+    """
+    try:
+        _mcp = _backend_handle()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"backend launcher unavailable: {exc}") from exc
+    result = await _mcp.launch_backend(
+        max_attempts=req.max_attempts,
+        target_clock_mhz=req.target_clock_mhz,
+        stop_after_gate_sim=not req.full,
+    )
+    if result.get("error"):
+        raise HTTPException(409, json.dumps(result))
+    return result
+
+
+@app.get("/backend/state")
+async def backend_state():
+    """Backend graph snapshot, including the chip_top gate-sim verdict."""
+    try:
+        _mcp = _backend_handle()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"backend state unavailable: {exc}") from exc
+    raw = await _mcp.get_backend_state()
+    try:
+        state = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except (ValueError, TypeError):
+        return {"raw": raw}
+    # Surface the gate-sim verdict at the top level: it is the reason this
+    # endpoint exists, and burying it in the raw checkpoint means an outer agent
+    # has to know where to dig. Absence is reported as absence, never as a pass.
+    try:
+        snap = await _mcp._backend.graph.aget_state(
+            {"configurable": {"thread_id": _mcp._backend.thread_id}}
+        )
+        vals = (snap.values if snap else {}) or {}
+    except Exception:  # noqa: BLE001
+        vals = {}
+    state["chip_gate_sim"] = {
+        "ok": vals.get("chip_gate_sim_ok"),
+        "status": vals.get("chip_gate_sim_status", ""),
+        "reason": vals.get("chip_gate_sim_reason", ""),
+        "flat_netlist_path": vals.get("flat_netlist_path", ""),
+        "stopped_after_gate_sim": bool(vals.get("stop_after_gate_sim")),
+    }
+    return state
+
+
+@app.post("/backend/pause")
+async def backend_pause():
+    try:
+        _mcp = _backend_handle()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"backend pause unavailable: {exc}") from exc
+    handle = _mcp._backend
+    if handle.task is None or handle.task.done():
+        return {"paused": False, "reason": "no running task"}
+    handle.task.cancel()
+    try:
+        await handle.task
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+    handle.status = "paused"
+    return {"paused": True}
 
 
 # ---------------------------------------------------------------------------
@@ -948,23 +1310,74 @@ def _shape_state(state_snapshot) -> dict:
     # Surface every interrupt and LABEL the suspicion instead of acting on it --
     # a driver can then skip suspected-stale ones deliberately, which is a
     # different thing from never being told.
+    #
+    # D5: an interrupt a LIVE resume has already answered is not pending. The
+    # checkpoint still carries it until the graph writes its next one, which is
+    # how `/run/state` came to report `pending_interrupt_count: 1` alongside
+    # `status: running` and drove outer agents to resume the same interrupt
+    # twice. Discounted by ID, only while the runner task is in flight, and
+    # still LISTED (with `consumed_by_resume`) so nothing is hidden.
+    #
+    # But "the block is in completed_blocks" alone is not evidence of a
+    # leftover -- in a two-pass run EVERY block completes pass 1, so EVERY
+    # pass-2 interrupt was born ``stale_suspected: true`` with
+    # ``live_interrupt_count: 0``, and an automated driver reading that
+    # concludes there is nothing to act on. The suspicion is now keyed to WHEN
+    # THE INTERRUPT WAS RAISED: a leftover is an interrupt the graph has since
+    # moved PAST, so the block's completion must be NEWER than the interrupt.
+    # A just-raised interrupt reads LIVE, and an unstamped completion (a
+    # checkpoint predating ``completed_at``) is no evidence at all -- absence of
+    # evidence is not evidence of absence, which is this file's whole thesis.
+    consumed = _consumed_now()
+    now_ts = time.time()
+    completion_ts = _completion_times(completed)
+    _note_interrupts_seen(
+        {intr.id
+         for task in (state_snapshot.tasks or [])
+         for intr in task.interrupts},
+        now=now_ts,
+    )
     interrupts: list[dict] = []
     suspected_stale = 0
+    consumed_count = 0
     if state_snapshot.tasks:
         for task in state_snapshot.tasks:
             for intr in task.interrupts:
                 payload = intr.value
+                raised_ts = _interrupt_raised_ts(intr.id, now=now_ts)
                 stale = False
+                basis = "not_a_block_interrupt"
                 if isinstance(payload, dict):
                     blk = payload.get("block", payload.get("block_name", ""))
-                    stale = bool(blk) and blk in completed_names
+                    if not blk:
+                        basis = "not_a_block_interrupt"
+                    elif blk not in completed_names:
+                        basis = "block_not_completed"
+                    else:
+                        done_ts = completion_ts.get(blk, 0.0)
+                        if not done_ts:
+                            basis = "completion_unstamped"
+                        elif raised_ts > done_ts:
+                            basis = "raised_after_block_completed"
+                        else:
+                            basis = "raised_before_block_completed"
+                            stale = True
                 if stale:
                     suspected_stale += 1
+                was_consumed = intr.id in consumed
+                if was_consumed:
+                    consumed_count += 1
                 interrupts.append({
                     "id": intr.id,
                     "payload": payload,
                     "stale_suspected": stale,
+                    "stale_basis": basis,
+                    "raised_ts": raised_ts,
+                    "age_seconds": round(max(0.0, now_ts - raised_ts), 3),
+                    "consumed_by_resume": was_consumed,
                 })
+
+    pending_interrupts = [i for i in interrupts if not i["consumed_by_resume"]]
 
     base.update({
         "completed_count": len(latest_by_name),
@@ -978,14 +1391,19 @@ def _shape_state(state_snapshot) -> dict:
         "pipeline_done": values.get("pipeline_done", False),
         "next_nodes": list(state_snapshot.next) if state_snapshot.next else [],
         "interrupts": interrupts,
-        "pending_interrupt_count": len(interrupts),
+        # PENDING = still waiting on a decision. An interrupt whose resume is
+        # already in flight is not waiting on anything.
+        "pending_interrupt_count": len(interrupts) - consumed_count,
         # Split out so a driver can choose to skip suspected-stale ones
         # DELIBERATELY, rather than never being told they exist.
         "suspected_stale_interrupt_count": suspected_stale,
-        "live_interrupt_count": len(interrupts) - suspected_stale,
+        "consumed_interrupt_count": consumed_count,
+        "live_interrupt_count": max(
+            0, len(interrupts) - consumed_count - suspected_stale),
         "interrupt_type": (
-            interrupts[0]["payload"].get("type", "")
-            if interrupts and isinstance(interrupts[0]["payload"], dict)
+            pending_interrupts[0]["payload"].get("type", "")
+            if pending_interrupts
+            and isinstance(pending_interrupts[0]["payload"], dict)
             else None
         ),
     })
