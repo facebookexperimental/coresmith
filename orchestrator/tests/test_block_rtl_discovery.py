@@ -169,3 +169,75 @@ class TestTheConsequenceThatActuallyBit:
         assert detect_wrapper_block(
             {k: v for k, v in modules.items() if k != "user_project_wrapper_io"}
         ) is None
+
+
+# ---------------------------------------------------------------------------
+# The fix has to be reachable from the caller that actually exists.
+# ---------------------------------------------------------------------------
+
+#: EXACTLY the keys pipeline_graph builds for a passing block (~:4913). Written
+#: out rather than paraphrased: the first version of the rtl_target fix passed
+#: its unit test and was dead on the production path, because the test invented a
+#: dict containing rtl_target and the real caller never produces one. This branch
+#: has that same defect recorded for the chip_top gate sim ("its unit test passed
+#: by injecting the value itself"), so the shape is pinned here on purpose.
+_PRODUCTION_RESULT_KEYS = (
+    "name", "success", "attempts", "gate_count", "synth_success",
+    "constraints_learned", "step_log_paths", "phase",
+)
+
+
+def _production_result(name):
+    return {"name": name, "success": True, "attempts": 1, "gate_count": 0,
+            "synth_success": True, "constraints_learned": 0,
+            "step_log_paths": {}, "phase": "rtl"}
+
+
+class TestTheProductionCallerCanActuallyResolveRtlTarget:
+    def test_the_result_dict_really_has_no_rtl_target(self):
+        """Guards the premise. If a future change starts putting rtl_target in
+        the block result, this test should fail and the join becomes redundant --
+        which is information, not breakage."""
+        r = _production_result("blk")
+        assert set(r) == set(_PRODUCTION_RESULT_KEYS)
+        assert "rtl_target" not in r and "rtl_path" not in r
+
+    def test_discovery_drops_the_odd_named_block_without_the_join(self, tmp_path):
+        """The live failure, reproduced from the production dict shape."""
+        (tmp_path / "rtl").mkdir()
+        (tmp_path / "rtl" / "user_project_wrapper.v").write_text(PAD_ADAPTER)
+        _leaf(tmp_path / "rtl" / "core" / "engine.v", "engine")
+        results = [_production_result("user_project_wrapper_io"),
+                   _production_result("engine")]
+        found = discover_block_rtl(str(tmp_path), results)
+        assert "engine" in found                      # filename convention saves it
+        assert "user_project_wrapper_io" not in found  # ...and cannot save this one
+
+    def test_merging_the_spec_makes_it_resolvable(self, tmp_path):
+        from orchestrator.langgraph.integration_helpers import merge_block_specs
+        (tmp_path / "rtl").mkdir()
+        (tmp_path / "rtl" / "user_project_wrapper.v").write_text(PAD_ADAPTER)
+        _leaf(tmp_path / "rtl" / "core" / "engine.v", "engine")
+        results = [_production_result("user_project_wrapper_io"),
+                   _production_result("engine")]
+        queue = [{"name": "user_project_wrapper_io",
+                  "rtl_target": "rtl/user_project_wrapper.v"},
+                 {"name": "engine", "rtl_target": "rtl/core/engine.v"}]
+        found = discover_block_rtl(
+            str(tmp_path), merge_block_specs(results, queue))
+        assert set(found) == {"user_project_wrapper_io", "engine"}
+
+    def test_the_result_wins_over_the_spec(self, tmp_path):
+        """A block reported what it actually did; the spec says what it should
+        be. Never let the spec overwrite the report."""
+        from orchestrator.langgraph.integration_helpers import merge_block_specs
+        merged = merge_block_specs(
+            [{"name": "blk", "success": True, "attempts": 3}],
+            [{"name": "blk", "attempts": 1, "rtl_target": "rtl/blk.v"}])
+        assert merged[0]["attempts"] == 3
+        assert merged[0]["rtl_target"] == "rtl/blk.v"
+
+    def test_a_block_with_no_spec_survives_the_join(self, tmp_path):
+        from orchestrator.langgraph.integration_helpers import merge_block_specs
+        merged = merge_block_specs([_production_result("orphan")], [])
+        assert merged[0]["name"] == "orphan"

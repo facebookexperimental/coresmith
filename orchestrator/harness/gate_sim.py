@@ -496,22 +496,59 @@ def power_inout_level(name: str) -> Optional[int]:
     return None
 
 
-def split_inouts(ports: list[Port]) -> tuple[list[Port], list[Port]]:
-    """``(power_rails, signal_inouts)`` among the top's bidirectional ports.
+def inout_is_inert(netlist_text: str, name: str) -> bool:
+    """True when the netlist PROVES this inout carries no behaviour.
 
-    A rail wider than one bit is not a rail we understand, so it is reported as a
-    signal rather than tied to a guessed constant.
+    Every reference must be the port's own declaration (port list, `inout`,
+    `wire`) or a constant all-Z assign -- the exact form yosys emits for an
+    unused mandated pad bus (`assign analog_io = 29'hzzzzzzzz;`). One reference
+    that is anything else (an instance connection, a real driver, a read) means
+    the port participates in the design and the honest answer stays "cannot
+    judge".
+
+    Structural on purpose. A name list ("analog_io is fine") would silently
+    bless a design that actually drives its analog pads.
+    """
+    ref = re.compile(r"^.*\b" + re.escape(name) + r"\b.*$", re.MULTILINE)
+    decl = re.compile(
+        r"^\s*(?:module\b|(?:inout|input|output|wire|tri|logic)\b)")
+    zassign = re.compile(
+        r"^\s*assign\s+\\?" + re.escape(name) +
+        r"(?:\s*\[[^\]]*\])?\s*=\s*\d*'[hbodHBOD]?[zZ_]+\s*;")
+    for m in ref.finditer(netlist_text):
+        line = m.group(0)
+        if decl.match(line) or zassign.match(line):
+            continue
+        return False
+    return True
+
+
+def split_inouts(
+    ports: list[Port], netlist_text: str = "",
+) -> tuple[list[Port], list[Port], list[Port]]:
+    """``(power_rails, inert, signal_inouts)`` among the bidirectional ports.
+
+    ``inert`` are inouts the netlist proves carry no behaviour (see
+    :func:`inout_is_inert`) -- mandated-but-unused pad buses like Caravel's
+    ``analog_io``. They are neither driven nor compared, and excluding them
+    fabricates nothing because there is nothing there.
+
+    A rail wider than one bit is not a rail we understand, so it is reported as
+    a signal rather than tied to a guessed constant.
     """
     rails: list[Port] = []
+    inert: list[Port] = []
     signals: list[Port] = []
     for p in ports:
         if p.direction != "inout":
             continue
         if p.width == 1 and power_inout_level(p.name) is not None:
             rails.append(p)
+        elif netlist_text and inout_is_inert(netlist_text, p.name):
+            inert.append(p)
         else:
             signals.append(p)
-    return rails, signals
+    return rails, inert, signals
 
 
 def pick_clock(ports: list[Port], hint: str = "") -> Optional[Port]:
@@ -1434,7 +1471,7 @@ def render_driver_cpp(top: str, ports: list[Port], clock: str,
         max_divergences = gate_sim_max_divergences()
     ins = [p for p in ports if p.direction == "input" and p.name != clock]
     outs = [p for p in ports if p.direction == "output"]
-    rails, _ = split_inouts(ports)
+    rails, _inert, _sig = split_inouts(ports)
 
     # Supplies are constants, but they are re-asserted every cycle: an `inout`
     # can be driven from inside the netlist during eval(), and a rail that
@@ -1898,7 +1935,13 @@ def check_gate_sim(
     if clock is None:
         return _not_run("no clock port identified on the netlist top -- "
                         "cycle-accurate replay needs one")
-    rails, signal_inouts = split_inouts(ports)
+    rails, inert_inouts, signal_inouts = split_inouts(ports, netlist_text)
+    if inert_inouts:
+        # Mandated-but-unused pad buses (Caravel analog_io): the netlist proves
+        # they carry no behaviour (declaration + constant-Z tie only), so they
+        # are excluded from drive and comparison. Excluding nothing fabricates
+        # nothing -- but record them so the verdict says what was not judged.
+        pass
     if signal_inouts:
         # A bidirectional SIGNAL is neither driven nor compared by the replay, so
         # a PASS would carry a hole exactly where the gate is supposed to be

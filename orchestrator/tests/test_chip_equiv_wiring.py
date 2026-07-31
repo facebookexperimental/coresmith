@@ -84,7 +84,7 @@ def _setup_node(monkeypatch, tmp_path, *, sim_passed, equiv_result):
         pipeline_graph, "load_architecture_connections", lambda pr: ([], "chip"))
     monkeypatch.setattr(
         pipeline_graph, "parse_verilog_ports",
-        lambda p: VerilogModule(name="a", ports=[VerilogPort("clk", "input")]))
+        lambda p, module=None: VerilogModule(name="a", ports=[VerilogPort("clk", "input")]))
     monkeypatch.setattr(
         pipeline_graph, "run_integration_simulation",
         lambda *a, **k: {"passed": sim_passed, "log": "sim ran", "log_path": ""})

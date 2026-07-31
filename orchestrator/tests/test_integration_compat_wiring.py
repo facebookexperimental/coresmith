@@ -103,7 +103,8 @@ def _wire_two_block_design(monkeypatch, *, src_width, dst_width):
     )
     monkeypatch.setattr(
         pipeline_graph, "parse_verilog_ports",
-        lambda path: modules["a"] if path.endswith("a.v") else modules["b"],
+        lambda path, module=None: (modules["a"] if path.endswith("a.v")
+                                   else modules["b"]),
     )
     monkeypatch.setattr(
         pipeline_graph, "lint_top_level",

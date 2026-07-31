@@ -114,6 +114,10 @@ class PrebindResult:
     """Outcome of pre-synthesis macro resolution."""
 
     bindings: list = field(default_factory=list)      # [(ShellSpec, MacroInfo)]
+    # geometry key (w, d, nport) -> write-mask lanes the RTL drives. 0/1 mean a
+    # whole-word mask. Needed by emit_bound_shell to size the shell's wmask0 and
+    # to decide whether the macro's own mask port can carry it.
+    mask_lanes: dict = field(default_factory=dict)
     unresolved: list = field(default_factory=list)    # [ShellSpec]
     errors: list = field(default_factory=list)        # [str]
     warnings: list = field(default_factory=list)      # [str] -- do not block
@@ -217,7 +221,39 @@ def macro_ports(verilog_path) -> set[str]:
     return ports
 
 
-def _ports_for(macro, spec) -> list[tuple[str, str]]:
+def macro_mask_lanes(verilog_path) -> int | None:
+    """Write-mask lanes the macro's Verilog actually declares, or None.
+
+    OpenRAM emits ``parameter NUM_WMASKS = N;`` next to
+    ``input [NUM_WMASKS-1:0] wmask0;``. A literal range is accepted too. Returns
+    None when the macro declares no ``wmask0`` OR when the width cannot be
+    resolved -- callers must treat None as "cannot verify" and refuse, never as
+    a default, because this number decides which bytes a write touches.
+
+    Deliberately does NOT consult ``MacroInfo.mask_bits``: that field reports
+    the write granularity for some macros and the lane count for others, and it
+    read 8 for a macro whose mask is 2 bits wide.
+    """
+    import re
+    try:
+        text = _strip_comments(Path(verilog_path).read_text(errors="ignore"))
+    except OSError:
+        return None
+    if not re.search(r"\bwmask0\b", text):
+        return None
+    m = re.search(r"\bparameter\b[^;]*?\bNUM_WMASKS\b\s*=\s*(\d+)", text)
+    if m:
+        return int(m.group(1))
+    # Literal range, e.g. `input [3:0] wmask0;`
+    m = re.search(r"\b(?:input|output|inout)\b[^;()]*\[\s*(\d+)\s*:\s*(\d+)\s*\][^;()]*\bwmask0\b",
+                  text)
+    if m:
+        return abs(int(m.group(1)) - int(m.group(2))) + 1
+    # Declared, but the width is an expression we will not evaluate.
+    return None
+
+
+def _ports_for(macro, spec, nmask: int = 1) -> list[tuple[str, str]]:
     """Port connections from the OpenRAM macro to the shell's signals.
 
     OpenRAM sky130 SRAMs use ACTIVE-LOW chip-select and write-enable
@@ -236,8 +272,20 @@ def _ports_for(macro, spec) -> list[tuple[str, str]]:
         ("dout0", "rdata0"),
     ]
     if "wmask0" in have:
-        nb = int(getattr(macro, "mask_bits", 0) or 0)
-        conns.insert(3, ("wmask0", "{%d{1'b1}}" % nb if nb else "'1"))
+        # Connect the SHELL's mask, not a constant. Tying this high was the
+        # defect: it silently turned every partial write into a full-word write.
+        conns.insert(3, ("wmask0", "wmask0"))
+    else:
+        # The macro has no mask port at all -- OpenRAM omits it when
+        # word_size == write_size, i.e. the mask is a single whole-word bit.
+        # That bit is exactly a write-enable qualifier, so fold it into web0
+        # here. Doing it structurally means no design has to remember to write
+        # `we0 = write_fire & wmask` by hand (framebuffer_sram had to be
+        # patched by hand to do precisely this).
+        for i, (port, _sig) in enumerate(conns):
+            if port == "web0":
+                conns[i] = ("web0", "~(we0 & (&wmask0))")
+                break
     if int(getattr(spec, "nport", 1) or 1) >= 2:
         conns += [
             ("clk1", "clk"),
@@ -271,11 +319,13 @@ def emit_bound_shell(result: PrebindResult) -> str:
         "    parameter integer WIDTH = 32,",
         "    parameter integer DEPTH = 512,",
         "    parameter integer NPORT = 1,",
+        "    parameter integer NMASK = 1,",
         "    parameter integer AW    = (DEPTH <= 1) ? 1 : $clog2(DEPTH)",
         ") (",
         "    input  wire             clk,",
         "    input  wire             ce0,",
         "    input  wire             we0,",
+        "    input  wire [NMASK-1:0] wmask0,",
         "    input  wire [AW-1:0]    addr0,",
         "    input  wire [WIDTH-1:0] wdata0,",
         "    output wire [WIDTH-1:0] rdata0,",
@@ -295,7 +345,9 @@ def emit_bound_shell(result: PrebindResult) -> str:
             f"g_w{w}_d{d}_p{n}"
         )
         lines.append(f"      {macro.name} u_macro (")
-        conns = _ports_for(macro, spec)
+        key = (w, d, n)
+        nmask = max(1, int(result.mask_lanes.get(key, 1) or 1))
+        conns = _ports_for(macro, spec, nmask)
         for i, (port, sig) in enumerate(conns):
             comma = "," if i < len(conns) - 1 else ""
             lines.append(f"        .{port}({sig}){comma}")
@@ -393,6 +445,28 @@ def resolve_prebindings(sources, *, allow_generate: bool = True,
         if key in req_mask:
             nb = req_mask[key]
             macro_has_mask = "wmask0" in macro_ports(macro.verilog)
+            result_lanes = nb
+            if macro_has_mask and nb > 1:
+                # The shell routes the mask to the macro's own port, so this
+                # binds -- PROVIDED both sides agree on lane count. OpenRAM
+                # lanes = ceil(width / write_size); a disagreement would write
+                # the wrong bytes, which is the corruption we are removing.
+                macro_lanes = macro_mask_lanes(macro.verilog)
+                if macro_lanes != nb:
+                    res.unresolved.append(spec)
+                    res.errors.append(
+                        f"{spec.describe()}: RTL drives {nb} write-mask lane(s) "
+                        f"but macro {macro.name} declares "
+                        f"{macro_lanes if macro_lanes is not None else 'an unresolvable number of'}"
+                        f" lane(s). Connecting mismatched lanes would write the "
+                        f"wrong bytes, so this is refused rather than truncated "
+                        f"(the previous binder replicated a constant and let "
+                        f"yosys truncate it). Regenerate the macro with a "
+                        f"write_size that yields {nb} lanes.")
+                    continue
+                res.mask_lanes[key] = nb
+                res.bindings.append((spec, macro))
+                continue
             if nb > 1:
                 # A real per-byte mask survives ONLY if it can travel all the way
                 # from the RTL to the macro. Two independent things can break
@@ -425,21 +499,17 @@ def resolve_prebindings(sources, *, allow_generate: bool = True,
                     f"{detail}. Refusing to bind: a dropped mask turns masked "
                     f"writes into full-word writes, which RTL DV cannot see.")
                 continue
-            # nb == 1: the mask spans the whole word, so `we0 & mask` is exactly
-            # equivalent to masking inside the macro -- which is why OpenRAM
-            # omits the port when word_size == write_size. Binding is legal
-            # PROVIDED the RTL folds the mask into we0; if it drives we0 from an
-            # unmasked signal the write is no longer suppressed. Still only a
-            # warning because that fold is the correct, common fix and the
-            # geometry is otherwise sound -- but nothing here can prove the RTL
-            # did it.
+            # nb == 1: a whole-word mask, exactly equivalent to a write-enable
+            # qualifier. The shell now folds it into web0 itself, so this is
+            # correct by construction and no longer depends on the RTL author
+            # remembering to write `we0 = write_fire & wmask`.
+            res.mask_lanes[key] = 1
             res.warnings.append(
-                f"{spec.describe()}: the requested mask is a single whole-word "
-                f"bit, so it is equivalent to the write enable"
-                f"{'' if macro_has_mask else f' (macro {macro.name} omits wmask0 entirely)'}"
-                f". The shell carries no mask pins, so the mask reaches the "
-                f"memory ONLY if the RTL folds it into we0 "
-                f"(e.g. we0 = write_fire & wmask). UNVERIFIED here.")
+                f"{spec.describe()}: whole-word write mask folded into the "
+                f"macro's write enable by the bound shell"
+                f"{'' if macro_has_mask else f' (macro {macro.name} exposes no wmask0)'}"
+                f" -- masked writes are suppressed correctly without any RTL "
+                f"change.")
         res.bindings.append((spec, macro))
     return res
 

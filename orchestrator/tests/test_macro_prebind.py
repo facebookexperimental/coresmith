@@ -54,8 +54,10 @@ class TestActiveLowPolarity:
     def test_chip_select_and_write_enable_are_inverted(self):
         v = emit_bound_shell(_bound((FakeSpec(8, 4096), FakeMacro("sram_a"))))
         assert ".csb0(~ce0)" in v
-        assert ".web0(~we0)" in v
         assert ".csb0(ce0)" not in v, "active-low port driven with active-high signal"
+        # A macro with no wmask0 gets the whole-word mask folded into its write
+        # enable, so web0 is the INVERTED (we0 AND mask) rather than plain ~we0.
+        assert ".web0(~(we0 & (&wmask0)))" in v
         assert ".web0(we0)" not in v
 
     def test_second_read_port_select_also_inverted(self):
@@ -115,7 +117,10 @@ class TestGeometryDispatch:
             "endmodule\n")
         v = emit_bound_shell(_bound(
             (FakeSpec(32, 512, nport=1), FakeMacro("m", str(masked), mask_bits=4))))
-        assert ".wmask0({4{1'b1}})" in v
+        # The SHELL's mask, not a constant. Tying it high was the defect: every
+        # partial write silently became a full-word write.
+        assert ".wmask0(wmask0)" in v
+        assert "1'b1}}" not in v.split(".wmask0")[1][:40], "mask tied to a constant"
 
         plain = tmp_path / "plain.v"
         plain.write_text(
@@ -125,7 +130,9 @@ class TestGeometryDispatch:
             "endmodule\n")
         v2 = emit_bound_shell(_bound(
             (FakeSpec(8, 4096, nport=1), FakeMacro("p", str(plain), mask_bits=1))))
-        assert "wmask0" not in v2, "connected a pin the model does not declare"
+        assert ".wmask0(" not in v2, "connected a pin the model does not declare"
+        # ...but the mask still reaches the memory, folded into web0.
+        assert ".web0(~(we0 & (&wmask0)))" in v2
 
 
 def _maskless_env(tmp_path, monkeypatch, width, nb_expected):
@@ -177,65 +184,87 @@ class TestMaskMismatchIsRefused:
         assert any("wmask0" in e for e in res.errors)
         assert any("full-word writes" in e for e in res.errors)
 
-    def test_whole_word_mask_binds_but_warns(self, tmp_path, monkeypatch):
+    def test_whole_word_mask_binds_and_the_shell_folds_it(self, tmp_path, monkeypatch):
         """WIDTH=8 / GRAN=8 -> 1 mask bit spanning the word, which is exactly
-        what the write enable already expresses -- and why OpenRAM omits the
-        port. Bind, but say the fold into we0 is required."""
+        what a write enable expresses -- and why OpenRAM omits the port.
+
+        The shell now performs the fold itself, so this is correct by
+        construction instead of depending on the RTL author remembering to write
+        `we0 = write_fire & wmask` (framebuffer_sram had to be hand-patched to do
+        exactly that)."""
         mp, rtl = _maskless_env(tmp_path, monkeypatch, 8, 1)
         res = mp.resolve_prebindings([rtl], allow_generate=False)
         assert res.bindings, "refused a mask that is equivalent to we0"
         assert not res.unresolved and not res.errors
         assert res.ok is True
-        assert any("fold" in w and "we0" in w for w in res.warnings)
+        assert res.mask_lanes.get((8, 4096, 2)) == 1
+        assert any("folded" in w for w in res.warnings)
 
-    def test_multibit_mask_against_a_MASK_CAPABLE_macro_is_also_refused(
+    def test_multibit_mask_against_a_MASK_CAPABLE_macro_now_BINDS(
         self, tmp_path, monkeypatch
     ):
-        """The hole the maskless test could not see.
-
-        Resolving to a byte-write-enable macro is NECESSARY but not SUFFICIENT:
-        ``emit_bound_shell``'s ``cs_mem_macro_shell`` declares no mask pins and
-        ``_ports_for`` hardwires the macro's ``wmask0`` to all-ones, so the RTL's
-        dynamic mask is discarded even though the macro could have honoured it.
+        """The shell routes the mask, so this is no longer refused -- it works.
 
         Two of the three memories in exp-raster-macro-20260727 were in exactly
-        this state, both driving a genuinely dynamic mask:
-        triangle_store (WIDTH=64, 8 mask bits, macro sram_1rw1r_64_64_8_sky130
-        tied 8'hff) and zbuffer_sram (WIDTH=9, 2 mask bits, macro
-        sram_1rw1r_9_4096_8_sky130 tied 2'h3). Both bound cleanly and both lost
-        the mask.
+        this state, both driving a genuinely dynamic mask: triangle_store
+        (WIDTH=64, 8 lanes) and zbuffer_sram (WIDTH=9, 2 lanes). Both used to
+        bind with the mask tied to all-ones and silently lose it; refusing them
+        was honest but left the design unable to reach a netlist at all.
         """
         mp, rtl = _maskless_env(tmp_path, monkeypatch, 64, 8)
-        # Unlike _maskless_env's default, this macro DOES declare wmask0.
+        # This macro DOES declare wmask0, with a matching 8 lanes.
         monkeypatch.setattr(mp, "macro_ports",
                             lambda p: {"clk0", "csb0", "web0", "wmask0",
                                        "addr0", "din0", "dout0"})
+        monkeypatch.setattr(mp, "macro_mask_lanes", lambda p: 8)
         res = mp.resolve_prebindings([rtl], allow_generate=False)
-        assert res.ok is False, "bound a masked geometry the shell cannot route"
-        assert res.unresolved
-        # The diagnosis must name the SHELL, not blame the macro -- otherwise the
-        # reader regenerates a macro that already had the port.
-        joined = " ".join(res.errors)
-        assert "cs_mem_macro_shell" in joined
-        assert "HAS a wmask0 port" in joined
-        assert "full-word writes" in joined
+        assert res.ok is True, res.errors
+        assert res.bindings and not res.unresolved
+        assert res.mask_lanes.get((64, 4096, 2)) == 8
+        # And the emitted shell wires it rather than tying it.
+        assert ".wmask0(wmask0)" in mp.emit_bound_shell(res)
 
-    def test_the_two_refusals_give_DIFFERENT_diagnoses(self, tmp_path, monkeypatch):
-        """Same symptom, opposite fixes: regenerate the macro vs route the pin
-        through the shell. A single shared message would send half the readers
-        to the wrong repair."""
-        mp, rtl = _maskless_env(tmp_path, monkeypatch, 32, 4)
-        maskless = " ".join(
-            mp.resolve_prebindings([rtl], allow_generate=False).errors)
+    def test_lane_count_disagreement_is_refused_not_truncated(
+        self, tmp_path, monkeypatch
+    ):
+        """The old binder replicated `{mask_bits{1'b1}}` and let yosys truncate
+        it -- an 8-bit constant into the 2-bit port of
+        sram_1rw1r_9_4096_8_sky130. A lane-count disagreement decides which
+        BYTES a write touches, so it must refuse."""
+        mp, rtl = _maskless_env(tmp_path, monkeypatch, 64, 8)
         monkeypatch.setattr(mp, "macro_ports",
                             lambda p: {"clk0", "csb0", "web0", "wmask0",
                                        "addr0", "din0", "dout0"})
-        capable = " ".join(
-            mp.resolve_prebindings([rtl], allow_generate=False).errors)
-        assert "no wmask0 port at all" in maskless
-        assert "write_size" in maskless          # regenerate the macro
-        assert "cs_mem_macro_shell" in capable   # route the pin
-        assert maskless != capable
+        monkeypatch.setattr(mp, "macro_mask_lanes", lambda p: 2)   # != 8
+        res = mp.resolve_prebindings([rtl], allow_generate=False)
+        assert res.ok is False and res.unresolved
+        joined = " ".join(res.errors)
+        assert "8 write-mask lane(s)" in joined and "2 lane(s)" in joined
+        assert "truncated" in joined
+
+    def test_unverifiable_lane_count_is_refused(self, tmp_path, monkeypatch):
+        """`None` means the width is an expression we will not evaluate. That is
+        "cannot verify", which must never become a default."""
+        mp, rtl = _maskless_env(tmp_path, monkeypatch, 64, 8)
+        monkeypatch.setattr(mp, "macro_ports",
+                            lambda p: {"clk0", "csb0", "web0", "wmask0",
+                                       "addr0", "din0", "dout0"})
+        monkeypatch.setattr(mp, "macro_mask_lanes", lambda p: None)
+        res = mp.resolve_prebindings([rtl], allow_generate=False)
+        assert res.ok is False and res.unresolved
+        assert "unresolvable" in " ".join(res.errors)
+
+    def test_multibit_mask_against_a_MASKLESS_macro_is_still_refused(
+        self, tmp_path, monkeypatch
+    ):
+        """No wiring can carry 4 lanes to a macro with a single whole-word
+        write enable. Regenerating the macro is the only fix."""
+        mp, rtl = _maskless_env(tmp_path, monkeypatch, 32, 4)
+        res = mp.resolve_prebindings([rtl], allow_generate=False)
+        assert res.ok is False and res.unresolved
+        joined = " ".join(res.errors)
+        assert "no wmask0 port at all" in joined
+        assert "write_size" in joined
 
 
 class TestStructure:
