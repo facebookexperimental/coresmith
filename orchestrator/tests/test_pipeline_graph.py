@@ -38,15 +38,19 @@ from orchestrator.langgraph.pipeline_graph import (
     build_block_subgraph,
     build_pipeline_graph,
     init_block_node,
+    integration_dv_decision_node,
     integration_dv_node,
     pipeline_complete_node,
     route_after_human,
     route_after_integration_dv,
+    route_after_integration_dv_decision,
     route_after_integration_review,
     route_after_uarch_review,
     route_after_validation_dv,
+    route_after_validation_dv_decision,
     route_decision,
     route_next_tier,
+    validation_dv_decision_node,
     validation_dv_node,
 )
 
@@ -216,6 +220,7 @@ class TestGraphConstruction:
             "init_tier", "process_block", "integration_review",
             "advance_tier", "pipeline_complete",
             "integration_check", "integration_dv", "validation_dv",
+            "integration_dv_decision", "validation_dv_decision",
         ]
         for name in expected:
             assert name in node_names, f"Missing orchestrator node: {name}"
@@ -298,15 +303,32 @@ class TestGraphConstruction:
             },
         })
 
+        # run3-followups two-phase flow: the DV node itself NEVER calls
+        # interrupt() (the one-cycle-late defect) -- it parks with the
+        # payload in state; the dedicated decision node consumes the
+        # response.
         dv_result = result["integration_dv_result"]
         assert dv_result["passed"] is False
         assert dv_result["phase"] == "tb_generation"
-        assert dv_result["action_taken"] == "fix_tb"
+        assert dv_result["pending_decision"] is True
         assert result["pipeline_done"] is False
-        assert route_after_integration_dv(result) == "integration_dv"
-        assert interrupts
-        assert interrupts[0]["phase"] == "tb_generation"
-        assert interrupts[0]["contract_audit"]["category"] == "INTEGRATION_TB_BUG"
+        assert not interrupts, "DV node must not call interrupt() directly"
+        payload = dv_result["interrupt_payload"]
+        assert payload["phase"] == "tb_generation"
+        assert payload["contract_audit"]["category"] == "INTEGRATION_TB_BUG"
+        assert route_after_integration_dv(result) == "integration_dv_decision"
+
+        decision = await integration_dv_decision_node({
+            "project_root": str(tmp_path),
+            "integration_dv_result": dv_result,
+        })
+        assert interrupts and interrupts[0] is payload
+        d_result = decision["integration_dv_result"]
+        assert d_result["action_taken"] == "fix_tb"
+        assert d_result["pending_decision"] is False
+        assert d_result["fix_applied"] == "repair generator"
+        assert route_after_integration_dv_decision(decision) == "integration_dv"
+        assert route_after_integration_dv(decision) == "integration_dv"
 
     @pytest.mark.asyncio
     async def test_integration_testbench_generator_accepts_written_file(self, tmp_path):
@@ -396,14 +418,27 @@ class TestGraphConstruction:
             },
         })
 
+        # run3-followups two-phase flow (see the integration variant).
         dv_result = result["validation_dv_result"]
         assert dv_result["passed"] is False
         assert dv_result["phase"] == "tb_generation"
-        assert dv_result["action_taken"] == "fix_tb"
-        assert route_after_validation_dv(result) == "validation_dv"
-        assert interrupts
-        assert interrupts[0]["phase"] == "tb_generation"
-        assert interrupts[0]["contract_audit"]["category"] == "VALIDATION_TB_BUG"
+        assert dv_result["pending_decision"] is True
+        assert not interrupts, "DV node must not call interrupt() directly"
+        payload = dv_result["interrupt_payload"]
+        assert payload["phase"] == "tb_generation"
+        assert payload["contract_audit"]["category"] == "VALIDATION_TB_BUG"
+        assert route_after_validation_dv(result) == "validation_dv_decision"
+
+        decision = await validation_dv_decision_node({
+            "project_root": str(tmp_path),
+            "validation_dv_result": dv_result,
+        })
+        assert interrupts and interrupts[0] is payload
+        d_result = decision["validation_dv_result"]
+        assert d_result["action_taken"] == "fix_tb"
+        assert d_result["pending_decision"] is False
+        assert route_after_validation_dv_decision(decision) == "validation_dv"
+        assert route_after_validation_dv(decision) == "validation_dv"
 
     def test_block_subgraph_has_expected_nodes(self):
         subgraph = build_block_subgraph().compile()
@@ -2129,6 +2164,9 @@ _SINGLE_PASS_NODES = {
     "init_tier", "process_block", "integration_review", "advance_tier",
     "pipeline_complete", "integration_check", "model_integration",
     "integration_dv", "validation_dv",
+    # run3-followups: dedicated interrupt-decision nodes (resume responses are
+    # consumed immediately, not one regeneration cycle late).
+    "integration_dv_decision", "validation_dv_decision",
     # Deterministic signoff-scorecard node: the pre-END funnel for the genuine
     # terminals (validation_dv done / integration_dv terminal-fail /
     # pipeline_complete abort). Shared by both topologies.
