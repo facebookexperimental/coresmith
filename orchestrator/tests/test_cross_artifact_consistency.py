@@ -863,6 +863,47 @@ class TestErsEmissionOrder:
         monkeypatch.delenv("CORESMITH_ERS_BEFORE_CONSTRAINTS", raising=False)
         assert ag._ers_before_constraints_enabled() is True
 
+    @pytest.mark.parametrize("node,generator,payload,filename", [
+        (
+            "system_architecture_node",
+            "orchestrator.architecture.specialists.sad_spec.generate_sad",
+            {"sad_text": "# SAD\nSCK <=6.25 MHz.\n"},
+            "sad_spec.md",
+        ),
+        (
+            "functional_requirements_node",
+            "orchestrator.architecture.specialists.frd_spec.generate_frd",
+            {"frd_text": "# FRD\nSCK <=6.25 MHz.\n"},
+            "frd_spec.md",
+        ),
+    ])
+    def test_sad_and_frd_were_already_emitted_before_the_gate(
+        self, tmp_path, node, generator, payload, filename,
+    ):
+        """The ERS was the ONLY artifact written after the gate.
+
+        Checked when the reorder was designed, and pinned here so a future
+        refactor that moves SAD/FRD emission downstream of Constraint Check
+        re-opens the same hole loudly. (The PRD is written by
+        ``gather_requirements_node``, which is the graph's entry node, so it
+        cannot move below the gate without the flow itself changing.)
+        """
+        from orchestrator.langgraph import architecture_graph as ag
+
+        project_root = tmp_path / "run"
+        (project_root / ".coresmith").mkdir(parents=True)
+        state = {
+            "project_root": str(project_root), "round": 1,
+            "requirements": "r", "pdk_summary": "", "prd_spec": {},
+            "sad_spec": {}, "target_clock_mhz": 50.0,
+        }
+        with patch.object(
+            ag, "_persist_intermediate_state", lambda *_a, **_k: None,
+        ), patch(generator, new=AsyncMock(return_value=payload)):
+            _run(getattr(ag, node)(state))
+
+        assert (project_root / "arch" / filename).exists()
+
     def test_ers_failure_is_not_fatal(self, tmp_path):
         """A dead ERS generator must not take the architecture run with it."""
         from orchestrator.langgraph import architecture_graph as ag
