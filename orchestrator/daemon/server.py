@@ -90,7 +90,7 @@ _STALL_POLL_S = float(os.environ.get("CORESMITH_INTERRUPT_STALL_POLL_S", "300"))
 #   * ``_shape_state`` labelled an interrupt "stale_suspected" purely because
 #     its block appears in the append-only ``completed_blocks``. In a two-pass
 #     run EVERY block completes pass 1, so EVERY pass-2 interrupt is born
-#     stale: the parked raster run reported ``stale_suspected: true`` and
+#     stale: a parked graded run reported ``stale_suspected: true`` and
 #     ``live_interrupt_count: 0`` on a freshly raised, entirely live
 #     ``contract_conformance_unrepairable`` -- and an automated consumer
 #     reading ``live_interrupt_count == 0`` concludes there is nothing to act

@@ -614,3 +614,147 @@ class TestSafeFormat:
         # ... and the rendered example is natural single-brace Verilog.
         assert "assign io_out = {31'b0, done, qspi_o, 2'b0};" in rendered
         assert "{4{oe}}, 2'b1};" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Synthesis self-recovery is never silent (run3-followups #3)
+# ---------------------------------------------------------------------------
+#
+# PRODUCTION CALL PATH: these drive ``flat_top_synthesis_node`` itself, with only
+# the LLM step faked. The bug was that a driver-internal retry left no trace, so
+# a test that exercised the collector alone would have proved nothing about the
+# artifact a later reader actually opens.
+
+class TestFlatSynthAttemptHistoryWiring:
+    def _state(self, tmp_path, **kw):
+        top = tmp_path / "rtl" / "integration" / "chip_top.v"
+        top.parent.mkdir(parents=True, exist_ok=True)
+        top.write_text("module chip_top(input wb_clk_i);\nendmodule\n")
+        state = {
+            "project_root": str(tmp_path),
+            "design_name": "chip_top",
+            "integration_top_path": str(top),
+            "block_rtl_paths": {},
+            "target_clock_mhz": 50.0,
+            "attempt": 1,
+            "current_block": {"name": "chip_top"},
+        }
+        state.update(kw)
+        return state
+
+    def _syn_dir(self, tmp_path):
+        d = tmp_path / "syn" / "output" / "chip_top"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @pytest.mark.asyncio
+    async def test_success_on_attempt_2_retains_attempt_1(self, tmp_path, monkeypatch):
+        """THE defect, end to end: the driver succeeds on its second internal
+        attempt; attempt 1's reason lands in synth_result.json AND in state."""
+        from orchestrator.langgraph import backend_graph as bg
+
+        d = self._syn_dir(tmp_path)
+        net = d / "chip_top_netlist.v"
+        net.write_text("module chip_top(); endmodule\n")
+        (d / "synth_attempt1.log").write_text(
+            "ERROR: Module `cs_sram_1rw' referenced in module `chip_top' "
+            "is not part of the design.\n")
+
+        async def _fake_llm(**kwargs):
+            return {
+                "success": True,
+                "netlist_path": str(net),
+                "sdc_path": "",
+                "gate_count": 10,
+                "_llm_reply": "Synthesis succeeded on attempt 2.",
+            }
+
+        monkeypatch.setattr(bg, "_run_llm_eda_step", _fake_llm)
+        monkeypatch.setattr(bg, "_bind_macro_shells_for_backend",
+                            lambda _n: ([], ""))
+        monkeypatch.setattr(bg, "_run_chip_top_gate_sim",
+                            lambda _s, _n: (None, "not_run", "no TB"))
+
+        out = await bg.flat_top_synthesis_node(self._state(tmp_path))
+
+        hist = out["synth_attempt_history"]
+        assert [h["attempt"] for h in hist] == [1]
+        assert "cs_sram_1rw" in hist[0]["error_summary"]
+
+        import json as _json
+        artifact = _json.loads((d / "synth_result.json").read_text())
+        assert artifact["attempt_history"] == hist
+        assert artifact["attempt_failures"] == 1
+
+    @pytest.mark.asyncio
+    async def test_claimed_retry_with_no_evidence_is_recorded_as_a_gap(
+            self, tmp_path, monkeypatch):
+        from orchestrator.langgraph import backend_graph as bg
+
+        d = self._syn_dir(tmp_path)
+        net = d / "chip_top_netlist.v"
+        net.write_text("module chip_top(); endmodule\n")
+
+        async def _fake_llm(**kwargs):
+            return {"success": True, "netlist_path": str(net),
+                    "_llm_reply": "Synthesis succeeded on attempt 3."}
+
+        monkeypatch.setattr(bg, "_run_llm_eda_step", _fake_llm)
+        monkeypatch.setattr(bg, "_bind_macro_shells_for_backend",
+                            lambda _n: ([], ""))
+        monkeypatch.setattr(bg, "_run_chip_top_gate_sim",
+                            lambda _s, _n: (None, "not_run", ""))
+
+        out = await bg.flat_top_synthesis_node(self._state(tmp_path))
+        hist = out["synth_attempt_history"]
+        assert [h["attempt"] for h in hist] == [1, 2]
+        assert all(h["unrecorded"] for h in hist)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_synthesis_carries_its_history_into_previous_error(
+            self, tmp_path, monkeypatch):
+        """diagnose reads previous_error. "attempt 3 failed" without the two
+        reasons before it is what made the same defect recur every run."""
+        from orchestrator.langgraph import backend_graph as bg
+
+        d = self._syn_dir(tmp_path)
+        (d / "run1.log").write_text("ERROR: cannot open liberty file\n")
+
+        async def _fake_llm(**kwargs):
+            return {"success": False, "error": "Flat synthesis failed",
+                    "_llm_reply": "gave up after attempt 2"}
+
+        monkeypatch.setattr(bg, "_run_llm_eda_step", _fake_llm)
+        out = await bg.flat_top_synthesis_node(self._state(tmp_path))
+        assert out["flat_netlist_path"] == ""
+        assert "Flat synthesis failed" in out["previous_error"]
+        assert "cannot open liberty file" in out["previous_error"]
+        # the FINAL attempt's reason is result["error"] (already in
+        # previous_error); the history retains the EARLIER attempt, which is
+        # exactly what used to vanish.
+        assert len(out["synth_attempt_history"]) == 1
+        assert out["synth_attempt_history"][0]["attempt"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_clean_first_attempt_is_byte_identical(
+            self, tmp_path, monkeypatch):
+        """No retry -> no history, no artifact mutation: the pre-fix shape."""
+        from orchestrator.langgraph import backend_graph as bg
+
+        d = self._syn_dir(tmp_path)
+        net = d / "chip_top_netlist.v"
+        net.write_text("module chip_top(); endmodule\n")
+
+        async def _fake_llm(**kwargs):
+            return {"success": True, "netlist_path": str(net),
+                    "_llm_reply": "Synthesis succeeded."}
+
+        monkeypatch.setattr(bg, "_run_llm_eda_step", _fake_llm)
+        monkeypatch.setattr(bg, "_bind_macro_shells_for_backend",
+                            lambda _n: ([], ""))
+        monkeypatch.setattr(bg, "_run_chip_top_gate_sim",
+                            lambda _s, _n: (None, "not_run", ""))
+
+        out = await bg.flat_top_synthesis_node(self._state(tmp_path))
+        assert out["synth_attempt_history"] == []
+        assert not (d / "synth_result.json").exists()

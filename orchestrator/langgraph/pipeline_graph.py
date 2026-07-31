@@ -6768,7 +6768,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
 
         # BLOCK-RTL COMPLETENESS GATE: refuse to assemble a chip that is MISSING
         # a block. `discover_block_rtl` used to drop an unresolvable block
-        # SILENTLY, which structurally DELETES it from the chip: the raster run
+        # SILENTLY, which structurally DELETES it from the chip: one graded run
         # lost its locked Caravel pad adapter (whose file is
         # rtl/user_project_wrapper.v, NOT <block_name>.v, because an interface
         # contract locks the module name), so `detect_wrapper_block` returned
@@ -8608,9 +8608,14 @@ async def begin_rtl_pass_node(state: OrchestratorState) -> dict:
     the already-computed list (R8).
     """
     pr = state.get("project_root", str(PROJECT_ROOT))
-    log(f"\n{'='*60}", CYAN)
-    log("  µARCH GATE CLEAN -> beginning RTL pass (pass 2)", CYAN)
-    log(f"{'='*60}", CYAN)
+    # run3-followups: the banner reflects the ACTUAL gate outcome -- a green
+    # CLEAN was printed four lines after an advisory-dismissed model mismatch,
+    # suppressing a true early detection for ~2.5 h of downstream work.
+    from orchestrator.langgraph.pipeline_helpers import uarch_gate_banner
+    _banner, _colour = uarch_gate_banner(state.get("model_integration_result"))
+    log(f"\n{'='*60}", _colour)
+    log(f"  {_banner}", _colour)
+    log(f"{'='*60}", _colour)
     write_graph_event(pr, "Begin RTL Pass", "graph_node_exit", {
         "pipeline_phase": "rtl",
     })
@@ -9357,7 +9362,7 @@ def _maxgeo_conformance_scope(
         the gate exactly as before.
 
     What it relaxes is only this: a compute-lane dimension (frame_width,
-    num_triangles, ...) cannot be driven by a testbench that has no compute
+    record counts, coordinate extents, ...) cannot be driven by a testbench that has no compute
     oracle, so demanding it makes the gate a permanent brick wall for that whole
     class of run rather than a defect detector. Those dims are reported, logged
     loudly, and carried forward as a defect -- never silently dropped.
@@ -9450,19 +9455,27 @@ def _maxgeo_gate_verdict(
     try:
         if not _maxgeo_gate_enabled():
             return None
-        dims = _declared_dimensions(project_root)
+        # run3-followups: single-sourced declared table (byte-equality with
+        # the legacy _declared_dimensions is pinned by test).
+        from orchestrator.langgraph.bfm_lib import maxgeo as _maxgeo_lib
+        dims = _maxgeo_lib.declared_dimensional_maxima(project_root)
         if not dims:
             return None
         marker = _tb_maxgeo_pairs(tb_path)
-        marker_values = set(marker.values())
-        missing = {
-            name: mx for name, mx in dims.items() if mx not in marker_values
-        }
+        # run3-followups: single-sourced demand partition (bfm_lib.maxgeo).
+        # `missing` is provably identical to the old value-set computation;
+        # `value_only` newly NAMES the dims whose only evidence is a value
+        # collision with another marker pair, so the gate's number and the
+        # TB's confession finally agree.
+        _demand = _maxgeo_lib.maxgeo_demand(dims, marker)
+        missing = _demand.missing
+        value_only = _demand.value_only
         if not missing:
             # run3-followups: an evaluated PASS is a verdict, not a silence --
             # the caller logs it so a suppressed gate can never read as green.
             return {"verdict": "pass", "declared_dims": dims,
-                    "marker_pairs": marker}
+                    "marker_pairs": marker,
+                    "value_only_dims": value_only}
         scoped = _maxgeo_conformance_scope(
             project_root, tb_path, tb_result, dims, marker, missing)
         if scoped is not None:
@@ -9487,6 +9500,7 @@ def _maxgeo_gate_verdict(
                     "advisory": True,
                     "scope": "functional-max-case",
                     "uncovered_dims": missing,
+                    "value_only_dims": value_only,
                     "declared_dims": dims,
                     "marker_pairs": marker,
                     "functional_max_case": case,
@@ -9512,13 +9526,15 @@ def _maxgeo_gate_verdict(
             f"  declared maxima : {dims}\n"
             f"  marker pairs    : {marker or '(no # MAXGEO marker found)'}\n"
             f"  uncovered dims  : {missing}\n"
+            f"  value-collision-only (not individually proven): {value_only}\n"
             "Fix: regenerate/edit the testbench to drive a max-geometry case "
             "(sparse/short content at the maximum dimensions is acceptable if a "
             "full workload is too slow -- the point is to exercise the index/"
             "address widths at maximum extent) and emit the marker."
         )
         return {"reason": reason, "declared_dims": dims,
-                "marker_pairs": marker, "uncovered_dims": missing}
+                "marker_pairs": marker, "uncovered_dims": missing,
+                "value_only_dims": value_only}
     except Exception:  # noqa: BLE001
         return None
 
@@ -9744,7 +9760,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                         # advisory and PROCEEDED on the LLM-authored, DUT-co-tuned
                         # BFM: DV was silently downgraded exactly when the design
                         # is most likely to be non-conformant, and the run still
-                        # reported "INTEGRATION DV PASSED" (exp-raster-macro-
+                        # reported "INTEGRATION DV PASSED" (observed live on a graded run
                         # 20260727). It is now the run's normal tb_generation
                         # interrupt (retry/fix_rtl/fix_tb/abort), per the local
                         # honest-gate idiom.
@@ -10378,7 +10394,7 @@ def _load_ers_validation_context(project_root: str) -> tuple[str, int]:
 # therefore STABLE, path: every integration-DV failure of the same stage writes
 # the same filename. So a failed or skipped audit leaves the PREVIOUS failure's
 # verdict lying in the exact place the next one is read from. Observed on the
-# raster run: a 0.99-confidence TESTBENCH_BUG audit describing an already-fixed
+# graded run: a 0.99-confidence TESTBENCH_BUG audit describing an already-fixed
 # crash sat next to a new, different failure and was quoted as its diagnosis.
 #
 # A verdict is only about the failure it actually read, so it now carries that

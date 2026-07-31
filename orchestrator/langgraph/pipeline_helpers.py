@@ -744,6 +744,62 @@ def rtl_reference_source(block: dict) -> tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
+# µarch composition gate -- honest exit banner
+# ---------------------------------------------------------------------------
+
+def uarch_gate_banner(model_integration_result: dict | None) -> tuple[str, str]:
+    """``(banner_text, colour)`` for the µarch gate's exit banner.
+
+    CLEAN means nothing fired. Measured live: the gate detected a model-level
+    mismatch, logged it, DISMISSED it as advisory (the deterministic-BFM bypass,
+    which is a legitimate non-blocking decision) -- and four lines later the run
+    printed a green "µARCH GATE CLEAN". Two true statements were composed into a
+    false one, and the green line is the one a reader carries away.
+
+    This function does not change what the gate DOES -- the bypass stays
+    advisory, the run still proceeds -- only what it SAYS. Every outcome that is
+    not "nothing fired" gets a yellow banner naming the finding and stating
+    explicitly that it is non-blocking.
+    """
+    res = model_integration_result if isinstance(model_integration_result, dict) else {}
+    tail = " -> beginning RTL pass (pass 2)"
+
+    if res.get("advisory_bypass"):
+        n = len(res.get("violations") or [])
+        where = res.get("first_divergence_block") or ""
+        return (
+            "µARCH GATE NOT CLEAN: "
+            + (f"{n} model-level mismatch(es)" if n else "a model-level mismatch")
+            + " were DISMISSED as ADVISORY (non-blocking; the deterministic "
+            "integration DV on the real RTL is the authoritative check) and "
+            "carried forward"
+            + (f"; first-divergence block: {where}" if where else
+               "; first-divergence block: (unlocalized)")
+            + tail,
+            YELLOW,
+        )
+
+    if res and res.get("passed") is False:
+        return (
+            "µARCH GATE NOT CLEAN: the gate did not pass"
+            + (f" (action taken: {res.get('action_taken')})"
+               if res.get("action_taken") else "")
+            + tail,
+            YELLOW,
+        )
+
+    if res.get("derate_signed_off"):
+        return (
+            "µARCH GATE PASSED WITH A SIGNED-OFF DERATE (within budget, "
+            "recorded in the derate ledger)" + tail,
+            YELLOW,
+        )
+
+    # Nothing fired (or no record at all -- the gate never ran on this path).
+    return ("µARCH GATE CLEAN" + tail, CYAN)
+
+
+# ---------------------------------------------------------------------------
 # Microarchitecture Spec Generation
 # ---------------------------------------------------------------------------
 

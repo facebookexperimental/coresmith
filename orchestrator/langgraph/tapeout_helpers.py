@@ -1297,7 +1297,7 @@ def _run_magic_drc_on_gds(gds_path: str, output_dir: str, timeout: int = 600) ->
     when no measurement exists. This function used to return
     ``{"pass": False, "violation_count": -1}`` when Magic produced nothing at
     all, which every consumer read as "this layout HAS violations" -- see the
-    ``exp-raster-macro-20260727`` w32_d64 / w9_d512 macro reports, whose named
+    measured w32_d64 / w9_d512 macro reports from a validation run, whose named
     ``precheck_magic_drc.rpt`` was never written.
     """
     from orchestrator.langgraph.backend_helpers import (
