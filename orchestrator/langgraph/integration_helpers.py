@@ -2082,9 +2082,31 @@ def chip_rtl_sources(
     first entry.
     """
     sources = [top_rtl_path]
+    # A block file that RE-DECLARES the top's own module is an alias-carrier:
+    # the generated pad block ships a thin `module user_project_wrapper` alias
+    # plus stub declarations of its sibling blocks. Include it and the MODDUP
+    # dedup keeps the stubs (they sort first) and strips the real logic -- the
+    # reference then elaborates a hollow chip and honestly fails, so the gate
+    # reports not_run on a design that is fine. The top provides its own
+    # module; a file re-declaring it leaves the list, stubs and all.
+    _top_mod = ""
+    try:
+        _top_text = Path(top_rtl_path).read_text(errors="replace")
+        _m = re.search(r"\bmodule\s+([A-Za-z_]\w*)", _top_text)
+        _top_mod = _m.group(1) if _m else ""
+    except OSError:
+        pass
     for bp in block_rtl_paths.values():
-        if Path(bp).exists() and bp != top_rtl_path:
-            sources.append(bp)
+        if not Path(bp).exists() or bp == top_rtl_path:
+            continue
+        if _top_mod:
+            try:
+                if re.search(r"\bmodule\s+" + re.escape(_top_mod) + r"\b",
+                             Path(bp).read_text(errors="replace")):
+                    continue
+            except OSError:
+                pass
+        sources.append(bp)
     # Include the generic SRAM wrapper lib if any block instantiates cs_sram, so
     # the chip-level Verilator build can resolve cs_sram_1rw/1rw1r (without it
     # the sim hard-fails with "Cannot find module cs_sram_1rw1r"). Best-effort.
