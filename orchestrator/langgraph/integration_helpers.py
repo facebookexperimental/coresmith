@@ -1096,6 +1096,12 @@ def generate_caravel_wrapper_top(
             and wrapper_block is not None):
         dropped_adapter = wrapper_block
         modules = {k: v for k, v in modules.items() if k != wrapper_block}
+        # Its FILE has to go too, not just its instantiation. That file declares
+        # stub versions of the sibling blocks, and it sorts first, so leaving it
+        # in the source list makes _dedup_module_sources treat those stubs as
+        # the first definitions and strip the real implementations out of every
+        # other file -- emptying the design while still looking assembled.
+        rtl_paths = {k: v for k, v in rtl_paths.items() if k != wrapper_block}
         edges = [e for e in edges
                  if wrapper_block not in (e.get("producer_block"),
                                           e.get("consumer_block"))]

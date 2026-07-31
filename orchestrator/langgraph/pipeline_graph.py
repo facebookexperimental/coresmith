@@ -6623,7 +6623,13 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 )
                 lint_clean = lint_result.get("clean", False)
                 # Postcondition: every block is instantiated in the assembled top.
-                missing = [b for b in modules if f"u_{b} (" not in asm["verilog"]]
+                # A block the assembler deliberately DROPPED is not missing.
+                # With a pin map the pad adapter is replaced by routing emitted
+                # in the top, so requiring its instantiation would fail the
+                # postcondition on the very design that fixed the problem.
+                _dropped = asm.get("dropped_adapter") or ""
+                missing = [b for b in modules
+                           if b != _dropped and f"u_{b} (" not in asm["verilog"]]
                 log(f"  [INTEGRATION] Caravel top: {len(asm['instantiated'])} blocks "
                     f"instantiated, {asm['wire_count']} internal wires, lint "
                     f"{'CLEAN' if lint_clean else 'ERRORS'}",
