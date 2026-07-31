@@ -8800,7 +8800,110 @@ def _tb_maxgeo_pairs(tb_path: str) -> dict:
     return pairs
 
 
-def _maxgeo_gate_verdict(project_root: str, tb_path: str) -> dict | None:
+def _maxgeo_conformance_scope_enabled() -> bool:
+    """Scope the MAX-GEOMETRY demand for the ENGINE'S OWN compute-lane-independent
+    conformance testbench. Default ON; ``CORESMITH_MAXGEO_CONFORMANCE_SCOPE=0``
+    restores the unscoped demand (both branches tested)."""
+    return (
+        os.environ.get("CORESMITH_MAXGEO_CONFORMANCE_SCOPE", "1") or "1"
+    ) != "0"
+
+
+def _maxgeo_conformance_scope(
+    project_root: str, tb_path: str, tb_result: dict | None,
+    dims: dict, marker: dict, missing: dict,
+) -> dict | None:
+    """Scoped verdict for the DETERMINISTIC QSPI conformance testbench, or None.
+
+    ``None`` means "this relaxation does not apply" -- the caller then issues the
+    normal, unchanged hard failure. This is deliberately narrow:
+
+      * It keys off ``tb_result`` flags that ONLY the engine's own bfm_lib writer
+        sets (``deterministic_bfm`` + ``conformance_only``). An LLM-authored
+        testbench cannot reach it, no matter what it writes into its own text --
+        which is the whole reason the discriminator is the caller's record and
+        not a comment in the file.
+      * It applies only when the testbench ALSO declares its scope in the
+        artifact (``# MAXGEO_SCOPE:``), so a hand-edited TB that dropped the
+        coverage cannot inherit the relaxation.
+      * It keeps TEETH: the expected bus coverage is recomputed HERE, from the
+        bus contract the architecture produced, and every bus dimension that
+        contract could drive must actually appear in the marker. A codegen
+        regression that silently stops driving the max-length read burst fails
+        the gate exactly as before.
+
+    What it relaxes is only this: a compute-lane dimension (frame_width,
+    num_triangles, ...) cannot be driven by a testbench that has no compute
+    oracle, so demanding it makes the gate a permanent brick wall for that whole
+    class of run rather than a defect detector. Those dims are reported, logged
+    loudly, and carried forward as a defect -- never silently dropped.
+    """
+    if not _maxgeo_conformance_scope_enabled():
+        return None
+    tbr = tb_result or {}
+    if not (tbr.get("deterministic_bfm") and tbr.get("conformance_only")):
+        return None
+    contract_dict = tbr.get("contract") or {}
+    if not contract_dict:
+        return None
+    try:
+        text = Path(tb_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if "# MAXGEO_SCOPE:" not in text:
+        return None
+    try:
+        from orchestrator.langgraph import bfm_lib as _bfm
+        contract = _bfm.QSPIContract.from_dict(contract_dict)
+        cov = _bfm.bus_maxgeo_coverage(contract, dims)
+    except Exception:  # noqa: BLE001 - an unusable contract is not a relaxation
+        return None
+    # TEETH: every bus dim this contract COULD drive must be marked, by name AND
+    # value. Recomputed here, not read from the testbench's own claims.
+    skipped = {n: v for n, v in cov.covered.items() if marker.get(n) != v}
+    if skipped:
+        return {
+            "advisory": False,
+            "reason": (
+                "MAX-GEOMETRY DV GATE FAILED (deterministic QSPI conformance "
+                "testbench): the bus contract can drive these declared maxima "
+                "and the testbench did not mark them. This is a generator "
+                "regression, not an unmodeled compute lane.\n"
+                f"  bus-drivable    : {cov.covered}\n"
+                f"  marker pairs    : {marker or '(no # MAXGEO marker found)'}\n"
+                f"  skipped by TB   : {skipped}\n"
+            ),
+            "declared_dims": dims, "marker_pairs": marker,
+            "uncovered_dims": missing, "bus_skipped": skipped,
+        }
+    uncovered = {n: v for n, v in dims.items() if n not in cov.covered}
+    return {
+        "advisory": True,
+        "reason": (
+            "MAX-GEOMETRY DV GATE SCOPED (not a clean pass): this run's "
+            "integration DV is the DETERMINISTIC QSPI-slave conformance "
+            "testbench, which has NO compute oracle -- the exercise's compute "
+            "lane is unmodeled. It drove every BUS maximum the design declares "
+            "at full extent, and it CANNOT drive compute-lane geometry at all. "
+            "The gate therefore demands the bus subset and RECORDS the "
+            "remainder as uncovered instead of failing a run that no testbench "
+            "of this kind could ever pass.\n"
+            f"  declared maxima : {dims}\n"
+            f"  driven at max   : {cov.covered}\n"
+            f"  NOT COVERED     : {uncovered}\n"
+            "The uncovered dimensions are compute-lane geometry: a truncated "
+            "index width behind them would NOT be caught by this DV. Model the "
+            "compute lane (a golden host-flow plan) to close them, or set "
+            "CORESMITH_MAXGEO_CONFORMANCE_SCOPE=0 to demand them anyway."
+        ),
+        "declared_dims": dims, "marker_pairs": marker,
+        "uncovered_dims": uncovered, "bus_covered": dict(cov.covered),
+    }
+
+
+def _maxgeo_gate_verdict(
+    project_root: str, tb_path: str, tb_result: dict | None = None
+) -> dict | None:
     """``None`` -> gate passes / no-ops. Otherwise a violation dict: the design
     declares dimensional maxima but the testbench's ``# MAXGEO`` marker does not
     prove a max-geometry case for every declared dimension.
@@ -8809,7 +8912,14 @@ def _maxgeo_gate_verdict(project_root: str, tb_path: str) -> dict | None:
     ``key=value`` pair (the key name is free-form data). Testing at the declared
     maximum inherently crosses every 2^n index boundary below it -- exactly
     where a truncated index/address width wraps. NEVER raises (a parse hiccup is
-    non-blocking; the prompt requirement is the primary defense)."""
+    non-blocking; the prompt requirement is the primary defense).
+
+    ``tb_result`` is the generator's own record for this testbench. When it
+    identifies the ENGINE'S deterministic, compute-lane-independent QSPI
+    conformance TB, :func:`_maxgeo_conformance_scope` may return an ADVISORY
+    verdict (``advisory: True``) instead of a failure -- see that function for
+    why that is a scope, not a weakening. Callers MUST treat ``advisory`` as
+    "passed, with a loud recorded gap", and anything else as a failure."""
     try:
         if not _maxgeo_gate_enabled():
             return None
@@ -8823,6 +8933,10 @@ def _maxgeo_gate_verdict(project_root: str, tb_path: str) -> dict | None:
         }
         if not missing:
             return None
+        scoped = _maxgeo_conformance_scope(
+            project_root, tb_path, tb_result, dims, marker, missing)
+        if scoped is not None:
+            return scoped
         reason = (
             "MAX-GEOMETRY DV GATE FAILED: the design declares dimensional "
             "maxima but the testbench does not exercise them. A chip can pass "
@@ -9003,7 +9117,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                             PROJECT_ROOT / "tb" / "integration"
                             / f"test_{design_name}.py"
                         )
-                        # The design's own declared dimensional maxima -- the
+                        # The design's OWN declared dimensional maxima -- the
                         # same dict the MAX-GEOMETRY gate reads. Threading it in
                         # here is what lets the deterministic TB drive the BUS
                         # maxima at full extent and mark them per design,
@@ -9349,8 +9463,38 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
         # in a "verified" chip. Flip the DV to failed -> existing failure
         # interrupt. Operator-reused TBs (fix_tb/fix_rtl) are trusted as-is.
         if passed and not reuse_existing_tb:
-            _mg = _maxgeo_gate_verdict(pr, tb_path)
-            if _mg is not None:
+            _mg = _maxgeo_gate_verdict(pr, tb_path, tb_result)
+            if _mg is not None and _mg.get("advisory"):
+                # SCOPED, not silent. The engine's own compute-lane-independent
+                # conformance TB drove every BUS maximum and cannot drive the
+                # compute lane; the gap is logged RED, written to the event
+                # stream, and carried forward as a defect so the final report
+                # and validation DV both see it.
+                log("  [INTEG-DV] MAX-GEOMETRY gate SCOPED to the bus contract "
+                    "(deterministic conformance TB, compute lane UNMODELED) -- "
+                    "this is NOT full max-geometry coverage. NOT COVERED: "
+                    f"{_mg['uncovered_dims']}", RED)
+                write_graph_event(pr, "Integration DV", "maxgeo_gate_scoped", {
+                    "gate": "maxgeo",
+                    "scope": "bus-contract-only",
+                    "bus_covered": _mg.get("bus_covered", {}),
+                    "uncovered_dims": _mg.get("uncovered_dims", {}),
+                })
+                record_carried_forward_defect(pr, {
+                    "gate": "maxgeo",
+                    "kind": "max_geometry_not_covered",
+                    "advisory": True,
+                    "unmodeled": (
+                        "compute-lane dimensional maxima never driven at "
+                        f"maximum extent: {_mg.get('uncovered_dims', {})} "
+                        "(integration DV is the deterministic QSPI conformance "
+                        "TB -- no compute oracle)"
+                    ),
+                    "first_divergence_block": "",
+                    "note": _mg["reason"],
+                })
+                sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
+            elif _mg is not None:
                 passed = False
                 sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
                 span.set_attribute("maxgeo_gate_failed", True)

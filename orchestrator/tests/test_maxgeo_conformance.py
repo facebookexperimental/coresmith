@@ -21,10 +21,12 @@ Two properties are tested here, and they pull in opposite directions on purpose:
 
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
 
+from orchestrator.langgraph import pipeline_graph
 from orchestrator.langgraph.bfm_lib import (
     QSPIContract,
     bus_maxgeo_coverage,
@@ -202,3 +204,86 @@ def test_writer_reports_coverage_and_carries_the_contract(tmp_path):
     # what this TB was capable of, instead of trusting what it claimed
     assert res["contract"]["addr_bytes"] == 3
     assert out.is_file()
+
+
+# ---------------------------------------------------------------------------
+# The gate's scoped verdict
+# ---------------------------------------------------------------------------
+def _project(tmp_path, dims: dict) -> str:
+    cs = tmp_path / ".coresmith"
+    cs.mkdir(parents=True, exist_ok=True)
+    (cs / "ers_spec.json").write_text(json.dumps({"ers": {"constraints": [
+        {"name": n, "max": v} for n, v in dims.items()
+    ]}}), encoding="utf-8")
+    return str(tmp_path)
+
+
+def _conformance_tb(tmp_path, dims: dict) -> tuple[str, dict]:
+    out = tmp_path / "tb" / "integration" / "test_chip_top.py"
+    res = write_qspi_conformance_tb(
+        str(tmp_path), "chip_top", QSPIContract(), str(out), declared_dims=dims)
+    return str(out), res
+
+
+def test_gate_scopes_the_deterministic_conformance_tb(tmp_path):
+    pr = _project(tmp_path, RASTER_DIMS)
+    tb, res = _conformance_tb(tmp_path, RASTER_DIMS)
+    v = pipeline_graph._maxgeo_gate_verdict(pr, tb, res)
+    assert v is not None and v["advisory"] is True
+    assert v["bus_covered"] == BUS_DIMS
+    # the compute-lane remainder is REPORTED, not dropped
+    assert "frame_width" in v["uncovered_dims"]
+    assert "NOT COVERED" in v["reason"]
+    assert "no compute oracle" in v["reason"].lower()
+
+
+def test_gate_still_bites_when_the_generator_skips_a_bus_maximum(tmp_path):
+    """The relaxation recomputes the expected bus coverage from the CONTRACT.
+    A codegen regression that stops driving the max read burst is a hard fail --
+    the TB does not get to mark its own homework."""
+    pr = _project(tmp_path, RASTER_DIMS)
+    tb, res = _conformance_tb(tmp_path, RASTER_DIMS)
+    text = open(tb).read().replace("out_read_length=4096 ", "")
+    open(tb, "w").write(text)
+    v = pipeline_graph._maxgeo_gate_verdict(pr, tb, res)
+    assert v is not None and v.get("advisory") is not True
+    assert v["bus_skipped"] == {"out_read_length": 4096}
+
+
+def test_gate_does_not_scope_an_llm_authored_tb(tmp_path):
+    """Same testbench TEXT, but the caller's record does not identify it as the
+    engine's deterministic conformance TB -> the gate is unchanged. The
+    discriminator is the caller's record precisely so a generated file cannot
+    talk its way into the relaxation."""
+    pr = _project(tmp_path, RASTER_DIMS)
+    tb, _res = _conformance_tb(tmp_path, RASTER_DIMS)
+    for record in (None, {}, {"deterministic_bfm": True}, {"conformance_only": True}):
+        v = pipeline_graph._maxgeo_gate_verdict(pr, tb, record)
+        assert v is not None and v.get("advisory") is not True, record
+
+
+def test_gate_does_not_scope_without_the_scope_marker_in_the_artifact(tmp_path):
+    pr = _project(tmp_path, RASTER_DIMS)
+    tb, res = _conformance_tb(tmp_path, RASTER_DIMS)
+    text = open(tb).read().replace("# MAXGEO_SCOPE:", "# (scope line removed)")
+    open(tb, "w").write(text)
+    v = pipeline_graph._maxgeo_gate_verdict(pr, tb, res)
+    assert v is not None and v.get("advisory") is not True
+
+
+def test_scope_can_be_switched_off(tmp_path, monkeypatch):
+    pr = _project(tmp_path, RASTER_DIMS)
+    tb, res = _conformance_tb(tmp_path, RASTER_DIMS)
+    assert pipeline_graph._maxgeo_gate_verdict(pr, tb, res)["advisory"] is True
+    monkeypatch.setenv("CORESMITH_MAXGEO_CONFORMANCE_SCOPE", "0")
+    v = pipeline_graph._maxgeo_gate_verdict(pr, tb, res)
+    assert v is not None and v.get("advisory") is not True
+
+
+def test_a_bus_only_design_gets_a_clean_pass_not_an_advisory(tmp_path):
+    """When every declared maximum IS a bus maximum, the conformance TB covers
+    them all and the gate returns a plain pass -- the scope path is not
+    involved."""
+    pr = _project(tmp_path, BUS_DIMS)
+    tb, res = _conformance_tb(tmp_path, BUS_DIMS)
+    assert pipeline_graph._maxgeo_gate_verdict(pr, tb, res) is None
