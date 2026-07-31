@@ -476,6 +476,11 @@ async def init_design_node(state: BackendState) -> dict:
     log(f"{'='*60}", CYAN)
 
     out: dict = {
+        # Return the COMPUTED name. It was logged in the banner and then
+        # dropped, so the state kept whatever the caller guessed -- measured:
+        # the banner said user_project_wrapper while synthesis ran with a stale
+        # name and yosys renamed the top to match it.
+        "design_name": design_name,
         "current_block": {"name": design_name},
         "integration_top_path": integration_top,
         "block_rtl_paths": block_rtl,

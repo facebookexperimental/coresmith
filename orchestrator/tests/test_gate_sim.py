@@ -52,12 +52,17 @@ _NETLIST_RAILS = _NETLIST.replace(
 )
 
 # The same netlist with a real bidirectional SIGNAL on the boundary.
+# The tristate port is genuinely DRIVEN (a conditional-Z assign): the veto is
+# for bidirectional SIGNALS. A declared-but-unreferenced inout, or one tied to
+# constant Z, is INERT -- a mandated-but-unused pad bus like Caravel analog_io --
+# and deliberately does not veto (test_a_z_tied_unused_inout_is_inert_not_a_veto).
 _NETLIST_TRISTATE = _NETLIST.replace(
     "module blk(clk, rst_n, en, q, valid);",
     "module blk(clk, rst_n, en, q, valid, sda);",
 ).replace(
     "  sky130_fd_sc_hd__dfxtp_1",
-    "  inout sda;\n  wire sda;\n  sky130_fd_sc_hd__dfxtp_1",
+    "  inout sda;\n  wire sda;\n"
+    "  assign sda = en ? 1'b0 : 1'bz;\n  sky130_fd_sc_hd__dfxtp_1",
 )
 
 # The subject under test declares itself the chip top. The gate's DEFAULT SCOPE
@@ -638,7 +643,7 @@ def test_split_inouts_separates_rails_from_signals():
     ports = [gs.Port("clk", "input"), gs.Port("vccd1", "inout"),
              gs.Port("vssd1", "inout"), gs.Port("sda", "inout"),
              gs.Port("q", "output", 8, 7, 0)]
-    rails, signals = gs.split_inouts(ports)
+    rails, _inert, signals = gs.split_inouts(ports)
     assert [p.name for p in rails] == ["vccd1", "vssd1"]
     assert [p.name for p in signals] == ["sda"]
 
@@ -646,9 +651,51 @@ def test_split_inouts_separates_rails_from_signals():
 def test_a_wide_inout_is_never_treated_as_a_rail():
     """A supply is one bit. A bus that happens to share a rail's name is not a
     rail we understand, so it stays a signal and still vetoes the gate."""
-    rails, signals = gs.split_inouts([gs.Port("vccd1", "inout", 8, 7, 0)])
-    assert rails == []
+    rails, inert, signals = gs.split_inouts([gs.Port("vccd1", "inout", 8, 7, 0)])
+    assert rails == [] and inert == []
     assert [p.name for p in signals] == ["vccd1"]
+
+
+def test_a_z_tied_unused_inout_is_inert_not_a_veto():
+    """Caravel MANDATES `inout [28:0] analog_io` on every user_project_wrapper.
+    A design that never touches it gets `assign analog_io = 29'hzzzzzzzz;` from
+    yosys -- declaration plus a constant-Z tie, no behaviour. Excluding it
+    fabricates nothing, and without this rule the gate can never judge the one
+    artifact the external grader actually drives."""
+    netlist = (
+        "module top(clk, analog_io);\n"
+        "  input clk;\n"
+        "  inout [28:0] analog_io;\n"
+        "  wire [28:0] analog_io;\n"
+        "  assign analog_io = 29'hzzzzzzzz;\n"
+        "endmodule\n")
+    rails, inert, signals = gs.split_inouts(
+        [gs.Port("analog_io", "inout", 29, 28, 0)], netlist)
+    assert [p.name for p in inert] == ["analog_io"]
+    assert signals == [] and rails == []
+
+
+def test_an_inout_with_any_real_reference_still_vetoes():
+    """One instance connection means the port participates in the design; the
+    honest answer stays "cannot judge". Structural, not a name list: a design
+    that actually drives its analog pads must not be blessed."""
+    netlist = (
+        "module top(clk, analog_io);\n"
+        "  input clk;\n"
+        "  inout [28:0] analog_io;\n"
+        "  some_cell u0 (.pad(analog_io[3]));\n"
+        "endmodule\n")
+    rails, inert, signals = gs.split_inouts(
+        [gs.Port("analog_io", "inout", 29, 28, 0)], netlist)
+    assert inert == []
+    assert [p.name for p in signals] == ["analog_io"]
+
+
+def test_without_netlist_text_no_inout_is_presumed_inert():
+    """No evidence, no exemption."""
+    rails, inert, signals = gs.split_inouts(
+        [gs.Port("analog_io", "inout", 29, 28, 0)])
+    assert inert == [] and [p.name for p in signals] == ["analog_io"]
 
 
 def test_driver_ties_power_rails_and_never_compares_them():
