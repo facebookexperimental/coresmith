@@ -1454,9 +1454,8 @@ _DOC_FIX_MAX_ATTEMPTS = 2
 # violation loops forever on the doc-fix path (rung3r2 defect 3). The ERS is
 # a synthesis of those same roots (re-issuing it cannot change what it derives
 # from), and ``requirements`` is the immutable user input. An ``auto_fixable``
-# violation rooted in one of these
-# is ESCALATION-ONLY: it needs an operator PRD amendment / documented
-# supersession / accept, never an auto-repair loop.
+# violation rooted in one of these is ESCALATION-ONLY: it needs an operator PRD
+# amendment / documented supersession / accept, never an auto-repair loop.
 _ESCALATION_ONLY_SOURCES = frozenset({"prd", "requirements", "ers"})
 
 
