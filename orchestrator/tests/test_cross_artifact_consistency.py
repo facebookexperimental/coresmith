@@ -25,7 +25,22 @@ verbatim (copied from the run's ``.bak-chiplead*`` before-files) plus a
 ``clean/`` counterpart with every correction applied, so a false positive on
 consistent artifacts fails a test.
 
-Hermetic: no LLM is called except through a monkeypatched ``ClaudeLLM``.
+Hermetic: no LLM is called except through a monkeypatched ``ClaudeLLM``. A
+stubbed subagent proves the *plumbing* (findings surface, block the run, and
+carry both cited locations) but says nothing about whether the catalog entry's
+prompt actually works, so it was also run LIVE once against these same
+fixtures before landing -- ``_run_constraint_subagent`` with the real provider
+(codex / gpt-5.6-sol), on the real ``_build_artifact_bundle`` output:
+
+  * ``contradictory/`` -> 13 findings covering ALL FIVE acceptance
+    contradictions (nine of them the individual stale FRD references of
+    contradiction 1, plus 2, 3, 4 and 5), every one emitting the pinned
+    ``A: ... || B: ...`` evidence format, so all 13 machine-split into two
+    cited locations;
+  * ``clean/``         -> 0 findings.
+
+Re-run that check by hand if you change the entry's ``description``; it is the
+only thing that tells you the prompt still works.
 """
 
 from __future__ import annotations
