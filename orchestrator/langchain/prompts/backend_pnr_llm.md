@@ -131,9 +131,9 @@ If you do use `-max_columns` (for via-array control, which is a
 different purpose), put it on **`add_pdn_connect`**, never on
 `define_pdn_grid`:
 
-    add_pdn_connect -grid stdcell_grid -layers {met1 met4} -max_columns 2
-    add_pdn_connect -grid stdcell_grid -layers {met4 met5} -max_columns 2
-    add_pdn_connect -grid macro_grid   -layers {met4 met5} -max_columns 2
+    add_pdn_connect -grid stdcell_grid -layers {{met1 met4}} -max_columns 2
+    add_pdn_connect -grid stdcell_grid -layers {{met4 met5}} -max_columns 2
+    add_pdn_connect -grid macro_grid   -layers {{met4 met5}} -max_columns 2
 
 `max_columns` is a parameter of `pdn::make_connect` (the SWIG entry point
 behind `add_pdn_connect`). Writing `define_pdn_grid ... -max_columns 2`
