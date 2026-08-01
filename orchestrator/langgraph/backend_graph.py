@@ -2459,6 +2459,16 @@ async def ask_human_node(state: BackendState) -> dict:
             _r["waived"] = True
             _r["waiver"] = _waiver
             out["lvs_result"] = _r
+        else:
+            # signoff-phase accept: the park can land after downstream stages
+            # already ran (diagnose picks up the earlier LVS failure). Waive
+            # the failed LVS here too, or advance_block re-fails on it.
+            _lr = state.get("lvs_result") or {}
+            if _lr.get("match") is False and not _lr.get("waived"):
+                _r = dict(_lr)
+                _r["waived"] = True
+                _r["waiver"] = _waiver
+                out["lvs_result"] = _r
         log(f"  [WAIVER] operator ACCEPTED failed {_phase} check -- "
             "recorded, proceeding to the next signoff stage. A waived check "
             "is reported as waived, never as clean.", YELLOW)
@@ -2957,7 +2967,7 @@ def route_after_human(state: BackendState) -> str:
         _phase = state.get("phase", "")
         if _phase == "drc":
             return "lvs"
-        if _phase == "lvs":
+        if _phase in ("lvs", "signoff"):
             return "timing_signoff"
         return "advance_block"
     mapping = {
