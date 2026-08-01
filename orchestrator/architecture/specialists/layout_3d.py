@@ -100,6 +100,23 @@ DEFAULT_POLY_BUDGET = 300_000
 Z_EXAGGERATION = 0.15
 
 
+def _active_layer_map() -> dict[tuple[int, int], dict[str, Any]]:
+    """The GDS layer map for the active deployment (PR6, byo-pdk).
+
+    A deployment may supply its own ``gds_layer_map()``; when it returns None
+    (the sky130 default) the engine's built-in ``SKY130_LAYERS`` is used, so
+    behavior is unchanged. Best-effort -- any resolution error falls back to
+    the sky130 map so the viewer never hard-fails."""
+    try:
+        from orchestrator.pdk.registry import get_deployment
+        m = get_deployment().gds_layer_map()
+        if m:
+            return m
+    except Exception:  # noqa: BLE001
+        pass
+    return SKY130_LAYERS
+
+
 # ── Geometry helpers ────────────────────────────────────────────
 
 
@@ -192,15 +209,24 @@ def _build_layer_mesh(
 def gds_to_gltf(
     gds_path: str,
     max_polygons: int = DEFAULT_POLY_BUDGET,
+    layer_map: dict[tuple[int, int], dict[str, Any]] | None = None,
 ) -> tuple[bytes, list[dict[str, Any]]] | None:
     """Convert a GDS file to GLB binary + layer metadata.
 
     Returns ``(glb_bytes, layer_info_list)`` or ``None`` on failure.
     Each entry in *layer_info_list* has keys ``name``, ``color``, ``count``.
+
+    ``layer_map`` is the (gds_layer, datatype) -> render-param map; when None it
+    is resolved from the active deployment (PR6), defaulting to the sky130 map
+    so behavior is unchanged.
     """
     if not _HAS_DEPS:
         logger.warning("3D viewer deps not installed (gdstk / pygltflib / mapbox-earcut)")
         return None
+
+    if layer_map is None:
+        layer_map = _active_layer_map()
+    max_z = max(v["z"] + v["h"] for v in layer_map.values())
 
     lib = gdstk.read_gds(gds_path)
     tops = lib.top_level()
@@ -211,14 +237,14 @@ def gds_to_gltf(
 
     # ── Collect polygons per layer ──────────────────────────────
     layer_polys: dict[tuple[int, int], list[np.ndarray]] = {}
-    for key in SKY130_LAYERS:
+    for key in layer_map:
         raw = top.get_polygons(depth=None, layer=key[0], datatype=key[1])
         if raw:
             pts = [np.asarray(p.points) if hasattr(p, "points") else np.asarray(p) for p in raw]
             layer_polys[key] = pts
 
     if not layer_polys:
-        logger.warning("No recognised sky130 layer polygons in GDS")
+        logger.warning("No recognised PDK layer polygons in GDS")
         return None
 
     total = sum(len(v) for v in layer_polys.values())
@@ -226,7 +252,7 @@ def gds_to_gltf(
 
     # ── Budget cap (keep highest-priority layers first) ─────────
     if total > max_polygons:
-        sorted_keys = sorted(layer_polys, key=lambda k: SKY130_LAYERS[k]["pri"])
+        sorted_keys = sorted(layer_polys, key=lambda k: layer_map[k]["pri"])
         kept: dict[tuple[int, int], list[np.ndarray]] = {}
         count = 0
         for key in sorted_keys:
@@ -250,7 +276,7 @@ def gds_to_gltf(
     center = (bb_min + bb_max) / 2.0
     extent = max(float(bb_max[0] - bb_min[0]), float(bb_max[1] - bb_min[1]), 1.0)
     scale = 10.0 / extent
-    z_scale = 10.0 * Z_EXAGGERATION / _MAX_Z
+    z_scale = 10.0 * Z_EXAGGERATION / max_z
 
     # ── Materials, meshes, buffer ───────────────────────────────
     materials: list[Any] = []
@@ -263,10 +289,10 @@ def gds_to_gltf(
     meshes: list[Any] = []
     child_ids: list[int] = []
 
-    sorted_keys = sorted(layer_polys, key=lambda k: SKY130_LAYERS[k]["z"])
+    sorted_keys = sorted(layer_polys, key=lambda k: layer_map[k]["z"])
 
     for key in sorted_keys:
-        info = SKY130_LAYERS[key]
+        info = layer_map[key]
         r, g, b = info["color"]
         a: float = info.get("alpha", 1.0)
 

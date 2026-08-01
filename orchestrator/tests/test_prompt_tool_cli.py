@@ -226,13 +226,16 @@ class TestEdaPromptsHelper:
 
 
 def test_gen_macro_cli_skips_when_capability_absent(tmp_path, monkeypatch):
-    """gen_macro is a CLI verb stub: a deployment lacking it exits 4 (skip),
-    never a false green."""
+    """gen_macro is capability-gated on OpenRAM (PR6): a deployment that cannot
+    invoke OpenRAM exits 4 (skip), never a false green. Force the unavailable
+    branch so the assertion holds regardless of the host's OpenRAM install."""
     import types
 
+    import orchestrator.langgraph.openram_gen as og
     from orchestrator.harness import cli_tool
     from orchestrator.pdk.registry import reset_deployment_cache
     monkeypatch.setenv("CORESMITH_DEPLOYMENT", "sky130")
+    monkeypatch.setattr(og, "openram_available", lambda: False)
     reset_deployment_cache()
     args = types.SimpleNamespace(
         verb="gen_macro", project_root=str(tmp_path), design="w8d64",
@@ -240,4 +243,22 @@ def test_gen_macro_cli_skips_when_capability_absent(tmp_path, monkeypatch):
         json=False, rtl=None, script=None, netlist=None, sdc=None, gds=None,
         spice=None)
     assert cli_tool.cmd_tool_run(args) == 4
+    reset_deployment_cache()
+
+
+def test_gen_macro_capability_present_when_openram_available(monkeypatch):
+    """When OpenRAM IS invokable, sky130 advertises gen_macro (capability +
+    supports + a tool instance) -- the honest present branch."""
+    import orchestrator.langgraph.openram_gen as og
+    from orchestrator.pdk.registry import reset_deployment_cache
+    monkeypatch.setenv("CORESMITH_DEPLOYMENT", "sky130")
+    monkeypatch.setattr(og, "openram_available", lambda: True)
+    reset_deployment_cache()
+    from orchestrator.pdk.registry import get_deployment
+    dep = get_deployment()
+    assert dep.supports("gen_macro")
+    assert "gen_macro" in dep.capabilities()
+    assert dep.tool("gen_macro") is not None
+    # hot-path lookups never gain gen_macro (no OpenRAM probe there)
+    assert "gen_macro" not in dep.tools()
     reset_deployment_cache()

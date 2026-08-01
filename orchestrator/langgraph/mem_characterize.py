@@ -29,10 +29,11 @@ Design notes
   in the sweep. Routability risk is a heuristic derived from the flop read-mux
   fan-out (depth) since a deep combinational read mux is exactly what congests.
 * Generic: the grid + PDK are inputs; nothing is sky130-specific beyond the
-  PDK paths resolved through ``backend_helpers`` (LIBERTY/TECH_LEF/...).
+  PDK paths + OpenROAD binary resolved through the active DEPLOYMENT
+  (LIBERTY/TECH_LEF/... and ``resolve_openroad_bin()``).
 * Reuses engine helpers: ``openram_gen.ensure_macro/find_exact/plan_composition``,
-  ``sram_wrapper.wrapper_lib_path``, ``backend_helpers`` PDK consts + the
-  OpenROAD binary, ``macro_registry`` for macro ``.lib``/``.lef`` resolution.
+  ``sram_wrapper.wrapper_lib_path``, the deployment's PDK paths + OpenROAD
+  binary, ``macro_registry`` for macro ``.lib``/``.lef`` resolution.
 """
 from __future__ import annotations
 
@@ -53,37 +54,34 @@ from typing import Any
 # ---------------------------------------------------------------------------
 from orchestrator.langgraph.sram_wrapper import wrapper_lib_path
 
+# PDK paths come from the active deployment (PR6, byo-pdk) rather than a
+# cross-module import of backend_helpers constants. These module-level names are
+# retained as a re-export shim: arith_characterize imports them from here, and
+# any external caller keeps working. Values are byte-identical to the old
+# backend_helpers re-exports for the sky130 deployment.
 try:
-    from orchestrator.langgraph.backend_helpers import (
-        CELL_LEF,
-        LIBERTY,
-        OPENROAD_BIN,
-        TECH_LEF,
-    )
-except Exception:  # pragma: no cover - only if PDK consts unresolvable
+    from orchestrator.pdk.registry import get_deployment as _get_deployment
+    _dep = _get_deployment()
+    LIBERTY = Path(_dep.liberty)
+    TECH_LEF = Path(_dep.tech_lef)
+    CELL_LEF = Path(_dep.cell_lef)
+except Exception:  # pragma: no cover - only if the deployment is unresolvable
     LIBERTY = TECH_LEF = CELL_LEF = Path("/nonexistent")
-    OPENROAD_BIN = "openroad"
 
 
 def _resolve_openroad() -> str:
-    """Real OpenROAD binary for STA.
+    """Real OpenROAD binary for STA -- delegates to the deployment (PR6).
 
-    backend_helpers resolves OPENROAD_BIN to a ``nix develop`` wrapper script by
-    default; on a host without nix that fails (exec: nix: not found). Prefer an
-    explicit env var, then a real ``openroad`` on PATH, then the known local
-    build, and only fall back to the (possibly-wrapper) backend const.
+    The deployment prefers an explicit ``CORESMITH_BACKEND_OPENROAD`` env var,
+    then a real ``openroad`` on PATH, then a local build, and only falls back to
+    its (possibly nix-wrapper) binary -- the logic formerly inline here.
     """
-    import shutil as _sh
-    env = os.environ.get("CORESMITH_BACKEND_OPENROAD", "").strip()
-    if env and Path(env).exists():
-        return env
-    on_path = _sh.which("openroad")
-    if on_path:
-        return on_path
-    local = Path.home() / "openroad-src" / "build" / "bin" / "openroad"
-    if local.exists():
-        return str(local)
-    return OPENROAD_BIN
+    try:
+        from orchestrator.pdk.registry import get_deployment
+        return get_deployment().resolve_openroad_bin()
+    except Exception:  # noqa: BLE001 - never let resolution break import
+        import shutil as _sh
+        return _sh.which("openroad") or "openroad"
 
 
 OPENROAD_BIN = _resolve_openroad()

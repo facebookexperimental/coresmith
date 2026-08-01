@@ -280,6 +280,41 @@ class Deployment(ABC):
         """Gate-sim cell verilog + UDP shims (default: none)."""
         return []
 
+    # -- gate-sim accessors (PR6): a deployment owns its cell sim models, UDP
+    # shim text, and Verilator defines. Defaults are honest empties so a
+    # deployment that supplies none degrades the gate sim to ``not_run`` (never
+    # a false pass -- there is nothing to simulate the netlist against).
+    def cell_model_files(self, netlist_text: str = "",
+                         pdk_root: str | None = None) -> tuple[list[str], tuple[str, ...]]:
+        """Return ``(files, prefixes)`` -- the standard-cell simulation models
+        the netlist references. Default: none."""
+        return [], ()
+
+    def udp_shim_source(self, prefixes: tuple[str, ...] = ()) -> str:
+        """Verilator-compatible behavioural UDP replacements (default: none)."""
+        return ""
+
+    def sim_defines(self) -> list[str]:
+        """Verilator ``-D`` defines for gate simulation (default: none)."""
+        return []
+
+    # -- macro accessors (PR6): a deployment owns where its pre-built hard
+    # macros live and the power/ground/lib-corner defaults. A deployment with
+    # no macro library returns an empty search set -> discover_macros() is empty
+    # (honest: the flop path / gen_macro is the only route to a memory).
+    def macro_search_paths(self, pdk_root: str) -> list[Path]:
+        """Directories to scan for pre-built macro collateral. Default: none."""
+        return []
+
+    def macro_defaults(self) -> dict[str, str]:
+        """Macro power/ground pin + preferred lib corner defaults."""
+        return {"power_pin": "", "ground_pin": "", "lib_corner": ""}
+
+    def gds_layer_map(self) -> dict[tuple[int, int], Any] | None:
+        """GDS (layer, datatype) -> render params for the 3D/2D viewer.
+        Default ``None`` -> the viewer uses its built-in default map."""
+        return None
+
     def data_dir(self) -> Path | None:
         """Optional sidecar dir for TCL/yaml templates (default: none)."""
         return None
