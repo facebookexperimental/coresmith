@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
@@ -208,6 +209,28 @@ class OutputArtifactChecker(Checker):
         )
 
 
+def _run_cmd(cmd: list[str], timeout: int,
+             cwd: str | None = None) -> tuple[int, str, str, str]:
+    """Run a subprocess; return (rc, stdout, stderr, infra_reason).
+
+    ``infra_reason`` is non-empty only for a genuine infra failure (timeout /
+    binary missing) so callers can map it to exit-3 rather than a verb fail.
+    """
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=timeout, cwd=cwd)
+        return r.returncode, r.stdout, r.stderr, ""
+    except subprocess.TimeoutExpired:
+        return 124, "", "", f"did not terminate within {timeout}s (timeout)"
+    except (FileNotFoundError, OSError) as exc:
+        return 127, "", "", f"tool not found: {exc}"
+
+
+def _synth_out_dir(req: ToolRequest) -> Path:
+    return Path(req.out_dir) if req.out_dir else (
+        PROJECT_ROOT / "syn" / "output" / (req.design or "block"))
+
+
 def _artifact_check(name: str, path: Path | None) -> CheckResult:
     """Compose an inline artifact-presence check from a known path."""
     if path is not None and Path(path).exists():
@@ -226,11 +249,19 @@ class RunSynthYosys(EdaTool):
     def run(self, req: ToolRequest) -> ToolResult:
         from orchestrator.langgraph.pipeline_helpers import synthesize_block
 
+        # Agent-authored script path: run the caller's .ys VERBATIM (the flat-top
+        # backend synth authors a custom script -- macro directives, lpflow-strip,
+        # etc.). No script -> the deployment generates + runs its own recipe via
+        # synthesize_block (the per-block frontend path).
+        script = req.input("script")
+        if script is not None:
+            return self._run_script(req, script)
+
         rtl = req.input("rtl")
         if rtl is None:
             return ToolResult.from_checks(
                 tool_ok=False,
-                checks=[CheckResult("inputs", "fail", details="run_synth needs --rtl")],
+                checks=[CheckResult("inputs", "fail", details="run_synth needs --rtl or --script")],
                 verb=self.verb, design=req.design,
             )
         clock = float(req.params.get("clock_mhz", 50.0))
@@ -278,14 +309,53 @@ class RunSynthYosys(EdaTool):
             design=req.design, extra_metrics=metrics,
         )
 
+    def _run_script(self, req: ToolRequest, script: Path) -> ToolResult:
+        """Run a caller-authored yosys script verbatim and parse its stat."""
+        out_dir = _synth_out_dir(req)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        rc, stdout, stderr, infra = _run_cmd(
+            [_resolve_yosys(), "-s", str(script)],
+            timeout=req.timeout_s or 900, cwd=str(PROJECT_ROOT))
+        report = out_dir / f"{req.design or 'synth'}_report.txt"
+        report.write_text(stdout + "\n" + stderr)
+        success = rc == 0 and not infra
+        tool_ok = success or not (infra or _is_infra_failure(stderr))
+        checks = [CheckResult("synth_returncode", "pass" if success else "fail",
+                              details=(stderr or stdout)[-400:])]
+        stat_res = SynthStatChecker().check(req, out_dir)
+        checks.append(stat_res)
+        nets = sorted(out_dir.glob("*netlist*.v")) or sorted(out_dir.glob("*.v"))
+        if nets:
+            checks.append(_artifact_check("netlist", nets[0]))
+        metrics = {
+            "cells": int(stat_res.metrics.get("cells", 0) or 0),
+            "gate_count": int(stat_res.metrics.get("cells", 0) or 0),
+            "ff_count": int(stat_res.metrics.get("ff_count", 0) or 0),
+            "chip_area_um2": float(stat_res.metrics.get("chip_area_um2", 0.0) or 0.0),
+        }
+        return ToolResult.from_checks(
+            tool_ok=tool_ok, checks=checks,
+            artifacts={"netlist": nets[0]} if nets else {},
+            log_path=report, verb=self.verb, design=req.design,
+            extra_metrics=metrics,
+        )
+
     def checkers(self) -> list[Checker]:
         return [SynthStatChecker(), LogicDepthChecker(),
                 OutputArtifactChecker("netlist_present", "netlist")]
 
     def prompt_notes(self) -> str:
         return (
-            "yosys synth targeting sky130_fd_sc_hd; PDK-free generic mapping when "
-            "no liberty is present. dfflibmap + abc -liberty for the mapped flow."
+            "Yosys targeting the sky130 high-density standard-cell library.\n"
+            "- PDK-mapped flow (liberty present): read_verilog -> "
+            "hierarchy -check -top <top> -> proc; opt; fsm; opt; memory; opt -> "
+            "techmap; opt -> dfflibmap -liberty <lib>; abc -liberty <lib>; clean; "
+            "opt_clean -purge -> write_verilog -noattr; stat -liberty <lib>.\n"
+            "- PDK-free generic flow (no liberty on this host): map with "
+            "`abc -g AND,OR,XOR,MUX` then a plain `stat`; this still proves the "
+            "design elaborates and maps to terminating gates.\n"
+            "- Parse the final `stat` for the cell count (the module total is a "
+            "`N cells` line on newer Yosys) and area."
         )
 
 
@@ -380,7 +450,21 @@ class RunPnrOpenroad(EdaTool):
         return ref if ref.exists() else None
 
     def prompt_notes(self) -> str:
-        return "OpenROAD -no_init -exit <tcl>; start from the pnr_reference.tcl template."
+        return (
+            "OpenROAD place-and-route on the sky130 HD PDK. Start from the "
+            "reference TCL (`tool emit-script run_pnr`), which already has the "
+            "full flow (read design, floorplan, PDN, placement, CTS, timing "
+            "repair, routing, reports, output). Sky130-specific rules that MUST "
+            "hold when you edit it:\n"
+            "- Power grid MUST use met1 followpins -- sky130 HD cells require it.\n"
+            "- Do NOT insert filler cells before CTS (CTS buffers need free "
+            "sites); ALWAYS `remove_fillers` before any post-CTS "
+            "`detailed_placement`; insert fillers only after that passes.\n"
+            "- Die area must be >= 60 um on each side.\n"
+            "- NEVER drop the SRAM macro reads/placement (`read_lef` of the "
+            "macro LEFs, `place_macro`) to work around an error -- a layout with "
+            "bound memories physically absent is a HARD FAILURE, not a success."
+        )
 
 
 class RunStaOpenroad(EdaTool):
@@ -417,7 +501,11 @@ class RunStaOpenroad(EdaTool):
         return [StaChecker()]
 
     def prompt_notes(self) -> str:
-        return "OpenROAD STA: read_liberty/read_verilog/read_sdc + report_checks."
+        return (
+            "OpenROAD/OpenSTA on the sky130 HD liberty: "
+            "read_liberty -> read_verilog -> link_design -> read_sdc -> "
+            "report_checks / report_wns / report_tns. Report WNS/TNS in ns."
+        )
 
 
 class RunDrcMagic(EdaTool):
@@ -468,7 +556,28 @@ class RunDrcMagic(EdaTool):
         return [MagicDrcChecker()]
 
     def prompt_notes(self) -> str:
-        return "Magic -dnull -noconsole -rcfile <magicrc> <drc.tcl>."
+        return (
+            "Magic VLSI DRC + SPICE extraction on the sky130 HD PDK. Author a "
+            "Magic TCL script; the CLI runs it under the correct magicrc. "
+            "Sky130-specific requirements:\n"
+            "- Read the tech + cell LEFs FIRST, BEFORE `def read` -- without the "
+            "tech LEF, Magic cannot map the DEF's routing vias and every net "
+            "becomes a dangling single-pin node (LVS then reports a huge "
+            "net_delta no setup can reconcile). Read each macro LEF here too.\n"
+            "- Black-box each hard macro before extraction (`extract halt "
+            "<cell>`) so Magic does not descend into the intractable "
+            "transistor-level macro layout.\n"
+            "- Run DRC HIERARCHICALLY -- do NOT flatten for the gating count "
+            "(flattening reports thousands of PDK-derivation sliver artifacts). "
+            "`drc check; drc catchup` then `drc listall why <report>`.\n"
+            "- Extract LVS SPICE CONNECTIVITY-ONLY (no parasitics): "
+            "`extract do local; extract no capacitance; extract no coupling; "
+            "extract no resistance; extract all; ext2spice lvs; "
+            "ext2spice cthresh infinite; ext2spice rthresh infinite`.\n"
+            "- Write the signoff GDS via KLayout streamout from the DEF "
+            "(OpenLane-standard); fall back to Magic `gds write` and say so. "
+            "Write to a temp name, move into place only on success."
+        )
 
 
 class RunLvsNetgen(EdaTool):
@@ -477,12 +586,18 @@ class RunLvsNetgen(EdaTool):
     def run(self, req: ToolRequest) -> ToolResult:
         from orchestrator.langgraph.backend_helpers import run_lvs_flow
 
+        # Agent-authored netgen script path (the abstraction-aligned readnet
+        # flow); no script -> the deterministic spice-vs-netlist helper.
+        script = req.input("script")
+        if script is not None:
+            return self._run_script(req, script)
+
         spice, netlist = req.input("spice"), req.input("netlist")
         if spice is None or netlist is None:
             return ToolResult.from_checks(
                 tool_ok=False,
                 checks=[CheckResult("inputs", "fail",
-                                    details="run_lvs needs --spice and --netlist")],
+                                    details="run_lvs needs --script OR (--spice and --netlist)")],
                 verb=self.verb, design=req.design,
             )
         out_dir = str(req.out_dir or (PROJECT_ROOT / "pnr" / "output" / req.design))
@@ -501,6 +616,26 @@ class RunLvsNetgen(EdaTool):
             verb=self.verb, design=req.design,
         )
 
+    def _run_script(self, req: ToolRequest, script: Path) -> ToolResult:
+        """Run a caller-authored ``netgen -batch source <script>`` and derive the
+        verdict from the report (LvsMatchChecker reconciles benign pins)."""
+        out_dir = Path(req.out_dir) if req.out_dir else (
+            PROJECT_ROOT / "pnr" / "output" / (req.design or "lvs"))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        rc, stdout, stderr, infra = _run_cmd(
+            [self.deployment.netgen_bin, "-batch", "source", str(script)],
+            timeout=req.timeout_s or 900, cwd=str(PROJECT_ROOT))
+        log = out_dir / f"{req.design or 'lvs'}_netgen.log"
+        log.write_text(stdout + "\n" + stderr)
+        tool_ok = not (infra or _is_infra_failure(stderr))
+        checks = [LvsMatchChecker().check(req, out_dir)]
+        rpt = sorted(out_dir.glob("*lvs*.rpt"))
+        return ToolResult.from_checks(
+            tool_ok=tool_ok, checks=checks,
+            artifacts={"report": rpt[0]} if rpt else {},
+            log_path=log, verb=self.verb, design=req.design,
+        )
+
     def checkers(self) -> list[Checker]:
         # The inline verdict above already reconciles benign pins WITH the
         # reference power-Verilog (richer than a report-only standalone check),
@@ -509,7 +644,17 @@ class RunLvsNetgen(EdaTool):
         return [LvsMatchChecker()]
 
     def prompt_notes(self) -> str:
-        return "Netgen -batch lvs <spice> <verilog> <netgen-setup>."
+        return (
+            "Netgen LVS on the sky130 HD PDK: compare the Magic-extracted SPICE "
+            "against the power-aware PnR Verilog. Sky130/openframe specifics:\n"
+            "- A cell-library SPICE plus the layout netlist must each be read as "
+            "SEPARATE `readnet` calls (netgen treats a space-joined pair as one "
+            "filename); verify the cell-library subckts loaded.\n"
+            "- Power-pin (VPWR/VGND/VPB/VNB) and openframe GPIO tie mismatches "
+            "are the expected benign artifact -- a `Final result: Circuits match "
+            "uniquely` after benign reconciliation is a pass; keep the report so "
+            "the checker can reconcile it."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -573,6 +718,9 @@ class Sky130Deployment(Deployment):
         ctx = super().prompt_context()
         ctx["std_cell_library"] = _STD_CELL
         ctx["pdk_variant"] = self.paths.variant
+        # Cell SPICE library path, so an LVS script can `readnet` the reference
+        # cell definitions without a hardcoded cell-library token in the prompt.
+        ctx["cell_spice"] = str(self.paths.cell_spice)
         return ctx
 
 

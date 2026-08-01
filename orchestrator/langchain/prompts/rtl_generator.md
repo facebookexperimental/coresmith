@@ -243,16 +243,18 @@ If the previous attempt failed, the error will be provided. Fix the specific
 issue while maintaining correctness.
 
 LINT-CLEAN OUTPUT -- MANDATORY:
-After writing the Verilog file to disk, run this command using Bash:
-    verilator --lint-only -Wall -Wno-fatal -Wno-EOFNEWLINE <file_path>
-If lint errors appear (lines containing %Error), fix them immediately by
-editing the Verilog file and re-running lint. Repeat until lint passes
-with zero errors (warnings starting with %Warning are acceptable).
-Only report success when lint is clean.
+After writing the Verilog file to disk, run lint through the coresmith CLI using
+Bash (it resolves the linter + flags from the active deployment):
+    CS="${CORESMITH_CLI:-coresmith}"
+    "$CS" tool run_lint --rtl <file_path> --json
+Exit code 0 means clean; exit 1 means a lint failure (read `.checks[]` in the
+JSON -- an entry with a `%Error`-derived detail). Fix any errors immediately by
+editing the Verilog file and re-running lint. Repeat until lint passes with zero
+errors (style warnings are acceptable). Only report success when lint is clean.
 
 Output format:
 1. Write the complete {rtl_language} module to the specified file path.
-2. Run verilator lint and fix any errors.
+2. Run lint via `"$CS" tool run_lint` and fix any errors.
 3. Ensure the RTL exposes enough named internal signals for a WaveKit VCD
    audit of reset, handshakes, metadata, state transitions, and error flags.
 4. After the module, output a JSON block with port information:

@@ -268,8 +268,16 @@ async def _run_llm_eda_step(
         Parsed result dict from the JSON file, or a failure dict.
     """
     from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
+    from orchestrator.langgraph.eda_prompts import (
+        merged_prompt_context,
+        resolve_prompt_path,
+    )
 
-    prompt_path = _PROMPT_DIR / prompt_file
+    # Merge in the active deployment's PDK/tool context ({pdk_summary},
+    # {tool_notes}, ...); the caller's context keys win on collision. The
+    # rollback flag (CORESMITH_TOOL_CLI_PROMPTS=0) selects a .legacy.md sibling.
+    context = merged_prompt_context(prompt_file, context)
+    prompt_path = resolve_prompt_path(_PROMPT_DIR, prompt_file)
     system_prompt = _safe_format(prompt_path.read_text(), context)
 
     user_message = (

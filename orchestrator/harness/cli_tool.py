@@ -42,7 +42,7 @@ _VERB_INPUTS: dict[str, tuple[str, ...]] = {
     "run_synth": ("rtl", "script"),
     "run_pnr": ("script", "netlist", "sdc"),
     "run_drc": ("script", "gds"),
-    "run_lvs": ("spice", "netlist"),
+    "run_lvs": ("script", "spice", "netlist"),
     "run_sta": ("script", "netlist", "sdc"),
     "run_lint": ("rtl",),
 }
@@ -101,6 +101,11 @@ def _build_request(verb: str, args):
         val = getattr(args, key, None)
         if val:
             inputs[key] = Path(val)
+    # gen_macro carries scalar params, not file inputs.
+    for key in ("width", "depth", "ports"):
+        val = getattr(args, key, None)
+        if val is not None:
+            params[key] = val
     design = getattr(args, "design", None) or (
         Path(rtls[0]).stem if rtls else "")
     out_dir = getattr(args, "out_dir", None)
@@ -273,6 +278,24 @@ def register_tool(sub, run_wrap, add_project_root, add_json) -> None:
         vp.add_argument("--timeout-s", dest="timeout_s", type=int,
                         help="tool timeout in seconds")
         vp.set_defaults(func=run_wrap(cmd_tool_run), verb=verb)
+
+    # tool gen_macro --width W --depth D --ports 1rw1r  (memory macro generation)
+    # A stub verb: deployments that lack the capability exit 4 (skip) via the
+    # shared unsupported-verb path. sky130 leaves gen_macro capability-absent for
+    # now -- Phase C wires it to openram_gen; other deployments bring a vendor
+    # memory compiler.
+    gm = tsub.add_parser("gen_macro", help="generate a memory macro (SRAM/ROM)")
+    add_project_root(gm)
+    add_json(gm)
+    gm.add_argument("--design", help="macro name (default: derived from geometry)")
+    gm.add_argument("--width", type=int, help="data width in bits")
+    gm.add_argument("--depth", type=int, help="depth (number of words)")
+    gm.add_argument("--ports", help="port config, e.g. 1rw or 1rw1r")
+    gm.add_argument("--out-dir", dest="out_dir", metavar="DIR",
+                    help="output/working directory")
+    gm.add_argument("--timeout-s", dest="timeout_s", type=int,
+                    help="tool timeout in seconds")
+    gm.set_defaults(func=run_wrap(cmd_tool_run), verb="gen_macro")
 
     # tool emit-script <verb> --out <path>
     es = tsub.add_parser("emit-script",

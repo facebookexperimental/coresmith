@@ -585,35 +585,49 @@ class TestSafeFormat:
         assert _safe_format("{p:.2f}", {"p": 12.3456}) == "12.35"
         assert _safe_format("{x!r}", {"x": "hi"}) == "'hi'"
 
-    def test_all_backend_prompts_render_identically_to_str_format(self):
-        # AUDIT guard: every backend prompt must render byte-identically under
-        # _safe_format and str.format for its real (word-name) placeholder set.
-        # Guarantees the swap changed no rendering, incl. the `{{ }}` JSON blocks.
-        import re
-        field_re = re.compile(r"\{(\w+)(?:![rsa])?(?::[^{}]*)?\}")
+    def test_all_backend_prompts_render_without_error(self):
+        # AUDIT guard: _safe_format is the production renderer for backend
+        # prompts. Every prompt must render without raising for its real
+        # (word-name) placeholder set, fill each provided field, and leave the
+        # `${CORESMITH_CLI:-coresmith}` shell fallback + escaped JSON braces
+        # literal. (Post-migration the prompts contain a shell `${...}` that
+        # str.format cannot handle but _safe_format leaves literal -- the exact
+        # reason _safe_format exists.)
+        # Real placeholders only, via the engine's own escape-aware regex (so
+        # escaped `{{ }}` Verilog/JSON braces are NOT mistaken for fields), and
+        # excluding `${SHELL_VAR}` fallbacks.
+        from orchestrator.langgraph.backend_graph import _SAFE_FORMAT_RE
         for name in _EDA_PROMPTS:
             text = (_Path(_PROMPT_DIR) / name).read_text()
             ctx = {}
-            for f in set(field_re.findall(text)):
-                # numeric fields may carry :.Nf specs -> give them a float
+            for m in _SAFE_FORMAT_RE.finditer(text):
+                if not m.group(1):
+                    continue
+                if m.start() > 0 and text[m.start() - 1] == "$":
+                    continue  # ${SHELL_VAR}: not a template field
+                f = m.group(1)
                 ctx[f] = 12.3456 if f.endswith(("_ns", "_mhz")) else f"<{f}>"
-            assert _safe_format(text, ctx) == text.format(**ctx), name
+            rendered = _safe_format(text, ctx)  # must not raise
+            # Every provided field was substituted (no un-filled real field).
+            for f in ctx:
+                assert ("{" + f + "}") not in rendered, f"{name}: {f} unfilled"
 
-    def test_lvs_prompt_no_longer_crashes_str_format(self):
-        # Belt-and-suspenders: the LVS example braces are escaped, so even a
-        # plain str.format renders (and matches _safe_format).
+    def test_lvs_prompt_renders_via_safe_format(self):
+        # The LVS example braces (Verilog concat/replication) stay literal, the
+        # shell CLI alias stays literal, and every real field is filled.
         text = (_Path(_PROMPT_DIR) / "backend_lvs_llm.md").read_text()
         ctx = {
-            "design_name": "d", "netgen_setup": "s", "netgen_bin": "b",
+            "design_name": "d", "netgen_setup": "s", "cell_spice": "cs",
             "spice_path": "sp", "pwr_verilog_path": "pv", "output_dir": "od",
             "attempt": 1, "prior_failure": "None", "constraints": "c",
-            "result_json_path": "rj",
+            "result_json_path": "rj", "pdk_summary": "PDK", "tool_notes": "notes",
         }
         rendered = _safe_format(text, ctx)
-        assert rendered == text.format(**ctx)
-        # ... and the rendered example is natural single-brace Verilog.
+        # Verilog braces render as natural single-brace (escaped `{{ }}` -> `{ }`).
         assert "assign io_out = {31'b0, done, qspi_o, 2'b0};" in rendered
         assert "{4{oe}}, 2'b1};" in rendered
+        # The shell CLI alias is left literal (str.format would crash on it).
+        assert "${CORESMITH_CLI:-coresmith}" in rendered
 
 
 # ---------------------------------------------------------------------------

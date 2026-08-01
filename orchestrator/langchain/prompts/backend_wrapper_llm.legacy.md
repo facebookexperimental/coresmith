@@ -13,10 +13,6 @@ and copy all required artifacts.
 
 ## Input Artifacts
 
-These paths are the artifacts produced by the earlier `"$CS" tool run_pnr` /
-`run_drc` verbs (their `ToolResult.artifacts` -- netlist, routed_def, gds,
-spice). You only package them here; no EDA tool is invoked in this step.
-
 - Gate-level netlist: `{pnr_verilog_path}`
 - Routed DEF: `{routed_def_path}`
 - GDS: `{gds_path}`

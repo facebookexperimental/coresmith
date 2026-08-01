@@ -146,10 +146,12 @@ is "fast enough" without checking its own Liberty. And **read `minimum_period`,
 never clock-to-output** — treating a clk→Q access arc as a legal clock period
 produced ~2 GHz macro frequencies for a macro whose real limit was 558 MHz.
 
-To generate a macro that actually passes DRC/LVS/characterization, use
-`bin/gen_ram` — it bakes in the OpenRAM repairs (see the `gen_ram` docstring
-and `scripts/patch_openram.py`), several of which fail *silently* and produce a
-plausible wrong answer rather than an error.
+To generate a macro that actually passes DRC/LVS/characterization, use the
+active deployment's memory-macro verb through the CLI
+(`CS="${CORESMITH_CLI:-coresmith}"`; `"$CS" tool gen_macro ...`). It resolves
+the memory compiler and its silent-repair recipe from the deployment; a
+deployment that has no memory compiler exits 4 (skip) rather than producing a
+plausible wrong answer.
 
 ## Available sky130 SRAM macros (reference one by name in the spec)
 
@@ -173,10 +175,10 @@ into one logical memory — neither horizontally (concatenating `rdata`) nor
 vertically (decoding high address bits to select a bank). Tiling is disabled
 in the engine by default and `ensure_macro` will not return a tiled plan.
 
-Ask for the geometry you actually need and let OpenRAM build it
-(`bin/gen_ram --width W --depth D --ports 1rw1r`). A purpose-built macro is
-smaller than an over-provisioned tile and arrives with its own signed-off
-DRC/LVS/Liberty collateral.
+Ask for the geometry you actually need and let the deployment's memory compiler
+build it (`"$CS" tool gen_macro --width W --depth D --ports 1rw1r`). A
+purpose-built macro is smaller than an over-provisioned tile and arrives with its
+own signed-off DRC/LVS/Liberty collateral.
 
 Two reasons this matters, both measured:
 
