@@ -172,14 +172,25 @@ def test_present_golden_says_nothing(monkeypatch):
     assert called == []
 
 
-def test_promised_hardware_golden_that_cannot_be_read_fails_rtl_generation():
-    import inspect
+def test_promised_hardware_golden_that_cannot_be_read_fails_rtl_generation(tmp_path):
+    """An unreadable hardware golden must RAISE, not silently ask for a
+    byte-exact lowering of nothing. Asserted on the behaviour of the
+    production prompt constructor (``build_user_message``, which
+    ``RTLGeneratorAgent.generate`` calls), not on its source text."""
+    import pytest
 
     from orchestrator.langchain.agents import rtl_generator as rg
 
-    src = inspect.getsource(rg.RTLGeneratorAgent.generate)
-    assert "if not _hw_src.strip():" in src
-    assert "CORESMITH_RTL_FROM_HW_GOLDEN" in src
+    with pytest.raises(RuntimeError) as exc:
+        rg.build_user_message(
+            block_name="blk",
+            rtl_target="rtl/blk.v",
+            python_source_path="arch/block_models/blk.py",   # does not exist
+            reference_is_hw_golden=True,
+            project_root=str(tmp_path),
+        )
+    assert "CORESMITH_RTL_FROM_HW_GOLDEN" in str(exc.value)
+    assert "byte-exact" in str(exc.value)
 
 
 # ===========================================================================

@@ -3142,7 +3142,8 @@ async def fix_lint_errors(
         f"## Working Files\n"
         f"- RTL file: {rtl_path}\n"
         f"- Lint log: {lint_log_path}\n"
-        f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n\n"
+        f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n"
+        f"  ({_naming_precedence_line()})\n\n"
         f"Read the lint errors, then use the Edit tool to fix the RTL file "
         f"in-place. Do NOT rewrite the entire file -- make targeted fixes."
     )
@@ -3230,7 +3231,8 @@ async def fix_synth_errors(
         f"- Diagnosis / prior error context (READ THIS FIRST -- when a prior "
         f"diagnose ran it names the specific root cause + the fix): "
         f".coresmith/blocks/{block_name}/previous_error.txt\n"
-        f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n\n"
+        f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n"
+        f"  ({_naming_precedence_line()})\n\n"
         f"Read previous_error.txt and the synthesis errors, then fix the RTL. "
         f"{edit_instr}"
     )
@@ -3337,6 +3339,23 @@ async def fix_testbench_errors(
     except Exception as e:
         log(f"  [TB-FIX] LLM error: {e}", RED)
         return None
+
+
+def _naming_precedence_line() -> str:
+    """Naming precedence for a block's ACCUMULATED constraints ('' on error).
+
+    A learned constraint is one debug agent's read of one failure; the frozen
+    interface contract is design intent. When they disagree about a port NAME,
+    the contract wins -- otherwise a constraint that memorialised a collapsed
+    name keeps re-introducing it on every fixer pass.
+    """
+    try:
+        from orchestrator.langgraph.contract_conformance import (
+            CONSTRAINT_PRECEDENCE_LINE,
+        )
+        return CONSTRAINT_PRECEDENCE_LINE
+    except Exception:  # noqa: BLE001 - prompt garnish, never blocks a fix
+        return ""
 
 
 # ---------------------------------------------------------------------------
