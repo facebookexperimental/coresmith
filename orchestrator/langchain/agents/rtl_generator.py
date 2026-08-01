@@ -150,10 +150,13 @@ if _SKILLS_TEXT:
 # model's (collapsed) port list "byte-exact" -- see the AUTHORITATIVE PORT
 # NAMES table injected into every RTL user message.
 _PORT_NAMING_SKILL = _load_skill_strict("port_naming")
+_LATCHED_CTRL_SKILL = _load_skill_strict("latched_control_decisions")
 SYSTEM_PROMPT = (
     SYSTEM_PROMPT
     + "\n\n# Reference Skill (canonical port naming -- MANDATORY)\n\n"
     + _PORT_NAMING_SKILL
+    + "\n\n"
+    + _LATCHED_CTRL_SKILL
 )
 
 # QSPI-slave frontend / IO-subsystem blocks own the external chassis bus boundary

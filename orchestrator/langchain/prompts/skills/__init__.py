@@ -94,6 +94,10 @@ SKILL_PURPOSES: dict[str, str] = {
         "the canonical <channel>_<field> port name and the contract's primacy "
         "over golden-model port identifiers"
     ),
+    "latched_control_decisions": (
+        "Latch multi-cycle control decisions; never re-derive from live "
+        "signals in later FSM states (recurring silicon-bug class)."
+    ),
     "qspi_slave_frontend_protocol": (
         "complete QSPI-slave bus protocol for the block that owns the external "
         "chassis boundary"
@@ -133,7 +137,7 @@ UARCH_SKILL_CANDIDATES: tuple[str, ...] = (
 #: Injected INLINE on every call, never manifested. Small (~2 K) and the one
 #: rule with no cheap recovery path: a collapsed port name is not caught until
 #: the pre-sim conformance gate, and costs a full regeneration.
-ALWAYS_INLINE: tuple[str, ...] = ("port_naming",)
+ALWAYS_INLINE: tuple[str, ...] = ("port_naming", "latched_control_decisions")
 
 
 def skill_path(skill_id: str) -> Path:
