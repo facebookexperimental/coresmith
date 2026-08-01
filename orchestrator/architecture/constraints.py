@@ -1345,6 +1345,31 @@ single violation MAY instead be reported with top-level ``violation_text`` /
 """
 
 
+def build_subagent_prompt(constraint: dict, artifact_bundle: str) -> str:
+    """One constraint subagent's user message: SHARED PREFIX first, charter last.
+
+    The eight subagents differ only in which constraint they check, and the
+    artifact bundle they share is the whole prompt by volume (measured: ~306 K
+    chars each, of which interface_contracts.json + block_diagram.json alone
+    are ~165 K, re-uploaded eight times at an 11 % prompt-cache hit rate).
+    Prompt caching is PREFIX-matched, so putting the per-subagent constraint
+    first made every one of the eight prompts diverge at character ~50 and none
+    of the shared bulk could be reused.
+
+    Bundle first, charter last => all eight prompts share a byte-identical
+    prefix. Nothing about WHAT a subagent checks changes.
+    """
+    return (
+        "## Artifact bundle\n"
+        f"{artifact_bundle}\n\n"
+        "## Constraint to verify\n"
+        f"**id:** `{constraint['id']}`\n\n"
+        f"**rule:**\n{constraint['description']}\n\n"
+        "Verify the constraint against the artifact bundle above. Respond "
+        "with JSON only."
+    )
+
+
 async def _run_constraint_subagent(
     constraint: dict,
     artifact_bundle: str,
@@ -1364,14 +1389,7 @@ async def _run_constraint_subagent(
 
     llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=timeout_seconds)
 
-    user_prompt = (
-        "## Constraint to verify\n"
-        f"**id:** `{constraint['id']}`\n\n"
-        f"**rule:**\n{constraint['description']}\n\n"
-        "## Artifact bundle\n"
-        f"{artifact_bundle}\n\n"
-        "Verify the constraint. Respond with JSON only."
-    )
+    user_prompt = build_subagent_prompt(constraint, artifact_bundle)
 
     try:
         content = await llm.call(
@@ -1597,13 +1615,29 @@ async def check_constraints(
             os.environ.get("CORESMITH_CONSTRAINT_SUBAGENT_TIMEOUT", "600")
         )
 
-        subagent_results = await asyncio.gather(
-            *[
-                _run_constraint_subagent(c, artifact_bundle, timeout_seconds)
-                for c in applicable
-            ],
-            return_exceptions=False,
-        )
+        # CACHE WARM-UP: issue ONE subagent first, then the rest in parallel.
+        # Every prompt now shares a byte-identical prefix (the artifact
+        # bundle), but a cache entry only exists once some call has WRITTEN
+        # it -- firing all eight simultaneously means eight concurrent misses
+        # on the same prefix. One serial call primes it; the remaining N-1
+        # then run concurrently against a warm prefix.
+        subagent_results: list[list[dict]] = []
+        if applicable:
+            subagent_results.append(
+                await _run_constraint_subagent(
+                    applicable[0], artifact_bundle, timeout_seconds)
+            )
+            if len(applicable) > 1:
+                subagent_results.extend(
+                    await asyncio.gather(
+                        *[
+                            _run_constraint_subagent(
+                                c, artifact_bundle, timeout_seconds)
+                            for c in applicable[1:]
+                        ],
+                        return_exceptions=False,
+                    )
+                )
 
         llm_violations: list[dict] = [v for batch in subagent_results for v in batch]
         # LLM cross-artifact findings are CANDIDATES: render both cited sides

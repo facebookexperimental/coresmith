@@ -39,7 +39,7 @@ from typing import Any
 from opentelemetry import trace
 
 from orchestrator._timeouts import scaled
-from orchestrator.langchain.prompts.skills import load_skills as _load_skills
+from orchestrator.langchain.prompts.skills import build_skill_section, select_skills
 
 from .coresmith_llm import ClaudeLLM
 
@@ -60,18 +60,46 @@ else:  # pragma: no cover - prompt ships with the repo
         "latency semantics."
     )
 
-# Inject the shared streaming-protocol skills so generated block models follow
-# the same handshake + framing (tvalid/tready, tlast/tuser) conventions every
-# other coresmith agent uses -- this is what lets the blocks COMPOSE.
-_SKILLS_TEXT = _load_skills(
-    "axi_stream", "srdy_drdy", "arithmetic_precision", "serialization_contract",
-    "buffer_stride_contract", "no_stimulus_keyed_memorization", "pipeline_contract")
-if _SKILLS_TEXT:
-    SYSTEM_PROMPT = (
-        SYSTEM_PROMPT
-        + "\n\n# Reference Skills (streaming protocol — follow these)\n\n"
-        + _SKILLS_TEXT
+# The shared streaming-protocol skills let the blocks COMPOSE, but they used to
+# be concatenated at IMPORT time -- ~82 K chars on every block model, most of it
+# inapplicable. They are now selected PER CALL from the block's own evidence
+# (see build_system_prompt); the rest are manifested with absolute paths for the
+# worker to read on demand.
+#
+#: Selected from this block's evidence.
+BLOCK_MODEL_SKILL_CANDIDATES: tuple[str, ...] = (
+    "axi_stream",
+    "srdy_drdy",
+    "arithmetic_precision",
+    "serialization_contract",
+    "buffer_stride_contract",
+    "pipeline_contract",
+)
+#: Always inline: port_naming (the contract is the naming authority and a
+#: collapsed name is only caught by a pre-sim gate) + the anti-cheat rule (a
+#: model that keys off the stimulus invalidates every DV verdict downstream).
+_BLOCK_MODEL_ALWAYS: tuple[str, ...] = (
+    "port_naming",
+    "no_stimulus_keyed_memorization",
+)
+
+
+def build_system_prompt(
+    block_spec: Any = None,
+    contracts: Any = None,
+    block_diagram: Any = None,
+) -> str:
+    """The block-model author's system prompt for ONE block."""
+    section = build_skill_section(
+        select_skills(
+            block_spec, contracts, block_diagram,
+            candidates=BLOCK_MODEL_SKILL_CANDIDATES,
+        ),
+        candidates=BLOCK_MODEL_SKILL_CANDIDATES,
+        always=_BLOCK_MODEL_ALWAYS,
+        heading="# Reference Skills (streaming protocol — follow these)",
     )
+    return SYSTEM_PROMPT + "\n\n" + section if section else SYSTEM_PROMPT
 
 
 def _contract_port_names(block_ports: Any, interface_contract: Any) -> list[str]:
@@ -252,9 +280,21 @@ class BlockGoldenGenerator:
                 except OSError:
                     pre_existing = ""
 
+            _system_prompt = build_system_prompt(
+                block_spec={
+                    "name": block_name,
+                    "ports": block_ports,
+                    "model_source": reference_impl_source,
+                    "golden_functions": slice_functions or [],
+                },
+                contracts=interface_contract,
+                block_diagram=block_ports or None,
+            )
+            span.set_attribute("system_prompt_chars", len(_system_prompt))
+
             run_name = f"Generate Block Model [{block_title}]"
             content = await self.llm.call(
-                system=SYSTEM_PROMPT,
+                system=_system_prompt,
                 prompt=user_message,
                 run_name=run_name,
             )

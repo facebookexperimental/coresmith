@@ -21,6 +21,7 @@ from typing import Any
 
 from opentelemetry import trace
 
+from orchestrator.langchain.prompts.skills import load_skill_strict as _load_skill_strict
 from orchestrator.langchain.prompts.skills import load_skills as _load_skills
 
 from .coresmith_llm import DEFAULT_MODEL, ClaudeLLM
@@ -141,6 +142,19 @@ if _SKILLS_TEXT:
         + "\n\n"
         + _SKILLS_TEXT
     )
+
+# port_naming is ALWAYS inline (it is ~2 KB). The one rule that has no cheap
+# recovery path: a collapsed `<channel>_<field>` name is not caught until the
+# deterministic pre-sim conformance gate, and costs a whole regeneration. It
+# lived in NO prompt while the RTL generator was told to transcribe the golden
+# model's (collapsed) port list "byte-exact" -- see the AUTHORITATIVE PORT
+# NAMES table injected into every RTL user message.
+_PORT_NAMING_SKILL = _load_skill_strict("port_naming")
+SYSTEM_PROMPT = (
+    SYSTEM_PROMPT
+    + "\n\n# Reference Skill (canonical port naming -- MANDATORY)\n\n"
+    + _PORT_NAMING_SKILL
+)
 
 # QSPI-slave frontend / IO-subsystem blocks own the external chassis bus boundary
 # and keep shipping protocol-INCOMPLETE code (dropped cmd 0x05 read_status, short
@@ -302,6 +316,283 @@ def _recover_codex_artifact(
     return ""
 
 
+def _contract_port_table_fragment(project_root: str, block_name: str) -> str:
+    """The block's AUTHORITATIVE port names, derived from the frozen contract.
+
+    Reuses the conformance gate's own derivation
+    (``contract_conformance.contract_port_rows``) so the names the generator is
+    told to use are byte-identical to the names the gate demands. Without this
+    the RTL prompt carried only the golden model's COLLAPSED port list under a
+    "transcribe it EXACTLY (byte-exact)" directive, and the contract's port
+    table appeared in no prompt at all -- which is how a run lost 90 minutes to
+    `host_write_enable` where the contract said `host_write_write_enable`.
+
+    Best-effort: returns '' when there is no contract edge for this block or on
+    any error (never blocks RTL generation -- the gate still catches it).
+    """
+    if not project_root or not block_name:
+        return ""
+    try:
+        from orchestrator.langgraph.contract_conformance import (
+            format_contract_port_table,
+        )
+        return format_contract_port_table(project_root, block_name)
+    except Exception:  # noqa: BLE001 - best-effort, never block RTL generation
+        return ""
+
+
+def build_user_message(
+    block_name: str,
+    description: str = "",
+    attempt: int = 1,
+    rtl_target: str = "",
+    python_source_path: str = "",
+    reference_is_hw_golden: bool = False,
+    project_root: str = "",
+    rtl_language: str = "Verilog-2005",
+) -> str:
+    """Assemble the RTL generator's user message (the production constructor).
+
+    Split out of :meth:`RTLGeneratorAgent.generate` so the assembled prompt can
+    be asserted on directly, the way the other prompt builders in this repo
+    are.
+    """
+    parts = [
+        f"Block name: {block_name}",
+        f"Description: {description}",
+        f"Attempt: {attempt}",
+        "",
+        "## Working Files",
+        "Read these files to understand the design:",
+        f"- uArch Spec: arch/uarch_specs/{block_name}.md",
+        "- ERS: arch/ers_spec.md",
+        f"- Constraints: .coresmith/blocks/{block_name}/constraints.json",
+        (
+            f"- Hardware Golden Model (Amaranth): {python_source_path}"
+            if reference_is_hw_golden
+            else f"- Golden Model: {python_source_path}"
+        ),
+        "- Block Diagram: .coresmith/block_diagram.json (for interface context)",
+        "- Interface Contracts: .coresmith/interface_contracts.json "
+        "(canonical bit-level edge contracts — see inline excerpt below)",
+    ]
+
+    if reference_is_hw_golden:
+        # Step 1 of the microarchitecture restructure: the RTL is a
+        # *lowering* of the per-block Amaranth hardware golden, not an
+        # independent re-transcription of a float reference. This is the
+        # fix for "the RTL re-derives (and re-breaks) the hardware
+        # decisions the model already paid to make."
+        parts += [
+            "",
+            "## Reference is the HARDWARE GOLDEN — lower it, do not re-derive",
+            "The golden model above is the per-block Amaranth HARDWARE model, "
+            "NOT a floating-point reference. It is already in hardware "
+            "semantics: fixed-point arithmetic, resolved feedback/state, "
+            "and any performance derating already applied. Your job is to "
+            "LOWER it to RTL faithfully — the RTL must be FUNCTIONALLY "
+            "BYTE-EXACT to this model. Do NOT re-derive the algorithm from "
+            "a floating-point reference; do NOT change quantization, scan "
+            "order, rounding, saturation, or datapath widths; do NOT "
+            "'improve' or re-approximate the math. Transcribe its "
+            "arithmetic and control exactly. You MAY choose pipelining, "
+            "encoding, and resource sharing for PPA, but every produced "
+            "value must match the model bit-for-bit. This is about "
+            "BEHAVIOR: the model's PORT NAMES are not authoritative — see "
+            "the AUTHORITATIVE PORT NAMES table below.",
+        ]
+
+        # Inline the hardware-golden SOURCE (not just its path). The
+        # path-only reference let the RTL generator skim/skip the model
+        # and emit a cheap re-approximation that lints clean; inlining
+        # forces the byte-exact target into context, the same fix the
+        # interface contracts already use below.
+        _hw_src = _read_hw_golden_source(project_root, python_source_path)
+        if not _hw_src.strip():
+            # D1: the prompt three paragraphs up has just told the
+            # generator "the golden model above is the per-block Amaranth
+            # HARDWARE model ... the RTL must be FUNCTIONALLY BYTE-EXACT
+            # to this model". If the file cannot be read, that sentence
+            # is false and the generator is being asked to be byte-exact
+            # to nothing -- it will re-derive the algorithm, which is the
+            # precise failure the hardware-golden flag exists to stop.
+            # Reading "" and carrying on was a silent fail-open.
+            raise RuntimeError(
+                f"RTL generation for '{block_name}': the run promised a "
+                f"HARDWARE GOLDEN ({python_source_path}) as the "
+                "byte-exact lowering target (CORESMITH_RTL_FROM_HW_GOLDEN"
+                "), but it is empty or unreadable. Refusing to ask for a "
+                "byte-exact lowering of nothing -- the generator would "
+                "re-derive the algorithm and the equivalence gate would "
+                "then fail on RTL nobody could explain. Regenerate the "
+                "block model, or turn the flag off to fall back to the "
+                "reference golden."
+            )
+        if _hw_src and _prompt_slim_enabled():
+            # B4 prompt-slim: path + head instead of the full inline.
+            # The equivalence gate (with a fresh seed) catches any
+            # re-derivation, so the byte-exact target need not be dumped.
+            _head = "\n".join(_hw_src.splitlines()[:40])
+            parts += [
+                "",
+                "## HARDWARE GOLDEN MODEL — transcribe it EXACTLY (byte-exact)",
+                f"The hardware golden is `{python_source_path}` (READ THE "
+                "FULL FILE; first 40 lines shown for orientation). The RTL "
+                "must be functionally BYTE-EXACT to it: same algorithm, "
+                "mode/branch selection, arithmetic, quantization, scan "
+                "order, rounding, saturation, and datapath widths. Do NOT "
+                "substitute a heuristic or re-derive from a float reference "
+                "-- an RTL-vs-model equivalence gate "
+                "(`\"${CORESMITH_CLI:-coresmith}\" verify rtl <block>`) "
+                "checks this with a FRESH seed before the block "
+                "is accepted. Byte-exact applies to BEHAVIOR, not to the "
+                "model's port identifiers: take every port NAME from the "
+                "AUTHORITATIVE PORT NAMES table below.",
+                "```python",
+                _head,
+                "```",
+            ]
+        elif _hw_src:
+            parts += [
+                "",
+                "## HARDWARE GOLDEN MODEL SOURCE — transcribe this EXACTLY",
+                f"Below is `{python_source_path}` inlined. The RTL must be "
+                "functionally BYTE-EXACT to THIS code: same algorithm, "
+                "mode/branch selection, arithmetic, quantization, scan "
+                "order, rounding, saturation, and datapath widths. Do NOT "
+                "substitute a simpler heuristic, gradient/edge "
+                "approximation, or any re-derivation — every produced "
+                "value must match it bit-for-bit (an RTL-vs-model "
+                "equivalence gate checks this before the block is "
+                "accepted). Byte-exact applies to BEHAVIOR, not to the "
+                "model's port identifiers: take every port NAME from the "
+                "AUTHORITATIVE PORT NAMES table below.",
+                "```python",
+                _hw_src,
+                "```",
+            ]
+
+    # THE NAMING AUTHORITY. Derived from the frozen contract via the same
+    # machinery the pre-sim conformance gate uses, so what the generator is
+    # shown and what the gate demands cannot drift apart.
+    _port_table = _contract_port_table_fragment(project_root, block_name)
+    if _port_table:
+        parts.append(_port_table)
+        parts.append(
+            "\n" + _constraint_precedence_line()
+        )
+
+    # Inject the canonical contract slice for this block directly
+    # into the prompt. The v7 autopilot run proved that telling the
+    # agent "go read interface_contracts.json" is not enough — the
+    # RTL generator routinely ignored the file's bootstrap_policy.
+    # Inlining the relevant edges forces the contract into the
+    # generator's context window.
+    from .contract_lookup import (
+        format_block_contracts_prompt,
+        format_block_contracts_prompt_slim,
+        load_block_contracts,
+    )
+    _contracts_view = load_block_contracts(project_root, block_name)
+    # B4 prompt-slim: emit the bootstrap policy + a `coresmith contracts
+    # <block>` pointer instead of the full edge JSON dump.
+    if _prompt_slim_enabled():
+        _contracts_fragment = format_block_contracts_prompt_slim(
+            block_name, _contracts_view
+        )
+    else:
+        _contracts_fragment = format_block_contracts_prompt(
+            block_name, _contracts_view
+        )
+    if _contracts_fragment:
+        parts.append(_contracts_fragment)
+
+    # PDK arithmetic timing budget (gated; best-effort) -- the real
+    # per-op delays so the RTL sizes each registered pipeline stage
+    # instead of emitting a single-cycle combinational cloud. Same
+    # budget the uArch spec author consumed; honored here at RTL time.
+    _budget_text = _pdk_budget_fragment(project_root)
+    if _budget_text:
+        parts.append(
+            "\n--- PDK TIMING BUDGET (size each REGISTERED stage to "
+            "these per-op delays; the chained combinational delay in "
+            "any one stage must not exceed the clock period) ---\n"
+            + _budget_text
+        )
+
+    # Per-block PIPELINE STAGE MAP, audited from the Amaranth model's
+    # declared STAGE_BUDGET: each named stage -> a registered boundary
+    # with a known per-cycle op budget. This is the structural contract
+    # whose absence let the codec RD-search collapse into one comb cloud.
+    try:
+        from orchestrator.langgraph.latency_audit import (
+            stage_map_fragment as _stage_map,
+        )
+        _sm = _stage_map(project_root, block_name)
+        if _sm:
+            parts.append(
+                "\n--- PIPELINE STAGE MAP (from the model's audited "
+                "latency budget; realize EACH stage as a registered "
+                "always @(posedge clk) boundary) ---\n" + _sm
+            )
+    except Exception:  # noqa: BLE001 - best-effort, never block RTL gen
+        pass
+
+    # THROUGHPUT CONTRACT (v3): the block's DECLARED cyc/op + II as a
+    # HARD constraint. Delivery-time DV cycle-measures the RTL and
+    # rejects it above declared x 1.1 -- so the target the AES worker
+    # never saw is now in the RTL generator's context.
+    _thr_text = _throughput_contract_fragment(project_root, block_name)
+    if _thr_text:
+        parts.append(
+            "\n--- THROUGHPUT CONTRACT (your RTL is cycle-measured in "
+            "DV; exceeding declared x 1.1 is an automatic rejection -- "
+            "see system-prompt rule 18) ---\n" + _thr_text
+        )
+
+    if attempt > 1:
+        parts.extend([
+            f"- Previous Error: .coresmith/blocks/{block_name}/previous_error.txt",
+            f"- Existing RTL: {rtl_target} (use Edit to fix incrementally if possible)",
+        ])
+
+    parts.extend([
+        "",
+        "## Output",
+        f"Write the complete synthesizable {rtl_language} module to: {rtl_target}",
+        "Keep reset, handshakes, state, sideband metadata, error flags, "
+        "and pipeline boundary signals named and observable so the "
+        "downstream Verilator VCD can be audited with WaveKit.",
+        "",
+    ])
+
+    if attempt > 1:
+        parts.append(
+            "This is a RETRY. Read the previous error and the existing RTL. "
+            "If the fix is surgical, use the Edit tool to modify the existing "
+            "RTL in-place. Only regenerate from scratch if the design is "
+            "fundamentally wrong."
+        )
+    else:
+        parts.append(
+            "Read the uArch spec and golden model, then generate the "
+            "complete Verilog module and write it to the output path."
+        )
+
+    return "\n".join(parts)
+
+
+def _constraint_precedence_line() -> str:
+    """Naming precedence for the accumulated constraints.json ('' on error)."""
+    try:
+        from orchestrator.langgraph.contract_conformance import (
+            CONSTRAINT_PRECEDENCE_LINE,
+        )
+        return CONSTRAINT_PRECEDENCE_LINE
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 class RTLGeneratorAgent:
     """Agent for Python-to-Verilog RTL generation.
 
@@ -370,213 +661,16 @@ class RTLGeneratorAgent:
             _tool = synthesis_tool or self._DEFAULT_SYNTH_TOOL
             _pcon = process_constraints or self._DEFAULT_CONSTRAINTS
 
-            parts = [
-                f"Block name: {block_name}",
-                f"Description: {description}",
-                f"Attempt: {attempt}",
-                "",
-                "## Working Files",
-                "Read these files to understand the design:",
-                f"- uArch Spec: arch/uarch_specs/{block_name}.md",
-                "- ERS: arch/ers_spec.md",
-                f"- Constraints: .coresmith/blocks/{block_name}/constraints.json",
-                (
-                    f"- Hardware Golden Model (Amaranth): {python_source_path}"
-                    if reference_is_hw_golden
-                    else f"- Golden Model: {python_source_path}"
-                ),
-                "- Block Diagram: .coresmith/block_diagram.json (for interface context)",
-                "- Interface Contracts: .coresmith/interface_contracts.json "
-                "(canonical bit-level edge contracts — see inline excerpt below)",
-            ]
-
-            if reference_is_hw_golden:
-                # Step 1 of the microarchitecture restructure: the RTL is a
-                # *lowering* of the per-block Amaranth hardware golden, not an
-                # independent re-transcription of a float reference. This is the
-                # fix for "the RTL re-derives (and re-breaks) the hardware
-                # decisions the model already paid to make."
-                parts += [
-                    "",
-                    "## Reference is the HARDWARE GOLDEN — lower it, do not re-derive",
-                    "The golden model above is the per-block Amaranth HARDWARE model, "
-                    "NOT a floating-point reference. It is already in hardware "
-                    "semantics: fixed-point arithmetic, resolved feedback/state, "
-                    "and any performance derating already applied. Your job is to "
-                    "LOWER it to RTL faithfully — the RTL must be FUNCTIONALLY "
-                    "BYTE-EXACT to this model. Do NOT re-derive the algorithm from "
-                    "a floating-point reference; do NOT change quantization, scan "
-                    "order, rounding, saturation, or datapath widths; do NOT "
-                    "'improve' or re-approximate the math. Transcribe its "
-                    "arithmetic and control exactly. You MAY choose pipelining, "
-                    "encoding, and resource sharing for PPA, but every produced "
-                    "value must match the model bit-for-bit.",
-                ]
-
-                # Inline the hardware-golden SOURCE (not just its path). The
-                # path-only reference let the RTL generator skim/skip the model
-                # and emit a cheap re-approximation that lints clean; inlining
-                # forces the byte-exact target into context, the same fix the
-                # interface contracts already use below.
-                _hw_src = _read_hw_golden_source(project_root, python_source_path)
-                if not _hw_src.strip():
-                    # D1: the prompt three paragraphs up has just told the
-                    # generator "the golden model above is the per-block Amaranth
-                    # HARDWARE model ... the RTL must be FUNCTIONALLY BYTE-EXACT
-                    # to this model". If the file cannot be read, that sentence
-                    # is false and the generator is being asked to be byte-exact
-                    # to nothing -- it will re-derive the algorithm, which is the
-                    # precise failure the hardware-golden flag exists to stop.
-                    # Reading "" and carrying on was a silent fail-open.
-                    raise RuntimeError(
-                        f"RTL generation for '{block_name}': the run promised a "
-                        f"HARDWARE GOLDEN ({python_source_path}) as the "
-                        "byte-exact lowering target (CORESMITH_RTL_FROM_HW_GOLDEN"
-                        "), but it is empty or unreadable. Refusing to ask for a "
-                        "byte-exact lowering of nothing -- the generator would "
-                        "re-derive the algorithm and the equivalence gate would "
-                        "then fail on RTL nobody could explain. Regenerate the "
-                        "block model, or turn the flag off to fall back to the "
-                        "reference golden."
-                    )
-                if _hw_src and _prompt_slim_enabled():
-                    # B4 prompt-slim: path + head instead of the full inline.
-                    # The equivalence gate (with a fresh seed) catches any
-                    # re-derivation, so the byte-exact target need not be dumped.
-                    _head = "\n".join(_hw_src.splitlines()[:40])
-                    parts += [
-                        "",
-                        "## HARDWARE GOLDEN MODEL — transcribe it EXACTLY (byte-exact)",
-                        f"The hardware golden is `{python_source_path}` (READ THE "
-                        "FULL FILE; first 40 lines shown for orientation). The RTL "
-                        "must be functionally BYTE-EXACT to it: same algorithm, "
-                        "mode/branch selection, arithmetic, quantization, scan "
-                        "order, rounding, saturation, and datapath widths. Do NOT "
-                        "substitute a heuristic or re-derive from a float reference "
-                        "-- an RTL-vs-model equivalence gate "
-                        "(`\"${CORESMITH_CLI:-coresmith}\" verify rtl <block>`) "
-                        "checks this with a FRESH seed before the block "
-                        "is accepted.",
-                        "```python",
-                        _head,
-                        "```",
-                    ]
-                elif _hw_src:
-                    parts += [
-                        "",
-                        "## HARDWARE GOLDEN MODEL SOURCE — transcribe this EXACTLY",
-                        f"Below is `{python_source_path}` inlined. The RTL must be "
-                        "functionally BYTE-EXACT to THIS code: same algorithm, "
-                        "mode/branch selection, arithmetic, quantization, scan "
-                        "order, rounding, saturation, and datapath widths. Do NOT "
-                        "substitute a simpler heuristic, gradient/edge "
-                        "approximation, or any re-derivation — every produced "
-                        "value must match it bit-for-bit (an RTL-vs-model "
-                        "equivalence gate checks this before the block is "
-                        "accepted).",
-                        "```python",
-                        _hw_src,
-                        "```",
-                    ]
-
-            # Inject the canonical contract slice for this block directly
-            # into the prompt. The v7 autopilot run proved that telling the
-            # agent "go read interface_contracts.json" is not enough — the
-            # RTL generator routinely ignored the file's bootstrap_policy.
-            # Inlining the relevant edges forces the contract into the
-            # generator's context window.
-            from .contract_lookup import (
-                format_block_contracts_prompt,
-                format_block_contracts_prompt_slim,
-                load_block_contracts,
+            user_message = build_user_message(
+                block_name=block_name,
+                description=description,
+                attempt=attempt,
+                rtl_target=rtl_target,
+                python_source_path=python_source_path,
+                reference_is_hw_golden=reference_is_hw_golden,
+                project_root=project_root,
+                rtl_language=_lang,
             )
-            _contracts_view = load_block_contracts(project_root, block_name)
-            # B4 prompt-slim: emit the bootstrap policy + a `coresmith contracts
-            # <block>` pointer instead of the full edge JSON dump.
-            if _prompt_slim_enabled():
-                _contracts_fragment = format_block_contracts_prompt_slim(
-                    block_name, _contracts_view
-                )
-            else:
-                _contracts_fragment = format_block_contracts_prompt(
-                    block_name, _contracts_view
-                )
-            if _contracts_fragment:
-                parts.append(_contracts_fragment)
-
-            # PDK arithmetic timing budget (gated; best-effort) -- the real
-            # per-op delays so the RTL sizes each registered pipeline stage
-            # instead of emitting a single-cycle combinational cloud. Same
-            # budget the uArch spec author consumed; honored here at RTL time.
-            _budget_text = _pdk_budget_fragment(project_root)
-            if _budget_text:
-                parts.append(
-                    "\n--- PDK TIMING BUDGET (size each REGISTERED stage to "
-                    "these per-op delays; the chained combinational delay in "
-                    "any one stage must not exceed the clock period) ---\n"
-                    + _budget_text
-                )
-
-            # Per-block PIPELINE STAGE MAP, audited from the Amaranth model's
-            # declared STAGE_BUDGET: each named stage -> a registered boundary
-            # with a known per-cycle op budget. This is the structural contract
-            # whose absence let the codec RD-search collapse into one comb cloud.
-            try:
-                from orchestrator.langgraph.latency_audit import (
-                    stage_map_fragment as _stage_map,
-                )
-                _sm = _stage_map(project_root, block_name)
-                if _sm:
-                    parts.append(
-                        "\n--- PIPELINE STAGE MAP (from the model's audited "
-                        "latency budget; realize EACH stage as a registered "
-                        "always @(posedge clk) boundary) ---\n" + _sm
-                    )
-            except Exception:  # noqa: BLE001 - best-effort, never block RTL gen
-                pass
-
-            # THROUGHPUT CONTRACT (v3): the block's DECLARED cyc/op + II as a
-            # HARD constraint. Delivery-time DV cycle-measures the RTL and
-            # rejects it above declared x 1.1 -- so the target the AES worker
-            # never saw is now in the RTL generator's context.
-            _thr_text = _throughput_contract_fragment(project_root, block_name)
-            if _thr_text:
-                parts.append(
-                    "\n--- THROUGHPUT CONTRACT (your RTL is cycle-measured in "
-                    "DV; exceeding declared x 1.1 is an automatic rejection -- "
-                    "see system-prompt rule 18) ---\n" + _thr_text
-                )
-
-            if attempt > 1:
-                parts.extend([
-                    f"- Previous Error: .coresmith/blocks/{block_name}/previous_error.txt",
-                    f"- Existing RTL: {rtl_target} (use Edit to fix incrementally if possible)",
-                ])
-
-            parts.extend([
-                "",
-                "## Output",
-                f"Write the complete synthesizable {_lang} module to: {rtl_target}",
-                "Keep reset, handshakes, state, sideband metadata, error flags, "
-                "and pipeline boundary signals named and observable so the "
-                "downstream Verilator VCD can be audited with WaveKit.",
-                "",
-            ])
-
-            if attempt > 1:
-                parts.append(
-                    "This is a RETRY. Read the previous error and the existing RTL. "
-                    "If the fix is surgical, use the Edit tool to modify the existing "
-                    "RTL in-place. Only regenerate from scratch if the design is "
-                    "fundamentally wrong."
-                )
-            else:
-                parts.append(
-                    "Read the uArch spec and golden model, then generate the "
-                    "complete Verilog module and write it to the output path."
-                )
-
-            user_message = "\n".join(parts)
 
             # NOTE: use explicit placeholder substitution (NOT str.format) so
             # literal braces in prompt code examples -- e.g. the anti-memorization

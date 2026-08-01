@@ -136,27 +136,171 @@ def _load_contracts(project_root) -> list[dict]:
     return c if isinstance(c, list) else []
 
 
-def _signal_names(edge: dict) -> list[str]:
-    """Every signal on a channel: the payload fields plus the sideband.
+def signal_specs(edge: dict) -> list[dict]:
+    """Every signal on a channel, with what the contract says about it.
 
-    Split across two keys in the schema, which is precisely why several readers
-    concluded the contract did not record them at all.
+    The payload fields plus the sideband -- split across two keys in the
+    schema, which is precisely why several readers concluded the contract did
+    not record them at all. Their UNION is the port set.
+
+    Returns ``[{"name", "width", "dir", "kind"}]`` in contract order,
+    de-duplicated by name. ``width``/``dir`` are ``""`` when the contract does
+    not state them. This is the single union implementation: both the
+    conformance checker and the prompt-side port table read it, so the
+    generator can never be shown a port set the gate does not check.
     """
-    out: list[str] = []
-    for f in edge.get("fields") or []:
-        n = f.get("name") if isinstance(f, dict) else f
-        if n:
-            out.append(str(n))
-    for s in edge.get("sideband_signals") or []:
-        n = s.get("name") if isinstance(s, dict) else s
-        if n:
-            out.append(str(n))
+    out: list[dict] = []
+    for kind, key in (("field", "fields"), ("sideband", "sideband_signals")):
+        for f in edge.get(key) or []:
+            if isinstance(f, dict):
+                name = f.get("name")
+                width = f.get("width")
+                if width is None:
+                    msb, lsb = f.get("msb"), f.get("lsb")
+                    if isinstance(msb, int) and isinstance(lsb, int):
+                        width = abs(msb - lsb) + 1
+                direction = (
+                    f.get("dir") or f.get("direction") or f.get("towards") or ""
+                )
+            else:
+                name, width, direction = f, None, ""
+            if not name:
+                continue
+            out.append({
+                "name": str(name),
+                "width": "" if width is None else str(width),
+                "dir": str(direction),
+                "kind": kind,
+            })
     seen, uniq = set(), []
-    for n in out:
-        if n not in seen:
-            seen.add(n)
-            uniq.append(n)
+    for spec in out:
+        if spec["name"] not in seen:
+            seen.add(spec["name"])
+            uniq.append(spec)
     return uniq
+
+
+def _signal_names(edge: dict) -> list[str]:
+    """Every signal name on a channel (payload fields plus sideband)."""
+    return [s["name"] for s in signal_specs(edge)]
+
+
+def contract_port_rows(project_root, block_name: str) -> list[dict]:
+    """The ports the contract DECLARES for one block, as canonical rows.
+
+    Walks exactly the edges :func:`check_block` walks, in the same order, and
+    builds the same ``f"{chan}_{n}"`` expectation -- so what the generator is
+    shown and what the gate demands are derived from one place. Returns::
+
+        [{"channel", "role", "signal", "port", "width", "dir", "kind",
+          "peer", "doubled_token"}]
+
+    ``port`` is the canonical flattened name. ``doubled_token`` marks the rows
+    whose channel suffix and signal prefix share a token (``data_write`` +
+    ``write_enable`` -> ``data_write_write_enable``), i.e. exactly the rows a
+    generator "tidies up" into an unwireable name.
+    """
+    rows: list[dict] = []
+    for edge in _load_contracts(project_root):
+        for role, key, peer_key in (
+            ("producer", "producer_port", "consumer_block"),
+            ("consumer", "consumer_port", "producer_block"),
+        ):
+            role_key = "producer_block" if role == "producer" else "consumer_block"
+            if edge.get(role_key) != block_name:
+                continue
+            chan = str(edge.get(key) or "")
+            if not chan:
+                continue
+            for spec in signal_specs(edge):
+                name = spec["name"]
+                port = f"{chan}_{name}"
+                chan_tail = chan.rsplit("_", 1)[-1]
+                sig_head = name.split("_", 1)[0]
+                rows.append({
+                    "channel": chan,
+                    "role": role,
+                    "signal": name,
+                    "port": port,
+                    "width": spec["width"],
+                    "dir": spec["dir"],
+                    "kind": spec["kind"],
+                    "peer": str(edge.get(peer_key) or ""),
+                    "doubled_token": bool(chan_tail) and chan_tail == sig_head,
+                })
+    return rows
+
+
+#: Prepended wherever a block's ACCUMULATED constraints (constraints.json) are
+#: put in front of a generator. Learned constraints are written by a debug
+#: agent looking at one failure; the contract is frozen design intent. When
+#: they disagree about a NAME, the contract wins -- silently, without asking.
+CONSTRAINT_PRECEDENCE_LINE = (
+    "PRECEDENCE: these accumulated constraints are subordinate to the "
+    "interface contract's port table on anything to do with NAMING. If a "
+    "constraint (or a previous attempt's RTL, or the golden model, or the "
+    "uArch spec's prose) spells a port differently from the contract's "
+    "AUTHORITATIVE PORT NAMES table, the contract wins -- use the contract's "
+    "spelling and ignore the constraint's. Constraints remain authoritative "
+    "for everything that is not a port name."
+)
+
+_PORT_TABLE_HEADER = (
+    "## AUTHORITATIVE PORT NAMES (from the frozen interface contract)\n"
+    "The golden model's port identifiers may be collapsed or abbreviated; "
+    "transcribe the model's BEHAVIOR byte-exact but take every port NAME from "
+    "this table. Each row is a port your module MUST declare, spelled exactly "
+    "as shown. A deterministic pre-simulation gate checks this list against "
+    "your module header and FAILS the block on any deviation -- there is no "
+    "sim to reach if a name is wrong.\n"
+)
+
+
+def format_contract_port_table(project_root, block_name: str) -> str:
+    """Render :func:`contract_port_rows` as a prompt fragment ('' when empty).
+
+    Grouped by channel so the ``<channel>_<field>`` construction is visible,
+    with the doubled-token rows called out by name (the exact class the
+    conformance gate keeps catching).
+    """
+    rows = contract_port_rows(project_root, block_name)
+    if not rows:
+        return ""
+    lines = ["", _PORT_TABLE_HEADER]
+    seen_channels: list[tuple[str, str, str]] = []
+    for r in rows:
+        keyed = (r["channel"], r["role"], r["peer"])
+        if keyed not in seen_channels:
+            seen_channels.append(keyed)
+    for chan, role, peer in seen_channels:
+        peer_txt = f" <-> {peer}" if peer else ""
+        lines.append(f"\n**channel `{chan}`** (this block is the {role}{peer_txt})")
+        for r in rows:
+            if (r["channel"], r["role"], r["peer"]) != (chan, role, peer):
+                continue
+            bits = []
+            if r["width"]:
+                bits.append(f"width {r['width']}")
+            if r["dir"]:
+                bits.append(f"dir {r['dir']}")
+            bits.append(r["kind"])
+            note = ""
+            if r["doubled_token"]:
+                note = (
+                    "   <-- DOUBLED TOKEN IS CORRECT: channel "
+                    f"`{chan}` + signal `{r['signal']}`. Do NOT collapse it."
+                )
+            lines.append(
+                f"- `{r['port']}`  ({', '.join(bits)}; signal "
+                f"`{r['signal']}`){note}"
+            )
+    lines.append(
+        "\nRules: the canonical port name is `<channel>_<signal>`; never "
+        "shorten a repeated token, never drop the channel prefix, never "
+        "expose the same signal twice (both prefixed and bare), and never "
+        "invent a port that wears a channel prefix but is not in this table."
+    )
+    return "\n".join(lines)
 
 
 _PORT_RE = re.compile(r"\b(?:input|output|inout)\b([^;)]*)", re.MULTILINE)
