@@ -1734,7 +1734,7 @@ async def lvs_node(state: BackendState) -> dict:
     block_name = block["name"]
 
     drc_result = state.get("drc_result") or {}
-    if not drc_result.get("clean"):
+    if not (drc_result.get("clean") or drc_result.get("waived")):
         error_msg = drc_result.get("errors", "DRC not clean")
         return {"lvs_result": {"match": False, "errors": error_msg}, "phase": "lvs", "previous_error": error_msg}
 
