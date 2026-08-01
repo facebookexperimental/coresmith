@@ -10910,9 +10910,47 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
         # -- otherwise a geometry-dependent index/address-width truncation ships
         # verified. Flip to failed -> existing failure interrupt. Operator-reused
         # TBs are trusted.
-        if passed and not reuse_existing_tb:
-            _mg = _maxgeo_gate_verdict(pr, tb_path)
-            if _mg is not None:
+        # run3-followups: same contract as integration_dv -- the gate runs on
+        # EVERY passing cycle (operator-reused TBs get MORE scrutiny) and every
+        # evaluated outcome logs a verdict; a pass returns a dict, never None.
+        if passed:
+            _mg = _maxgeo_gate_verdict(pr, tb_path, tb_result)
+            if reuse_existing_tb and _mg is not None:
+                log("  [VALIDATION-DV] MAX-GEOMETRY gate: evaluating an "
+                    "OPERATOR-REUSED testbench (fix_tb/fix_rtl) -- operator "
+                    "edits get more scrutiny, not less.", YELLOW)
+            if _mg is not None and _mg.get("verdict") == "pass":
+                log("  [VALIDATION-DV] MAX-GEOMETRY gate PASS -- every "
+                    f"declared maximum appears in the TB markers: "
+                    f"{_mg.get('marker_pairs', {})}", GREEN)
+                write_graph_event(pr, "Validation DV", "maxgeo_gate_pass", {
+                    "gate": "maxgeo",
+                    "marker_pairs": _mg.get("marker_pairs", {}),
+                })
+            elif _mg is not None and _mg.get("advisory"):
+                _mg_scope = _mg.get("scope", "bus-contract-only")
+                log("  [VALIDATION-DV] MAX-GEOMETRY gate ADVISORY "
+                    f"(scope={_mg_scope}) -- NOT full max-geometry coverage. "
+                    f"NOT COVERED: {_mg['uncovered_dims']}", RED)
+                write_graph_event(pr, "Validation DV", "maxgeo_gate_scoped", {
+                    "gate": "maxgeo",
+                    "scope": _mg_scope,
+                    "uncovered_dims": _mg.get("uncovered_dims", {}),
+                })
+                record_carried_forward_defect(pr, {
+                    "gate": "maxgeo",
+                    "kind": "max_geometry_not_covered",
+                    "advisory": True,
+                    "unmodeled": (
+                        "dimensional maxima never individually driven at "
+                        f"maximum extent: {_mg.get('uncovered_dims', {})} "
+                        f"(scope={_mg_scope})"
+                    ),
+                    "first_divergence_block": "",
+                    "note": _mg["reason"],
+                })
+                sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
+            elif _mg is not None:
                 passed = False
                 sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
                 span.set_attribute("maxgeo_gate_failed", True)

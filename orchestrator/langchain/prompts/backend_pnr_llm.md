@@ -94,3 +94,10 @@ If PnR fails after all retries:
 ```
 
 IMPORTANT: Write the result JSON file FIRST, then respond with a brief summary.
+
+## Threading (REQUIRED)
+
+The very first line of every OpenROAD TCL script you write MUST be
+`set_thread_count [exec nproc]` (or a explicit core count). Detailed
+routing single-threaded on a multi-core box wastes 3-8x wall clock and
+has caused step-timeout kills of routes that were converging cleanly.
