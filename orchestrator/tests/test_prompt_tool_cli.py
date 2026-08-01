@@ -43,11 +43,20 @@ _FORBIDDEN = [
 ]
 
 
+# The script-adaptation prompts (run under disable_tools=True) also get their
+# tool/PDK specifics from {tool_notes}/{pdk_summary} now (PR5), so they must be
+# free of hardcoded sky130 cell tokens + bare invocations too.
+_ADAPTATION_PROMPTS = (
+    "backend_synthesis.md", "backend_pnr.md", "backend_drc.md", "backend_lvs.md",
+)
+
+
 def _guarded_files() -> list[Path]:
     files: list[Path] = []
     for pat in ("*_llm.md", "tapeout_wrapper_*.md"):
         files += _PROMPT_DIR.glob(pat)
     files += (_PROMPT_DIR / "skills").glob("*.md")
+    files += [_PROMPT_DIR / n for n in _ADAPTATION_PROMPTS]
     return [f for f in sorted(set(files)) if not f.name.endswith(".legacy.md")]
 
 
@@ -66,6 +75,9 @@ def test_guard_actually_scans_files():
     # The migrated verb prompts must be in scope, and legacy copies must NOT.
     assert "backend_synth_llm.md" in names
     assert "tapeout_wrapper_lvs.md" in names
+    # The script-adaptation prompts are now in scope too (PR5).
+    for n in _ADAPTATION_PROMPTS:
+        assert n in names, f"{n} should be guarded"
     assert not any(n.endswith(".legacy.md") for n in names)
 
 

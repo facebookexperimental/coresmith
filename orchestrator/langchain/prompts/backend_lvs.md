@@ -38,9 +38,9 @@ Constraints:
 COMMON LVS ISSUES AND PRE-PROCESSING FIXES
 ─────────────────────────────────────────────────────────────────────
 
-1. **Tap cell device delta** (benign): tap cells
-   (`sky130_fd_sc_hd__tapvpwrvgnd_1`) appear in the Verilog netlist but
-   have no active devices in SPICE. This causes a device_delta = N and
+1. **Tap cell device delta** (benign): the PDK's tap cells (see the tool
+   notes for the exact cell) appear in the Verilog netlist but have no
+   active devices in SPICE. This causes a device_delta = N and
    net_delta ≈ 4*N. If the Netgen output says "Circuits match uniquely"
    for all subcircuits, this is EXPECTED and should NOT fail LVS.
 

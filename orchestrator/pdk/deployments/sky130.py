@@ -185,6 +185,37 @@ def _resolve_yosys() -> str:
 
 
 # ---------------------------------------------------------------------------
+# TCL table formatters (PR5). These render the PDK-derived data
+# (``PDKConfig.cells`` / ``PDKConfig.pnr``) into the exact TCL tokens the
+# reference OpenROAD flow uses. Kept as pure functions of a PDKConfig so the
+# generated script is byte-identical to the pre-move backend_helpers output
+# (guarded by test_pdk_tcl_golden). A different PDK supplies its own cells/pnr
+# in its config and these formatters reproduce its flow unchanged.
+# ---------------------------------------------------------------------------
+def _tracks_tcl(pnr) -> str:
+    """The ``make_tracks`` block. Layer is left-justified to 4 (``li1 ``) so the
+    two-space alignment before ``-x_offset`` matches the reference verbatim."""
+    return "".join(
+        f"make_tracks {t['layer']:<4} -x_offset {t['x_offset']} "
+        f"-x_pitch {t['x_pitch']} -y_offset {t['y_offset']} "
+        f"-y_pitch {t['y_pitch']}\n"
+        for t in pnr.tracks
+    )
+
+
+def _fillers_tcl(cells) -> str:
+    return " ".join(cells.fillers)
+
+
+def _clkbuf_list_tcl(cells) -> str:
+    return " ".join(cells.clkbuf_list)
+
+
+def _dont_use_tcl(cells) -> str:
+    return " ".join(cells.dont_use)
+
+
+# ---------------------------------------------------------------------------
 # Minimal checkers (PR1). Verdicts are largely composed inline in the tool
 # ``run()`` bodies (which hold the helper result dicts); these classes carry the
 # fail-closed "report present?" rule and describe the tool for ``tool list``.
@@ -442,6 +473,491 @@ class RunPnrOpenroad(EdaTool):
             design=req.design, extra_metrics=metrics,
         )
 
+    # ------------------------------------------------------------------
+    # TCL generation (moved here from backend_helpers -- OpenROAD-specific,
+    # so it belongs to the tool class). All PDK data comes from the
+    # deployment's PDKConfig (cells + pnr); byte-identity vs the pre-move
+    # backend_helpers output is asserted by test_pdk_tcl_golden.
+    # ------------------------------------------------------------------
+    def render_floorplan_tcl(self, block_name: str, utilization: int,
+                             gate_count: int) -> str:
+        """The floorplan section (gate-count-based die sizing to avoid the
+        power-strap failure IFP-0024 on small designs)."""
+        import math
+
+        pdk = self.deployment.pdk
+        site = pdk.site_name
+        tracks = _tracks_tcl(pdk.pnr)
+        tapcell = pdk.cells.tapcell
+        tap_dist = pdk.pnr.tapcell_distance
+
+        avg_cell_area_um2 = 10
+        min_edge = 60.0
+        if gate_count > 0:
+            estimated_edge = math.sqrt(gate_count * avg_cell_area_um2 / (utilization / 100.0)) * 2.0
+            min_edge = max(60.0, estimated_edge)
+
+        needs_explicit_die = gate_count > 0 and gate_count < 500
+
+        if needs_explicit_die:
+            core_margin = 2.5
+            core_edge = min_edge - 2 * core_margin
+            floorplan = (
+                f'# Small design ({gate_count} gates) -- use explicit die area\n'
+                f'# to ensure enough space for power straps (avoid IFP-0024).\n'
+                f'initialize_floorplan \\\n'
+                f'    -die_area "0 0 {min_edge:.1f} {min_edge:.1f}" \\\n'
+                f'    -core_area "{core_margin} {core_margin} {core_edge:.1f} {core_edge:.1f}" \\\n'
+                f'    -site {site}\n'
+            )
+        else:
+            floorplan = (
+                f'initialize_floorplan \\\n'
+                f'    -utilization {utilization} \\\n'
+                f'    -aspect_ratio 1.0 \\\n'
+                f'    -core_space 2 \\\n'
+                f'    -site {site}\n'
+            )
+
+        relaxed_util = max(utilization - 10, 15)
+
+        return (
+            f'{floorplan}\n'
+            f'{tracks}\n'
+            f'place_pins -hor_layers met3 -ver_layers met2\n\n'
+            f'tapcell \\\n'
+            f'    -distance {tap_dist} \\\n'
+            f'    -tapcell_master {tapcell}\n\n'
+            f'set die_area [ord::get_die_area]\n'
+            f'puts "Die area: $die_area"\n\n'
+            f'# Post-init die size check\n'
+            f'set die_w [expr {{[lindex $die_area 2] - [lindex $die_area 0]}}]\n'
+            f'set die_h [expr {{[lindex $die_area 3] - [lindex $die_area 1]}}]\n'
+            f'if {{$die_w < 50.0 || $die_h < 50.0}} {{\n'
+            f'    puts "WARNING: Die ${{die_w}} x ${{die_h}} um too small for PDN."\n'
+            f'    initialize_floorplan -die_area "0 0 {min_edge:.1f} {min_edge:.1f}" '
+            f'-core_area "2.5 2.5 {min_edge - 2.5:.1f} {min_edge - 2.5:.1f}" -site {site}\n'
+            f'    {tracks}'
+            f'    place_pins -hor_layers met3 -ver_layers met2\n'
+            f'    set die_area [ord::get_die_area]\n'
+            f'    puts "Resized die area: $die_area"\n'
+            f'}}\n\n'
+            f'# Post-floorplan utilization sanity check\n'
+            f'set fp_die_w [expr {{[lindex $die_area 2] - [lindex $die_area 0]}}]\n'
+            f'set fp_die_h [expr {{[lindex $die_area 3] - [lindex $die_area 1]}}]\n'
+            f'set fp_core_area [expr {{$fp_die_w * $fp_die_h}}]\n'
+            f'set fp_cell_count [llength [get_cells *]]\n'
+            f'set fp_est_cell_area [expr {{$fp_cell_count * 10.0}}]\n'
+            f'if {{$fp_core_area > 0}} {{\n'
+            f'    set fp_actual_util [expr {{$fp_est_cell_area / $fp_core_area * 100.0}}]\n'
+            f'    puts "Floorplan check: die ${{fp_die_w}}x${{fp_die_h}} um, '
+            f'target util: {utilization}%, actual: ${{fp_actual_util}}%"\n'
+            f'    if {{$fp_actual_util > {utilization * 1.5}}} {{\n'
+            f'        puts "WARNING: utilization ${{fp_actual_util}}% exceeds 1.5x target '
+            f'({utilization}%) -- re-floorplanning with {relaxed_util}%"\n'
+            f'        initialize_floorplan -utilization {relaxed_util} '
+            f'-aspect_ratio 1.0 -core_space 2 -site {site}\n'
+            f'        {tracks}'
+            f'        place_pins -hor_layers met3 -ver_layers met2\n'
+            f'        set die_area [ord::get_die_area]\n'
+            f'        puts "Re-floorplanned die area: $die_area"\n'
+            f'    }}\n'
+            f'}}\n'
+        )
+
+    def render_pnr_tcl(self, block_name: str, actual_module: str,
+                       abs_netlist: str, abs_sdc: str, utilization: int = 45,
+                       density: float = 0.6, gate_count: int = 0) -> str:
+        """The full OpenROAD PnR script for a flat block, byte-identical to the
+        pre-move ``backend_helpers.generate_pnr_tcl``."""
+        pdk = self.deployment.pdk
+        tech_lef, cell_lef, liberty = (self.deployment.tech_lef,
+                                       self.deployment.cell_lef,
+                                       self.deployment.liberty)
+        pdn = pdk.pnr.pdn
+        dont_use = _dont_use_tcl(pdk.cells)
+        clkbufs = _clkbuf_list_tcl(pdk.cells)
+        clkbuf_root = pdk.cells.clkbuf_root
+        fillers = _fillers_tcl(pdk.cells)
+        max_fanout = pdk.pnr.max_fanout
+        pad = pdk.pnr.global_place_pad
+        wire_sig = pdk.pnr.wire_rc_signal_layer
+        wire_clk = pdk.pnr.wire_rc_clock_layer
+        route_sig = pdk.pnr.routing_signal
+        route_clk = pdk.pnr.routing_clock
+
+        return f"""# Auto-generated PnR flow for {block_name} (Sky130 HD)
+# Generated by coresmith backend_helpers.generate_pnr_tcl
+
+set script_dir [file dirname [file normalize [info script]]]
+
+# ----- PDK paths (absolute) -----
+set tech_lef   "{tech_lef}"
+set cell_lef   "{cell_lef}"
+set liberty    "{liberty}"
+
+# ----- Design paths (absolute) -----
+set netlist    "{abs_netlist}"
+set sdc_file   "{abs_sdc}"
+set out_dir    "$script_dir"
+
+# =====================================================================
+# 1. READ DESIGN
+# =====================================================================
+puts "========== 1. Reading design =========="
+
+read_lef $tech_lef
+read_lef $cell_lef
+read_liberty $liberty
+read_verilog $netlist
+link_design {actual_module}
+read_sdc $sdc_file
+
+# Fix DRT-0305: Yosys constant nets (zero_, one_) typed as GROUND/POWER
+# are not routable by TritonRoute. Connect them to the power grid so they
+# become special nets handled by the PDN, not by the signal router.
+catch {{
+    add_global_connection -net VGND -inst_pattern ".*" -pin_pattern "zero_" -ground
+}}
+catch {{
+    add_global_connection -net VPWR -inst_pattern ".*" -pin_pattern "one_" -power
+}}
+
+puts "Design linked. Cell count: [llength [get_cells *]]"
+
+# =====================================================================
+# 2. FLOORPLAN
+# =====================================================================
+puts "\\n========== 2. Floorplan =========="
+
+{self.render_floorplan_tcl(block_name, utilization, gate_count)}
+
+# =====================================================================
+# 3. POWER DISTRIBUTION NETWORK (PDN)
+# =====================================================================
+puts "\\n========== 3. Power grid =========="
+
+add_global_connection -net VPWR -pin_pattern "VPWR" -power
+add_global_connection -net VGND -pin_pattern "VGND" -ground
+add_global_connection -net VPWR -pin_pattern "VPB" -power
+add_global_connection -net VGND -pin_pattern "VNB" -ground
+
+global_connect
+
+set_voltage_domain -name CORE -power VPWR -ground VGND
+
+define_pdn_grid -name stdcell_grid \\
+    -starts_with POWER \\
+    -voltage_domain CORE \\
+    -pins {pdn['grid_pins']}
+
+add_pdn_stripe -grid stdcell_grid -layer {pdn['followpins_layer']} -width {pdn['followpins_width']} -followpins -starts_with POWER
+add_pdn_stripe -grid stdcell_grid -layer {pdn['stripe_layer']} -width {pdn['stripe_width']} -pitch {pdn['stripe_pitch']} -offset {pdn['stripe_offset']} -starts_with POWER
+add_pdn_connect -grid stdcell_grid -layers {{{pdn['connect_layers']}}}
+
+pdngen
+
+puts "PDN generated."
+
+# =====================================================================
+# 4. GLOBAL PLACEMENT
+# =====================================================================
+puts "\\n========== 4. Global Placement =========="
+
+global_placement -density {density} -pad_left {pad} -pad_right {pad}
+
+puts "Global placement done."
+
+# =====================================================================
+# 5. DETAILED PLACEMENT
+# =====================================================================
+puts "\\n========== 5. Detailed Placement =========="
+
+detailed_placement
+check_placement -verbose
+
+# NO filler insertion here -- fillers are inserted after CTS to avoid
+# DPL-0036 failures when CTS buffers need placement sites occupied by
+# pre-CTS fillers.
+
+puts "Detailed placement done (fillers deferred until after CTS)."
+
+# =====================================================================
+# 6. SET WIRE RC (needed for CTS, timing repair, and STA)
+# =====================================================================
+puts "\\n========== 6. Set wire RC parasitics =========="
+
+set_wire_rc -signal -layer {wire_sig}
+set_wire_rc -clock  -layer {wire_clk}
+
+puts "Wire RC set: signal={wire_sig}, clock={wire_clk}"
+
+# =====================================================================
+# 6b. PRE-CTS DESIGN REPAIR (buffer high-fanout nets, resize weak drivers)
+# =====================================================================
+# A ~200-fanout net left on a single min-size driver measures ~12 ns of pure
+# cell delay pre-repair (live run: reset net, WNS -1.92 ns); repair_design
+# with a fanout cap moved it to WNS 0.00 at 50 MHz. Also exclude the sky130
+# probe/lpflow cells: the resizer otherwise picks them and they break LVS
+# and skew timing.
+puts "\n========== 6b. Pre-CTS repair_design =========="
+
+set_dont_use {{{dont_use}}}
+estimate_parasitics -placement
+set_max_fanout {max_fanout} [current_design]
+repair_design
+detailed_placement
+check_placement -verbose
+
+puts "Pre-CTS repair_design done."
+
+# =====================================================================
+# 7. CLOCK TREE SYNTHESIS
+# =====================================================================
+puts "\\n========== 7. Clock Tree Synthesis =========="
+
+clock_tree_synthesis \\
+    -buf_list {{{clkbufs}}} \\
+    -root_buf {clkbuf_root} \\
+    -sink_clustering_enable
+
+set_propagated_clock [all_clocks]
+
+repair_clock_nets
+
+remove_fillers
+detailed_placement
+filler_placement -prefix FILLER {{{fillers}}}
+
+puts "CTS done."
+
+# =====================================================================
+# 8. TIMING REPAIR (post-CTS)
+# =====================================================================
+puts "\\n========== 8. Post-CTS Timing Repair =========="
+
+estimate_parasitics -placement
+
+repair_timing -setup
+repair_timing -hold
+
+remove_fillers
+detailed_placement
+check_placement -verbose
+filler_placement -prefix FILLER {{{fillers}}}
+
+puts "Post-CTS repair done."
+
+# =====================================================================
+# 9. GLOBAL ROUTING
+# =====================================================================
+puts "\\n========== 9. Global Routing =========="
+
+set_routing_layers -signal {route_sig} -clock {route_clk}
+
+global_route -guide_file "$out_dir/route_guide.guide" \\
+    -congestion_iterations 50
+
+puts "Global routing done."
+
+# =====================================================================
+# 10. DETAILED ROUTING
+# =====================================================================
+puts "\\n========== 10. Detailed Routing =========="
+
+# Fix DRT-0305: Yosys/OpenROAD may create constant nets (zero_, one_)
+# typed as GROUND/POWER that TritonRoute refuses to route as signal nets.
+# Reclassify any non-special GROUND/POWER nets to SIGNAL before routing.
+set block [ord::get_db_block]
+foreach net [$block getNets] {{
+    set sig_type [$net getSigType]
+    set special [$net isSpecial]
+    if {{($sig_type == "GROUND" || $sig_type == "POWER") && !$special}} {{
+        set net_name [$net getName]
+        if {{$net_name ne "VPWR" && $net_name ne "VGND" && $net_name ne "VPB" && $net_name ne "VNB"}} {{
+            puts "Reclassifying net '$net_name' ($sig_type, special=$special) to SIGNAL"
+            $net setSigType SIGNAL
+        }}
+    }}
+}}
+
+detailed_route \\
+    -output_drc "$out_dir/route_drc.rpt" \\
+    -verbose 1
+
+puts "Detailed routing done."
+
+# =====================================================================
+# 11. SPEF PARASITIC ESTIMATION (in-flow)
+# =====================================================================
+puts "\\n========== 11. SPEF Parasitic Estimation =========="
+
+estimate_parasitics -global_routing
+
+# write_spef may produce empty file if estimate_parasitics didn't populate
+# the RCX data store (expected -- use standalone RCX for accurate SPEF)
+catch {{write_spef "$out_dir/{block_name}.spef"}}
+
+puts "SPEF estimation done (use standalone RCX for accurate extraction)."
+
+# =====================================================================
+# 12. REPORTS (post-route STA)
+# =====================================================================
+puts "\\n========== 12. Reports =========="
+
+report_checks -path_delay max -format full_clock_expanded > "$out_dir/timing_setup.rpt"
+report_checks -path_delay min -format full_clock_expanded > "$out_dir/timing_hold.rpt"
+report_tns > "$out_dir/timing_tns.rpt"
+report_wns > "$out_dir/timing_wns.rpt"
+report_power > "$out_dir/power.rpt"
+puts "Reports written to $out_dir"
+
+# Print key metrics to stdout for parsing
+puts "\\n========== SUMMARY =========="
+report_design_area
+report_wns
+report_tns
+report_power
+
+# =====================================================================
+# 13. METAL DENSITY FILL (Efabless shuttle requirement)
+# =====================================================================
+puts "\\n========== 13. Metal Density Fill =========="
+
+density_fill -rules $tech_lef
+
+puts "Density fill done."
+
+# =====================================================================
+# 14. WRITE OUTPUTS
+# =====================================================================
+puts "\\n========== 14. Writing outputs =========="
+
+write_def "$out_dir/{block_name}_routed.def"
+write_verilog "$out_dir/{block_name}_pnr.v"
+write_verilog -include_pwr_gnd "$out_dir/{block_name}_pwr.v"
+
+puts "\\n========== FLOW COMPLETE =========="
+puts "DEF:              $out_dir/{block_name}_routed.def"
+puts "Verilog:          $out_dir/{block_name}_pnr.v"
+puts "Power Verilog:    $out_dir/{block_name}_pwr.v"
+puts "SPEF:             $out_dir/{block_name}.spef"
+
+exit
+"""
+
+    def render_wrapper_pnr_tcl(self, wrapper_netlist_abs: str, sdc_path: str,
+                               top_module: str, die_width_um: float,
+                               die_height_um: float, core_margin_um: float) -> str:
+        """OpenFrame wrapper-level PnR (flat, fixed die). PDK data (tracks,
+        PDN, CTS bufs, fillers, site) from the deployment; the die geometry is
+        an OpenFrame parameter passed by the caller."""
+        pdk = self.deployment.pdk
+        site = pdk.site_name
+        tracks = _tracks_tcl(pdk.pnr).rstrip("\n")
+        pdn = pdk.pnr.pdn
+        clkbufs = _clkbuf_list_tcl(pdk.cells)
+        clkbuf_root = pdk.cells.clkbuf_root
+        fillers = _fillers_tcl(pdk.cells)
+        wire_sig = pdk.pnr.wire_rc_signal_layer
+        wire_clk = pdk.pnr.wire_rc_clock_layer
+        route_sig = pdk.pnr.routing_signal
+        route_clk = pdk.pnr.routing_clock
+        tech_lef, cell_lef, liberty = (self.deployment.tech_lef,
+                                       self.deployment.cell_lef,
+                                       self.deployment.liberty)
+        return f"""# Auto-generated wrapper-level PnR for OpenFrame (Sky130)
+# Generated by coresmith tapeout_helpers
+
+set script_dir [file dirname [file normalize [info script]]]
+set out_dir "$script_dir"
+
+# ---- Read PDK ----
+read_lef "{tech_lef}"
+read_lef "{cell_lef}"
+read_liberty "{liberty}"
+
+# ---- Read wrapper netlist (flattened, includes block logic) ----
+read_verilog "{wrapper_netlist_abs}"
+link_design {top_module}
+read_sdc "{sdc_path}"
+
+# ---- Fixed OpenFrame die ----
+initialize_floorplan \\
+    -die_area "0 0 {die_width_um:.1f} {die_height_um:.1f}" \\
+    -core_area "{core_margin_um:.1f} {core_margin_um:.1f} \\
+                {die_width_um - core_margin_um:.1f} \\
+                {die_height_um - core_margin_um:.1f}" \\
+    -site {site}
+
+# Routing tracks
+{tracks}
+
+place_pins -hor_layers met3 -ver_layers met2
+
+# ---- PDN (wrapper-level: met4 + met5) ----
+add_global_connection -net VPWR -pin_pattern "VPWR" -power
+add_global_connection -net VGND -pin_pattern "VGND" -ground
+add_global_connection -net VPWR -pin_pattern "VPB" -power
+add_global_connection -net VGND -pin_pattern "VNB" -ground
+global_connect
+
+set_voltage_domain -name CORE -power VPWR -ground VGND
+define_pdn_grid -name wrapper_grid -starts_with POWER -voltage_domain CORE -pins {{met4 met5}}
+add_pdn_stripe -grid wrapper_grid -layer {pdn['followpins_layer']} -width {pdn['followpins_width']} -followpins -starts_with POWER
+add_pdn_stripe -grid wrapper_grid -layer met4 -width {pdn['stripe_width']} -pitch {pdn['stripe_pitch']} -offset {pdn['stripe_offset']} -starts_with POWER
+add_pdn_stripe -grid wrapper_grid -layer met5 -width {pdn['stripe_width']} -pitch {pdn['stripe_pitch']} -offset {pdn['stripe_offset']} -starts_with POWER
+add_pdn_connect -grid wrapper_grid -layers {{met1 met4}}
+add_pdn_connect -grid wrapper_grid -layers {{met4 met5}}
+pdngen
+
+# ---- Standard cell placement and routing ----
+global_placement -density 0.3 -pad_left 2 -pad_right 2
+detailed_placement
+check_placement -verbose
+
+# Filler / decap cells for continuous n-well and power rail
+filler_placement -prefix FILLER {{{fillers}}}
+
+set_wire_rc -signal -layer {wire_sig}
+set_wire_rc -clock  -layer {wire_clk}
+
+clock_tree_synthesis \\
+    -buf_list {{{clkbufs}}} \\
+    -root_buf {clkbuf_root} \\
+    -sink_clustering_enable
+set_propagated_clock [all_clocks]
+repair_clock_nets
+remove_fillers
+detailed_placement
+filler_placement -prefix FILLER {{{fillers}}}
+
+set_routing_layers -signal {route_sig} -clock {route_clk}
+global_route -congestion_iterations 50
+detailed_route -output_drc "$out_dir/wrapper_route_drc.rpt" -verbose 1
+
+# ---- Reports ----
+report_checks -path_delay max > "$out_dir/wrapper_timing_setup.rpt"
+report_checks -path_delay min > "$out_dir/wrapper_timing_hold.rpt"
+report_wns > "$out_dir/wrapper_wns.rpt"
+report_tns > "$out_dir/wrapper_tns.rpt"
+report_power > "$out_dir/wrapper_power.rpt"
+
+puts "\\n========== WRAPPER SUMMARY =========="
+report_design_area
+report_wns
+report_tns
+
+# ---- Write outputs ----
+write_def "$out_dir/openframe_project_wrapper_routed.def"
+write_verilog "$out_dir/openframe_project_wrapper_pnr.v"
+write_verilog -include_pwr_gnd "$out_dir/openframe_project_wrapper_pwr.v"
+
+puts "\\n========== WRAPPER PNR COMPLETE =========="
+
+exit
+"""
+
     def checkers(self) -> list[Checker]:
         return [PnrReportsChecker(), RouteDrcChecker()]
 
@@ -496,6 +1012,75 @@ class RunStaOpenroad(EdaTool):
             log_path=Path(lp) if lp else None, verb=self.verb,
             design=req.design, extra_metrics=metrics,
         )
+
+    def render_rcx_tcl(self, block_name: str, abs_def: str,
+                       abs_sdc: str) -> str:
+        """OpenRCX SPEF extraction script (byte-identical to the pre-move
+        ``backend_helpers.generate_rcx_tcl``). Via resistances are sky130
+        calibration data kept inline in this sky130-owned generator (plan
+        allows long-tail data as a module table, not schematized)."""
+        tech_lef, cell_lef, liberty = (self.deployment.tech_lef,
+                                       self.deployment.cell_lef,
+                                       self.deployment.liberty)
+        rcx_rules_path = str(self.deployment.paths.rcx_rules)
+        return f"""# Auto-generated OpenRCX SPEF extraction for {block_name} (Sky130)
+# Generated by coresmith backend_helpers.generate_rcx_tcl
+
+set script_dir [file dirname [file normalize [info script]]]
+
+set tech_lef   "{tech_lef}"
+set cell_lef   "{cell_lef}"
+set liberty    "{liberty}"
+set sdc_file   "{abs_sdc}"
+set def_file   "{abs_def}"
+set rcx_rules  "{rcx_rules_path}"
+set out_dir    "$script_dir"
+
+puts "========== RCX SPEF Extraction: {block_name} =========="
+
+# 1. Read design from DEF
+read_lef $tech_lef
+read_lef $cell_lef
+read_liberty $liberty
+read_def $def_file
+read_sdc $sdc_file
+
+set_propagated_clock [all_clocks]
+
+# 2. Set via resistances (Sky130 calibration from OpenROAD-flow-scripts)
+set tech [ord::get_db_tech]
+[$tech findLayer mcon] setResistance 9.249146
+[$tech findLayer via]  setResistance 4.5
+[$tech findLayer via2] setResistance 3.368786
+[$tech findLayer via3] setResistance 0.376635
+[$tech findLayer via4] setResistance 0.00580
+
+# 3. Run OpenRCX extraction
+puts "Running OpenRCX extraction..."
+define_process_corner -ext_model_index 0 X
+extract_parasitics -ext_model_file $rcx_rules
+
+# 4. Write SPEF
+puts "Writing SPEF..."
+write_spef "$out_dir/{block_name}.spef"
+
+# 5. Write power-aware Verilog for LVS
+write_verilog -include_pwr_gnd "$out_dir/{block_name}_pwr.v"
+
+# 6. Post-extraction STA
+puts "\\n========== Post-extraction STA =========="
+report_checks -path_delay max -format full_clock_expanded
+report_checks -path_delay min -format full_clock_expanded
+report_tns
+report_wns
+report_power
+
+puts "\\nSPEF: $out_dir/{block_name}.spef"
+puts "Power Verilog: $out_dir/{block_name}_pwr.v"
+puts "Done."
+
+exit
+"""
 
     def checkers(self) -> list[Checker]:
         return [StaChecker()]
@@ -574,9 +1159,9 @@ class RunDrcMagic(EdaTool):
             "`extract do local; extract no capacitance; extract no coupling; "
             "extract no resistance; extract all; ext2spice lvs; "
             "ext2spice cthresh infinite; ext2spice rthresh infinite`.\n"
-            "- Write the signoff GDS via KLayout streamout from the DEF "
-            "(OpenLane-standard); fall back to Magic `gds write` and say so. "
-            "Write to a temp name, move into place only on success."
+            "- The signoff GDS is written by the deployment (KLayout streamout "
+            "from the DEF, Magic `gds write` fallback) -- you do not need to "
+            "script the DEF-to-GDS conversion yourself."
         )
 
 
@@ -713,6 +1298,88 @@ class Sky130Deployment(Deployment):
 
     def data_dir(self) -> Path | None:
         return _DATA_DIR if _DATA_DIR.is_dir() else None
+
+    # -- data_dir payload accessors (the deployment OWNS its TCL/data files) --
+    def pnr_reference_tcl(self) -> Path:
+        """The PnR reference template an agent adapts (``tool emit-script``)."""
+        return _DATA_DIR / "pnr_reference.tcl"
+
+    def load_template(self, name: str) -> str:
+        """Load a data_dir Tcl template by name (without extension)."""
+        return (_DATA_DIR / f"{name}.tcl").read_text()
+
+    def filler_cells(self) -> list[str]:
+        """Ordered filler/decap cells: the data_dir file if present, else the
+        PDKConfig ``cells.fillers`` list."""
+        f = _DATA_DIR / "filler_cells.txt"
+        if f.is_file():
+            return [ln.strip() for ln in f.read_text().splitlines()
+                    if ln.strip() and not ln.startswith("#")]
+        return list(self.pdk.cells.fillers)
+
+    def def2gds(self, def_path: str, out_dir: str, block_name: str,
+                timeout: int = 600) -> dict:
+        """Write a signoff GDS from a routed DEF -- KLayout streamout first
+        (OpenLane-standard), Magic ``gds write`` fallback. This is DEPLOYMENT
+        LOGIC (formerly agent-prompt guidance): the caller no longer scripts the
+        DEF-to-GDS conversion.
+
+        Returns ``{ok, gds_path, method, log}``; fail-closed -- if neither tool
+        produces a GDS, ``ok`` is False and ``gds_path`` is None (never a
+        fabricated path).
+        """
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        target = out / f"{block_name}.gds"
+        logs: list[str] = []
+
+        # 1. KLayout streamout via the PDK's own klayout tech (.lyt), the
+        #    OpenLane-standard path. Skipped honestly when the binary or the
+        #    tech file is absent.
+        lyt = (self.paths.pdk_path / "libs.tech" / "klayout" / "tech"
+               / f"{self.paths.variant}.lyt")
+        if lyt.is_file():
+            rb = out / "_def2gds.rb"
+            rb.write_text(
+                f'lm = RBA::LayoutMetaInfo\n'
+                f'ly = RBA::Layout::new\n'
+                f'ly.read("{def_path}", '
+                f'RBA::LoadLayoutOptions::new)\n'
+                f'ly.write("{target}")\n')
+            rc, so, se, infra = _run_cmd(
+                [self.klayout_bin, "-b", "-r", str(rb)], timeout=timeout,
+                cwd=str(PROJECT_ROOT))
+            logs.append(f"[klayout] rc={rc} {infra} {se[-200:]}")
+            if rc == 0 and target.is_file() and target.stat().st_size > 0:
+                return {"ok": True, "gds_path": str(target),
+                        "method": "klayout", "log": "\n".join(logs)}
+
+        # 2. Magic `gds write` fallback (the def2gds.tcl data-dir template).
+        try:
+            tmpl = self.load_template("def2gds")
+        except OSError as exc:
+            logs.append(f"[magic] no def2gds template: {exc}")
+            return {"ok": False, "gds_path": None, "method": None,
+                    "log": "\n".join(logs)}
+        script = (tmpl
+                  .replace("$TECH_LEF", str(self.paths.tech_lef))
+                  .replace("$CELL_LEF", str(self.paths.cell_lef))
+                  .replace("$CELL_GDS", str(self.paths.cell_gds))
+                  .replace("$DEF_FILE", def_path)
+                  .replace("$BLOCK_NAME", block_name)
+                  .replace("$OUT_DIR", str(out)))
+        tcl = out / "_def2gds.tcl"
+        tcl.write_text(script)
+        rc, so, se, infra = _run_cmd(
+            [self.magic_bin, "-dnull", "-noconsole", "-rcfile",
+             str(self.paths.magic_rc), str(tcl)],
+            timeout=timeout, cwd=str(PROJECT_ROOT))
+        logs.append(f"[magic] rc={rc} {infra} {se[-200:]}")
+        if target.is_file() and target.stat().st_size > 0:
+            return {"ok": True, "gds_path": str(target),
+                    "method": "magic", "log": "\n".join(logs)}
+        return {"ok": False, "gds_path": None, "method": None,
+                "log": "\n".join(logs)}
 
     def prompt_context(self) -> dict[str, str]:
         ctx = super().prompt_context()

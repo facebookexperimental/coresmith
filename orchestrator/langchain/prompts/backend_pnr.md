@@ -48,30 +48,32 @@ MODIFICATION GUIDELINES
 
 1. **Floorplan sizing**: For small designs (< 500 gates), ensure explicit
    die area is set. For large designs (> 20k gates), consider aspect ratio
-   adjustments. The die must be >= 60 µm on each side for Sky130's power
-   grid.
+   adjustments. Honor the minimum die edge the tool notes state for the
+   target PDK's power grid.
 
-2. **Power grid**: The PDN must use met1 followpins + met4 straps. Do NOT
-   remove or change the power grid structure -- Sky130 HD cells require
-   VPWR/VGND on met1. Adjust stripe pitch/offset only if DRC violations
-   suggest strap overlap.
+2. **Power grid**: Keep the PDN structure from the baseline script (its
+   layers, followpins, and straps come from the deployment). Do NOT remove
+   or restructure the power grid -- the tool notes list the PDK's hard
+   requirements. Adjust stripe pitch/offset only if DRC violations suggest
+   strap overlap.
 
 3. **Placement density**: Lower density gives the router more room. If
    prior failures show routing congestion (DRC_METAL), reduce density by
    0.1 increments (minimum 0.3). If prior failures show placement overlap,
    reduce utilization by 5 increments (minimum 25).
 
-4. **CTS**: Use `sky130_fd_sc_hd__clkbuf_4` and `sky130_fd_sc_hd__clkbuf_8`
-   as the buffer library. For designs with clock skew issues, add
+4. **CTS**: Use the clock-buffer list already in the baseline script (the
+   deployment supplies the correct cells for this PDK) -- do NOT substitute
+   arbitrary buffers. For designs with clock skew issues, add
    `sink_clustering_size 20` and `sink_clustering_max_diameter 20`.
 
-5. **Routing layers**: Default is met1-met4 for signal, met3-met4 for clock.
-   If routing congestion is severe, consider enabling met5 for long-distance
-   routing.
+5. **Routing layers**: Keep the signal/clock routing layer ranges from the
+   baseline. If routing congestion is severe, consider enabling an extra
+   top metal layer for long-distance routing.
 
-6. **Filler cells**: MUST include filler/decap cells after detailed
-   placement. The order is: decap_12, decap_8, decap_6, decap_4, decap_3,
-   fill_2, fill_1. Missing fillers cause N-well DRC violations.
+6. **Filler cells**: MUST include the filler/decap cells from the baseline
+   script after detailed placement, in the order the baseline uses. Missing
+   fillers cause N-well DRC violations.
 
 7. **Timing repair**: `repair_timing -setup` then `repair_timing -hold`
    after CTS. If hold violations persist, add `repair_timing -hold
