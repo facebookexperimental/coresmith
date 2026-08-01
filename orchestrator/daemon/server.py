@@ -973,6 +973,36 @@ async def backend_state():
     return state
 
 
+class BackendResumeRequest(BaseModel):
+    action: str = "retry"          # retry | skip | abort
+    constraint: str = ""
+
+
+@app.post("/backend/resume")
+async def backend_resume(req: BackendResumeRequest):
+    """Resume a parked backend interrupt (DRC/LVS/signoff ask_human).
+
+    Delegates to the MCP resume_backend (one implementation, two transports
+    -- the same split as /backend/start). Fire-and-forget is safe HERE
+    because the daemon event loop hosts the created task; the gap this
+    closes is that resume_backend was previously reachable only from a
+    short-lived MCP process, which silently lost the resume. Two campaigns
+    were run-blocked on this: backend start --full can only replay into the
+    same park, so a DRC/LVS-parked backend was terminal from the outside."""
+    try:
+        _mcp = _backend_handle()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"backend resume unavailable: {exc}") from exc
+    raw = await _mcp.resume_backend(action=req.action, constraint=req.constraint)
+    try:
+        result = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except (ValueError, TypeError):
+        return {"raw": raw}
+    if result.get("error"):
+        raise HTTPException(409, json.dumps(result))
+    return result
+
+
 @app.post("/backend/pause")
 async def backend_pause():
     try:
