@@ -2425,6 +2425,11 @@ async def ask_human_node(state: BackendState) -> dict:
         "step_log_paths": state.get("step_log_paths", {}),
         "supported_actions": [
             "retry", "skip", "abort",
+            # accept: waive the CURRENT failed check (operator rationale
+            # recorded) and proceed to the NEXT signoff stage -- distinct
+            # from skip, which abandons the block and makes every later
+            # stage unreachable.
+            "accept",
         ],
     }
 
@@ -2435,7 +2440,29 @@ async def ask_human_node(state: BackendState) -> dict:
         "graph": "backend",
     })
 
-    return {"human_response": response}
+    out: dict = {"human_response": response}
+    if response.get("action") == "accept":
+        _phase = state.get("phase", "")
+        _waiver = {
+            "phase": _phase,
+            "rationale": response.get("constraint", "")
+            or response.get("feedback", ""),
+            "recorded_by": "operator_accept",
+        }
+        if _phase == "drc":
+            _r = dict(state.get("drc_result") or {})
+            _r["waived"] = True
+            _r["waiver"] = _waiver
+            out["drc_result"] = _r
+        elif _phase == "lvs":
+            _r = dict(state.get("lvs_result") or {})
+            _r["waived"] = True
+            _r["waiver"] = _waiver
+            out["lvs_result"] = _r
+        log(f"  [WAIVER] operator ACCEPTED failed {_phase} check -- "
+            "recorded, proceeding to the next signoff stage. A waived check "
+            "is reported as waived, never as clean.", YELLOW)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -2482,12 +2509,18 @@ async def advance_block_node(state: BackendState) -> dict:
     block_name = block["name"]
     attempt = state["attempt"]
 
-    drc_clean = (state.get("drc_result") or {}).get("clean", False)
-    lvs_match = (state.get("lvs_result") or {}).get("match", False)
+    _drc = state.get("drc_result") or {}
+    _lvs = state.get("lvs_result") or {}
+    drc_clean = _drc.get("clean", False) or _drc.get("waived", False)
+    lvs_match = _lvs.get("match", False) or _lvs.get("waived", False)
     timing_met = (state.get("timing_result") or {}).get("met", False)
     precheck = state.get("precheck_result") or {}
     precheck_ok = precheck.get("pass", False)
     all_pass = drc_clean and lvs_match and timing_met and precheck_ok
+    # A waived check satisfies the gate but is NEVER silent: the waivers ride
+    # in the block result and every report downstream.
+    waivers = [r["waiver"] for r in (_drc, _lvs)
+               if r.get("waived") and r.get("waiver")]
 
     power = state.get("power_result") or {}
     step_logs = dict(state.get("step_log_paths") or {})
@@ -2499,6 +2532,7 @@ async def advance_block_node(state: BackendState) -> dict:
         result = {
             "name": block_name,
             "success": True,
+            "waivers": waivers,
             "attempts": attempt,
             "total_power_mw": power.get("total_power_mw", 0),
             "dynamic_power_mw": power.get("dynamic_power_mw", 0),
@@ -2919,6 +2953,13 @@ route_decision.__edge_labels__ = {
 def route_after_human(state: BackendState) -> str:
     """Route based on the human's resume action."""
     action = (state.get("human_response") or {}).get("action", "retry")
+    if action == "accept":
+        _phase = state.get("phase", "")
+        if _phase == "drc":
+            return "lvs"
+        if _phase == "lvs":
+            return "timing_signoff"
+        return "advance_block"
     mapping = {
         "retry": "increment_attempt",
         "skip": "advance_block",
@@ -2931,6 +2972,8 @@ route_after_human.__edge_labels__ = {
     "increment_attempt": "RETRY",
     "advance_block": "SKIP",
     "backend_complete": "ABORT",
+    "lvs": "ACCEPT (waive DRC)",
+    "timing_signoff": "ACCEPT (waive LVS)",
 }
 
 
