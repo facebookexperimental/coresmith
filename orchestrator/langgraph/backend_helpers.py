@@ -33,77 +33,37 @@ from orchestrator.langgraph.pipeline_helpers import (
     YELLOW,
     _write_step_log,
     _write_step_log_error,
-    load_config,
     log,
 )
 
 # ---------------------------------------------------------------------------
-# PDK path resolution
+# PDK path resolution + tool-binary resolution
 # ---------------------------------------------------------------------------
+# The Sky130 PDK paths, ``_resolve_tool`` and the resolved backend binaries now
+# live in the reference deployment (``orchestrator.pdk.deployments.sky130``),
+# the single source of truth. They are re-exported here UNCHANGED so every
+# existing call site (`from ...backend_helpers import LIBERTY / OPENROAD_BIN / ...`)
+# keeps its byte-identical value. See the byo-pdk plan, PR1.
+from orchestrator.pdk.deployments import sky130 as _sky130
 
-def _pdk_variant() -> str:
-    """Return the PDK variant directory name (sky130A or sky130B)."""
-    for v in ("sky130A", "sky130B"):
-        if (PDK_ROOT / v).is_dir():
-            return v
-    return "sky130A"
+_STD_CELL = _sky130._STD_CELL
+_PDK_VAR = _sky130._PDK_VAR
+_PDK_PATH = _sky130._PDK_PATH
+_resolve_tool = _sky130._resolve_tool
 
+TECH_LEF = _sky130.TECH_LEF
+CELL_LEF = _sky130.CELL_LEF
+LIBERTY = _sky130.LIBERTY
+CELL_GDS = _sky130.CELL_GDS
+CELL_SPICE = _sky130.CELL_SPICE
+MAGIC_RC = _sky130.MAGIC_RC
+NETGEN_SETUP = _sky130.NETGEN_SETUP
+RCX_RULES = _sky130.RCX_RULES
 
-_PDK_VAR = _pdk_variant()
-_PDK_PATH = PDK_ROOT / _PDK_VAR
-_STD_CELL = "sky130_fd_sc_hd"
-
-TECH_LEF = _PDK_PATH / "libs.ref" / _STD_CELL / "techlef" / f"{_STD_CELL}__nom.tlef"
-CELL_LEF = _PDK_PATH / "libs.ref" / _STD_CELL / "lef" / f"{_STD_CELL}.lef"
-LIBERTY = _PDK_PATH / "libs.ref" / _STD_CELL / "lib" / f"{_STD_CELL}__tt_025C_1v80.lib"
-CELL_GDS = _PDK_PATH / "libs.ref" / _STD_CELL / "gds" / f"{_STD_CELL}.gds"
-CELL_SPICE = _PDK_PATH / "libs.ref" / _STD_CELL / "spice" / f"{_STD_CELL}.spice"
-MAGIC_RC = _PDK_PATH / "libs.tech" / "magic" / f"{_PDK_VAR}.magicrc"
-NETGEN_SETUP = _PDK_PATH / "libs.tech" / "netgen" / "setup.tcl"
-RCX_RULES = _PDK_PATH / "libs.tech" / "rcx" / "sky130hd_rcx_patterns.rules"
-
-
-def _resolve_tool(config_key: str, default_script: str) -> str:
-    """Resolve an EDA tool binary path.
-
-    Resolution order (first match wins):
-
-    1. ``CORESMITH_BACKEND_<NAME>`` env var (e.g. ``CORESMITH_BACKEND_OPENROAD``)
-       -- used by the ``nix develop`` shellHook and the Docker image to
-       point at the bare binary on ``$PATH`` and skip the per-call
-       ``nix shell`` re-entry.
-    2. ``backend.<config_key>`` in ``orchestrator/config.yaml`` -- the
-       checked-in default points at ``scripts/*-nix.sh`` wrappers.
-    3. ``default_script`` relative to the project root.
-    4. ``default_script`` as-is (lets the OS resolve it via ``$PATH``).
-    """
-    env_key = "CORESMITH_BACKEND_" + config_key.removesuffix("_binary").upper()
-    env_val = os.environ.get(env_key, "").strip()
-    if env_val:
-        return env_val
-
-    try:
-        cfg = load_config()
-        backend = cfg.get("backend", {})
-        path = backend.get(config_key, "")
-        if path:
-            p = Path(path)
-            if not p.is_absolute():
-                p = PROJECT_ROOT / p
-            if p.exists():
-                return str(p)
-    except Exception:
-        pass
-    p = PROJECT_ROOT / default_script
-    if p.exists():
-        return str(p)
-    return default_script
-
-
-OPENROAD_BIN = _resolve_tool("openroad_binary", "scripts/openroad-nix.sh")
-MAGIC_BIN = _resolve_tool("magic_binary", "scripts/magic-nix.sh")
-NETGEN_BIN = _resolve_tool("netgen_binary", "scripts/netgen-nix.sh")
-KLAYOUT_BIN = _resolve_tool("klayout_binary", "scripts/klayout-nix.sh")
+OPENROAD_BIN = _sky130.OPENROAD_BIN
+MAGIC_BIN = _sky130.MAGIC_BIN
+NETGEN_BIN = _sky130.NETGEN_BIN
+KLAYOUT_BIN = _sky130.KLAYOUT_BIN
 RENDER_SCRIPT = str(PROJECT_ROOT / "scripts" / "render_layout.rb")
 
 
