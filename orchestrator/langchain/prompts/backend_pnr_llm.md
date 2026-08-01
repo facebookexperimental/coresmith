@@ -108,7 +108,22 @@ PDN met4 pin/strap stubs narrower than the met4 minimum area are the
 dominant Magic-DRC artifact class on sky130 (met4.4a, ~0.24 um^2):
 `define_pdn_grid ... -pins met4` emits tiny stub rectangles in bands
 at the die edges. Prevent it in the PDN section of every script:
-pass `-max_columns 2` on the pdngen grid (proven recipe: 0 DRC on a
-prior sky130 chip), and make met4 straps wide enough that every pin
-stub satisfies min-area. Signal routing is unaffected; this is purely
-the power-grid emission.
+put `-max_columns 2` on the **`add_pdn_connect`** call for every
+met4 layer pair -- NOT on `define_pdn_grid`, which does not accept it.
+This is verified against the installed OpenROAD build:
+
+    add_pdn_connect -grid stdcell_grid -layers {met1 met4} -max_columns 2
+    add_pdn_connect -grid stdcell_grid -layers {met4 met5} -max_columns 2
+    add_pdn_connect -grid macro_grid   -layers {met4 met5} -max_columns 2
+
+`max_columns` is a parameter of `pdn::make_connect` (the SWIG entry point
+behind `add_pdn_connect`). Writing `define_pdn_grid ... -max_columns 2`
+fails at parse time with `[ERROR STA-0562] define_pdn_grid -max_columns
+is not a known keyword or flag`, and any `catch`/fallback around it
+silently reverts to the unmitigated grid -- the DRC count then does not
+move at all (observed: 83 met4.4a violations before and after). Do NOT
+wrap the PDN in a catch-and-fall-back: if the option is rejected, the
+script must FAIL LOUDLY rather than emit a layout with the same slivers.
+
+Also make met4 straps wide enough that every pin stub satisfies min-area.
+Signal routing is unaffected; this is purely the power-grid emission.
