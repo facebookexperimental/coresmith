@@ -102,15 +102,34 @@ The very first line of every OpenROAD TCL script you write MUST be
 routing single-threaded on a multi-core box wastes 3-8x wall clock and
 has caused step-timeout kills of routes that were converging cleanly.
 
-## PDN metal-4 min-area (REQUIRED on sky130)
+## PDN pin layer / metal-4 min-area (REQUIRED on sky130)
 
-PDN met4 pin/strap stubs narrower than the met4 minimum area are the
-dominant Magic-DRC artifact class on sky130 (met4.4a, ~0.24 um^2):
-`define_pdn_grid ... -pins met4` emits tiny stub rectangles in bands
-at the die edges. Prevent it in the PDN section of every script:
-put `-max_columns 2` on the **`add_pdn_connect`** call for every
-met4 layer pair -- NOT on `define_pdn_grid`, which does not accept it.
-This is verified against the installed OpenROAD build:
+**Put the top-level PDN pins on met5, not met4.** met4 pin emission at
+the die boundary produces min-area stub rectangles (Magic `met4.4a`,
+~0.24 um^2) that NO connection option can fix -- they are grid-emission
+geometry, not via geometry. Use met4 for straps only:
+
+    define_pdn_grid -name stdcell_grid \
+        -starts_with POWER \
+        -voltage_domain CORE \
+        -pins met5
+
+met5 as the top-level PDN pin layer is also the standard sky130 posture
+for macro/user-project designs: the harness power ring is normally met
+with met5 straps, so this matches how the chip actually takes power.
+
+Measured evidence for why met4 pins must not be used: on a sky130 chip
+with three SRAM macros, `-pins met4` produced 83 Magic violations, 100%
+of them `met4.4a`, as 76x76 rectangles in narrow bands at the die edges,
+while OpenROAD's own detailed-route DRC was 0. Adding `-max_columns 2`
+did not move the count and did not change a single rectangle -- the
+violating shapes were byte-identical before and after, because
+`max_columns` governs via-array columns on PDN *connections* and these
+shapes come from *pin* emission.
+
+If you do use `-max_columns` (for via-array control, which is a
+different purpose), put it on **`add_pdn_connect`**, never on
+`define_pdn_grid`:
 
     add_pdn_connect -grid stdcell_grid -layers {met1 met4} -max_columns 2
     add_pdn_connect -grid stdcell_grid -layers {met4 met5} -max_columns 2
@@ -119,11 +138,11 @@ This is verified against the installed OpenROAD build:
 `max_columns` is a parameter of `pdn::make_connect` (the SWIG entry point
 behind `add_pdn_connect`). Writing `define_pdn_grid ... -max_columns 2`
 fails at parse time with `[ERROR STA-0562] define_pdn_grid -max_columns
-is not a known keyword or flag`, and any `catch`/fallback around it
-silently reverts to the unmitigated grid -- the DRC count then does not
-move at all (observed: 83 met4.4a violations before and after). Do NOT
-wrap the PDN in a catch-and-fall-back: if the option is rejected, the
-script must FAIL LOUDLY rather than emit a layout with the same slivers.
+is not a known keyword or flag`.
 
-Also make met4 straps wide enough that every pin stub satisfies min-area.
-Signal routing is unaffected; this is purely the power-grid emission.
+Do NOT wrap the PDN in a `catch`/fallback. A rejected option that falls
+back silently emits the unmitigated grid and the DRC count does not move
+at all, while the log shows only a WARNING. If a PDN option is rejected,
+the script must FAIL LOUDLY rather than ship a layout with the same
+slivers. Signal routing is unaffected by any of this; it is purely the
+power-grid emission.
