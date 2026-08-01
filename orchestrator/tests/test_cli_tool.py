@@ -213,3 +213,6 @@ def test_smoke_run_synth_generic(tmp_path):
     assert out["ok"] is True
     assert out["metrics"]["cells"] > 0, out["metrics"]
     assert out["metrics"]["ff_count"] > 0
+    # PR3: the Yosys 0.65 box-format ("N cells") fix means gate_count is now the
+    # recovered cell count, not a false 0.
+    assert out["metrics"]["gate_count"] > 0, out["metrics"]

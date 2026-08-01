@@ -39,6 +39,16 @@ from orchestrator.pdk.base import (
     ToolRequest,
     ToolResult,
 )
+from orchestrator.pdk.checkers import (
+    LintChecker,
+    LogicDepthChecker,
+    LvsMatchChecker,
+    MagicDrcChecker,
+    PnrReportsChecker,
+    RouteDrcChecker,
+    StaChecker,
+    SynthStatChecker,
+)
 from orchestrator.pdk.pdk_config import PDKConfig
 
 _STD_CELL = "sky130_fd_sc_hd"
@@ -236,24 +246,25 @@ class RunSynthYosys(EdaTool):
                         details=res.get("log", "")[-400:]),
             _artifact_check("netlist", Path(netlist) if netlist else None),
         ]
-        # ``synthesize_block``'s inline gate-count parser misses newer Yosys
-        # box-format stat ("N cells", 2 tokens); recover a robust count from the
-        # report via the shared parser so metrics carry a real cell count.
-        cells = int(res.get("gate_count", 0) or 0)
+        # Cell / FF / area metrics come from the SynthStatChecker (advisory),
+        # which wraps ppa_check.count_cells_from_stat -- the parser that DOES
+        # understand the Yosys 0.65 box-format stat ("N cells") that
+        # synthesize_block's own inline loop misses. Fall back to the helper's
+        # own numbers if no report is on disk to parse.
         report = res.get("report_path")
-        if not cells and report and Path(report).exists():
-            try:
-                from orchestrator.langgraph.ppa_check import count_cells_from_stat
-                c = count_cells_from_stat(Path(report).read_text(errors="replace"))
-                if c:
-                    cells = c
-            except Exception:  # noqa: BLE001
-                pass
+        stat = SynthStatChecker()
+        stat_res = stat.check(
+            req, Path(report).parent if report else (req.out_dir or PROJECT_ROOT))
+        checks.append(stat_res)
+        cells = int(stat_res.metrics.get("cells", 0) or res.get("gate_count", 0) or 0)
+        ff = int(stat_res.metrics.get("ff_count", 0) or res.get("ff_count", 0) or 0)
+        area = float(stat_res.metrics.get("chip_area_um2", 0.0)
+                     or res.get("chip_area_um2", 0.0) or 0.0)
         metrics = {
             "cells": cells,
-            "gate_count": res.get("gate_count", 0),
-            "ff_count": res.get("ff_count", 0),
-            "chip_area_um2": res.get("chip_area_um2", 0.0),
+            "gate_count": cells or res.get("gate_count", 0),
+            "ff_count": ff,
+            "chip_area_um2": area,
         }
         artifacts = {
             k: Path(res[v]) for k, v in
@@ -268,7 +279,8 @@ class RunSynthYosys(EdaTool):
         )
 
     def checkers(self) -> list[Checker]:
-        return [OutputArtifactChecker("netlist_present", "netlist")]
+        return [SynthStatChecker(), LogicDepthChecker(),
+                OutputArtifactChecker("netlist_present", "netlist")]
 
     def prompt_notes(self) -> str:
         return (
@@ -304,6 +316,9 @@ class RunLintVerilator(EdaTool):
             extra_metrics={"clean": clean},
         )
 
+    def checkers(self) -> list[Checker]:
+        return [LintChecker()]
+
     def prompt_notes(self) -> str:
         return "verilator --lint-only -Wall -Wno-fatal; %Error tokens fail the lint."
 
@@ -335,6 +350,12 @@ class RunPnrOpenroad(EdaTool):
         tool_ok = success or not _is_infra_failure(
             str(res.get("stderr", "")) + str(res.get("error", "")))
         checks = [CheckResult("pnr", "pass" if success else "fail")]
+        # Report-derived checkers: PnrReportsChecker (advisory WNS/TNS/power/area)
+        # and RouteDrcChecker (BLOCKING -- a routed design OpenROAD left with
+        # detailed-route DRC is not a passing PnR). Both read out_dir.
+        run_dir = Path(out_dir)
+        for chk in self.checkers():
+            checks.append(chk.check(req, run_dir))
         artifacts = {
             k: Path(res[v]) for k, v in
             (("routed_def", "routed_def_path"), ("pnr_verilog", "pnr_verilog_path"),
@@ -350,6 +371,9 @@ class RunPnrOpenroad(EdaTool):
             log_path=Path(lp) if lp else None, verb=self.verb,
             design=req.design, extra_metrics=metrics,
         )
+
+    def checkers(self) -> list[Checker]:
+        return [PnrReportsChecker(), RouteDrcChecker()]
 
     def reference_script(self) -> Path | None:
         ref = _DATA_DIR / "pnr_reference.tcl"
@@ -378,6 +402,9 @@ class RunStaOpenroad(EdaTool):
         success = bool(res.get("success"))
         tool_ok = success or not _is_infra_failure(str(res.get("stderr", "")))
         checks = [CheckResult("sta", "pass" if success else "fail")]
+        run_dir = Path(req.out_dir) if req.out_dir else Path(script).parent
+        for chk in self.checkers():
+            checks.append(chk.check(req, run_dir))
         lp = res.get("log_path")
         metrics = {k: res[k] for k in ("wns_ns", "tns_ns") if k in res}
         return ToolResult.from_checks(
@@ -385,6 +412,9 @@ class RunStaOpenroad(EdaTool):
             log_path=Path(lp) if lp else None, verb=self.verb,
             design=req.design, extra_metrics=metrics,
         )
+
+    def checkers(self) -> list[Checker]:
+        return [StaChecker()]
 
     def prompt_notes(self) -> str:
         return "OpenROAD STA: read_liberty/read_verilog/read_sdc + report_checks."
@@ -420,6 +450,12 @@ class RunDrcMagic(EdaTool):
         checks = [CheckResult("drc", "pass" if clean else "fail",
                               metrics={"violations": res.get("violation_count",
                                                              res.get("drc_count", 0))})]
+        # Honest report-derived DRC verdict (BLOCKING, fail-closed): catches
+        # report-rects the stdout count missed and never renders a missing
+        # report as clean (drc_verdict.classify_drc three-state).
+        run_dir = Path(out_dir)
+        for chk in self.checkers():
+            checks.append(chk.check(req, run_dir))
         artifacts = {k: Path(res[v]) for k, v in
                      (("gds", "gds_path"), ("spice", "spice_path")) if res.get(v)}
         lp = res.get("log_path")
@@ -427,6 +463,9 @@ class RunDrcMagic(EdaTool):
             tool_ok=tool_ok, checks=checks, artifacts=artifacts,
             log_path=Path(lp) if lp else None, verb=self.verb, design=req.design,
         )
+
+    def checkers(self) -> list[Checker]:
+        return [MagicDrcChecker()]
 
     def prompt_notes(self) -> str:
         return "Magic -dnull -noconsole -rcfile <magicrc> <drc.tcl>."
@@ -461,6 +500,13 @@ class RunLvsNetgen(EdaTool):
             log_path=Path(res["log_path"]) if res.get("log_path") else None,
             verb=self.verb, design=req.design,
         )
+
+    def checkers(self) -> list[Checker]:
+        # The inline verdict above already reconciles benign pins WITH the
+        # reference power-Verilog (richer than a report-only standalone check),
+        # so it stays the source of truth; LvsMatchChecker is exposed here for
+        # `tool list` + standalone use over a report file.
+        return [LvsMatchChecker()]
 
     def prompt_notes(self) -> str:
         return "Netgen -batch lvs <spice> <verilog> <netgen-setup>."

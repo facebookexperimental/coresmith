@@ -3100,7 +3100,20 @@ write_verilog -noattr {netlist_path}
 
         report_path.write_text(result.stdout)
 
-        from orchestrator.langgraph.ppa_check import count_flops_from_stat
+        from orchestrator.langgraph.ppa_check import (
+            count_cells_from_stat,
+            count_flops_from_stat,
+        )
+        # The inline loop above only handles the "Number of cells: N" line and
+        # the 3-token liberty stat ("178 1.73E+03 cells"); it MISSES the Yosys
+        # 0.65 box-format total ("N cells", two tokens) that a PDK-free generic
+        # `stat` emits, leaving gate_count=0 on generic synth. count_cells_from_stat
+        # understands every format (last-stat wins), so use it as the robust
+        # backstop -- keeping the return shape (gate_count stays an int).
+        if not gate_count:
+            _cells = count_cells_from_stat(result.stdout)
+            if _cells:
+                gate_count = _cells
         ff_count = count_flops_from_stat(result.stdout)
 
         log_path = _write_step_log(block_name, "synthesize", [yosys_bin, "-s", str(script_path)], result, attempt)
