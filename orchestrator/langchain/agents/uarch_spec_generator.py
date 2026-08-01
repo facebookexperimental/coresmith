@@ -24,7 +24,11 @@ from typing import Any
 from opentelemetry import trace
 
 from orchestrator._timeouts import scaled
-from orchestrator.langchain.prompts.skills import load_skills as _load_skills
+from orchestrator.langchain.prompts.skills import (
+    UARCH_SKILL_CANDIDATES,
+    build_skill_section,
+    select_skills,
+)
 
 from .coresmith_llm import ClaudeLLM
 
@@ -41,27 +45,18 @@ else:
         "Produce a detailed microarchitecture specification from a Python model."
     )
 
-# Inject handshake skills so every uArch spec author has access to the
-# coresmith conventions for AXI-Stream and sRdy/dRdy. Skills are loaded
-# at import time so a missing skill file is visible immediately rather
-# than at first agent call.
-_SKILLS_TEXT = _load_skills(
-    "axi_stream",
-    "srdy_drdy",
-    "arithmetic_precision",
-    "memory_macro_vs_flops",
-    "serialization_contract",
-    "buffer_stride_contract",
-    "pipeline_contract",
-    "throughput_budget_contract",
-    "control_pulse_handshake",
-)
-if _SKILLS_TEXT:
-    SYSTEM_PROMPT = (
-        SYSTEM_PROMPT
-        + "\n\n# Reference Skills (use when authoring interfaces)\n\n"
-        + _SKILLS_TEXT
-    )
+# Reference skills are NO LONGER concatenated at import time. All ten used to
+# be injected unconditionally, so a register-file block carried the full 18 K
+# bitstream-serialization skill: measured on a live run, 133 K of a 141 K-char
+# system prompt was skills, most of them inapplicable. They are now selected
+# PER CALL from the block's own evidence (see build_system_prompt below);
+# unselected skills are listed in a compact manifest with their absolute paths,
+# which the worker (which has filesystem read access) must read before
+# authoring in that domain. Nothing became unavailable; the token tax did.
+#
+# The missing-file fail-fast property is preserved and strengthened: a SELECTED
+# skill is loaded with load_skill_strict, which raises loudly at first use
+# instead of silently shrinking the prompt.
 
 # Inject the LIVE set of pre-built SRAM macros discovered in the PDK, so the
 # uArch author picks from what is actually available (not a hardcoded list) --
@@ -119,6 +114,42 @@ try:
     )
 except Exception:  # pragma: no cover - discovery is best-effort
     pass
+
+
+def _constraint_precedence_line() -> str:
+    """Naming precedence for a block's ACCUMULATED constraints ('' on error).
+
+    The accumulated constraints are a debug agent's reading of past failures;
+    the frozen contract is design intent. On a port NAME they disagree about,
+    the contract wins. Imported lazily so the agent module keeps no import-time
+    dependency on the langgraph package.
+    """
+    try:
+        from orchestrator.langgraph.contract_conformance import (
+            CONSTRAINT_PRECEDENCE_LINE,
+        )
+        return CONSTRAINT_PRECEDENCE_LINE
+    except Exception:  # noqa: BLE001 - prompt garnish, never blocks a spec
+        return ""
+
+
+def build_system_prompt(
+    block_spec: Any = None,
+    contracts: Any = None,
+    block_diagram: Any = None,
+) -> str:
+    """The uArch author's system prompt for ONE block.
+
+    ``SYSTEM_PROMPT`` (the authored prompt + the live SRAM macro menu) plus the
+    reference-skill section assembled for this block: ``port_naming`` always
+    inline, the skills this block's evidence implicates inline, everything else
+    named in the manifest with an absolute path to read.
+    """
+    section = build_skill_section(
+        select_skills(block_spec, contracts, block_diagram),
+        candidates=UARCH_SKILL_CANDIDATES,
+    )
+    return SYSTEM_PROMPT + "\n\n" + section if section else SYSTEM_PROMPT
 
 
 def normalize_feasibility(summary: dict) -> dict:
@@ -228,6 +259,13 @@ class UarchSpecGenerator:
                 f"Description: {description}",
             ]
 
+            # Evidence for per-call reference-skill selection (see
+            # build_system_prompt). Populated below from disk when a
+            # project_root is supplied; empty means "no evidence", and the
+            # classifier then conservatively inlines every skill.
+            _bd_block: dict = {}
+            _contracts_view: dict = {}
+
             if constraints:
                 parts.append("\n--- DESIGN CONSTRAINTS ---")
                 for i, c in enumerate(constraints, 1):
@@ -235,6 +273,7 @@ class UarchSpecGenerator:
                         parts.append(f"  {i}. {c.get('rule', str(c))}")
                     else:
                         parts.append(f"  {i}. {c}")
+                parts.append(_constraint_precedence_line())
                 parts.append("")
 
             # PDK arithmetic timing budget (gated; best-effort). Arms the author
@@ -365,6 +404,7 @@ class UarchSpecGenerator:
 
                         for blk in bd.get("blocks", []):
                             if blk.get("name") == block_name:
+                                _bd_block = blk if isinstance(blk, dict) else {}
                                 ifaces = blk.get("interfaces", {})
                                 if ifaces:
                                     parts.append(
@@ -423,7 +463,7 @@ class UarchSpecGenerator:
                     format_block_contracts_prompt,
                     load_block_contracts,
                 )
-                _contracts_view = load_block_contracts(project_root, block_name)
+                _contracts_view = load_block_contracts(project_root, block_name) or {}
                 _contracts_fragment = format_block_contracts_prompt(
                     block_name, _contracts_view
                 )
@@ -469,9 +509,25 @@ class UarchSpecGenerator:
 
             user_message = "\n".join(parts)
 
+            # Per-call system prompt: port_naming always inline, the rest
+            # selected from THIS block's evidence, unselected skills manifested
+            # with absolute paths.
+            _block_spec = dict(_bd_block)
+            _block_spec.update({
+                "name": block_name,
+                "description": description,
+                "model_source": python_source,
+            })
+            system_prompt = build_system_prompt(
+                block_spec=_block_spec,
+                contracts=_contracts_view or None,
+                block_diagram=_bd_block or None,
+            )
+            span.set_attribute("system_prompt_chars", len(system_prompt))
+
             run_name = f"Generate Uarch Spec [{block_title}]{revision_label}"
             content = await self.llm.call(
-                system=SYSTEM_PROMPT,
+                system=system_prompt,
                 prompt=user_message,
                 run_name=run_name,
                 resume_session_id=resume_session_id,

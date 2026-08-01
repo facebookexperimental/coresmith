@@ -132,16 +132,40 @@ class TestSkillsWiredIntoAgents:
     wiring so a refactor that drops the load can't go unnoticed."""
 
     def test_uarch_spec_generator_loads_arithmetic_precision(self):
+        # Skills are now selected PER CALL (see build_system_prompt): the
+        # wiring test asserts the skill reaches a block whose evidence calls
+        # for it, not that it is concatenated at import time onto every block.
         from orchestrator.langchain.agents import uarch_spec_generator
-        assert "Bit-width derivation" in uarch_spec_generator.SYSTEM_PROMPT
+        prompt = uarch_spec_generator.build_system_prompt(
+            block_spec={"name": "mac_lane",
+                        "description": "multiply-accumulate lane",
+                        "model_source": "def f(a, b):\n    return (a * b) >> 8\n"},
+        )
+        assert "Bit-width derivation" in prompt
 
     def test_uarch_spec_generator_loads_memory_macro_vs_flops(self):
         # The SRAM-macro-vs-flops skill must reach the uArch agent so
         # every spec author chooses storage type explicitly.
         from orchestrator.langchain.agents import uarch_spec_generator
-        prompt = uarch_spec_generator.SYSTEM_PROMPT
+        prompt = uarch_spec_generator.build_system_prompt(
+            block_spec={"name": "frame_store",
+                        "description": "1024x32 SRAM-backed frame buffer"},
+        )
         assert "sky130_sram_1kbyte_1rw1r_32x256_8" in prompt
         assert "SRAM macro" in prompt
+
+    def test_uarch_spec_generator_no_evidence_inlines_every_skill(self):
+        # Conservative default: with nothing to classify on, the per-call
+        # prompt is exactly as complete as the old unconditional one.
+        from orchestrator.langchain.agents import uarch_spec_generator
+        from orchestrator.langchain.prompts.skills import (
+            UARCH_SKILL_CANDIDATES,
+            load_skill,
+        )
+        prompt = uarch_spec_generator.build_system_prompt()
+        for sid in UARCH_SKILL_CANDIDATES:
+            body = load_skill(sid)
+            assert body[-400:] in prompt, sid
 
     def test_ers_doc_loads_memory_macro_vs_flops(self):
         # The ERS specialist binds memory implementation for the whole
