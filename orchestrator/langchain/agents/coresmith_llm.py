@@ -737,6 +737,50 @@ _OPENCODE_MODEL_MAP = {
     "haiku-3.5": "openrouter/moonshotai/kimi-k3",
 }
 
+# --- Muse Spark endpoint (Meta Model API) -----------------------------------
+# Meta's Model API serves Muse Spark 1.1 over an OpenAI-*chat-completions*
+# compatible surface (POST {base}/chat/completions), so OpenCode must load the
+# "@ai-sdk/openai-compatible" adapter for it.
+#
+# WHY A NON-OBVIOUS PROVIDER ID: models.dev (OpenCode's built-in registry)
+# already ships a provider called "meta", pinned to npm "@ai-sdk/openai" -- the
+# *Responses* API. A user provider block keyed "meta" merges INTO that registry
+# entry and inherits its npm, so every call dies inside getModel() with
+# "responses is not a function". Registering under an id the registry does not
+# claim is what makes the adapter choice actually stick. Do not rename this to
+# "meta" without re-verifying against a live key.
+MUSE_SPARK_PROVIDER_ID = "meta-model-api"
+MUSE_SPARK_MODEL_ID = "muse-spark-1.1"
+MUSE_SPARK_BASE_URL = "https://api.meta.ai/v1"
+MUSE_SPARK_NPM = "@ai-sdk/openai-compatible"
+# Secret is read from the environment at call time and never persisted by
+# CoreSmith. OPENCODE_CONFIG_CONTENT uses OpenCode's "{env:VAR}" indirection so
+# the key itself is not embedded in the config blob we hand to the CLI.
+MUSE_SPARK_API_KEY_ENV = "META_MODEL_API_KEY"
+# 1M-token context per Meta's model card; output cap is the conservative value
+# CoreSmith asks OpenCode to plan against.
+MUSE_SPARK_CONTEXT_LIMIT = 1_000_000
+MUSE_SPARK_OUTPUT_LIMIT = 65_536
+
+DEFAULT_MUSE_SPARK_MODEL = f"{MUSE_SPARK_PROVIDER_ID}/{MUSE_SPARK_MODEL_ID}"
+
+# Every CoreSmith tier maps onto the single Muse Spark model the Model API
+# currently exposes (GET /v1/models returns exactly muse-spark-1.1).
+_MUSE_SPARK_MODEL_MAP = {
+    tier: DEFAULT_MUSE_SPARK_MODEL for tier in _OPENCODE_MODEL_MAP
+}
+
+
+def _is_muse_spark_model(resolved_model: str) -> bool:
+    """Whether a resolved OpenCode slug points at Muse Spark on the Model API.
+
+    Matches on the model id rather than the provider prefix so an operator who
+    routes Muse Spark through their own gateway (a different provider id, or
+    OpenRouter's ``openrouter/meta/muse-spark-1.1``) still gets the
+    model-specific handling.
+    """
+    return MUSE_SPARK_MODEL_ID in (resolved_model or "").lower()
+
 
 # Default model used by every agent unless overridden. Set the CORESMITH_MODEL
 # environment variable (to either a short name above or a full Claude CLI
@@ -752,6 +796,111 @@ DEFAULT_OPENCODE_MODEL = "openrouter/moonshotai/kimi-k3"
 # fix, tb fix).  Integration and review agents still call DEFAULT_MODEL.
 # Override with CORESMITH_BLOCK_MODEL env var.
 BLOCK_MODEL = "sonnet-5"
+
+# --- OpenCode endpoint selection --------------------------------------------
+# An "endpoint" bundles the model map, the default model and (where the target
+# is not something OpenCode can reach out of the box) the provider registration
+# CoreSmith injects for it.
+#
+# "openrouter" is the pre-existing hosted-Kimi route and remains the DEFAULT, so
+# a run that does not set CORESMITH_OPENCODE_ENDPOINT behaves exactly as before
+# this endpoint was added -- same model, same flags, same provider config.
+OPENCODE_ENDPOINT_OPENROUTER = "openrouter"
+OPENCODE_ENDPOINT_MUSE_SPARK = "muse-spark"
+
+_OPENCODE_ENDPOINT_ALIASES = {
+    "": OPENCODE_ENDPOINT_OPENROUTER,
+    "default": OPENCODE_ENDPOINT_OPENROUTER,
+    "openrouter": OPENCODE_ENDPOINT_OPENROUTER,
+    "kimi": OPENCODE_ENDPOINT_OPENROUTER,
+    "kimi-k3": OPENCODE_ENDPOINT_OPENROUTER,
+    "muse": OPENCODE_ENDPOINT_MUSE_SPARK,
+    "muse-spark": OPENCODE_ENDPOINT_MUSE_SPARK,
+    "muse_spark": OPENCODE_ENDPOINT_MUSE_SPARK,
+    "musespark": OPENCODE_ENDPOINT_MUSE_SPARK,
+    "meta": OPENCODE_ENDPOINT_MUSE_SPARK,
+    "meta-model-api": OPENCODE_ENDPOINT_MUSE_SPARK,
+}
+
+
+def _opencode_endpoint() -> str:
+    """Resolve ``CORESMITH_OPENCODE_ENDPOINT`` to a canonical endpoint name.
+
+    Unset (or any "openrouter" alias) keeps the historical hosted-Kimi route.
+    An unrecognised value raises rather than silently falling back: picking a
+    different model than the operator asked for is the kind of thing that only
+    surfaces hours later in a token bill.
+    """
+    raw = os.environ.get("CORESMITH_OPENCODE_ENDPOINT", "").strip().lower()
+    try:
+        return _OPENCODE_ENDPOINT_ALIASES[raw]
+    except KeyError:
+        raise ValueError(
+            "Unsupported CORESMITH_OPENCODE_ENDPOINT={!r}. Use one of: {}.".format(
+                raw, ", ".join(sorted(set(_OPENCODE_ENDPOINT_ALIASES.values())))
+            )
+        ) from None
+
+
+def _opencode_endpoint_models(endpoint: str) -> tuple[dict, str]:
+    """Return ``(model_map, default_model)`` for a canonical endpoint name."""
+    if endpoint == OPENCODE_ENDPOINT_MUSE_SPARK:
+        return _MUSE_SPARK_MODEL_MAP, DEFAULT_MUSE_SPARK_MODEL
+    return _OPENCODE_MODEL_MAP, DEFAULT_OPENCODE_MODEL
+
+
+def muse_spark_provider_config() -> dict:
+    """The OpenCode provider block that registers the Meta Model API.
+
+    Returned as a plain dict so callers can merge it into an existing
+    ``OPENCODE_CONFIG_CONTENT`` rather than clobbering operator config. The API
+    key is referenced through OpenCode's ``{env:VAR}`` indirection, so the
+    secret stays in the process environment and never lands in the config blob.
+    """
+    return {
+        "npm": MUSE_SPARK_NPM,
+        "name": "Meta Model API",
+        "api": MUSE_SPARK_BASE_URL,
+        "options": {
+            "baseURL": MUSE_SPARK_BASE_URL,
+            "apiKey": "{env:%s}" % MUSE_SPARK_API_KEY_ENV,
+        },
+        "models": {
+            MUSE_SPARK_MODEL_ID: {
+                "name": "Muse Spark 1.1",
+                "limit": {
+                    "context": MUSE_SPARK_CONTEXT_LIMIT,
+                    "output": MUSE_SPARK_OUTPUT_LIMIT,
+                },
+            },
+        },
+    }
+
+
+def _inject_muse_spark_provider(config_content: str) -> str:
+    """Merge the Muse Spark provider block into an OPENCODE_CONFIG_CONTENT blob.
+
+    Operator-supplied keys win: if the blob already registers
+    ``MUSE_SPARK_PROVIDER_ID`` we leave it completely alone, so a site that
+    needs a proxy base URL or a different adapter can override us without
+    editing CoreSmith.
+    """
+    try:
+        config = _json.loads(config_content or "{}") or {}
+    except _json.JSONDecodeError as exc:
+        raise ValueError(
+            "OPENCODE_CONFIG_CONTENT must be valid JSON to use the "
+            "muse-spark endpoint"
+        ) from exc
+    if not isinstance(config, dict):
+        raise ValueError("OPENCODE_CONFIG_CONTENT must contain a JSON object")
+
+    providers = config.setdefault("provider", {})
+    if not isinstance(providers, dict):
+        raise ValueError("OPENCODE_CONFIG_CONTENT 'provider' must be an object")
+    providers.setdefault(MUSE_SPARK_PROVIDER_ID, muse_spark_provider_config())
+    return _json.dumps(config)
+
 
 # --- OpenCode reasoning-effort ("--variant") handling ------------------------
 # OpenRouter's hosted Kimi models (kimi-k3 / kimi-k2-thinking) expose reasoning
@@ -798,6 +947,20 @@ def _normalize_opencode_variant(variant: str, resolved_model: str) -> str:
     """
     v = (variant or "").strip().lower()
     if not v:
+        return ""
+    if _is_muse_spark_model(resolved_model):
+        # Verified against a live Meta Model API key: muse-spark-1.1 accepts
+        # EVERY --variant value -- low/high/max/minimal and even "bogusvalue"
+        # all return 200, and the reported reasoning-token counts do not track
+        # the flag. Shipping it would put a reasoning cap in the command line
+        # and the logs that is not actually in force, which is precisely the
+        # footgun the Kimi normalisation above exists to prevent.
+        logger.warning(
+            "CORESMITH_OPENCODE_VARIANT=%r has no effect on %s: the Meta Model "
+            "API silently ignores --variant. Omitting the flag so it does not "
+            "imply a reasoning cap that is not applied.",
+            variant, resolved_model,
+        )
         return ""
     if "kimi" not in (resolved_model or "").lower():
         return v
@@ -914,15 +1077,18 @@ def _resolve_model(model: str, provider: str = "claude_cli") -> str:
             return DEFAULT_AGY_MODEL
         return _AGY_MODEL_MAP.get(model, model)
     if provider == "opencode_cli":
+        # The endpoint picks which catalogue we resolve against; an explicit
+        # CORESMITH_OPENCODE_MODEL still wins over both.
+        _model_map, _default_model = _opencode_endpoint_models(_opencode_endpoint())
         env_override = (
             os.environ.get("CORESMITH_OPENCODE_MODEL", "").strip()
             or os.environ.get("CORESMITH_MODEL", "").strip()
         )
         if env_override:
-            return _OPENCODE_MODEL_MAP.get(env_override, env_override)
+            return _model_map.get(env_override, env_override)
         if not model:
-            return DEFAULT_OPENCODE_MODEL
-        return _OPENCODE_MODEL_MAP.get(model, model)
+            return _default_model
+        return _model_map.get(model, model)
 
     env_override = os.environ.get("CORESMITH_MODEL", "").strip()
     if env_override:
@@ -2369,6 +2535,23 @@ class ClaudeLLM:
                 raise ValueError("OPENCODE_CONFIG_CONTENT must contain a JSON object")
             inline_config["permission"] = "deny"
             process_env["OPENCODE_CONFIG_CONTENT"] = _json.dumps(inline_config)
+
+        # Muse Spark is not reachable out of the box: OpenCode's built-in
+        # registry has no chat-completions provider for the Meta Model API, so
+        # CoreSmith registers one inline rather than making every operator
+        # hand-edit ~/.config/opencode/opencode.json. Merged (not clobbered) on
+        # top of whatever the disable_tools branch above and the operator set.
+        if _is_muse_spark_model(resolved_model):
+            if not process_env.get(MUSE_SPARK_API_KEY_ENV, "").strip():
+                raise RuntimeError(
+                    f"{MUSE_SPARK_API_KEY_ENV} is not set, so OpenCode cannot "
+                    f"authenticate against the Meta Model API "
+                    f"({MUSE_SPARK_BASE_URL}). Export the key before starting "
+                    f"the daemon."
+                )
+            process_env["OPENCODE_CONFIG_CONTENT"] = _inject_muse_spark_provider(
+                process_env.get("OPENCODE_CONFIG_CONTENT", "")
+            )
 
         logger.info(
             "OpenCode invocation: model=%s prompt_len=%d system_len=%d",
