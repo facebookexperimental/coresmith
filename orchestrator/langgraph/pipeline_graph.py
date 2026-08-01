@@ -2570,8 +2570,13 @@ async def generate_testbench_node(state: BlockState) -> dict:
                                   "reason": "contract_port_mismatch",
                                   "errors": _port_errors[:8],
                               })
+            # PHASE = "conformance", NOT "sim": this gate FAILS BEFORE any
+            # testbench is generated, so there is no simulation, no VCD and no
+            # WaveKit audit. Labelling it "sim" sent 3/3 diagnosis agents
+            # hunting for waveforms that cannot exist -- they then blamed the
+            # engine for the missing artifacts.
             return {"tb_path": str(tb_path_obj), "sim_passed": False,
-                    "phase": "sim", "force_regen_tb": False,
+                    "phase": "conformance", "force_regen_tb": False,
                     "step_log_paths": existing_logs}
 
     # --- CONTRACT-CONFORMANCE stage: check + repair the block's PORT NAMES ---
@@ -2685,8 +2690,10 @@ async def generate_testbench_node(state: BlockState) -> dict:
                 _park_conformance_unrepairable(state, block_name, _conform,
                                                _cf_n)
                 _reset_conformance_failures(_pr(state), block_name)
+            # PHASE = "conformance" (see the width gate above): pre-TB,
+            # pre-sim, no waveform exists.
             return {"tb_path": str(tb_path_obj), "sim_passed": False,
-                    "phase": "sim", "force_regen_tb": False,
+                    "phase": "conformance", "force_regen_tb": False,
                     "conformance_renames": _renames,
                     "step_log_paths": existing_logs}
         _reset_conformance_failures(_pr(state), block_name)
@@ -4920,6 +4927,11 @@ def _route_decision(debug_result: dict, attempt_history: list[dict],
         return "retry_tb"
 
     # Rule 6: Route based on failed phase
+    if phase == "conformance":
+        # Deterministic pre-sim contract gate (port names / widths). The fix is
+        # always in the RTL, and the exact expected names are already in
+        # previous_error.txt.
+        return "retry_rtl"
     if phase == "sim":
         return "retry_rtl"  # sim failure -> regenerate RTL
     if phase == "synth":
