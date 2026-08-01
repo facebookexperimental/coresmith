@@ -45,7 +45,7 @@ class TestSelectSkillsEvidenceClasses:
     def test_memory_shaped_block_selects_memory_macro(self):
         sel = select_skills(
             {"name": "pixel_line_buffer",
-             "description": "1024x32 line buffer for the raster stage"},
+             "description": "1024x32 line buffer for the scan stage"},
             None, None,
         )
         assert "memory_macro_vs_flops" in sel
@@ -275,8 +275,8 @@ _DOUBLED_TOKEN_CONTRACTS = {
     "contracts": [
         {
             "edge_id": "e1",
-            "producer_block": "qspi_slave_frontend",
-            "consumer_block": "regmap_buffers",
+            "producer_block": "bus_frontend",
+            "consumer_block": "register_map",
             "producer_port": "host_write",
             "consumer_port": "host_write",
             "handshake_protocol": "static",
@@ -305,22 +305,22 @@ class TestContractPortTable:
             contract_port_rows,
         )
         root = _project(tmp_path)
-        rows = contract_port_rows(str(root), "regmap_buffers")
+        rows = contract_port_rows(str(root), "register_map")
         names = {r["port"] for r in rows}
         assert "host_write_write_enable" in names
         assert "host_write_abort" in names, "sideband is part of the port set"
 
         # The gate must demand EXACTLY the names the table advertises.
-        rtl = tmp_path / "regmap_buffers.v"
-        rtl.write_text("module regmap_buffers(input wire clk);\nendmodule\n")
+        rtl = tmp_path / "register_map.v"
+        rtl.write_text("module register_map(input wire clk);\nendmodule\n")
         missing = {port for _chan, port in
-                   check_block(str(root), "regmap_buffers", rtl).missing}
+                   check_block(str(root), "register_map", rtl).missing}
         assert missing == names
 
     def test_doubled_token_row_is_flagged(self, tmp_path):
         from orchestrator.langgraph.contract_conformance import contract_port_rows
         root = _project(tmp_path)
-        rows = {r["port"]: r for r in contract_port_rows(str(root), "regmap_buffers")}
+        rows = {r["port"]: r for r in contract_port_rows(str(root), "register_map")}
         assert rows["host_write_write_enable"]["doubled_token"] is True
         assert rows["host_write_addr"]["doubled_token"] is False
 
@@ -328,10 +328,10 @@ class TestContractPortTable:
         from orchestrator.langchain.agents.rtl_generator import build_user_message
         root = _project(tmp_path)
         prompt = build_user_message(
-            block_name="regmap_buffers",
+            block_name="register_map",
             description="register map + buffers",
             attempt=1,
-            rtl_target="rtl/regmap_buffers.v",
+            rtl_target="rtl/register_map.v",
             python_source_path="inputs/golden.py",
             project_root=str(root),
         )
@@ -346,7 +346,7 @@ class TestContractPortTable:
         from orchestrator.langchain.agents.rtl_generator import build_user_message
         root = _project(tmp_path)
         prompt = build_user_message(
-            block_name="regmap_buffers", rtl_target="rtl/x.v",
+            block_name="register_map", rtl_target="rtl/x.v",
             project_root=str(root),
         )
         assert "PRECEDENCE" in prompt

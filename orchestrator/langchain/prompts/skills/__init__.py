@@ -440,8 +440,9 @@ def _rule_buffer_stride(ev: _Evidence) -> bool | None:
         return None
     if _rule_serialization(ev):
         return True
-    if ev.hit("stride", "raster", "sub-block", "subblock", "sub_block",
-              "row_offset", "slot index", "slot_index", "byte offset"):
+    if ev.hit("stride", "sub-block", "subblock", "sub_block",
+              "row_offset", "slot index", "slot_index", "byte offset",
+              "scan order", "scan_order"):
         return True
     if ev.word("tile", "tiles"):
         return True
