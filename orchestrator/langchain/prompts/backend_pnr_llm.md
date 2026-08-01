@@ -101,3 +101,14 @@ The very first line of every OpenROAD TCL script you write MUST be
 `set_thread_count [exec nproc]` (or a explicit core count). Detailed
 routing single-threaded on a multi-core box wastes 3-8x wall clock and
 has caused step-timeout kills of routes that were converging cleanly.
+
+## PDN metal-4 min-area (REQUIRED on sky130)
+
+PDN met4 pin/strap stubs narrower than the met4 minimum area are the
+dominant Magic-DRC artifact class on sky130 (met4.4a, ~0.24 um^2):
+`define_pdn_grid ... -pins met4` emits tiny stub rectangles in bands
+at the die edges. Prevent it in the PDN section of every script:
+pass `-max_columns 2` on the pdngen grid (proven recipe: 0 DRC on a
+prior sky130 chip), and make met4 straps wide enough that every pin
+stub satisfies min-area. Signal routing is unaffected; this is purely
+the power-grid emission.
