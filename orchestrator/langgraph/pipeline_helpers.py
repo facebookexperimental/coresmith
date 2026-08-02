@@ -2975,8 +2975,23 @@ def synthesize_block(
     # Generic SRAM wrapper: read its synth (black-box) view first so every
     # `cs_sram_*` instance is an opaque macro (0 storage flops) -- the backend
     # streams in the real SRAM collateral. Only when the block instantiates it.
+    #
+    # Then MIRROR the flat/backend synth's Part-B directive: `chparam -set
+    # MEM_IMPL "MACRO"` before `hierarchy`, so a macro-eligible wrapped memory
+    # (a cs_rom_1r mask ROM, a cs_mem_*) elaborates to its empty macro shell
+    # instead of a behavioral flop array. The blackbox above only covers
+    # cs_sram_1rw/1rw1r, so without the chparam a wrapped ROM became a
+    # thousands-deep combinational read mux at block synth and STA timed it --
+    # while the backend's flat synth, on the SAME RTL, bound it to a macro.
+    # Pinning MEM_IMPL in the RTL instead is not available: it makes the memory
+    # read zero in DV. The directive, its env gate, its module set and the
+    # macro-eligibility threshold all come from sram_wrapper, so the two synth
+    # paths cannot drift apart.
     _wrapper_read = ""
     try:
+        from orchestrator.langgraph.sram_wrapper import (
+            block_sram_macro_directive as _bsmd,
+        )
         from orchestrator.langgraph.sram_wrapper import (
             uses_wrapper as _uw,
         )
@@ -2985,9 +3000,11 @@ def synthesize_block(
         )
         _rtl_src = Path(rtl_path).read_text() if Path(rtl_path).exists() else ""
         if _uw(_rtl_src):
+            _chparam = _bsmd(_rtl_src)
             _wrapper_read = (
                 f"read_verilog -DCORESMITH_SRAM_SYNTH -sv {_wlp()}\n"
-                "blackbox cs_sram_1rw cs_sram_1rw1r\n"
+                + (f"{_chparam}\n" if _chparam else "")
+                + "blackbox cs_sram_1rw cs_sram_1rw1r\n"
             )
     except Exception:
         _wrapper_read = ""
