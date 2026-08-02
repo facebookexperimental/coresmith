@@ -12,14 +12,15 @@ Coresmith converts prompts to silicon. It uses LangGraph to drive the full RTL-t
 
 ## What It Does
 
-Coresmith will ask questions about your requirements, then run these phases:
+You provide Coresmith with a specification of the ASIC you want, ideally including a software model for some parts of the design. Coresmith will then decompose your requirements into an ASIC architecture and autonomously drive execution into a GDS. 
 
-1. **Architecture** -- Generates a Product Requirements Document (PRD) and block diagram via a multi-step LangGraph state machine. (Memory-map, clock-tree, and register-spec stages also exist but are **off by default** — enable with `CORESMITH_ENABLE_MEMORY_MAP=1` / `_CLOCK_TREE=1` / `_REGISTER_SPEC=1`.)
-2. **RTL Generation** -- An LLM agent converts specifications into synthesizable Verilog-2005
-3. **Verification** -- Another LLM agent generates cocotb testbenches; Verilator lints and simulates
-4. **Synthesis** -- Yosys synthesizes each block to a gate-level netlist targeting the SkyWater Sky130 130nm PDK
-5. **Backend** -- OpenROAD/Magic/netgen handle place-and-route, DRC, and LVS
-6. **Diagnosis** -- On failure at any step, a debug agent analyzes the root cause and retries with corrective constraints
+1. **Architecture**: Generates a Product Requirements Document (PRD), functional requirements document and system architecture using proxy metrics
+2. **Microarchitecture**: Decomposes your requirements and software model into microarchitecture specifications and byte-exact software models using heuristics for data movement and locality
+3. **RTL Generation**: An LLM agent converts specifications for every block into synthesizable Verilog
+4. **Verification**: Another LLM agent generates cocotb testbenches; Verilator lints and simulates
+5. **Synthesis**: Yosys synthesizes each block to a gate-level netlist targeting the SkyWater Sky130 130nm PDK, fixing timing if necessary
+6. **Backend**: OpenROAD/Magic/netgen handle place-and-route, DRC, and LVS
+7. **Diagnosis**: On failure at any step, a debug agent analyzes the root cause and retries with corrective constraints
 
 The pipeline is interactive via a daemon that exposes endpoints to control the LangGraph pipeline.
 
