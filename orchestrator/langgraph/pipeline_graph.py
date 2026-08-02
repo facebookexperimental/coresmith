@@ -1695,6 +1695,11 @@ _DETERMINISTIC_GATE_MARKERS = (
     "SPLIT-BRAIN CONDITIONAL-COMPILATION",                 # ifdef lint report
     "deterministic stage-realization",                     # stage lint subtitle
     "UNSYNTHESIZABLE COMBINATIONAL CLOUD",                 # stage lint header
+    # theora_dec instance #4 of fix-reported-artifact-unchanged: the
+    # memory-tier lint was missing here, so _deterministic_gate_retry()
+    # returned False and the anti-livelock bypass never fired -- identical
+    # RTL re-failed 3x while the engine diagnosed an architectural wall.
+    "pre-synth memory-tier lint",                          # memory-tier lint
 )
 
 
@@ -5168,7 +5173,9 @@ async def ask_human_node(state: BlockState) -> dict:
         })
         constr_path.write_text(_json.dumps(constraints, indent=2))
 
-    if action == "fix_rtl" and response.get("description"):
+    if action == "fix_rtl" and (
+        response.get("rtl_fix_description") or response.get("description")
+    ):
         constraints.append({
             "rule": f"Outer-agent RTL fix applied: {response['description']}",
             "source": "human",
