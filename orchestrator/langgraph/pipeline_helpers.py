@@ -3043,8 +3043,17 @@ write_verilog -noattr {netlist_path}
     # cloud) blows this -> success=False -> route_after_synth -> diagnose.
     _synth_timeout = scaled(600, env="CORESMITH_SYNTH_TIMEOUT_S")
     try:
+        # cwd=PROJECT_ROOT so a PROJECT-RELATIVE artifact path inside the RTL
+        # resolves exactly as it does in simulation. Block RTL legitimately
+        # carries `$readmemh("inputs/rom_images/<image>.memh", ...)` (and the
+        # cs_rom_1r wrapper's INIT_FILE parameter is the same relative path);
+        # yosys resolves those against ITS OWN cwd, which was whatever the
+        # daemon happened to be started in -- so the image was unreadable at
+        # block synth even though the identical path worked in DV. Both flat
+        # synth and the memory-flop probe already run rooted at the project.
         result = subprocess.run(
             ["yosys", "-s", str(script_path)],
+            cwd=str(PROJECT_ROOT.resolve()),
             capture_output=True,
             text=True,
             timeout=_synth_timeout,
