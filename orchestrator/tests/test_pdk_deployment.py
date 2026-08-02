@@ -11,7 +11,6 @@ paths are pure ``Path`` composition over a synthetic sky130A/sky130B tree.
 
 from __future__ import annotations
 
-import shutil
 import textwrap
 from pathlib import Path
 
@@ -123,10 +122,25 @@ class TestToolBinaryResolution:
         monkeypatch.setenv("CORESMITH_BACKEND_YOSYS", "/opt/x/yosys")
         assert sky130._resolve_yosys() == "/opt/x/yosys"
 
-    def test_yosys_path_first_when_no_env(self, monkeypatch):
-        # Preserves the historical bare-"yosys" behavior on non-Nix hosts.
+    def test_yosys_path_hit_wins_when_no_env(self, monkeypatch, tmp_path):
+        # Hermetic: a fake yosys on a controlled PATH must win over the
+        # nix-wrapper fallback (no dependency on the host having yosys).
         monkeypatch.delenv("CORESMITH_BACKEND_YOSYS", raising=False)
-        assert sky130._resolve_yosys() == (shutil.which("yosys") or "yosys")
+        fake = tmp_path / "yosys"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", str(tmp_path))
+        assert sky130._resolve_yosys() == str(fake)
+
+    def test_yosys_off_path_falls_back_to_wrapper_or_bare(self, monkeypatch,
+                                                          tmp_path):
+        # With no env override and no yosys on PATH (empty dir), resolution
+        # must land on the configured/nix wrapper script or the bare name --
+        # never raise. CI runners have no yosys, so this is the branch they take.
+        monkeypatch.delenv("CORESMITH_BACKEND_YOSYS", raising=False)
+        monkeypatch.setenv("PATH", str(tmp_path))
+        resolved = sky130._resolve_yosys()
+        assert resolved == "yosys" or resolved.endswith(("yosys-nix.sh", "yosys"))
 
 
 # ---------------------------------------------------------------------------
