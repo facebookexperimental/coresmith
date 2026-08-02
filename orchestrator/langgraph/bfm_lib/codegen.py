@@ -19,7 +19,6 @@ coresmith package being importable inside the sim subprocess.
 from __future__ import annotations
 
 import inspect
-
 import re as _re
 
 from . import qspi_contract as _contract_mod

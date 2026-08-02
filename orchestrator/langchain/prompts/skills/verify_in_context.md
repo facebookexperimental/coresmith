@@ -30,6 +30,39 @@ Run the matching check and read its verdict (exit 0 = pass, 1 = fail,
 - `"$CS" verify chip-model` / `"$CS" verify chip` — composed-model and
   integrated chip_top checks.
 
+## Run EDA tools via the CLI (`"$CS" tool ...`)
+Do NOT invoke `yosys` / `openroad` / `magic` / `netgen` / a linter directly.
+Run every EDA step through the CLI's tool verbs, exactly like `verify`: the
+active *deployment* resolves the tool binary, the PDK environment, the output
+checkers, timeouts, and telemetry for you, so a run is uniform and portable
+across PDKs. You still author/repair the tool script (that is where the work is);
+only the execution goes through the verb.
+
+```bash
+CS="${CORESMITH_CLI:-coresmith}"
+"$CS" tool list                                     # verbs, impl, checkers
+"$CS" tool emit-script run_pnr --out pnr_work.tcl   # start from the deployment template
+# ...edit pnr_work.tcl...
+"$CS" tool run_pnr --design <top> --script pnr_work.tcl --out-dir <dir> --json
+```
+
+Verbs (each accepts `--design`, `--out-dir`, `--timeout-s`, `--json`):
+- `run_synth --rtl <f...>` or `--script <ys>` — synthesis (cells/FF/area).
+- `run_pnr --script <tcl>` (or `--netlist <f> --sdc <f>`) — place-and-route.
+- `run_drc --script <tcl>` (or `--gds <f>`) — DRC + extraction.
+- `run_lvs --script <tcl>` (or `--spice <f> --netlist <f>`) — layout-vs-schematic.
+- `run_sta --script <tcl>` — static timing.
+- `run_lint --rtl <f...>` — lint.
+- `gen_macro --width W --depth D --ports 1rw1r` — memory-macro generation.
+
+Exit codes match `verify`: **0** pass (`ToolResult.ok`), **1** a blocking
+checker failed (read `.checks[]` in the `--json` output for which one), **3**
+infra (missing binary / timeout), **4** the deployment does not implement the
+verb (honest skip — never a false green). `--json` prints the full
+`ToolResult` (`.ok`, `.tool_ok`, `.checks[]`, `.metrics`, `.artifacts`) so you
+parse the verdict instead of grepping logs; `emit-script <verb>` writes the
+deployment's reference script for you to adapt.
+
 ## Pull state instead of re-deriving it
 - `"$CS" contracts <block>` — this block's interface contracts (producer /
   consumer edges + packing convention). Read the block's `bootstrap_policy`

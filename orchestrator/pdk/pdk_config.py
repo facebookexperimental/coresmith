@@ -20,11 +20,49 @@ Usage::
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+def _cells_from_dict(data: dict[str, Any] | None) -> "CellConfig":
+    """Build a CellConfig from a plain dict, tolerating missing keys."""
+    d = data or {}
+    return CellConfig(
+        tapcell=d.get("tapcell", ""),
+        clkbuf_list=list(d.get("clkbuf_list", []) or []),
+        clkbuf_root=d.get("clkbuf_root", ""),
+        fillers=list(d.get("fillers", []) or []),
+        dont_use=list(d.get("dont_use", []) or []),
+    )
+
+
+def _pnr_from_dict(data: dict[str, Any] | None) -> "PnrConfig":
+    """Build a PnrConfig from a plain dict, tolerating missing keys.
+
+    Track values are coerced to ``str`` so a YAML author may write bare numbers
+    (``0.23``) OR quoted tokens (``"1.70"``) -- both round-trip to the exact
+    token the reference TCL needs.
+    """
+    d = data or {}
+    tracks = []
+    for t in d.get("tracks", []) or []:
+        tracks.append({k: str(v) for k, v in t.items()})
+    pdn = dict(d.get("pdn", {}) or {})
+    defaults = PnrConfig()
+    return PnrConfig(
+        tapcell_distance=int(d.get("tapcell_distance", defaults.tapcell_distance)),
+        tracks=tracks,
+        pdn=pdn,
+        wire_rc_signal_layer=d.get("wire_rc_signal_layer", ""),
+        wire_rc_clock_layer=d.get("wire_rc_clock_layer", ""),
+        routing_signal=d.get("routing_signal", ""),
+        routing_clock=d.get("routing_clock", ""),
+        max_fanout=int(d.get("max_fanout", defaults.max_fanout)),
+        global_place_pad=int(d.get("global_place_pad", defaults.global_place_pad)),
+    )
 
 
 @dataclass
@@ -40,6 +78,46 @@ class CornerConfig:
     def resolve_liberty(self, pdk_root: str) -> str:
         """Resolve the liberty file path by substituting {pdk_root}."""
         return self.liberty.replace("{pdk_root}", pdk_root)
+
+
+@dataclass
+class CellConfig:
+    """Named standard cells the backend flow references by literal name.
+
+    These are the cell-family-specific names a PnR / synthesis flow must emit
+    verbatim (a Synopsys/ASAP7 deployment supplies its own). Empty defaults keep
+    a config that predates these keys loading unchanged.
+    """
+
+    tapcell: str = ""            # tap cell master (OpenROAD ``tapcell``)
+    clkbuf_list: list[str] = field(default_factory=list)   # CTS buffer list
+    clkbuf_root: str = ""        # CTS root buffer
+    fillers: list[str] = field(default_factory=list)       # filler/decap order
+    dont_use: list[str] = field(default_factory=list)      # resizer exclusions
+
+
+@dataclass
+class PnrConfig:
+    """PnR floorplan / PDN / routing parameters that are PDK-derived data.
+
+    Long-tail numeric tables (tracks, PDN stripe geometry) are kept as
+    string-valued tokens so a generated TCL byte-reproduces the reference flow
+    regardless of float formatting (``1.70`` must not become ``1.7``). Empty
+    defaults keep a pre-existing config loading unchanged.
+    """
+
+    tapcell_distance: int = 14
+    # Each track: {layer, x_offset, x_pitch, y_offset, y_pitch} -- all STRING
+    # tokens so the emitted make_tracks line is byte-identical.
+    tracks: list[dict[str, str]] = field(default_factory=list)
+    # PDN stripe spec (all string tokens where they land in TCL numerics).
+    pdn: dict[str, Any] = field(default_factory=dict)
+    wire_rc_signal_layer: str = ""
+    wire_rc_clock_layer: str = ""
+    routing_signal: str = ""     # e.g. "met1-met4"
+    routing_clock: str = ""      # e.g. "met3-met4"
+    max_fanout: int = 16
+    global_place_pad: int = 2
 
 
 @dataclass
@@ -60,6 +138,9 @@ class PDKConfig:
     lef_path: str = ""  # LEF file path template
     tech_lef_path: str = ""  # tech LEF path template
     pdk_root: str = ""  # resolved absolute PDK root path
+    # Backend cell + PnR data (optional; empty for configs predating these keys).
+    cells: CellConfig = field(default_factory=CellConfig)
+    pnr: PnrConfig = field(default_factory=PnrConfig)
 
     def liberty_path(self, corner: str | None = None) -> str:
         """Resolve liberty file path for a corner.
@@ -121,11 +202,13 @@ class PDKConfig:
             "lef_path": self.lef_path,
             "tech_lef_path": self.tech_lef_path,
             "pdk_root": self.pdk_root,
+            "cells": asdict(self.cells),
+            "pnr": asdict(self.pnr),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PDKConfig:
-        """Deserialize from a plain dict."""
+        """Deserialize from a plain dict (backward compatible: cells/pnr optional)."""
         corners = {}
         for name, cdata in data.get("corners", {}).items():
             corners[name] = CornerConfig(
@@ -146,6 +229,8 @@ class PDKConfig:
             lef_path=data.get("lef_path", ""),
             tech_lef_path=data.get("tech_lef_path", ""),
             pdk_root=data.get("pdk_root", ""),
+            cells=_cells_from_dict(data.get("cells")),
+            pnr=_pnr_from_dict(data.get("pnr")),
         )
 
     @classmethod
@@ -188,4 +273,6 @@ class PDKConfig:
             lef_path=data.get("lef", ""),
             tech_lef_path=data.get("tech_lef", ""),
             pdk_root=pdk_root,
+            cells=_cells_from_dict(data.get("cells")),
+            pnr=_pnr_from_dict(data.get("pnr")),
         )

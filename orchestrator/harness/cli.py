@@ -385,6 +385,7 @@ def register_subcommands(sub) -> None:
     """Register harness subcommands on the ``bin/coresmith`` subparser action."""
     _register_verify(sub)
     _register_queries(sub)
+    _register_tool(sub)
 
 
 def _register_queries(sub) -> None:
@@ -447,3 +448,17 @@ def _register_verify(sub) -> None:
     except Exception:  # noqa: BLE001
         return
     cli_verify.register_verify(sub, _run, _add_project_root, _add_json)
+
+
+def _register_tool(sub) -> None:
+    """``coresmith tool <verb>`` + ``coresmith pdk info`` (deployment EDA verbs).
+
+    Deferred import (like ``_register_verify``): cli_tool stays langgraph-free at
+    import; the registry/deployment imports it triggers are inside its handlers.
+    """
+    try:
+        from orchestrator.harness import cli_tool
+    except Exception:  # noqa: BLE001
+        return
+    cli_tool.register_tool(sub, _run, _add_project_root, _add_json)
+    cli_tool.register_pdk(sub, _run, _add_project_root, _add_json)

@@ -123,11 +123,15 @@ class MacroInfo:
         return all(p and Path(p).exists() for p in views)
 
 
-def _parse_lef(lef_path: Path) -> tuple[float, float, str, str]:
-    """Return (width_um, height_um, power_pin, ground_pin) from a macro LEF."""
+def _parse_lef(lef_path: Path, power_default: str = "vccd1",
+               ground_default: str = "vssd1") -> tuple[float, float, str, str]:
+    """Return (width_um, height_um, power_pin, ground_pin) from a macro LEF.
+
+    ``power_default``/``ground_default`` are the deployment-provided fallbacks
+    used when the LEF declares no ``USE POWER``/``USE GROUND`` pin (PR6)."""
     w = h = 0.0
-    power_pin = "vccd1"
-    ground_pin = "vssd1"
+    power_pin = power_default
+    ground_pin = ground_default
     try:
         text = lef_path.read_text(errors="ignore")
     except OSError:
@@ -262,8 +266,14 @@ def _first(paths: list[Path]) -> str:
     return ""
 
 
-def _build_macro(name: str, sram_root: Path) -> MacroInfo | None:
-    """Assemble a MacroInfo from the collateral subdirs of one sram_macros dir."""
+def _build_macro(name: str, sram_root: Path,
+                 lib_corner: str = _PREF_LIB_CORNER,
+                 power_default: str = "vccd1",
+                 ground_default: str = "vssd1") -> MacroInfo | None:
+    """Assemble a MacroInfo from the collateral subdirs of one sram_macros dir.
+
+    ``lib_corner`` + power/ground defaults are deployment-provided (PR6); the
+    defaults preserve the sky130 behavior for callers that omit them."""
     lef = sram_root / "lef" / f"{name}.lef"
     if not lef.exists():
         return None
@@ -274,12 +284,12 @@ def _build_macro(name: str, sram_root: Path) -> MacroInfo | None:
         sram_root / "cdl" / f"{name}.cdl",
     ])
     # liberty: prefer the typical corner, else any matching .lib
-    lib = sram_root / "lib" / f"{name}_{_PREF_LIB_CORNER}.lib"
+    lib = sram_root / "lib" / f"{name}_{lib_corner}.lib"
     if not lib.exists():
         cands = sorted((sram_root / "lib").glob(f"{name}*.lib"))
         lib = cands[0] if cands else lib
 
-    w, h, ppin, gpin = _parse_lef(lef)
+    w, h, ppin, gpin = _parse_lef(lef, power_default, ground_default)
     try:
         shorts = lef_pin_shorts(lef)
     except Exception:  # noqa: BLE001 - never let LEF parsing break discovery
@@ -305,14 +315,39 @@ def _build_macro(name: str, sram_root: Path) -> MacroInfo | None:
     return info
 
 
+def _macro_search_roots(pdk_root: str) -> list[Path]:
+    """The sram-macro dirs to scan, from the active deployment (PR6). A
+    deployment with no macro library returns an EMPTY set -> no macros
+    discovered (honest). Falls back to the sky130 layout only if the deployment
+    layer itself is unavailable (import failure), never when it returns []."""
+    try:
+        from orchestrator.pdk.registry import get_deployment
+        return [Path(p) for p in get_deployment().macro_search_paths(pdk_root)]
+    except Exception:  # noqa: BLE001
+        root = Path(pdk_root)
+        return [root / v / "libs.ref" / _SRAM_DIR for v in _VARIANTS]
+
+
+def _macro_defaults() -> tuple[str, str, str]:
+    """(lib_corner, power_pin, ground_pin) from the deployment (PR6)."""
+    try:
+        from orchestrator.pdk.registry import get_deployment
+        d = get_deployment().macro_defaults()
+        return (d.get("lib_corner") or _PREF_LIB_CORNER,
+                d.get("power_pin") or "vccd1",
+                d.get("ground_pin") or "vssd1")
+    except Exception:  # noqa: BLE001
+        return _PREF_LIB_CORNER, "vccd1", "vssd1"
+
+
 @lru_cache(maxsize=8)
 def discover_macros(pdk_root: str | None = None) -> dict[str, MacroInfo]:
     """Scan the PDK for pre-built SRAM macros. Cached per pdk_root.
 
-    Returns a {macro_name: MacroInfo} map. Scans both sky130A and sky130B
-    (efabless ships the macros in sky130B); the first variant that yields a
-    given macro wins. Returns {} if the PDK is absent -- callers degrade to the
-    flop path / OpenRAM fallback.
+    Returns a {macro_name: MacroInfo} map. The dirs to scan + the lib-corner /
+    power-pin defaults come from the active deployment (PR6). Returns {} if the
+    PDK/macro library is absent -- callers degrade to the flop path / OpenRAM
+    fallback.
     """
     if pdk_root is None:
         try:
@@ -320,10 +355,9 @@ def discover_macros(pdk_root: str | None = None) -> dict[str, MacroInfo]:
             pdk_root = str(PDK_ROOT)
         except Exception:
             return {}
-    root = Path(pdk_root)
+    lib_corner, ppin_def, gpin_def = _macro_defaults()
     out: dict[str, MacroInfo] = {}
-    for variant in _VARIANTS:
-        sram_root = root / variant / "libs.ref" / _SRAM_DIR
+    for sram_root in _macro_search_roots(pdk_root):
         lef_dir = sram_root / "lef"
         if not lef_dir.is_dir():
             continue
@@ -331,7 +365,7 @@ def discover_macros(pdk_root: str | None = None) -> dict[str, MacroInfo]:
             name = lef.stem
             if name in out:
                 continue
-            info = _build_macro(name, sram_root)
+            info = _build_macro(name, sram_root, lib_corner, ppin_def, gpin_def)
             if info is not None:
                 out[name] = info
     return out

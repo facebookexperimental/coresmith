@@ -445,7 +445,6 @@ def resolve_prebindings(sources, *, allow_generate: bool = True,
         if key in req_mask:
             nb = req_mask[key]
             macro_has_mask = "wmask0" in macro_ports(macro.verilog)
-            result_lanes = nb
             if macro_has_mask and nb > 1:
                 # The shell routes the mask to the macro's own port, so this
                 # binds -- PROVIDED both sides agree on lane count. OpenRAM

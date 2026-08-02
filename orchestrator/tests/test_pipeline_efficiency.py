@@ -313,7 +313,7 @@ class TestRtlLintInPrompt:
             / "langchain" / "prompts" / "rtl_generator.md"
         )
         content = prompt_path.read_text()
-        assert "verilator --lint-only" in content
+        assert "tool run_lint" in content
         assert "LINT-CLEAN OUTPUT" in content
 
 

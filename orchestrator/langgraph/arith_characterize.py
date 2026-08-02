@@ -35,8 +35,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-# Reuse the memory characterizer's resolved PDK paths, STA helper inputs, and
-# PDK fingerprint so the two characterizations share one cache key.
+# Reuse the memory characterizer's re-export of the DEPLOYMENT-resolved PDK
+# paths + OpenROAD binary (PR6), STA helper inputs, and PDK fingerprint so the
+# two characterizations share one cache key. mem_characterize now sources these
+# from the active deployment; this stays a re-export consumer (no direct
+# backend_helpers constant import).
 from .mem_characterize import (
     _ARRIVAL_RE,
     _YOSYS_AREA_RE,

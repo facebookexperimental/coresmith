@@ -23,9 +23,14 @@ class TestPnrTemplatePreCtsRepair:
         assert "lpflow_*" in tcl and "probe" in tcl
 
     def test_inline_template_matches(self):
-        src = (_ENGINE / "langgraph" / "backend_helpers.py").read_text()
+        # The OpenROAD PnR TCL generator moved into the sky130 deployment (PR5,
+        # byo-pdk): the pre-CTS repair_design + fanout cap invariant now lives
+        # there, parameterized from PDKConfig.pnr.max_fanout (== 16 for sky130).
+        src = (_ENGINE / "pdk" / "deployments" / "sky130.py").read_text()
         assert src.index("repair_design") < src.index("clock_tree_synthesis")
-        assert "set_max_fanout 16" in src
+        assert "set_max_fanout {max_fanout}" in src
+        from orchestrator.pdk.deployments.sky130 import DEPLOYMENT
+        assert DEPLOYMENT.pdk.pnr.max_fanout == 16
 
 
 class TestSdcClockDiscovery:

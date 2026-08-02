@@ -33,8 +33,7 @@ import json
 
 import pytest
 
-from orchestrator.langgraph import pipeline_graph
-from orchestrator.langgraph import bfm_lib
+from orchestrator.langgraph import bfm_lib, pipeline_graph
 from orchestrator.langgraph.bfm_lib import (
     STATUS_BOUNDARY_OFF_TOP,
     STATUS_CONTRADICTION,

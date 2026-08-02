@@ -2942,6 +2942,27 @@ async def generate_sdc(
 # Synthesis
 # ---------------------------------------------------------------------------
 
+def _resolve_synth_yosys() -> str:
+    """Resolve the yosys binary via the active deployment.
+
+    Historically ``synthesize_block`` invoked a bare ``"yosys"`` and ignored the
+    ``_resolve_tool`` seam the other backend binaries used. Routing it through
+    the deployment closes that inconsistency (and lets a BYO deployment redirect
+    it) while preserving today's PATH-first behavior on non-Nix hosts. Falls
+    back to bare ``"yosys"`` if the deployment can't be resolved.
+    """
+    try:
+        from orchestrator.pdk.registry import get_deployment
+
+        dep = get_deployment()
+        resolver = getattr(dep, "resolve_yosys", None)
+        if callable(resolver):
+            return resolver()
+    except Exception:  # noqa: BLE001
+        pass
+    return "yosys"
+
+
 def synthesize_block(
     block: dict, rtl_path: str, target_clock_mhz: float = 50.0,
     attempt: int = 1,
@@ -2951,6 +2972,7 @@ def synthesize_block(
     output_dir = PROJECT_ROOT / "syn" / "output" / block_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    yosys_bin = _resolve_synth_yosys()
     liberty = str(LIBERTY_FILE)
     netlist_path = output_dir / f"{block_name}_netlist.v"
     report_path = output_dir / f"{block_name}_report.txt"
@@ -3044,7 +3066,7 @@ write_verilog -noattr {netlist_path}
     _synth_timeout = scaled(600, env="CORESMITH_SYNTH_TIMEOUT_S")
     try:
         result = subprocess.run(
-            ["yosys", "-s", str(script_path)],
+            [yosys_bin, "-s", str(script_path)],
             capture_output=True,
             text=True,
             timeout=_synth_timeout,
@@ -3078,10 +3100,23 @@ write_verilog -noattr {netlist_path}
 
         report_path.write_text(result.stdout)
 
-        from orchestrator.langgraph.ppa_check import count_flops_from_stat
+        from orchestrator.langgraph.ppa_check import (
+            count_cells_from_stat,
+            count_flops_from_stat,
+        )
+        # The inline loop above only handles the "Number of cells: N" line and
+        # the 3-token liberty stat ("178 1.73E+03 cells"); it MISSES the Yosys
+        # 0.65 box-format total ("N cells", two tokens) that a PDK-free generic
+        # `stat` emits, leaving gate_count=0 on generic synth. count_cells_from_stat
+        # understands every format (last-stat wins), so use it as the robust
+        # backstop -- keeping the return shape (gate_count stays an int).
+        if not gate_count:
+            _cells = count_cells_from_stat(result.stdout)
+            if _cells:
+                gate_count = _cells
         ff_count = count_flops_from_stat(result.stdout)
 
-        log_path = _write_step_log(block_name, "synthesize", ["yosys", "-s", str(script_path)], result, attempt)
+        log_path = _write_step_log(block_name, "synthesize", [yosys_bin, "-s", str(script_path)], result, attempt)
 
         return {
             "success": result.returncode == 0,
@@ -3096,7 +3131,7 @@ write_verilog -noattr {netlist_path}
             "log_path": log_path,
         }
     except subprocess.TimeoutExpired:
-        cmd = ["yosys", "-s", str(script_path)]
+        cmd = [yosys_bin, "-s", str(script_path)]
         _msg = (
             f"SYNTH FAILED: Yosys did not terminate within {_synth_timeout}s "
             f"(CORESMITH_SYNTH_TIMEOUT_S). This is an UNSYNTHESIZABLE design "
@@ -3107,7 +3142,7 @@ write_verilog -noattr {netlist_path}
         log_path = _write_step_log_error(block_name, "synthesize", cmd, _msg, attempt)
         return {"success": False, "log": _msg, "log_path": log_path}
     except FileNotFoundError:
-        cmd = ["yosys", "-s", str(script_path)]
+        cmd = [yosys_bin, "-s", str(script_path)]
         log_path = _write_step_log_error(block_name, "synthesize", cmd, "Yosys not installed", attempt)
         return {"success": False, "log": "Yosys not installed", "log_path": log_path}
 

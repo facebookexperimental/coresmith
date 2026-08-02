@@ -34,6 +34,15 @@ _PROMPT_FILES = {
     "mpw_precheck": _PROMPT_DIR / "backend_mpw_precheck.md",
 }
 
+# Map an adaptation step to the verb whose deployment prompt_notes() it should
+# receive as {tool_notes} (so the recipe text comes from the deployment).
+_STEP_TO_LLM_PROMPT = {
+    "synthesis": "backend_synth_llm.md",
+    "pnr": "backend_pnr_llm.md",
+    "drc": "backend_drc_llm.md",
+    "lvs": "backend_lvs_llm.md",
+}
+
 _PROMPTS: dict[str, str] = {}
 for _step, _path in _PROMPT_FILES.items():
     if _path.exists():
@@ -89,8 +98,13 @@ class BackendEDAAgent:
             on any LLM failure.
         """
         from orchestrator.langchain.agents.coresmith_llm import ClaudeLLM
+        from orchestrator.langgraph.eda_prompts import deployment_prompt_context
 
-        ctx = {**context, "baseline_script": baseline_script}
+        # Supply the active deployment's {pdk_summary}/{tool_notes} so the
+        # adaptation prompt's PDK/tool recipe comes from the deployment, not a
+        # hardcoded block. Caller context wins on collision.
+        dep_ctx = deployment_prompt_context(_STEP_TO_LLM_PROMPT.get(self.step, ""))
+        ctx = {**dep_ctx, **context, "baseline_script": baseline_script}
         try:
             system_prompt = self._prompt_template.format(**ctx)
         except KeyError as exc:

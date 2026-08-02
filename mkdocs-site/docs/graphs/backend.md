@@ -128,10 +128,10 @@ Annotated with `_last` so that parallel writes don't clobber each other.
 | Node | Function | Calls |
 |---|---|---|
 | `init_design` | `init_design_node` | Discovers `integration_top_path` and per-block RTL paths; extracts `design_name`. |
-| `flat_top_synthesis` | `flat_top_synthesis_node:448` | LLM with `prompts/backend_synth_llm.md` writes a Yosys `.ys` and runs it. |
-| `run_pnr` | `run_pnr_node:598` | LLM with `prompts/backend_pnr_llm.md` adapts `pdk_templates/sky130/pnr_reference.tcl` via `prepare_pnr_working_copy` (`backend_helpers.py:694`), runs OpenROAD. |
-| `drc` | `drc_node:724` | LLM with `prompts/backend_drc_llm.md` runs Magic via `run_magic` (`backend_helpers.py:987`), parses `magic_drc.rpt`. |
-| `lvs` | `lvs_node:814` | LLM with `prompts/backend_lvs_llm.md` runs Netgen via `run_netgen_lvs` (`backend_helpers.py:1063`). |
+| `flat_top_synthesis` | `flat_top_synthesis_node:448` | LLM with `prompts/backend_synth_llm.md` authors a synthesis `.ys` and runs it via `"$CS" tool run_synth --script ... --json`. |
+| `run_pnr` | `run_pnr_node:598` | LLM with `prompts/backend_pnr_llm.md` adapts `pdk_templates/sky130/pnr_reference.tcl` (or `"$CS" tool emit-script run_pnr`) then runs `"$CS" tool run_pnr --script ... --json`. |
+| `drc` | `drc_node:724` | LLM with `prompts/backend_drc_llm.md` authors a DRC/extraction script and runs `"$CS" tool run_drc --script ... --json`; the `MagicDrcChecker` parses `magic_drc.rpt`. |
+| `lvs` | `lvs_node:814` | LLM with `prompts/backend_lvs_llm.md` authors an LVS script and runs `"$CS" tool run_lvs --script ... --json`; the `LvsMatchChecker` reconciles benign pins. |
 | `timing_signoff` | `timing_signoff_node:866` | `BackendEDAAgent.analyze("timing_signoff")` — supports a CONDITIONAL_PASS verdict for waivable violations. |
 | `generate_wrapper` | `generate_wrapper_node` | LLM with `prompts/backend_wrapper_llm.md` writes `openframe_project_wrapper.v` and seeds the submission directory. |
 | `mpw_precheck` | `mpw_precheck_node` | Native Efabless precheck — no Docker. Calls `run_mpw_precheck_native` (`tapeout_helpers.py:843`) on a thread. |
@@ -162,15 +162,33 @@ Annotated with `_last` so that parallel writes don't clobber each other.
 
 ## EDA tool integration
 
-| Tool | Helper | Binary env override | Where called |
-|---|---|---|---|
-| OpenROAD | `run_openroad` (`backend_helpers.py:926`) | `CORESMITH_BACKEND_OPENROAD` | `run_pnr_node` |
-| Magic | `run_magic` (`backend_helpers.py:987`) | `CORESMITH_BACKEND_MAGIC` | `drc_node`, `generate_3d_view_node` |
-| Netgen | `run_netgen_lvs` (`backend_helpers.py:1063`) | `CORESMITH_BACKEND_NETGEN` | `lvs_node` |
-| KLayout | `_run_klayout_drc` (`tapeout_helpers.py:1160`) | `CORESMITH_BACKEND_KLAYOUT` | `mpw_precheck_node` |
-| Yosys | LLM `bash` directly | (PATH) | `flat_top_synthesis_node` |
+Agents no longer invoke `yosys` / `openroad` / `magic` / `netgen` by name. Each
+EDA step is run through a **CLI verb** — `"$CS" tool run_<verb> --json`
+(`CS="${CORESMITH_CLI:-coresmith}"`) — that the active *deployment*
+(`orchestrator/pdk/deployments/`) maps to a concrete tool, resolving the binary,
+PDK environment, output checkers, and timeouts. The agent still authors/repairs
+the tool script; only execution goes through the verb. Run `"$CS" tool list` to
+see the verbs, their implementation classes, and attached checkers, and
+`"$CS" pdk info` for the resolved deployment.
 
-Subprocess env always includes `PDK_ROOT` (e.g. `backend_helpers.py:1006`).
+| Verb | Deployment tool (sky130) | Checkers | Binary env override | Node |
+|---|---|---|---|---|
+| `run_synth` | `RunSynthYosys` | `SynthStatChecker`, `LogicDepthChecker` | `CORESMITH_BACKEND_YOSYS` | `flat_top_synthesis_node` |
+| `run_pnr` | `RunPnrOpenroad` | `PnrReportsChecker`, `RouteDrcChecker` | `CORESMITH_BACKEND_OPENROAD` | `run_pnr_node` |
+| `run_drc` | `RunDrcMagic` | `MagicDrcChecker` | `CORESMITH_BACKEND_MAGIC` | `drc_node` |
+| `run_lvs` | `RunLvsNetgen` | `LvsMatchChecker` | `CORESMITH_BACKEND_NETGEN` | `lvs_node` |
+| `run_sta` | `RunStaOpenroad` | `StaChecker` | `CORESMITH_BACKEND_OPENROAD` | (timing) |
+| `run_lint` | `RunLintVerilator` | `LintChecker` | (PATH) | RTL/TB agents |
+
+Exit codes: `0` pass (`ToolResult.ok`), `1` a blocking checker failed, `3` infra
+(missing binary / timeout), `4` the deployment does not implement the verb
+(honest skip). Every invocation appends a JSONL record under
+`.coresmith/tool_runs/`. Subprocess env always includes `PDK_ROOT`.
+
+The prompt migration is behind `CORESMITH_TOOL_CLI_PROMPTS` (default ON); set it
+to `0` to fall back to the pre-migration `<name>.legacy.md` prompt text.
+KLayout DRC (`_run_klayout_drc`, `CORESMITH_BACKEND_KLAYOUT`) is still called
+directly from `mpw_precheck_node`.
 
 ## PDK resolution
 

@@ -60,10 +60,10 @@ Defined at `tapeout_graph.py:65-108`.
 | Node | Calls / Notes |
 |---|---|
 | `generate_wrapper` | If the backend already wrote `wrapper_result.json`, reuses it. Otherwise calls `tapeout_helpers.generate_wrapper` to author the wrapper RTL + GPIO mapping. |
-| `synthesize_wrapper` | LLM with `prompts/tapeout_wrapper_synth.md` — Yosys synthesis with block netlists as blackboxes. |
-| `wrapper_pnr` | LLM with `prompts/tapeout_wrapper_pnr.md` — OpenROAD on the *fixed* OpenFrame die (3520 × 5188 µm). |
-| `wrapper_drc` | LLM with `prompts/tapeout_wrapper_drc.md` — Magic DRC + GDS export. |
-| `wrapper_lvs` | LLM with `prompts/tapeout_wrapper_lvs.md` — Netgen LVS. Mismatch is tolerated. |
+| `synthesize_wrapper` | LLM with `prompts/tapeout_wrapper_synth.md` — authors a synthesis script (block netlists as blackboxes) and runs `"$CS" tool run_synth --script ... --json`. |
+| `wrapper_pnr` | LLM with `prompts/tapeout_wrapper_pnr.md` — adapts the reference TCL and runs `"$CS" tool run_pnr --script ... --json` on the *fixed* OpenFrame die (3520 × 5188 µm). |
+| `wrapper_drc` | LLM with `prompts/tapeout_wrapper_drc.md` — authors a DRC/extraction script and runs `"$CS" tool run_drc --script ... --json` (DRC + GDS export). |
+| `wrapper_lvs` | LLM with `prompts/tapeout_wrapper_lvs.md` — authors an LVS script and runs `"$CS" tool run_lvs --script ... --json`. Benign pin mismatch is reconciled. |
 | `mpw_precheck` | Native Efabless precheck (`tapeout_helpers.run_mpw_precheck_native:843`) — directory validation, GDS checks, `user_defines.v` generation, wrapper port validation, KLayout DRC (advisory), Magic DRC (authoritative). |
 | `diagnose_tapeout` | LLM (`diagnose_tapeout_failure`) — classifies the failure and emits `auto_retry`, `continue`, or `escalate`. On `auto_retry` writes a `pnr_overrides.json`. |
 | `ask_human` | Interrupts with `type=tapeout_intervention_needed`. |

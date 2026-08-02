@@ -27,3 +27,54 @@ corners:
 
 lef: "{pdk_root}/sky130A/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef"
 tech_lef: "{pdk_root}/sky130A/libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef"
+
+# ---------------------------------------------------------------------------
+# Backend cell + PnR data (owned by the sky130 deployment; consumed by the
+# OpenROAD TCL generators in pdk/deployments/sky130.py). A different PDK
+# supplies its own names/tables here and the engine flow is unchanged. Track
+# and PDN numbers are QUOTED so the emitted TCL byte-reproduces the reference
+# flow (float formatting must not turn 1.70 into 1.7).
+# ---------------------------------------------------------------------------
+cells:
+  tapcell: sky130_fd_sc_hd__tapvpwrvgnd_1
+  clkbuf_list:
+    - sky130_fd_sc_hd__clkbuf_4
+    - sky130_fd_sc_hd__clkbuf_8
+  clkbuf_root: sky130_fd_sc_hd__clkbuf_8
+  fillers:
+    - sky130_fd_sc_hd__decap_12
+    - sky130_fd_sc_hd__decap_8
+    - sky130_fd_sc_hd__decap_6
+    - sky130_fd_sc_hd__decap_4
+    - sky130_fd_sc_hd__decap_3
+    - sky130_fd_sc_hd__fill_2
+    - sky130_fd_sc_hd__fill_1
+  dont_use:
+    - sky130_fd_sc_hd__probe_p_*
+    - sky130_fd_sc_hd__probec_p_*
+    - sky130_fd_sc_hd__lpflow_*
+
+pnr:
+  tapcell_distance: 14
+  max_fanout: 16
+  global_place_pad: 2
+  wire_rc_signal_layer: met2
+  wire_rc_clock_layer: met3
+  routing_signal: met1-met4
+  routing_clock: met3-met4
+  tracks:
+    - {layer: li1,  x_offset: "0.23", x_pitch: "0.46", y_offset: "0.17", y_pitch: "0.34"}
+    - {layer: met1, x_offset: "0.17", x_pitch: "0.34", y_offset: "0.17", y_pitch: "0.34"}
+    - {layer: met2, x_offset: "0.23", x_pitch: "0.46", y_offset: "0.23", y_pitch: "0.46"}
+    - {layer: met3, x_offset: "0.34", x_pitch: "0.68", y_offset: "0.34", y_pitch: "0.68"}
+    - {layer: met4, x_offset: "0.46", x_pitch: "0.92", y_offset: "0.46", y_pitch: "0.92"}
+    - {layer: met5, x_offset: "1.70", x_pitch: "3.40", y_offset: "1.70", y_pitch: "3.40"}
+  pdn:
+    grid_pins: met4
+    followpins_layer: met1
+    followpins_width: "0.48"
+    stripe_layer: met4
+    stripe_width: "1.6"
+    stripe_pitch: "27.14"
+    stripe_offset: "13.57"
+    connect_layers: met1 met4
