@@ -925,10 +925,11 @@ class TestSynthAttemptHistory:
                              llm_reply=None) == []
 
     def test_persist_merges_into_the_synth_result_artifact(self, tmp_path):
+        import json as _json
+
         from orchestrator.langgraph.backend_helpers import (
             persist_synth_attempt_history,
         )
-        import json as _json
         p = tmp_path / "synth_result.json"
         p.write_text(_json.dumps({"success": True, "gate_count": 42}))
         hist = [{"attempt": 1, "error_summary": "ERROR: boom",
