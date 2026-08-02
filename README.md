@@ -82,13 +82,16 @@ at the 50 MHz target.
 
 CoreSmith can now generate intermediate-complexity out-of-order cores, like intra video encoders or decoders (e.g. Theora) that are byte-exact and decodable by a software oracle. 
 
-## LLM Cost
-You must have a Claude Code Max or OpenAI Codex Pro subscription. Codex is recommended and GPT 5.6 Sol is superior at silicon design.
+## LLM Providers
+For the best experience: 
 
-| Design  | Opus 5 | GPT 5.6 Sol |
-|------|---------|---------|
-| MCU | OK | OK |
-| Theora | Exceeds 5hr limit on Max 5x | OK |
+* Claude Code Max (minimum 100$/month, minimum 200$/month): use Fable as outer agent
+* OpenAI Codex Pro (minimum 100$/month, ideally 200$/month) subscription: use Sol-5.6 for all agents
+
+For research purposes:
+
+* OpenCode/OpenRouter endpoints are supported, including Kimi K3. 
+* Meta Muse Spark is supported via OpenCode: http://dev.meta.ai
 
 Using API rates, budget about 3$-5$ for a simple 3-stage MCU. 
 
