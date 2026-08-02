@@ -85,8 +85,8 @@ CoreSmith can now generate intermediate-complexity out-of-order cores, like intr
 ## LLM Providers
 For the best experience: 
 
-* Claude Code Max (minimum 100$/month, minimum 200$/month): use Fable as outer agent
-* OpenAI Codex Pro (minimum 100$/month, ideally 200$/month) subscription: use Sol-5.6 for all agents
+* Claude Code Max (minimum 100$/month, ideally 200$/month): use Fable as outer agent, Opus for inner agents
+* OpenAI Codex Pro (minimum 100$/month, ideally 200$/month): use Sol-5.6 xhigh for outer agent
 
 For research purposes:
 
