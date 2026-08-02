@@ -220,12 +220,18 @@ def detect_unwrapped_memories(
 def uses_wrapper(rtl_text: str) -> bool:
     """True if the RTL instantiates any CoreSmith memory primitive.
 
-    Covers the macro-backed wrappers (cs_sram_1rw/1rw1r), the reference
+    Covers the macro-backed wrappers (cs_sram_1rw/1rw1r), the UNIFIED memory
+    primitive they pass through to (cs_mem_1rw/1rw1r), the reference
     flop-memory primitives (cs_fpmem_1rw/1rw1r), and the mask-ROM primitive
     (cs_rom_1r) -- all live in the shared rtl_lib/cs_sram.v, so any one of them
     means that lib must be read in lint/sim/synth.
+
+    cs_mem_* was missing: every caller uses this to decide whether to READ the
+    wrapper library, so a block instantiating the unified primitive directly
+    (which the memory skill's macro menu offers) got no library anywhere and an
+    unresolved module at `hierarchy -check`.
     """
-    pat = r"\bcs_(?:sram_1rw(?:1r)?|fpmem_1rw(?:1r)?|rom_1r)\b"
+    pat = r"\bcs_(?:sram_1rw(?:1r)?|mem_1rw(?:1r)?|fpmem_1rw(?:1r)?|rom_1r)\b"
     return bool(re.search(pat + r"\s*#?\s*\(", rtl_text)) or \
         bool(re.search(pat + r"\s+\w+\s*\(", rtl_text))
 
@@ -517,6 +523,85 @@ def backend_sram_macro_directive(*, force: bool = False) -> str:
     return 'chparam -set MEM_IMPL "MACRO" ' + " ".join(SRAM_MACRO_CHPARAM_MODULES)
 
 
+#: Instances of the MACRO-BACKED wrappers -- the same module set the Part-B
+#: chparam re-derives. cs_fpmem_* is deliberately absent for the same reason it
+#: is absent from SRAM_MACRO_CHPARAM_MODULES: it is the blessed FLOP tier.
+_CSMEM_RE = re.compile(r"\bcs_mem_1rw(?:1r)?\b")
+
+
+def _mem_instances(rtl_text: str) -> list[tuple[int, int]]:
+    """[(width, depth), ...] for each direct cs_mem_1rw/1rw1r INSTANTIATION
+    (mirrors :func:`sram_instances`; skips the module definitions)."""
+    out: list[tuple[int, int]] = []
+    for m in _CSMEM_RE.finditer(rtl_text):
+        if _MODULE_DECL_RE.search(rtl_text[max(0, m.start() - 12):m.start()]):
+            continue
+        end = rtl_text.find(";", m.end())
+        window = rtl_text[m.end(): end if end != -1 else m.end() + 400]
+        w = _W_RE.search(window)
+        d = _D_RE.search(window)
+        if not (w or d):
+            continue
+        out.append((int(w.group(1)) if w else _DEFAULT_W,
+                    int(d.group(1)) if d else _DEFAULT_D))
+    return out
+
+
+def macro_wrapper_instances(rtl_text: str) -> list[tuple[int, int]]:
+    """[(width, depth), ...] for every MACRO-BACKED memory wrapper instance.
+
+    The union of the wrapper families the Part-B chparam covers
+    (:data:`SRAM_MACRO_CHPARAM_MODULES`): cs_sram_1rw/1rw1r, cs_rom_1r and a
+    direct cs_mem_1rw/1rw1r. cs_fpmem_* is excluded -- it hard-passes
+    MEM_IMPL("FLOP") and the chparam cannot (and must not) move it.
+    """
+    return (sram_instances(rtl_text) + rom_instances(rtl_text)
+            + _mem_instances(rtl_text))
+
+
+def macro_impl_eligible(
+    width: int, depth: int, *,
+    threshold_bits: int | None = None,
+    macro_words: int | None = None,
+) -> bool:
+    """Whether a memory of this geometry BELONGS in a macro rather than flops.
+
+    THE threshold predicate, in one place: at/above the SRAM-macro size by
+    total bits, or deep enough on its own that the read mux is the problem.
+    :func:`gate_memory_as_flops` (the post-synth backstop, which fails a block
+    for realizing such a memory as flops) and the block-level synth directive
+    (which stops it happening) must agree by construction -- a block-synth
+    threshold that drifted from the gate's would flop a memory the gate then
+    rejects.
+    """
+    if width <= 0 or depth <= 0:
+        return False
+    thr = threshold_bits if threshold_bits is not None else min_bits()
+    md = macro_words if macro_words is not None else macro_depth()
+    return (width * depth >= thr) or (depth >= md)
+
+
+def block_sram_macro_directive(rtl_text: str, *, force: bool = False) -> str:
+    """The Part-B chparam for a BLOCK-level synth script, or "".
+
+    Same directive, same env gate and same module set as
+    :func:`backend_sram_macro_directive` -- flat synth applies it to the whole
+    design; this applies it to ONE block, and only when that block instantiates
+    a macro-backed wrapper whose geometry is macro-eligible.
+
+    Without it the block-level script read the wrapper library and then
+    elaborated the wrapper BEHAVIORALLY, so a wrapped mask ROM became a
+    thousands-deep combinational read mux that STA duly timed -- while the flat
+    synth the backend runs on the same RTL bound it to a macro. The two paths
+    disagreed about the same source. Pinning MEM_IMPL in the RTL instead is not
+    an option: it makes the memory read zero in DV.
+    """
+    if not any(macro_impl_eligible(w, d)
+               for w, d in macro_wrapper_instances(rtl_text)):
+        return ""
+    return backend_sram_macro_directive(force=force)
+
+
 # --- Part D: post-synth memory-as-flops hard-block gate -----------------------
 #
 # The backstop that turns a silently-shipped flop-array memory into an early,
@@ -594,9 +679,11 @@ def gate_memory_as_flops(
         if _fpmem_exempt(width, depth, fpg):
             continue
         bits = width * depth
-        big = (bits >= thr)      # large by total bits
-        deep = (depth >= md)     # deep enough on its own (read-mux fanout)
-        if not (big or deep):
+        # ONE threshold predicate, shared with the block-synth chparam so the
+        # synth that AVOIDS the flop array and the gate that REJECTS it can
+        # never disagree about which geometries are macro-eligible.
+        if not macro_impl_eligible(width, depth,
+                                   threshold_bits=thr, macro_words=md):
             continue
         reasons.append(
             f"memory [{width}b x {depth}] = {bits:,} bits synthesized to a "

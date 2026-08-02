@@ -1401,6 +1401,13 @@ def build_build_models_prompt(
             "  (no constraints accumulated yet -- but you MUST still read the "
             "files above; they will fill up on retries.)"
         )
+    try:
+        from orchestrator.langgraph.contract_conformance import (
+            CONSTRAINT_PRECEDENCE_LINE as _PRECEDENCE,
+        )
+        constr_lines.append("\n" + _PRECEDENCE)
+    except Exception:  # noqa: BLE001 - prompt garnish, never blocks a build
+        pass
     lines += constr_lines
     if feedback.strip():
         lines += [

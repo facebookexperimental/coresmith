@@ -96,6 +96,117 @@ Output a JSON object with:
 """
 
 
+#: Phases whose failure is decided by a DETERMINISTIC gate that runs BEFORE
+#: any testbench is generated. Nothing was simulated, so no VCD, no WaveKit
+#: audit and no cocotb log exists for these -- measured: 3/3 diagnosis agents
+#: sent to hunt for those artifacts reported the engine as broken instead of
+#: reading the conformance report that was sitting on disk.
+PRE_SIM_PHASES = ("conformance",)
+
+
+def _phase_evidence_section(block_name: str, phase: str) -> tuple[str, str]:
+    """(working-files block, instructions block) for the failure's REAL phase.
+
+    Split by phase so the diagnosis agent is never pointed at an artifact the
+    phase cannot have produced.
+    """
+    if phase in PRE_SIM_PHASES:
+        files = (
+            f"- Conformance / contract-gate report: "
+            f".coresmith/blocks/{block_name}/contract_conformance.json\n"
+            f"- Gate error (the EXACT expected port names): "
+            f".coresmith/blocks/{block_name}/previous_error.txt\n"
+            f"- FROZEN interface contract (the naming authority): "
+            f".coresmith/interface_contracts.json\n"
+            f"- RTL source (read its module header / port list): find the .v "
+            f"file for this block under rtl/\n"
+            f"- uArch spec: arch/uarch_specs/{block_name}.md\n"
+            f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n"
+            f"- Attempt history: .coresmith/blocks/{block_name}/attempt_history.json\n"
+            f"- Block diagram: .coresmith/block_diagram.json (for interface context)\n"
+            f"- ERS: arch/ers_spec.md\n\n"
+        )
+        instructions = (
+            f"## Instructions\n"
+            f"This is a PRE-SIMULATION failure: a deterministic contract gate "
+            f"FAILED the block BEFORE any testbench was generated. NO "
+            f"simulation ran. There is NO waveform, NO VCD, NO WaveKit audit "
+            f"and NO cocotb log for this attempt, and none is missing or "
+            f"broken -- they do not exist by construction. Do NOT ask for "
+            f"them, do NOT look for them, do NOT infer anything from "
+            f"simulation artifacts, and do NOT report their absence as an "
+            f"infrastructure failure.\n"
+            f"The evidence is exactly three things: the conformance report, "
+            f"the frozen interface contract, and the RTL's declared ports.\n"
+            f"1. Read the gate report + previous_error.txt: it names each "
+            f"deviating port and the EXACT name the contract requires\n"
+            f"2. Read the RTL's module header and compare its ports against "
+            f"the contract's channels (`<channel>_<field>`; a doubled token "
+            f"such as `data_write_write_enable` is CORRECT and must not be "
+            f"collapsed)\n"
+            f"3. Diagnose why the RTL deviated (category INTERFACE_MISMATCH "
+            f"unless the evidence says otherwise)\n"
+            f"4. Write your diagnosis to "
+            f".coresmith/blocks/{block_name}/diagnosis.json\n"
+            f"5. If you identify new constraints, append them to "
+            f".coresmith/blocks/{block_name}/constraints.json. Any naming "
+            f"constraint you write is SUBORDINATE to the contract: quote the "
+            f"contract's spelling, never a spelling you prefer\n\n"
+        )
+        return files, instructions
+
+    files = (
+        f"- Error log: .coresmith/blocks/{block_name}/previous_error.txt\n"
+        f"- Step logs: .coresmith/step_logs/{block_name}/ (read the latest {phase}_attempt*.log)\n"
+        f"- VCD waveform: sim_build/{block_name}/dump.vcd\n"
+        f"- WaveKit audit: sim_build/{block_name}/wavekit_audit.json\n"
+        f"- Integration VCD, if this is a chip-level failure: sim_build/integration/dump.vcd\n"
+        f"- Integration WaveKit audit, if relevant: sim_build/integration/wavekit_audit.json\n"
+        f"- RTL source: find the .v file for this block under rtl/\n"
+        f"- Testbench: tb/cocotb/test_{block_name}.py\n"
+        f"- uArch spec: arch/uarch_specs/{block_name}.md\n"
+        f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n"
+        f"- Attempt history: .coresmith/blocks/{block_name}/attempt_history.json\n"
+        f"- Block diagram: .coresmith/block_diagram.json (for interface context)\n"
+        f"- ERS: arch/ers_spec.md\n\n"
+    )
+    instructions = (
+        f"## Instructions\n"
+        f"1. Read the error log, step logs, VCD, and WaveKit audit to understand what failed\n"
+        f"2. Read the full RTL source and testbench to understand the design\n"
+        f"3. Read the uArch spec for design intent\n"
+        f"4. Diagnose the root cause\n"
+        f"5. Write your diagnosis to .coresmith/blocks/{block_name}/diagnosis.json\n"
+        f"6. If you identify new constraints, append them to "
+        f".coresmith/blocks/{block_name}/constraints.json\n\n"
+    )
+    return files, instructions
+
+
+def build_debug_user_message(block_name: str, phase: str = "sim") -> str:
+    """The failure-analysis agent's user message (the production constructor).
+
+    ``phase`` is the REAL phase the block died in. It used to be hardcoded
+    "sim" even for gates that fail pre-testbench.
+    """
+    files, instructions = _phase_evidence_section(block_name, phase)
+    return (
+        f"Block: {block_name}\n"
+        f"Failed phase: {phase}\n\n"
+        f"## Working Files\n"
+        f"Read these files to understand the failure:\n"
+        f"{files}"
+        f"{instructions}"
+        f"The diagnosis.json must contain these fields:\n"
+        f'  diagnosis, category, suggested_fix, affected_blocks, '
+        f'escalate, confidence, constraints, needs_human, '
+        f'human_question, is_testbench_bug\n\n'
+        f"Categories: LOGIC_ERROR, TIMING_ISSUE, INTERFACE_MISMATCH, "
+        f"RESET_BUG, ARITHMETIC_ERROR, STATE_MACHINE_BUG, "
+        f"TESTBENCH_BUG, INFRASTRUCTURE_ERROR"
+    )
+
+
 class DebugAgent:
     """Agent for failure analysis and debugging.
 
@@ -125,7 +236,11 @@ class DebugAgent:
 
         Args:
             block_name: Name of the failed block
-            phase: Failed phase ("lint", "sim", "synth")
+            phase: Failed phase ("lint", "sim", "synth", "conformance").
+                "conformance" (and anything else in PRE_SIM_PHASES) is
+                decided before a testbench exists -- the prompt then omits
+                every simulation artifact instead of sending the agent
+                looking for waveforms that cannot exist.
             project_root: Path to project root
             mode: "debug" or "architecture_review"
 
@@ -160,40 +275,7 @@ class DebugAgent:
         block_title = block_name.replace("_", " ").title()
 
         try:
-            user_message = (
-                f"Block: {block_name}\n"
-                f"Failed phase: {phase}\n\n"
-                f"## Working Files\n"
-                f"Read these files to understand the failure:\n"
-                f"- Error log: .coresmith/blocks/{block_name}/previous_error.txt\n"
-                f"- Step logs: .coresmith/step_logs/{block_name}/ (read the latest {phase}_attempt*.log)\n"
-                f"- VCD waveform: sim_build/{block_name}/dump.vcd\n"
-                f"- WaveKit audit: sim_build/{block_name}/wavekit_audit.json\n"
-                f"- Integration VCD, if this is a chip-level failure: sim_build/integration/dump.vcd\n"
-                f"- Integration WaveKit audit, if relevant: sim_build/integration/wavekit_audit.json\n"
-                f"- RTL source: find the .v file for this block under rtl/\n"
-                f"- Testbench: tb/cocotb/test_{block_name}.py\n"
-                f"- uArch spec: arch/uarch_specs/{block_name}.md\n"
-                f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n"
-                f"- Attempt history: .coresmith/blocks/{block_name}/attempt_history.json\n"
-                f"- Block diagram: .coresmith/block_diagram.json (for interface context)\n"
-                f"- ERS: arch/ers_spec.md\n\n"
-                f"## Instructions\n"
-                f"1. Read the error log, step logs, VCD, and WaveKit audit to understand what failed\n"
-                f"2. Read the full RTL source and testbench to understand the design\n"
-                f"3. Read the uArch spec for design intent\n"
-                f"4. Diagnose the root cause\n"
-                f"5. Write your diagnosis to .coresmith/blocks/{block_name}/diagnosis.json\n"
-                f"6. If you identify new constraints, append them to "
-                f".coresmith/blocks/{block_name}/constraints.json\n\n"
-                f"The diagnosis.json must contain these fields:\n"
-                f'  diagnosis, category, suggested_fix, affected_blocks, '
-                f'escalate, confidence, constraints, needs_human, '
-                f'human_question, is_testbench_bug\n\n'
-                f"Categories: LOGIC_ERROR, TIMING_ISSUE, INTERFACE_MISMATCH, "
-                f"RESET_BUG, ARITHMETIC_ERROR, STATE_MACHINE_BUG, "
-                f"TESTBENCH_BUG, INFRASTRUCTURE_ERROR"
-            )
+            user_message = build_debug_user_message(block_name, phase)
 
             run_name = f"Analyze Failure [{block_title}]"
             await self.llm.call(

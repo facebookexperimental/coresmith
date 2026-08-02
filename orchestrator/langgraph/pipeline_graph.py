@@ -2570,8 +2570,13 @@ async def generate_testbench_node(state: BlockState) -> dict:
                                   "reason": "contract_port_mismatch",
                                   "errors": _port_errors[:8],
                               })
+            # PHASE = "conformance", NOT "sim": this gate FAILS BEFORE any
+            # testbench is generated, so there is no simulation, no VCD and no
+            # WaveKit audit. Labelling it "sim" sent 3/3 diagnosis agents
+            # hunting for waveforms that cannot exist -- they then blamed the
+            # engine for the missing artifacts.
             return {"tb_path": str(tb_path_obj), "sim_passed": False,
-                    "phase": "sim", "force_regen_tb": False,
+                    "phase": "conformance", "force_regen_tb": False,
                     "step_log_paths": existing_logs}
 
     # --- CONTRACT-CONFORMANCE stage: check + repair the block's PORT NAMES ---
@@ -2685,8 +2690,10 @@ async def generate_testbench_node(state: BlockState) -> dict:
                 _park_conformance_unrepairable(state, block_name, _conform,
                                                _cf_n)
                 _reset_conformance_failures(_pr(state), block_name)
+            # PHASE = "conformance" (see the width gate above): pre-TB,
+            # pre-sim, no waveform exists.
             return {"tb_path": str(tb_path_obj), "sim_passed": False,
-                    "phase": "sim", "force_regen_tb": False,
+                    "phase": "conformance", "force_regen_tb": False,
                     "conformance_renames": _renames,
                     "step_log_paths": existing_logs}
         _reset_conformance_failures(_pr(state), block_name)
@@ -4920,6 +4927,11 @@ def _route_decision(debug_result: dict, attempt_history: list[dict],
         return "retry_tb"
 
     # Rule 6: Route based on failed phase
+    if phase == "conformance":
+        # Deterministic pre-sim contract gate (port names / widths). The fix is
+        # always in the RTL, and the exact expected names are already in
+        # previous_error.txt.
+        return "retry_rtl"
     if phase == "sim":
         return "retry_rtl"  # sim failure -> regenerate RTL
     if phase == "synth":
@@ -10910,9 +10922,47 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
         # -- otherwise a geometry-dependent index/address-width truncation ships
         # verified. Flip to failed -> existing failure interrupt. Operator-reused
         # TBs are trusted.
-        if passed and not reuse_existing_tb:
-            _mg = _maxgeo_gate_verdict(pr, tb_path)
-            if _mg is not None:
+        # run3-followups: same contract as integration_dv -- the gate runs on
+        # EVERY passing cycle (operator-reused TBs get MORE scrutiny) and every
+        # evaluated outcome logs a verdict; a pass returns a dict, never None.
+        if passed:
+            _mg = _maxgeo_gate_verdict(pr, tb_path, tb_result)
+            if reuse_existing_tb and _mg is not None:
+                log("  [VALIDATION-DV] MAX-GEOMETRY gate: evaluating an "
+                    "OPERATOR-REUSED testbench (fix_tb/fix_rtl) -- operator "
+                    "edits get more scrutiny, not less.", YELLOW)
+            if _mg is not None and _mg.get("verdict") == "pass":
+                log("  [VALIDATION-DV] MAX-GEOMETRY gate PASS -- every "
+                    f"declared maximum appears in the TB markers: "
+                    f"{_mg.get('marker_pairs', {})}", GREEN)
+                write_graph_event(pr, "Validation DV", "maxgeo_gate_pass", {
+                    "gate": "maxgeo",
+                    "marker_pairs": _mg.get("marker_pairs", {}),
+                })
+            elif _mg is not None and _mg.get("advisory"):
+                _mg_scope = _mg.get("scope", "bus-contract-only")
+                log("  [VALIDATION-DV] MAX-GEOMETRY gate ADVISORY "
+                    f"(scope={_mg_scope}) -- NOT full max-geometry coverage. "
+                    f"NOT COVERED: {_mg['uncovered_dims']}", RED)
+                write_graph_event(pr, "Validation DV", "maxgeo_gate_scoped", {
+                    "gate": "maxgeo",
+                    "scope": _mg_scope,
+                    "uncovered_dims": _mg.get("uncovered_dims", {}),
+                })
+                record_carried_forward_defect(pr, {
+                    "gate": "maxgeo",
+                    "kind": "max_geometry_not_covered",
+                    "advisory": True,
+                    "unmodeled": (
+                        "dimensional maxima never individually driven at "
+                        f"maximum extent: {_mg.get('uncovered_dims', {})} "
+                        f"(scope={_mg_scope})"
+                    ),
+                    "first_divergence_block": "",
+                    "note": _mg["reason"],
+                })
+                sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
+            elif _mg is not None:
                 passed = False
                 sim_log = ((sim_log + "\n\n") if sim_log else "") + _mg["reason"]
                 span.set_attribute("maxgeo_gate_failed", True)

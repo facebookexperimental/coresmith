@@ -2975,8 +2975,23 @@ def synthesize_block(
     # Generic SRAM wrapper: read its synth (black-box) view first so every
     # `cs_sram_*` instance is an opaque macro (0 storage flops) -- the backend
     # streams in the real SRAM collateral. Only when the block instantiates it.
+    #
+    # Then MIRROR the flat/backend synth's Part-B directive: `chparam -set
+    # MEM_IMPL "MACRO"` before `hierarchy`, so a macro-eligible wrapped memory
+    # (a cs_rom_1r mask ROM, a cs_mem_*) elaborates to its empty macro shell
+    # instead of a behavioral flop array. The blackbox above only covers
+    # cs_sram_1rw/1rw1r, so without the chparam a wrapped ROM became a
+    # thousands-deep combinational read mux at block synth and STA timed it --
+    # while the backend's flat synth, on the SAME RTL, bound it to a macro.
+    # Pinning MEM_IMPL in the RTL instead is not available: it makes the memory
+    # read zero in DV. The directive, its env gate, its module set and the
+    # macro-eligibility threshold all come from sram_wrapper, so the two synth
+    # paths cannot drift apart.
     _wrapper_read = ""
     try:
+        from orchestrator.langgraph.sram_wrapper import (
+            block_sram_macro_directive as _bsmd,
+        )
         from orchestrator.langgraph.sram_wrapper import (
             uses_wrapper as _uw,
         )
@@ -2985,9 +3000,11 @@ def synthesize_block(
         )
         _rtl_src = Path(rtl_path).read_text() if Path(rtl_path).exists() else ""
         if _uw(_rtl_src):
+            _chparam = _bsmd(_rtl_src)
             _wrapper_read = (
                 f"read_verilog -DCORESMITH_SRAM_SYNTH -sv {_wlp()}\n"
-                "blackbox cs_sram_1rw cs_sram_1rw1r\n"
+                + (f"{_chparam}\n" if _chparam else "")
+                + "blackbox cs_sram_1rw cs_sram_1rw1r\n"
             )
     except Exception:
         _wrapper_read = ""
@@ -3043,8 +3060,17 @@ write_verilog -noattr {netlist_path}
     # cloud) blows this -> success=False -> route_after_synth -> diagnose.
     _synth_timeout = scaled(600, env="CORESMITH_SYNTH_TIMEOUT_S")
     try:
+        # cwd=PROJECT_ROOT so a PROJECT-RELATIVE artifact path inside the RTL
+        # resolves exactly as it does in simulation. Block RTL legitimately
+        # carries `$readmemh("inputs/rom_images/<image>.memh", ...)` (and the
+        # cs_rom_1r wrapper's INIT_FILE parameter is the same relative path);
+        # yosys resolves those against ITS OWN cwd, which was whatever the
+        # daemon happened to be started in -- so the image was unreadable at
+        # block synth even though the identical path worked in DV. Both flat
+        # synth and the memory-flop probe already run rooted at the project.
         result = subprocess.run(
             ["yosys", "-s", str(script_path)],
+            cwd=str(PROJECT_ROOT.resolve()),
             capture_output=True,
             text=True,
             timeout=_synth_timeout,
@@ -3142,7 +3168,8 @@ async def fix_lint_errors(
         f"## Working Files\n"
         f"- RTL file: {rtl_path}\n"
         f"- Lint log: {lint_log_path}\n"
-        f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n\n"
+        f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n"
+        f"  ({_naming_precedence_line()})\n\n"
         f"Read the lint errors, then use the Edit tool to fix the RTL file "
         f"in-place. Do NOT rewrite the entire file -- make targeted fixes."
     )
@@ -3230,7 +3257,8 @@ async def fix_synth_errors(
         f"- Diagnosis / prior error context (READ THIS FIRST -- when a prior "
         f"diagnose ran it names the specific root cause + the fix): "
         f".coresmith/blocks/{block_name}/previous_error.txt\n"
-        f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n\n"
+        f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n"
+        f"  ({_naming_precedence_line()})\n\n"
         f"Read previous_error.txt and the synthesis errors, then fix the RTL. "
         f"{edit_instr}"
     )
@@ -3337,6 +3365,23 @@ async def fix_testbench_errors(
     except Exception as e:
         log(f"  [TB-FIX] LLM error: {e}", RED)
         return None
+
+
+def _naming_precedence_line() -> str:
+    """Naming precedence for a block's ACCUMULATED constraints ('' on error).
+
+    A learned constraint is one debug agent's read of one failure; the frozen
+    interface contract is design intent. When they disagree about a port NAME,
+    the contract wins -- otherwise a constraint that memorialised a collapsed
+    name keeps re-introducing it on every fixer pass.
+    """
+    try:
+        from orchestrator.langgraph.contract_conformance import (
+            CONSTRAINT_PRECEDENCE_LINE,
+        )
+        return CONSTRAINT_PRECEDENCE_LINE
+    except Exception:  # noqa: BLE001 - prompt garnish, never blocks a fix
+        return ""
 
 
 # ---------------------------------------------------------------------------

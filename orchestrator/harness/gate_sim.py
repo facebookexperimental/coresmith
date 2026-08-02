@@ -515,9 +515,16 @@ def inout_is_inert(netlist_text: str, name: str) -> bool:
     zassign = re.compile(
         r"^\s*assign\s+\\?" + re.escape(name) +
         r"(?:\s*\[[^\]]*\])?\s*=\s*\d*'[hbodHBOD]?[zZ_]+\s*;")
+    # A same-name hierarchical pass-through (`.analog_io(analog_io),`) renames
+    # nothing and drives nothing: the parent hands the mandated pad bus to the
+    # leaf unchanged. Any OTHER connection shape (renamed net, expression,
+    # concatenation, slice) still disqualifies.
+    passthrough = re.compile(
+        r"^\s*\.\\?" + re.escape(name) +
+        r"\s*\(\s*\\?" + re.escape(name) + r"\s*\)\s*,?\s*$")
     for m in ref.finditer(netlist_text):
         line = m.group(0)
-        if decl.match(line) or zassign.match(line):
+        if decl.match(line) or zassign.match(line) or passthrough.match(line):
             continue
         return False
     return True

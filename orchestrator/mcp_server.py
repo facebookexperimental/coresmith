@@ -3278,7 +3278,7 @@ async def resume_backend(
         action: One of 'retry', 'skip', 'abort'.
         constraint: Optional constraint text.
     """
-    valid_actions = {"retry", "skip", "abort"}
+    valid_actions = {"retry", "skip", "abort", "accept"}
     if action not in valid_actions:
         return json.dumps({
             "error": f"Invalid action: {action}. Must be one of: {sorted(valid_actions)}",

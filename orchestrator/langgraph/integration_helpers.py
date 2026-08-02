@@ -20,6 +20,10 @@ import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from orchestrator.langgraph.contract_conformance import (
+    canonical_port,
+    channel_base,
+)
 from orchestrator.langgraph.pipeline_helpers import (
     PROJECT_ROOT,
     RED,
@@ -900,20 +904,29 @@ def _resolve_by_contract(edge, pb, cb, port_exact, modules):
     if pb not in modules or cb not in modules:
         return None
 
+    # ONE canonical derivation, shared with the per-block conformance gate: a
+    # `producer_port` spelled as a slash ENUMERATION of the channel's concrete
+    # ports (`m_x_srdy/m_x_data`, `m_read_req/addr`) is reduced to its channel
+    # base, and a slash-ALIASED signal (`srdy/in_valid`) to one name -- so the
+    # assembler looks up ports that can actually exist. Concatenating the raw
+    # strings produced `m_x_srdy/m_x_data_valid`, which matches nothing, so
+    # EVERY signal on such an edge became a hazard and the deterministic top
+    # fell back to an LLM-authored integration.
     def _one(block: str, chan: str, sig: str):
-        pref = port_exact(block, f"{chan}_{sig}")
-        bare = port_exact(block, sig)
+        want, bare_name = canonical_port(chan, sig)
+        pref = port_exact(block, want)
+        bare = port_exact(block, bare_name) if bare_name != want else None
         if pref is not None and bare is not None:
-            return None, (f"{block}.{chan}_{sig} and {block}.{sig} both exist "
+            return None, (f"{block}.{want} and {block}.{bare_name} both exist "
                           f"-- ambiguous which implements '{sig}'")
         got = pref or bare
         if got is None:
             return None, (f"{block} implements no port for declared signal "
-                          f"'{sig}' (expected '{chan}_{sig}' or '{sig}')")
+                          f"'{sig}' (expected '{want}' or '{bare_name}')")
         return got, None
 
-    pchan = str(edge.get("producer_port") or "")
-    cchan = str(edge.get("consumer_port") or "")
+    pchan = channel_base(edge.get("producer_port"))
+    cchan = channel_base(edge.get("consumer_port"))
     eid = edge.get("edge_id")
     paired, hazards = [], []
     for sig in signals:

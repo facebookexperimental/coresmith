@@ -64,8 +64,19 @@ COMMON FAILURE PATTERNS (check these FIRST before detailed analysis):
    or UARCH_SPEC_ERROR. Set confidence=0.99 and category=LOGIC_ERROR
    with diagnosis "false positive: prose words are not port names".
 
+FIRST, READ THE `Failed phase:` LINE IN THE USER MESSAGE. Not every failure
+came from a simulation. A PRE-SIMULATION phase (e.g. `conformance`) is decided
+by a deterministic gate that runs BEFORE the testbench is generated: no sim
+ran, so there is NO VCD, NO WaveKit audit and NO cocotb log for that attempt,
+and their absence is CORRECT, not a DV/process failure and not an
+infrastructure error. In a pre-simulation phase the evidence is the gate's
+report + the frozen interface contract + the RTL's declared ports, and nothing
+else; do not request, hunt for, or reason from simulation artifacts, and do not
+report the engine as broken for not producing them.
+
 Your job:
-1. Identify which signal diverged first. Read the WaveKit audit report and
+1. (SIMULATION PHASES ONLY -- skip entirely in a pre-simulation phase.)
+   Identify which signal diverged first. Read the WaveKit audit report and
    inspect the VCD when it exists. If the VCD or WaveKit audit is missing,
    empty, or header-only, classify that as a DV/process failure and include
    a concrete fix to restore waveform dumping/auditing.
