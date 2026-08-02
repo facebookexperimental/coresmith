@@ -56,6 +56,15 @@ class QSPIContract:
     # a narrow register (false-fail). Set 4 only when CFG1 is a full 32-bit
     # scalar and the wider probe is wanted.
     cfg1_width_bytes: int = 1
+    # Width (bytes) of the CTRL write issued by ``start()``/soft-reset. Default
+    # 1: a byte-wide access is universally legal on the byte-addressed map and
+    # CTRL bits live in byte 0 by convention, whereas the historical 4-byte
+    # write sprays addresses 1-3 -- deliberately reserved on exact-decode
+    # fail-closed designs, which flag them as malformed accesses (and a design
+    # fast enough to retire before the burst completes takes the hit while
+    # idle: sticky ERROR, false-failed run). Set wider only when CTRL is a
+    # genuine multi-byte scalar.
+    ctrl_width_bytes: int = 1
     in_addr: int = 0x001000          # W input window (auto-inc)
     out_addr: int = 0x002000         # R output window (auto-inc)
 

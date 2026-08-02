@@ -169,9 +169,18 @@ class QSPIMasterBFM:
         await self.write(addr, bytes((value >> (8 * i)) & 0xFF for i in range(width_bytes)))
 
     async def start(self):
-        """Pulse CTRL.START."""
+        """Pulse CTRL.START.
+
+        Write width comes from the contract (``ctrl_width_bytes``), floored at
+        the byte that actually holds the START bit -- never the historical
+        blanket 4 bytes, which sprays reserved CTRL addresses on exact-decode
+        designs."""
+        _w = max(
+            int(getattr(self.c, "ctrl_width_bytes", 1) or 1),
+            (self.c.ctrl_start_bit // 8) + 1,
+        )
         await self.write_reg(
-            self.c.ctrl_addr, 1 << self.c.ctrl_start_bit, 4
+            self.c.ctrl_addr, 1 << self.c.ctrl_start_bit, _w
         )
 
     async def wait_done(self, timeout_wbclks: int = 5_000_000) -> bool:
