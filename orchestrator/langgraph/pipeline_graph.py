@@ -5177,7 +5177,7 @@ async def ask_human_node(state: BlockState) -> dict:
         response.get("rtl_fix_description") or response.get("description")
     ):
         constraints.append({
-            "rule": f"Outer-agent RTL fix applied: {response['description']}",
+            "rule": "Outer-agent RTL fix applied: " + str(response.get("rtl_fix_description") or response.get("description")),
             "source": "human",
             "attempt": state["attempt"],
         })
