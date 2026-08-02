@@ -570,3 +570,241 @@ class TestWiredIntoTheBlockFlow:
         # fresh pair of tries rather than parking on every entry
         assert not (root / ".coresmith" / "blocks" / "ap"
                     / "_conformance_failures.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# Slash-bearing contract text -> a legal identifier, never a `/` in a port name
+# ---------------------------------------------------------------------------
+#
+# The schema template the interface-definition agent is handed literally offers
+# the slash form:
+#
+#     "producer_port": "<m_axis_<name> or m_<name>_srdy/m_<name>_data>"
+#
+# so real contracts carry it. Every fixture below is the SHAPE of a real edge
+# from a 12-block codec whose contract used all three enumeration styles plus a
+# two-name sideband alias; only the design-specific words are renamed. The
+# derivation concatenated these verbatim, produced port names containing `/`
+# (illegal unescaped Verilog), rewrote six blocks' RTL to them, and could never
+# converge -- and it double-prefixed a signal that already carried the channel
+# (`s_chan_s_chan_addr`).
+
+def _edge2(producer, consumer, pport, cport, fields=(), sideband=()):
+    """An edge whose two ends spell the channel differently (the real case)."""
+    return {
+        "edge_id": f"{producer}__to__{consumer}",
+        "producer_block": producer, "producer_port": pport,
+        "consumer_block": consumer, "consumer_port": cport,
+        "fields": [{"name": f} for f in fields],
+        "sideband_signals": [{"name": s} for s in sideband],
+    }
+
+
+#: The addressed-read edge: first segment fully qualified, the rest bare.
+_READ_EDGE = _edge2(
+    "transform_engine", "sample_memory",
+    "m_store_read_req/addr", "s_store_read_req/addr",
+    fields=["sample_u8"], sideband=["req", "address", "rvalid", "fault"])
+
+#: The elastic payload edge: both segments fully qualified.
+_ELASTIC_EDGE = _edge2(
+    "transform_engine", "quantizer",
+    "m_result_out_srdy/m_result_out_data",
+    "s_result_out_drdy/s_result_out_data",
+    fields=["idx", "value_s16"], sideband=["srdy", "drdy"])
+
+#: The control edge: qualified head, bare tail.
+_CONTROL_EDGE = _edge2(
+    "control_wrapper", "transform_engine",
+    "m_job_control_valid/data", "s_job_control_valid/data",
+    fields=["job_index", "job_start"], sideband=["valid"])
+
+#: The chip-boundary stream: a SHORT common prefix, plus two sidebands each
+#: declared under TWO names (generic role / mandated spelling) and one that
+#: already carries the producer's channel prefix.
+_STREAM_EDGE = _edge2(
+    "control_wrapper", "ingest_addressor",
+    "in_valid/in_data/in_last",
+    "s_source_srdy/s_source_data/s_source_last",
+    fields=["required_zero", "payload_byte"],
+    sideband=["srdy/in_valid", "drdy/in_ready", "in_last"])
+
+_SLASH_EDGES = [_READ_EDGE, _ELASTIC_EDGE, _CONTROL_EDGE, _STREAM_EDGE]
+
+
+class TestChannelBaseParsesTheEnumeration:
+    @pytest.mark.parametrize("raw,expect", [
+        ("m_store_read_req/addr", "m_store_read"),
+        ("s_store_read_req/addr", "s_store_read"),
+        ("m_result_out_srdy/m_result_out_data", "m_result_out"),
+        ("s_result_out_drdy/s_result_out_data", "s_result_out"),
+        ("m_job_control_valid/data", "m_job_control"),
+        ("in_valid/in_data/in_last", "in"),
+        ("s_source_srdy/s_source_data/s_source_last", "s_source"),
+        ("m_axis_frame", "m_axis_frame"),          # the bare form is untouched
+        ("", ""),
+    ])
+    def test_the_channel_is_the_common_token_prefix(self, raw, expect):
+        from orchestrator.langgraph.contract_conformance import channel_base
+        assert channel_base(raw) == expect
+
+
+class TestNoDerivedPortEverContainsASlash:
+    """The blocking defect: `s_store_read_req/addr_rvalid` is not an
+    identifier, so the repair pass rewrote RTL to a name no tool can parse and
+    the loop could not converge."""
+
+    def test_every_row_of_every_real_shape_is_a_legal_identifier(self, tmp_path):
+        from orchestrator.langgraph.contract_conformance import (
+            contract_port_rows,
+            is_legal_identifier,
+        )
+        root = _project(tmp_path, _SLASH_EDGES)
+        blocks = {b for e in _SLASH_EDGES
+                  for b in (e["producer_block"], e["consumer_block"])}
+        seen = 0
+        for block in blocks:
+            for r in contract_port_rows(str(root), block):
+                seen += 1
+                assert "/" not in r["port"], r
+                assert is_legal_identifier(r["port"]), r
+                assert "/" not in r["channel"], r
+        assert seen >= 20, "the fixture must actually exercise the derivation"
+
+    def test_the_gate_never_demands_a_name_with_a_slash(self, tmp_path):
+        root = _project(tmp_path, _SLASH_EDGES)
+        r = check_block(root, "sample_memory",
+                        _rtl(tmp_path, "sample_memory", ["clk"]))
+        assert r.missing
+        for _chan, port in r.missing:
+            assert "/" not in port, port
+
+    def test_the_expected_names_are_the_contract_s_own_port_list(self, tmp_path):
+        """`s_store_read_req/addr` enumerates two of the channel's real ports,
+        so the derived set must contain exactly those spellings."""
+        root = _project(tmp_path, [_READ_EDGE])
+        want = {p for _c, p in
+                check_block(root, "sample_memory",
+                            _rtl(tmp_path, "sample_memory", ["clk"])).missing}
+        assert want == {
+            "s_store_read_sample_u8", "s_store_read_req",
+            "s_store_read_address", "s_store_read_rvalid",
+            "s_store_read_fault",
+        }
+
+    def test_rtl_spelled_the_contract_s_way_conforms(self, tmp_path):
+        root = _project(tmp_path, [_ELASTIC_EDGE])
+        ports = ["m_result_out_idx", "m_result_out_value_s16",
+                 "m_result_out_srdy", "m_result_out_drdy"]
+        r = check_block(root, "transform_engine",
+                        _rtl(tmp_path, "transform_engine", ports))
+        assert r.ok, (r.missing, r.undeclared, r.ambiguous)
+
+
+class TestTheChannelPrefixIsIdempotent:
+    """`s_chan_s_chan_addr_field`: a signal that already carries the channel
+    was prefixed a second time. The port_naming skill's rule is
+    `<channel>_<field>`, and applying it twice must be the same as once."""
+
+    def test_a_signal_already_carrying_the_channel_is_not_prefixed_again(self):
+        from orchestrator.langgraph.contract_conformance import canonical_port
+        assert canonical_port("in", "in_last") == ("in_last", "in_last")
+        assert canonical_port("s_read_req", "s_read_req_addr") == (
+            "s_read_req_addr", "s_read_req_addr")
+
+    def test_a_doubled_TOKEN_is_still_required(self):
+        """Different thing, and the skill says it is CORRECT: `write_enable`
+        does not start with `data_write_`, so it is still prefixed."""
+        from orchestrator.langgraph.contract_conformance import canonical_port
+        assert canonical_port("data_write", "write_enable")[0] == \
+            "data_write_write_enable"
+
+    def test_no_port_repeats_its_whole_channel(self, tmp_path):
+        from orchestrator.langgraph.contract_conformance import contract_port_rows
+        root = _project(tmp_path, _SLASH_EDGES)
+        for block in ("control_wrapper", "ingest_addressor"):
+            for r in contract_port_rows(str(root), block):
+                assert not r["port"].startswith(r["channel"] + "_"
+                                                + r["channel"] + "_"), r
+
+    def test_the_prefixed_form_is_the_only_form_then(self, tmp_path):
+        """`in_last` on channel `in` has ONE acceptable spelling, so a block
+        exposing exactly it is conforming -- not 'ambiguous with itself'."""
+        root = _project(tmp_path, [_STREAM_EDGE])
+        ports = ["in_required_zero", "in_payload_byte", "in_valid",
+                 "in_ready", "in_last"]
+        r = check_block(root, "control_wrapper",
+                        _rtl(tmp_path, "control_wrapper", ports))
+        assert r.ok, (r.missing, r.undeclared, r.ambiguous)
+
+
+class TestATwoNameSidebandResolvesToOneName:
+    """`srdy/in_valid` declares ONE wire under the generic handshake role and
+    the spelling this edge mandates. Only one of them can be a port."""
+
+    def test_the_end_that_already_spells_it_keeps_its_spelling(self):
+        from orchestrator.langgraph.contract_conformance import canonical_port
+        # producer channel `in`: the contract's own port list says `in_valid`
+        assert canonical_port("in", "srdy/in_valid")[0] == "in_valid"
+        assert canonical_port("in", "drdy/in_ready")[0] == "in_ready"
+
+    def test_the_other_end_takes_the_generic_role(self):
+        from orchestrator.langgraph.contract_conformance import canonical_port
+        # consumer channel `s_source`: its port list says `s_source_srdy`
+        assert canonical_port("s_source", "srdy/in_valid")[0] == "s_source_srdy"
+        assert canonical_port("s_source", "drdy/in_ready")[0] == "s_source_drdy"
+
+    def test_both_ends_of_the_real_edge_derive_their_own_spelling(self, tmp_path):
+        from orchestrator.langgraph.contract_conformance import contract_port_rows
+        root = _project(tmp_path, [_STREAM_EDGE])
+        prod = {r["port"] for r in contract_port_rows(str(root), "control_wrapper")}
+        cons = {r["port"] for r in contract_port_rows(str(root), "ingest_addressor")}
+        assert {"in_valid", "in_ready", "in_last"} <= prod
+        assert {"s_source_srdy", "s_source_drdy"} <= cons
+        assert not any("/" in p for p in prod | cons)
+
+
+class TestAnUnreducibleNameIsDroppedLoudly:
+    """A contract that cannot be reduced to an identifier is a CONTRACT defect.
+    Emitting the name anyway rewrites the RTL to garbage; the only safe action
+    is to drop the signal and say so."""
+
+    def test_an_illegal_channel_drops_the_edge_and_logs(self, tmp_path, caplog):
+        import logging as _logging
+
+        from orchestrator.langgraph.contract_conformance import (
+            _ILLEGAL_REPORTED,
+            contract_port_rows,
+        )
+        _ILLEGAL_REPORTED.clear()
+        root = _project(tmp_path, [
+            _edge2("a", "b", "m bad-chan!", "m bad-chan!", fields=["data"])])
+        with caplog.at_level(_logging.ERROR):
+            rows = contract_port_rows(str(root), "b")
+        assert rows == []
+        assert "not a legal Verilog identifier" in caplog.text
+
+    def test_an_illegal_signal_drops_only_that_signal(self, tmp_path, caplog):
+        import logging as _logging
+
+        from orchestrator.langgraph.contract_conformance import (
+            _ILLEGAL_REPORTED,
+            contract_port_rows,
+        )
+        _ILLEGAL_REPORTED.clear()
+        root = _project(tmp_path, [
+            _edge2("a", "b", "m_ch", "s_ch", fields=["data", "addr[3:0]"])])
+        with caplog.at_level(_logging.ERROR):
+            ports = {r["port"] for r in contract_port_rows(str(root), "b")}
+        assert ports == {"s_ch_data"}
+        assert "addr[3:0]" in caplog.text
+
+    def test_a_repair_to_an_illegal_name_is_refused(self):
+        from orchestrator.langgraph.contract_conformance import (
+            ConformanceResult,
+            plan_port_repairs,
+        )
+        res = ConformanceResult(block="b")
+        res.missing = [("s_ch", "s_ch_req/addr")]
+        res.undeclared = ["s_ch_reqaddr"]
+        assert plan_port_repairs(res) == {}

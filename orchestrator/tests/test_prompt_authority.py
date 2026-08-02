@@ -361,6 +361,51 @@ class TestContractPortTable:
         )
         assert "AUTHORITATIVE PORT NAMES" not in prompt
 
+    def test_a_slash_alias_contract_keeps_prompt_and_gate_in_step(self, tmp_path):
+        """The generate side and the gate share ONE derivation, so a contract
+        whose channel is a slash ENUMERATION of the channel's concrete ports
+        (`m_read_req/addr`, the schema template's own second form) and whose
+        sideband is a two-name alias (`srdy/in_valid`) must produce the same
+        legal names on both sides -- never a `/` in a port the prompt shows or
+        the gate demands."""
+        from orchestrator.langgraph.contract_conformance import (
+            check_block,
+            contract_port_rows,
+            format_contract_port_table,
+        )
+        (tmp_path / ".coresmith").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".coresmith" / "interface_contracts.json").write_text(
+            json.dumps({"contracts": [{
+                "edge_id": "e1",
+                "producer_block": "engine",
+                "consumer_block": "sample_memory",
+                "producer_port": "m_store_read_req/addr",
+                "consumer_port": "s_store_read_req/addr",
+                "fields": [{"name": "sample_u8", "width": 8}],
+                "sideband_signals": [
+                    {"name": "req"}, {"name": "address", "width": 13},
+                    {"name": "srdy/in_valid"},
+                ],
+            }]}), encoding="utf-8")
+
+        rows = contract_port_rows(str(tmp_path), "sample_memory")
+        names = {r["port"] for r in rows}
+        assert names == {"s_store_read_sample_u8", "s_store_read_req",
+                         "s_store_read_address", "s_store_read_srdy"}
+
+        rtl = tmp_path / "sample_memory.v"
+        rtl.write_text("module sample_memory(input wire clk);\nendmodule\n")
+        missing = {port for _chan, port in
+                   check_block(str(tmp_path), "sample_memory", rtl).missing}
+        assert missing == names, "prompt table and gate must not diverge"
+
+        table = format_contract_port_table(str(tmp_path), "sample_memory")
+        for n in names:
+            assert f"`{n}`" in table
+        for line in table.splitlines():
+            if line.startswith("- `"):
+                assert "/" not in line, line
+
     def test_rtl_system_prompt_has_port_naming_skill(self):
         from orchestrator.langchain.agents import rtl_generator as rg
         assert "data_write_write_enable" in rg.SYSTEM_PROMPT

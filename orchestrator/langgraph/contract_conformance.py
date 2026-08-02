@@ -49,8 +49,10 @@ and the park.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -58,6 +60,188 @@ from pathlib import Path
 #: MANDATED port names (io_in/io_out/io_oeb[37:0] are fixed by the shuttle), so
 #: the <channel>_<field> convention cannot apply to it.
 _LOCKED_BOUNDARY_PORTS = ("io_in", "io_out", "io_oeb")
+
+_logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Deriving a canonical port name from contract text
+# ---------------------------------------------------------------------------
+#
+# The contract's channel and signal strings are NOT always bare identifiers.
+# The schema template the interface-definition agent is handed literally reads
+#
+#     "producer_port": "<m_axis_<name> or m_<name>_srdy/m_<name>_data>"
+#
+# so a real contract carries either a bare channel or a SLASH-SEPARATED
+# ENUMERATION of the concrete ports on that channel -- and a sideband is
+# sometimes declared under two names ("srdy/in_valid" = the generic protocol
+# role plus the spelling mandated on that edge). Concatenating those strings
+# verbatim into `<channel>_<field>` emitted port names containing `/`. No legal
+# UNESCAPED Verilog identifier can contain one, so the repair pass rewrote six
+# blocks' RTL to names nothing downstream can parse and the loop could never
+# converge. Everything below exists so a `/` can never reach an identifier.
+
+#: A legal, unescaped Verilog identifier. `\s_read_req/addr ` is legal only as
+#: an ESCAPED identifier, which no stitcher / cocotb handle lookup / netlist
+#: reader in this flow handles -- so it is not an acceptable port name here.
+_LEGAL_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+
+
+def is_legal_identifier(name) -> bool:
+    """Whether ``name`` may be emitted as an unescaped Verilog identifier."""
+    return bool(_LEGAL_IDENT_RE.match(str(name or "")))
+
+
+#: Illegal derivations already reported, so a 25-edge contract logs each defect
+#: once instead of once per block that touches it.
+_ILLEGAL_REPORTED: set = set()
+
+
+def _report_illegal(edge: dict, chan_raw, signal, derived: str) -> None:
+    """Loudly refuse a derived name that is not an identifier (never emit it).
+
+    Skipping is the only safe action: the alternative is rewriting a block's
+    RTL -- and its testbench -- to a name that cannot be declared, which is
+    what corrupted six blocks. It is logged at ERROR *and* on stderr because
+    the caller of this module owns logging and would otherwise swallow it.
+    """
+    key = (str(chan_raw), str(signal), derived)
+    if key in _ILLEGAL_REPORTED:
+        return
+    _ILLEGAL_REPORTED.add(key)
+    msg = (
+        "contract signal DROPPED from the port set -- the derived name is not "
+        f"a legal Verilog identifier. edge={edge.get('edge_id')!r} "
+        f"channel={chan_raw!r} signal={signal!r} derived={derived!r}. Fix the "
+        "CONTRACT (a channel/signal must reduce to an identifier); the RTL is "
+        "not at fault and must not be rewritten to this name."
+    )
+    _logger.error(msg)
+    print(f"[contract-conformance] {msg}", file=sys.stderr)
+
+
+def channel_base(raw) -> str:
+    """The channel PREFIX named by ``producer_port`` / ``consumer_port``.
+
+    A bare value is the channel. A slash-separated value ENUMERATES the
+    concrete ports on the channel; all three shapes occur in one 12-block
+    design::
+
+        m_coeff_out_srdy/m_coeff_out_data   -> m_coeff_out   (both qualified)
+        m_transform_read_req/addr           -> m_transform_read  (tail bare)
+        in_valid/in_data/in_last            -> in            (short prefix)
+
+    So the channel is the segments' longest common ``_``-token prefix. When no
+    later segment shares a leading token with the first (the ``.../addr``
+    shape), the segments are suffixes of one base and the first segment's
+    trailing token is its own signal, so the channel is everything before it.
+    """
+    segs = [s.strip() for s in str(raw or "").strip().split("/") if s.strip()]
+    if not segs:
+        return ""
+    if len(segs) == 1:
+        return segs[0]
+    head = segs[0].split("_")
+    common = None
+    for seg in segs[1:]:
+        toks = seg.split("_")
+        n = 0
+        while n < min(len(head), len(toks)) and head[n] == toks[n]:
+            n += 1
+        if n:
+            common = n if common is None else min(common, n)
+    if common:
+        return "_".join(head[:common])
+    return "_".join(head[:-1]) or segs[0]
+
+
+def signal_name(raw, chan: str = "") -> str:
+    """One concrete signal name from a (possibly slash-aliased) declaration.
+
+    ``srdy/in_valid`` declares ONE wire under two names -- the generic
+    handshake role and the spelling this edge mandates -- and only one of them
+    can be a port. Prefer the segment that already carries the channel prefix
+    (that is this end's fully-qualified spelling: on channel ``in`` the
+    contract's own port list says ``in_valid``, on channel ``s_source`` it says
+    ``s_source_srdy``), otherwise the first.
+    """
+    segs = [s.strip() for s in str(raw or "").split("/") if s.strip()]
+    if not segs:
+        return ""
+    if chan:
+        for seg in segs:
+            if seg == chan or seg.startswith(chan + "_"):
+                return seg
+    return segs[0]
+
+
+def canonical_port(chan: str, signal) -> tuple[str, str]:
+    """``(port, bare)`` -- the canonical flattened name for one channel signal.
+
+    ``<channel>_<signal>``, IDEMPOTENT in the channel prefix: a signal the
+    contract already spells with the channel on it (``in_last`` on channel
+    ``in``) is not prefixed a second time. Without that the derivation emitted
+    ``s_chan_s_chan_addr`` and then demanded the RTL rename to it.
+
+    The doubled-TOKEN rule is untouched, because it is a different thing:
+    channel ``data_write`` + signal ``write_enable`` is still
+    ``data_write_write_enable`` -- ``write_enable`` does not start with
+    ``data_write_``. Only a whole-prefix repeat is idempotent.
+
+    ``bare`` is the unprefixed spelling a block may legitimately use instead;
+    it equals ``port`` when the signal already carries the prefix (there is
+    then only ONE acceptable name, not two).
+    """
+    sig = signal_name(signal, chan)
+    if not sig:
+        return "", ""
+    if not chan or sig == chan or sig.startswith(chan + "_"):
+        return sig, sig
+    return f"{chan}_{sig}", sig
+
+
+def channel_signals(edge: dict, chan_raw) -> list[dict]:
+    """Canonical port rows for ONE END of a contract edge.
+
+    THE single derivation: :func:`check_block` (the gate) and
+    :func:`contract_port_rows` (what the RTL generator is shown) both go
+    through it, so the gate can never demand a spelling the prompt did not
+    advertise -- and a slash-alias cannot be fixed in one and not the other.
+
+    Returns ``[{channel, signal, port, bare, width, dir, kind,
+    doubled_token}]``, de-duplicated by port. A row whose derived name is not a
+    legal identifier is DROPPED and reported; nothing downstream ever sees it.
+    """
+    chan = channel_base(chan_raw)
+    if chan and not is_legal_identifier(chan):
+        _report_illegal(edge, chan_raw, "<channel>", chan)
+        return []
+    rows: list[dict] = []
+    seen: set = set()
+    for spec in signal_specs(edge):
+        port, bare = canonical_port(chan, spec["name"])
+        if not port:
+            continue
+        if not is_legal_identifier(port):
+            _report_illegal(edge, chan_raw, spec["name"], port)
+            continue
+        if port in seen:
+            continue
+        seen.add(port)
+        chan_tail = chan.rsplit("_", 1)[-1]
+        sig_head = bare.split("_", 1)[0]
+        rows.append({
+            "channel": chan,
+            "signal": bare,
+            "port": port,
+            "bare": bare,
+            "width": spec["width"],
+            "dir": spec["dir"],
+            "kind": spec["kind"],
+            "doubled_token": bool(chan_tail) and chan_tail == sig_head,
+        })
+    return rows
 
 
 @dataclass
@@ -209,25 +393,12 @@ def contract_port_rows(project_root, block_name: str) -> list[dict]:
             role_key = "producer_block" if role == "producer" else "consumer_block"
             if edge.get(role_key) != block_name:
                 continue
-            chan = str(edge.get(key) or "")
-            if not chan:
+            chan_raw = str(edge.get(key) or "")
+            if not chan_raw:
                 continue
-            for spec in signal_specs(edge):
-                name = spec["name"]
-                port = f"{chan}_{name}"
-                chan_tail = chan.rsplit("_", 1)[-1]
-                sig_head = name.split("_", 1)[0]
-                rows.append({
-                    "channel": chan,
-                    "role": role,
-                    "signal": name,
-                    "port": port,
-                    "width": spec["width"],
-                    "dir": spec["dir"],
-                    "kind": spec["kind"],
-                    "peer": str(edge.get(peer_key) or ""),
-                    "doubled_token": bool(chan_tail) and chan_tail == sig_head,
-                })
+            for row in channel_signals(edge, chan_raw):
+                rows.append(dict(
+                    row, role=role, peer=str(edge.get(peer_key) or "")))
     return rows
 
 
@@ -388,13 +559,22 @@ def check_block(project_root, block_name: str, rtl_path,
                           ("consumer_block", "consumer_port")):
             if edge.get(role) != block_name:
                 continue
-            chan = str(edge.get(key) or "")
-            if not chan:
+            chan_raw = str(edge.get(key) or "")
+            if not chan_raw:
                 continue
             res.checked_edges += 1
-            for n in _signal_names(edge):
-                prefixed, bare = f"{chan}_{n}", n
-                has_p, has_b = prefixed in ports, bare in ports
+            # ONE derivation, shared with the prompt's port table: a channel
+            # or signal spelled as a slash enumeration/alias is reduced here,
+            # never concatenated into an unparseable name.
+            chan = channel_base(chan_raw)
+            for row in channel_signals(edge, chan_raw):
+                prefixed, bare = row["port"], row["bare"]
+                has_p = prefixed in ports
+                # When the contract's signal already carries the channel
+                # prefix there is only ONE acceptable spelling, so the bare
+                # form is not a second candidate (and cannot be "ambiguous"
+                # with itself).
+                has_b = bare != prefixed and bare in ports
                 if has_p and has_b:
                     # Two candidate ports for one declared signal: the stitcher
                     # would have to pick, and picking is how channels get
@@ -429,7 +609,9 @@ def check_block(project_root, block_name: str, rtl_path,
         for role, key in (("producer_block", "producer_port"),
                           ("consumer_block", "consumer_port")):
             if edge.get(role) == block_name and edge.get(key):
-                channels.add(str(edge[key]))
+                base = channel_base(edge[key])
+                if base:
+                    channels.add(base)
     for port in sorted(ports):
         if port in accepted or port in _LOCKED_BOUNDARY_PORTS:
             continue
@@ -496,7 +678,23 @@ def plan_port_repairs(result: "ConformanceResult") -> dict:
             pairs.setdefault(free[0], []).append(want)
 
     # A source port wanted by two declared names is ambiguous -- drop it.
-    return {have: wants[0] for have, wants in pairs.items() if len(wants) == 1}
+    plan = {have: wants[0] for have, wants in pairs.items() if len(wants) == 1}
+
+    # Last line of defence before RTL is rewritten: never rename a port to
+    # something that is not an identifier. `check_block` already refuses to
+    # derive one, so reaching here means a new derivation path was added --
+    # and a rename is the step that turns a bad name into corrupted source.
+    safe = {}
+    for have, want in plan.items():
+        if is_legal_identifier(want) and is_legal_identifier(have):
+            safe[have] = want
+        else:
+            _logger.error(
+                "REFUSING port repair %r -> %r: not a legal Verilog "
+                "identifier. The RTL is left untouched.", have, want)
+            print(f"[contract-conformance] REFUSING port repair {have!r} -> "
+                  f"{want!r}: not a legal Verilog identifier", file=sys.stderr)
+    return safe
 
 
 def repair_block_ports(project_root, block_name: str, rtl_path,
