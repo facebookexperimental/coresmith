@@ -7257,6 +7257,26 @@ async def integration_check_node(state: OrchestratorState) -> dict:
         if not chip_top_text:
             chip_top_text = agent_result.get("verilog", "")
 
+        def _expand_includes_for_postcond(text: str, base: str) -> str:
+            """Inline one level of an include directive so the structural
+            postconditions see instantiations that live in a body .vh. yosys
+            expands includes at read time, so this only mirrors what synth and
+            sim already see. Best-effort: a missing include leaves the
+            directive in place (the postcondition then honestly still fails)."""
+            _inc = re.compile(r'^[ \t]*`include\s+"([^"]+)"[ \t]*$', re.MULTILINE)
+            _dir = Path(base).parent if base else Path(".")
+
+            def _sub(m):
+                p = _dir / m.group(1)
+                try:
+                    return p.read_text()
+                except OSError:
+                    return m.group(0)
+            return _inc.sub(_sub, text)
+
+        chip_top_text = _expand_includes_for_postcond(
+            chip_top_text, top_rtl_path or "")
+
         from orchestrator.langchain.agents.integration_lead import (
             assert_blocks_instantiated,
         )
