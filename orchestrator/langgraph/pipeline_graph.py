@@ -69,11 +69,11 @@ from opentelemetry import trace
 from orchestrator.langgraph.event_stream import write_graph_event
 from orchestrator.langgraph.integration_helpers import (
     discover_block_rtl,
-    module_for_block,
     generate_integration_testbench,
     generate_validation_testbench,
     lint_top_level,
     load_architecture_connections,
+    module_for_block,
     parse_verilog_ports,
     run_integration_simulation,
 )

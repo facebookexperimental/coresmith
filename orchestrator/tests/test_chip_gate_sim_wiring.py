@@ -31,7 +31,6 @@ from orchestrator.langgraph.backend_graph import (
 )
 from orchestrator.langgraph.integration_helpers import chip_rtl_sources
 
-
 # ---------------------------------------------------------------------------
 # The reference source list
 # ---------------------------------------------------------------------------
