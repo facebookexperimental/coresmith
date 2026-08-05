@@ -255,6 +255,61 @@ def fft16_full_docs(isolated_project):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Architecture-graph LLM containment
+# ═══════════════════════════════════════════════════════════════════════════
+
+def enter_arch_llm_node_patches(stack) -> None:
+    """Shut the architecture-graph nodes that reach a live LLM but are not
+    "specialists", so a test driving the whole graph stays offline.
+
+    Every test module that runs the architecture graph maintains its own list
+    of specialist patches, and both lists independently missed these two: they
+    are graph nodes rather than ``architecture.specialists.*`` modules, so they
+    do not look like something a "patch all specialists" helper should cover.
+    The result was that tests carrying no ``live_llm`` marker made real, billed
+    API calls, and the agents' shell tools ran unbounded commands (one observed
+    run spent 30+ minutes on a filesystem-wide ``find /``). The failure mode is
+    load-bearing on latency, not correctness, so it hid in plain sight -- CI
+    just looked slow.
+
+    Kept here rather than duplicated per module so the containment cannot drift
+    out of sync again. A test that genuinely wants either node's real behaviour
+    should mark itself ``live_llm`` and not call this.
+
+    Args:
+        stack: An ``ExitStack`` the caller already owns; patches are entered
+            into it and unwound with it.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    stack.enter_context(patch(
+        "orchestrator.architecture.specialists.interface_definition"
+        ".analyze_interface_definition",
+        new_callable=AsyncMock,
+        return_value={
+            "result": {
+                "design_summary": "patched by enter_arch_llm_node_patches",
+                "contracts": [],
+                "contract_violations": [],
+                "open_questions": [],
+            },
+            "questions": [],
+        },
+    ))
+    stack.enter_context(patch(
+        "orchestrator.langchain.agents.output_contract_review_agent"
+        ".OutputContractReviewAgent.review",
+        new_callable=AsyncMock,
+        return_value={
+            "passed": True,
+            "orphaned_properties": [],
+            "summary": "patched by enter_arch_llm_node_patches",
+            "feedback_for_redecomposition": "",
+        },
+    ))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Assertion Helpers
 # ═══════════════════════════════════════════════════════════════════════════
 
