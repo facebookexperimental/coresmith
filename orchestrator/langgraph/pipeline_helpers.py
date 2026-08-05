@@ -231,6 +231,30 @@ def preflight_check(phases: list[str] | None = None) -> dict:
         if not Path(NETGEN_BIN).exists():
             errors.append(f"Netgen binary/script not found: {NETGEN_BIN}")
 
+        # The three checks above only assert the configured path EXISTS. By
+        # default they point at scripts/{openroad,magic,netgen}-nix.sh, which
+        # are committed to this repo and therefore always exist -- so backend
+        # preflight reports ok on a box with no EDA tools at all. Those
+        # wrappers are one-liners that `exec nix shell "nixpkgs#<tool>"`, so
+        # without nix on PATH every one of them fails at the first backend
+        # node. Warn (not error): a site may point config.yaml at real
+        # binaries, and turning a passing preflight into a failing one is a
+        # behaviour change this check does not need to make in order to stop
+        # being misleading.
+        _nix_wrapped = sorted({
+            Path(_b).name
+            for _b in (OPENROAD_BIN, MAGIC_BIN, NETGEN_BIN)
+            if Path(_b).name.endswith("-nix.sh")
+        })
+        if _nix_wrapped and not shutil.which("nix"):
+            warnings.append(
+                "backend tools resolve to nix wrappers (" + ", ".join(_nix_wrapped)
+                + ") but `nix` is not on PATH -- these paths exist as files, so "
+                "the checks above pass, but every backend node will fail when it "
+                "invokes them. Install nix (see SETUP.md Option B), use the "
+                "Docker image, or point config.yaml at real binaries."
+            )
+
     return {"ok": len(errors) == 0, "errors": errors, "warnings": warnings}
 
 # ANSI colors for terminal output
