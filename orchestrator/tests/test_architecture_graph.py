@@ -45,6 +45,7 @@ from orchestrator.langgraph.architecture_graph import (
     route_after_prd,
     route_after_prd_escalation,
 )
+from orchestrator.tests.conftest import enter_arch_llm_node_patches
 from orchestrator.tests.fft16_fixtures import (
     FFT16_BLOCK_DIAGRAM,
     FFT16_CLOCK_TREE,
@@ -158,6 +159,10 @@ def _patch_all_specialists(
         new_callable=AsyncMock,
         return_value={"ers": {"title": "FFT16 ERS", "summary": "test"}, "phase": "ers_complete"},
     ))
+    # Interface Definition and Output Contract Review are graph nodes rather
+    # than specialists, so they were missing from the list above and reached a
+    # live LLM on every whole-graph test. See enter_arch_llm_node_patches.
+    enter_arch_llm_node_patches(stack)
 
     return stack
 

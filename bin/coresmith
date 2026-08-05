@@ -275,18 +275,29 @@ def _daemon_start(args):
     # interpreter can find pygpi (a separate package introduced in
     # cocotb 2.0). Without it, every sim invocation fails with
     # ``ModuleNotFoundError: No module named 'pygpi'`` even though the
-    # module is on disk next to cocotb itself. We auto-detect the
-    # required value from the current interpreter's sysconfig prefix
-    # and inject it -- the operator may override by setting
-    # PYTHONHOME explicitly in the environment or in .coresmith/env.
+    # module is on disk next to cocotb itself. We auto-detect the required
+    # value -- from the interpreter we are about to SPAWN, not from the one
+    # running this script, since they are usually different (system python
+    # here, repo venv python there) -- and inject it. The operator may
+    # override by setting PYTHONHOME explicitly in the environment or in
+    # .coresmith/env. resolve_pythonhome() returns None rather than a prefix
+    # with no stdlib: injecting one of those kills the daemon at startup
+    # ("No module named 'encodings'"), which is worse than not setting it.
     if "PYTHONHOME" not in env:
         try:
-            import sysconfig
-            prefix = sysconfig.get_config_var("prefix")
-            if prefix:
-                env["PYTHONHOME"] = prefix
-        except Exception:
-            pass
+            sys.path.insert(0, str(repo_root))
+            from orchestrator.harness.env import resolve_pythonhome
+            pythonhome = resolve_pythonhome(python)
+            if pythonhome:
+                env["PYTHONHOME"] = pythonhome
+            else:
+                print(
+                    "note: PYTHONHOME not injected -- no interpreter prefix with "
+                    "a stdlib found. cocotb sims may fail with 'No module named "
+                    "pygpi'; set PYTHONHOME explicitly if they do."
+                )
+        except Exception as e:  # noqa: BLE001 -- auto-detect is best-effort
+            print(f"note: PYTHONHOME auto-detect skipped: {e}")
 
     with open(log_path, "ab") as logf:
         proc = subprocess.Popen(
