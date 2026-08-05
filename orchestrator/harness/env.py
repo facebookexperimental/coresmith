@@ -13,10 +13,76 @@ on the process cwd (agents run from arbitrary directories).
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _prefix_has_stdlib(prefix: str | Path) -> bool:
+    """Whether ``prefix`` is a directory that actually holds a Python stdlib."""
+    root = Path(prefix)
+    if not root.is_dir():
+        return False
+    # posix: <prefix>/lib/python3.X/encodings ; windows: <prefix>/Lib/encodings
+    return any(next(root.glob(pat), None) is not None
+               for pat in ("lib/python*/encodings", "Lib/encodings"))
+
+
+def _interpreter_base_prefix(python: str | Path) -> str | None:
+    """Ask ``python`` for its own ``sys.base_prefix``; ``None`` on any failure."""
+    try:
+        proc = subprocess.run(
+            [str(python), "-c", "import sys; print(sys.base_prefix)"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except Exception:  # noqa: BLE001 -- probe is best-effort
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def resolve_pythonhome(python: str | Path | None = None) -> str | None:
+    """Return a PYTHONHOME value that can actually bootstrap an interpreter.
+
+    cocotb 2.x needs PYTHONHOME so Verilator's embedded interpreter can find
+    pygpi. The obvious source -- ``sysconfig.get_config_var("prefix")`` -- is
+    the prefix the interpreter was *configured* with, which is not always where
+    it was *installed*: relocated, framework and vendor-repackaged builds
+    report a prefix holding no stdlib. Injecting such a value is strictly worse
+    than injecting nothing, because PYTHONHOME overrides stdlib discovery, so
+    the child dies before running a single line with ``Fatal Python error:
+    init_fs_encoding`` / ``ModuleNotFoundError: No module named 'encodings'``.
+
+    Two corrections over the naive read:
+
+    * When ``python`` names a different interpreter than the current one
+      (``bin/coresmith`` may run under the system python while spawning the
+      venv python), ask *that* interpreter for its ``sys.base_prefix`` -- a
+      prefix derived from the launcher does not necessarily describe the child.
+    * Verify the candidate holds a stdlib, and return ``None`` rather than a
+      value known to be unbootable. ``None`` degrades to a pygpi import error
+      at sim time; a bad value kills the process at startup.
+    """
+    candidates: list[str] = []
+    if python and str(python) != sys.executable:
+        remote = _interpreter_base_prefix(python)
+        if remote:
+            candidates.append(remote)
+    candidates.append(sys.base_prefix)
+    try:
+        import sysconfig
+        configured = sysconfig.get_config_var("prefix")
+        if configured:
+            candidates.append(configured)
+    except Exception:  # noqa: BLE001
+        pass
+    for candidate in candidates:
+        if candidate and _prefix_has_stdlib(candidate):
+            return candidate
+    return None
 
 
 def repo_root() -> Path:
@@ -63,13 +129,9 @@ def harness_child_env(extra: dict | None = None) -> dict:
         env["PATH"] = os.pathsep.join(parts + [env.get("PATH", "/usr/bin:/bin")])
     # Preserve PYTHONHOME for cocotb's Verilator-embedded interpreter (pygpi).
     if "PYTHONHOME" not in env:
-        try:
-            import sysconfig
-            prefix = sysconfig.get_config_var("prefix")
-            if prefix:
-                env["PYTHONHOME"] = prefix
-        except Exception:  # noqa: BLE001
-            pass
+        pythonhome = resolve_pythonhome()
+        if pythonhome:
+            env["PYTHONHOME"] = pythonhome
     if extra:
         env.update({str(k): str(v) for k, v in extra.items()})
     return env
