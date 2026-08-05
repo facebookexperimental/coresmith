@@ -596,7 +596,10 @@ class TestIntegrationCheckNode:
             ],
         )
 
-        def _mock_parse(path):
+        # parse_verilog_ports(rtl_path, module=None): the `module` selector was
+        # added so a block whose Verilog module name differs from the block name
+        # still resolves, and the call site passes module_for_block(...).
+        def _mock_parse(path, module=None):
             if "block_a" in path:
                 return mod_a
             return mod_b
