@@ -14,8 +14,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import pytest
-
 from orchestrator.langgraph.macro_prebind import (
     UNBOUND_SENTINEL,
     PrebindResult,
@@ -137,8 +135,8 @@ class TestGeometryDispatch:
 
 def _maskless_env(tmp_path, monkeypatch, width, nb_expected):
     """Wire resolve_prebindings to a maskless macro for the given RTL width."""
-    from orchestrator.langgraph import macro_prebind as mp
     import orchestrator.langgraph.macro_registry as reg
+    from orchestrator.langgraph import macro_prebind as mp
 
     rtl = tmp_path / "blk.v"
     rtl.write_text(

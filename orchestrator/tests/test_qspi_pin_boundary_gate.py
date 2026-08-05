@@ -33,8 +33,7 @@ import json
 
 import pytest
 
-from orchestrator.langgraph import pipeline_graph
-from orchestrator.langgraph import bfm_lib
+from orchestrator.langgraph import bfm_lib, pipeline_graph
 from orchestrator.langgraph.bfm_lib import (
     STATUS_BOUNDARY_OFF_TOP,
     STATUS_CONTRADICTION,
@@ -50,6 +49,22 @@ from orchestrator.langgraph.bfm_lib.classifier import (
     declared_pad_ports,
 )
 from orchestrator.langgraph.integration_helpers import VerilogModule, VerilogPort
+
+
+def _must_not_interrupt(payload):
+    """integration_dv_node must never interrupt directly (run3-followups).
+
+    A tail ``interrupt()`` in a node LangGraph re-executes from the top is
+    consumed one full cycle late, and the intervening default cycle clobbers
+    operator ``fix_tb`` edits. The failure is returned as
+    ``integration_dv_result["interrupt_payload"]`` and parked by
+    ``integration_dv_decision_node`` instead.
+    """
+    raise AssertionError(
+        "integration_dv_node must not interrupt; the decision parks in "
+        "integration_dv_decision_node"
+    )
+
 
 # ---------------------------------------------------------------------------
 # RTL fixtures (shapes taken from the real raster run)
@@ -393,20 +408,18 @@ async def test_off_top_boundary_fails_closed_and_never_reaches_the_llm_bfm(
     monkeypatch.setattr(
         pipeline_graph, "generate_integration_testbench", _must_not_run)
 
-    captured = {}
-
-    def fake_interrupt(payload):
-        captured.update(payload)
-        return {"action": "abort"}
-    monkeypatch.setattr(pipeline_graph, "interrupt", fake_interrupt)
+    # The node hands the failure to integration_dv_decision_node as
+    # `interrupt_payload` instead of interrupting itself (run3-followups).
+    monkeypatch.setattr(pipeline_graph, "interrupt", _must_not_interrupt)
 
     result = await pipeline_graph.integration_dv_node(state)
 
-    assert captured.get("type") == "integration_dv_failure"
-    assert captured.get("phase") == "tb_generation"
-    assert "QSPI pin-boundary gate" in captured.get("sim_log", "")
-    assert "user_project_wrapper.v" in captured.get("sim_log", "")
     dv = result["integration_dv_result"]
+    payload = dv.get("interrupt_payload") or {}
+    assert payload.get("type") == "integration_dv_failure"
+    assert payload.get("phase") == "tb_generation"
+    assert "QSPI pin-boundary gate" in payload.get("sim_log", "")
+    assert "user_project_wrapper.v" in payload.get("sim_log", "")
     assert dv["passed"] is False
     assert result["pipeline_done"] is False
 
@@ -422,14 +435,12 @@ async def test_contradiction_fails_closed(monkeypatch, tmp_path):
         raise AssertionError("LLM BFM must not be generated")
     monkeypatch.setattr(
         pipeline_graph, "generate_integration_testbench", _must_not_run)
-    captured = {}
-    monkeypatch.setattr(
-        pipeline_graph, "interrupt",
-        lambda p: (captured.update(p), {"action": "retry"})[1])
+    monkeypatch.setattr(pipeline_graph, "interrupt", _must_not_interrupt)
 
-    await pipeline_graph.integration_dv_node(state)
-    assert captured.get("type") == "integration_dv_failure"
-    assert "CONTRADICTION" in captured.get("sim_log", "")
+    result = await pipeline_graph.integration_dv_node(state)
+    payload = result["integration_dv_result"].get("interrupt_payload") or {}
+    assert payload.get("type") == "integration_dv_failure"
+    assert "CONTRADICTION" in payload.get("sim_log", "")
 
 
 @pytest.mark.asyncio

@@ -116,13 +116,19 @@ def _setup_node(monkeypatch, tmp_path, *, sim_passed, equiv_result):
 
 @pytest.mark.asyncio
 async def test_loosened_tb_pass_but_equiv_fail_flips_dv_to_failed(monkeypatch, tmp_path):
-    captured = {}
+    # integration_dv_node deliberately does NOT interrupt (run3-followups): a
+    # tail interrupt() in a node LangGraph re-executes from the top is consumed
+    # one full cycle late, and the intervening default cycle clobbers operator
+    # fix_tb edits. The failure is handed to integration_dv_decision_node as
+    # `interrupt_payload` instead. Assert that invariant rather than
+    # monkeypatching a call that must never happen.
+    def _must_not_interrupt(payload):
+        raise AssertionError(
+            "integration_dv_node must not interrupt; the decision parks in "
+            "integration_dv_decision_node"
+        )
 
-    def fake_interrupt(payload):
-        captured.update(payload)
-        return {"action": "abort"}
-
-    monkeypatch.setattr(pipeline_graph, "interrupt", fake_interrupt)
+    monkeypatch.setattr(pipeline_graph, "interrupt", _must_not_interrupt)
     state = _setup_node(
         monkeypatch, tmp_path,
         sim_passed=True,
@@ -132,12 +138,13 @@ async def test_loosened_tb_pass_but_equiv_fail_flips_dv_to_failed(monkeypatch, t
     result = await pipeline_graph.integration_dv_node(state)
 
     # The sim passed but the equivalence gate failed -> DV is failed and the
-    # existing failure interrupt fired with the equivalence divergence in the log.
-    assert captured.get("type") == "integration_dv_failure"
-    assert "EQUIVALENCE FAILED" in captured.get("sim_log", "")
+    # pending payload carries the equivalence divergence in the log.
     dv = result["integration_dv_result"]
+    payload = dv.get("interrupt_payload") or {}
+    assert payload.get("type") == "integration_dv_failure"
+    assert "EQUIVALENCE FAILED" in payload.get("sim_log", "")
     assert dv["passed"] is False
-    assert dv["aborted"] is True
+    assert dv["pending_decision"] is True
 
 
 @pytest.mark.asyncio
