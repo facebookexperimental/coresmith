@@ -2060,6 +2060,81 @@ def _assert_testbench_materialized(tb_path: Path, block_name: str) -> str | None
 # Simulation
 # ---------------------------------------------------------------------------
 
+# Standalone WaveKit VCD-audit program. Runs in a SEPARATE interpreter
+# (see wavekit_python()), which may be a scratch venv rather than this
+# process, so it must not import anything from orchestrator. Module-level
+# so tests can exec it against stub readers for both WaveKit API shapes.
+_WAVEKIT_AUDIT_SCRIPT = r"""
+import json
+import sys
+from pathlib import Path
+
+from wavekit import VcdReader
+
+vcd_path = Path(sys.argv[1])
+clock_hint = sys.argv[2]
+
+with VcdReader(str(vcd_path)) as reader:
+    # WaveKit renamed its tree API between 0.5.x and 0.7.x. wavekit is
+    # unpinned in requirements.txt AND the wavekit_python() fallback below
+    # pip-installs the latest into a scratch venv, so a fresh box gets the new
+    # API no matter what the operator pinned. On the new API the 0.5.x calls
+    # raise AttributeError inside this script, which exits non-zero and is
+    # read as an audit FAILURE -- and the DV gates fail closed on that, so
+    # integration_dv and validation_dv could never pass. Support both shapes:
+    #   0.5.x: reader.top_scope_list()  scope.signal_list  scope.child_scope_list
+    #   0.7.x: reader.top_scopes        scope.children (signals and scopes mixed)
+    # Signal objects expose .full_name and .width in both.
+    _tops = getattr(reader, "top_scope_list", None)
+    top_scopes = _tops() if callable(_tops) else reader.top_scopes
+    signals = []
+    clocks = []
+
+    def _split(scope):
+        # Return (child_signals, child_scopes) for either API shape.
+        if hasattr(scope, "signal_list") or hasattr(scope, "child_scope_list"):
+            return (getattr(scope, "signal_list", []),
+                    getattr(scope, "child_scope_list", []))
+        sigs, scopes = [], []
+        for child in getattr(scope, "children", []):
+            # A signal is a leaf carrying a width; a scope is not.
+            (sigs if hasattr(child, "width") else scopes).append(child)
+        return sigs, scopes
+
+    def walk(scope):
+        child_signals, child_scopes = _split(scope)
+        for sig in child_signals:
+            name = sig.full_name
+            signals.append({"name": name, "width": int(sig.width)})
+            base = name.split(".")[-1].split("[")[0]
+            if base in {clock_hint, "clk", "clock", "i_clk"}:
+                clocks.append(name)
+        for child in child_scopes:
+            walk(child)
+
+    for top in top_scopes:
+        walk(top)
+
+    if not signals:
+        raise RuntimeError("VCD contains no signals")
+    if int(reader.end_time) <= int(reader.begin_time):
+        raise RuntimeError(
+            f"VCD contains no value-change time range: begin={reader.begin_time} end={reader.end_time}"
+        )
+
+    report = {
+        "ok": True,
+        "vcd_path": str(vcd_path),
+        "begin_time": int(reader.begin_time),
+        "end_time": int(reader.end_time),
+        "signal_count": len(signals),
+        "sample_signals": signals[:64],
+        "clock_candidates": clocks[:16],
+    }
+    print(json.dumps(report))
+"""
+
+
 def run_wavekit_vcd_audit(vcd_path: Path, audit_path: Path, clock_hint: str = "clk") -> dict:
     """Inspect a Verilator VCD with WaveKit and persist a small audit report."""
     if not vcd_path.exists() or vcd_path.stat().st_size == 0:
@@ -2104,52 +2179,7 @@ def run_wavekit_vcd_audit(vcd_path: Path, audit_path: Path, clock_hint: str = "c
             )
         return str(python)
 
-    script = r"""
-import json
-import sys
-from pathlib import Path
-
-from wavekit import VcdReader
-
-vcd_path = Path(sys.argv[1])
-clock_hint = sys.argv[2]
-
-with VcdReader(str(vcd_path)) as reader:
-    top_scopes = reader.top_scope_list()
-    signals = []
-    clocks = []
-
-    def walk(scope):
-        for sig in getattr(scope, "signal_list", []):
-            name = sig.full_name
-            signals.append({"name": name, "width": int(sig.width)})
-            base = name.split(".")[-1].split("[")[0]
-            if base in {clock_hint, "clk", "clock", "i_clk"}:
-                clocks.append(name)
-        for child in getattr(scope, "child_scope_list", []):
-            walk(child)
-
-    for top in top_scopes:
-        walk(top)
-
-    if not signals:
-        raise RuntimeError("VCD contains no signals")
-    if int(reader.end_time) <= int(reader.begin_time):
-        raise RuntimeError(
-            f"VCD contains no value-change time range: begin={reader.begin_time} end={reader.end_time}"
-        )
-
-    report = {
-        "ok": True,
-        "vcd_path": str(vcd_path),
-        "begin_time": int(reader.begin_time),
-        "end_time": int(reader.end_time),
-        "signal_count": len(signals),
-        "sample_signals": signals[:64],
-        "clock_candidates": clocks[:16],
-    }
-    print(json.dumps(report))
-"""
+    script = _WAVEKIT_AUDIT_SCRIPT
     try:
         audit_python = wavekit_python()
         proc = subprocess.run(
