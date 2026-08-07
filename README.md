@@ -83,6 +83,33 @@ at the 50 MHz target.
 
 CoreSmith can now generate intermediate-complexity out-of-order cores, like intra video encoders or decoders (e.g. Theora) that are byte-exact and decodable by a software oracle. 
 
+### Theora video codec: spec → silicon
+
+A matched Theora **encoder** and **decoder** were each driven from a natural-language spec all the way to Sky130 GDSII and signed off **byte-exact** against a from-scratch golden reference. They are the largest designs in the sweep — the deep on-chip frame memory is realized by tiling SRAM macros, so PPA here is routability-oriented, not area-optimized.
+
+| Design | Functional | DRC | LVS | Area (util) | Power | Timing @50 MHz |
+|--------|------------|-----|-----|-------------|-------|----------------|
+| Theora encoder | byte-exact (15,637/15,637 B) | 0 † | match ‡ | 4.44 mm² (43%) | *invalid* ※ | MET |
+| Theora decoder | byte-exact (161,280/161,280 B, 35 frames) | 0 † | match ‡ | 7.18 mm² (32%) | 6.25 mW | MET |
+
+- **※** Encoder power hit the same nonphysical OpenRAM macro-power-table value as Raster (§); its finite switching + leakage subtotal is ~6.9 mW. The decoder tiles pre-built PDK SRAM macros and reports valid power.
+
+![A 640×480 photo round-tripped through the CoreSmith Theora codec](docs/images/codec/roundtrip_hero.png)
+
+A 640×480 photo encoded, then decoded, through the codec's golden model — which is byte-exact to the taped-out RTL. The reconstructed bitstreams also decode byte-exact in stock `ffmpeg`: the output is conformant Theora, not an approximation.
+
+The silicon codec is fixed-function (64×48 4:2:0, intra-only, qi = 37). For the plots below, the byte-exact golden model was extended to arbitrary geometry (up to 1280×720) and variable quality (qi 0–63); the enhanced streams stay conformant (they decode byte-exact in `ffmpeg`). At equal *rate* the codec tracks ~1.2 dB under `libtheora` — its hardware-friendly entropy coder uses length-1 EOB runs and no trellis (bitrate is not a graded axis); at equal *qi* it quantizes finer (no deadzone) for lower distortion.
+
+![Rate–distortion vs libtheora at 640×480](docs/images/codec/rd_curve.png)
+
+Quality scales monotonically with qi:
+
+![Quality ladder, qi 16 → 52](docs/images/codec/quality_ladder.png)
+
+At its native 64×48 geometry — exactly what was physically taped out — a round-trip through the chip's own codec (both panels 8× nearest-neighbor for visibility; the reconstruction is byte-exact to the RTL):
+
+![64×48 taped-out silicon round-trip](docs/images/codec/silicon_64x48_roundtrip.png)
+
 ## LLM Providers
 For the best experience: 
 
