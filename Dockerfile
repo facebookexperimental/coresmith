@@ -85,17 +85,27 @@ ENV PATH="/root/.nix-profile/bin:${PATH}"
 #     ImportError: libstdc++.so.6: cannot open shared object file: No such file or directory
 #
 # The candidate must be picked by *library version*, not by store path.
-# `find ... | sort -V | tail -1` sorts whole /nix/store paths, and those
-# begin with a random 32-char hash -- so the "newest" library was really
-# whichever hash happened to sort last. That silently selected nixos-24.05's
-# gcc-13 libstdc++.so.6.0.32 (max CXXABI_1.3.14) even though the store also
-# carries a newer one, and every consumer needing a later ABI then died:
+# `find ... | sort -V | tail -1` sorts whole /nix/store paths, and those begin
+# with a random 32-char hash -- so the "newest" library was really whichever
+# hash happened to sort last, which makes the choice nondeterministic across
+# builds. Measured in this image, the store holds four candidates:
+#     .../gcc-13.2.0-lib/lib/libstdc++.so.6.0.32      -> max CXXABI_1.3.14
+#     .../gcc-13.2.0-lib/lib/libstdc++.so.6.0.32      -> max CXXABI_1.3.14
+#     .../gfortran-13.2.0-lib/lib/libstdc++.so.6.0.32 -> max CXXABI_1.3.14
+#     .../gcc-15.3.0-lib/lib/libstdc++.so.6.0.34      -> max CXXABI_1.3.15
+# Only the last one satisfies node, whose icu4c needs CXXABI_1.3.15. On CI the
+# hash order landed on a gcc-13 copy, so node could not start at all:
 #     node: /usr/lib/libstdc++.so.6: version `CXXABI_1.3.15' not found
 #           (required by .../icu4c-78.3/lib/libicui18n.so.78)
 # which broke `npm install -g` and failed the image build outright.
 # Sorting on the *basename* orders by the real X.Y suffix. Newest is always
 # the correct pick: libstdc++.so.6 and libz.so.1 are backward-compatible,
 # so the highest version satisfies every older consumer too.
+#
+# The re-key to basename is done with a shell `while read` loop and `${p##*/}`
+# rather than the obvious `awk`: this Nix-only base image has no awk on PATH
+# ("/bin/sh: awk: command not found"), which silently empties the pipeline.
+# Only find/sort/tail plus shell builtins are used here -- all present.
 RUN set -eux \
  && mkdir -p /usr/lib /lib /etc/ld.so.conf.d \
  && for spec in \
@@ -104,8 +114,11 @@ RUN set -eux \
         LIBNAME="${spec%%|*}"; PATTERN="${spec##*|}"; \
         LIB="$(find /nix/store -regextype posix-extended \
                 -regex ".*/${PATTERN}$" -type f 2>/dev/null \
-                | awk -F/ '{print $NF" "$0}' \
-                | sort -V | tail -1 | cut -d' ' -f2-)"; \
+                | while IFS= read -r p; do \
+                      printf '%s %s\n' "${p##*/}" "${p}"; \
+                  done \
+                | sort -V | tail -1)"; \
+        LIB="${LIB#* }"; \
         if [ -z "${LIB}" ] || [ ! -s "${LIB}" ]; then \
             echo "ERROR: could not locate ${LIBNAME} under /nix/store"; \
             exit 1; \
