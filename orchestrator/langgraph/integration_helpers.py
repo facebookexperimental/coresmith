@@ -238,6 +238,31 @@ class IntegrationMismatch:
         return asdict(self)
 
 
+_ROLE_CANON = {
+    "tdata": "data", "tvalid": "valid", "tready": "ready", "tlast": "last",
+    "tkeep": "keep", "tuser": "user", "tstrb": "strb",
+    "data": "data", "valid": "valid", "ready": "ready", "last": "last",
+    "keep": "keep", "user": "user", "strb": "strb",
+    "srdy": "valid", "drdy": "ready",
+}
+
+
+def _port_role(name: str) -> Optional[str]:
+    """Canonical handshake role implied by a port-name suffix, or None.
+
+    Arm S/M retro: the substring fallback paired ``*_tready`` with
+    ``*_tdata`` and the width check then reported 7-16 phantom errors on
+    every integration accept -- which trained operators to dismiss error
+    lists wholesale (one accept waved through 9 real errors that way).
+    Ports with recognizably different handshake roles must never be
+    compared.
+    """
+    tokens = [t for t in re.split(r"[^a-z0-9]+", str(name).lower()) if t]
+    while tokens and tokens[-1] in ("o", "i", "n", "q"):
+        tokens.pop()
+    return _ROLE_CANON.get(tokens[-1]) if tokens else None
+
+
 def _find_port_fuzzy(
     module: VerilogModule,
     port_name: str,
@@ -294,10 +319,14 @@ def _find_port_fuzzy(
     # resolve. Named-port lookups never reach here with an empty key_terms.
     if not key_terms and connection_name:
         key_terms = [t for t in connection_name.split('_') if len(t) > 2]
+    want_role = _port_role(port_name) or _port_role(connection_name)
     substr_cands: list[VerilogPort] = []
     for term in key_terms:
         for port in module.ports:
             if term in port.name and port not in substr_cands:
+                cand_role = _port_role(port.name)
+                if want_role and cand_role and cand_role != want_role:
+                    continue  # never resolve across handshake roles
                 substr_cands.append(port)
     return _pick(substr_cands)
 
@@ -469,6 +498,31 @@ def check_integration_compatibility(
                 ),
                 suggested_fix=f"Change '{dst_port.name}' direction to input in {to_block}",
             ))
+
+        # Role-compatibility guard: if fuzzy/portless resolution paired ports
+        # of DIFFERENT handshake roles (e.g. tready vs tdata), a width compare
+        # is meaningless -- cannot-check != error (phantom-error class from the
+        # arm S/M retrospective). Exact requested-name pairs are exempt.
+        _src_role = _port_role(src_port.name)
+        _dst_role = _port_role(dst_port.name)
+        _was_fuzzy = (src_port.name != from_port or dst_port.name != to_port)
+        if _src_role and _dst_role and _src_role != _dst_role and _was_fuzzy:
+            mismatches.append(IntegrationMismatch(
+                from_block=from_block, to_block=to_block,
+                issue_type="role_mismatch_unverifiable", severity="info",
+                description=(
+                    f"Fuzzy resolution paired ports of different handshake "
+                    f"roles ({from_block}.{src_port.name} [{_src_role}] vs "
+                    f"{to_block}.{dst_port.name} [{_dst_role}]); skipping "
+                    f"width check (cannot check != error)"
+                ),
+                suggested_fix=(
+                    "Add explicit from_port/to_port to the architecture "
+                    "connection so the checker compares like-for-like ports"
+                ),
+                details={"connection": interface_name},
+            ))
+            continue
 
         # Width compatibility check
         if src_port.width != dst_port.width:
@@ -2166,6 +2220,120 @@ def chip_rtl_sources(
     return sources
 
 
+_DV_SPECIAL_TESTS = (
+    "test_wavekit_bounded_semantic_trace",
+    "test_frozen_acceptance_matrix",
+)
+
+
+def _mission_testcase_line(tb_source: str) -> str:
+    """Shell-safe ``COCOTB_TESTCASE`` include-list for the default (mission)
+    pass of a bounded validation TB: every top-level cocotb test except the
+    bounded-trace and frozen-acceptance specials (which run under their own
+    Makefile targets).
+
+    Exists because the exclusion CANNOT be expressed as a regex: cocotb's
+    Makefile expands ``COCOTB_TEST_FILTER`` unquoted onto a ``bash -c`` line
+    (and re-expands it in a sub-make), so any filter containing ``(|)`` dies
+    with ``syntax error near unexpected token '('`` no matter how the
+    assignment is quoted -- the failure mode that ate 5 chip-lead fix_tb
+    rounds on arm U. A comma-separated name list survives every shell layer.
+    """
+    names = re.findall(r"^async def (test_\w+)\(", tb_source or "", re.M)
+    mission = [n for n in dict.fromkeys(names) if n not in _DV_SPECIAL_TESTS]
+    if not mission or not (set(names) & set(_DV_SPECIAL_TESTS)):
+        return ""
+    return "COCOTB_TESTCASE = " + ",".join(mission) + "\n"
+
+
+def _compose_dv_makefile(
+    sim_scope: str,
+    tb_source: str,
+    sources_str: str,
+    safe_name: str,
+    module_stem: str,
+) -> str:
+    """Makefile for the integration/validation cocotb sim.
+
+    Bounded-validation mode (ported from a chip-lead hot-patch authored live
+    on arm U, which cut the validation sim from a 900s VCD-explosion timeout
+    to ~7 min): when the validation TB provides an explicit bounded semantic
+    trace test, run THAT one test with tracing (depth-capped so mandatory
+    WaveKit evidence cannot grow with mission runtime) and run the full
+    application matrix untraced -- sharded 4-wide when the TB supports
+    ``ACCEPTANCE_SHARD``. The default cocotb pass covers the remaining
+    mission tests via a shell-safe COCOTB_TESTCASE list (see
+    :func:`_mission_testcase_line`).
+    """
+    bounded = (
+        sim_scope == "validation"
+        and "test_wavekit_bounded_semantic_trace" in (tb_source or "")
+    )
+    if not bounded:
+        return f"""
+SIM = verilator
+TOPLEVEL_LANG = verilog
+VERILOG_SOURCES = {sources_str}
+TOPLEVEL = {safe_name}
+MODULE = {module_stem}
+WAVES = 1
+EXTRA_ARGS += --trace --trace-structs
+EXTRA_ARGS += --build-jobs 1
+include $(shell cocotb-config --makefiles)/Makefile.sim
+"""
+    sharded = (
+        "test_frozen_acceptance_matrix" in tb_source
+        and "ACCEPTANCE_SHARD" in tb_source
+    )
+    mission_line = _mission_testcase_line(tb_source)
+    acceptance_rules = ""
+    if sharded:
+        acceptance_rules = r"""
+ACCEPTANCE_SHARDS = 0 1 2 3 4 5 6 7 8 9 10 11
+ACCEPTANCE_TARGETS = $(addprefix acceptance_shard_,$(ACCEPTANCE_SHARDS))
+
+.PHONY: acceptance_shards
+sim: acceptance_shards
+
+acceptance_shards: $(SIM_BUILD)/Vtop
+	$(MAKE) -j4 $(ACCEPTANCE_TARGETS)
+
+acceptance_shard_%: $(SIM_BUILD)/Vtop
+	$(RM) acceptance_shard_$*.xml
+	ACCEPTANCE_SHARD=$* \
+	COCOTB_RESULTS_FILE=acceptance_shard_$*.xml \
+	COCOTB_TEST_MODULES=$(MODULE) \
+	COCOTB_TEST_FILTER=test_frozen_acceptance_matrix \
+	COCOTB_TOPLEVEL=$(TOPLEVEL) TOPLEVEL_LANG=$(TOPLEVEL_LANG) \
+	$(SIM_BUILD)/Vtop
+	$(PYTHON_BIN) -m cocotb_tools.check_results acceptance_shard_$*.xml
+"""
+    return rf"""
+SIM = verilator
+TOPLEVEL_LANG = verilog
+VERILOG_SOURCES = {sources_str}
+TOPLEVEL = {safe_name}
+MODULE = {module_stem}
+COMPILE_ARGS += --trace --trace-structs --trace-depth 1 --trace-max-array 64
+EXTRA_ARGS += --build-jobs 1
+CUSTOM_COMPILE_DEPS += Makefile
+{mission_line}include $(shell cocotb-config --makefiles)/Makefile.sim
+
+.PHONY: bounded_waveform
+sim: bounded_waveform
+
+bounded_waveform: $(SIM_BUILD)/Vtop
+	$(RM) trace_results.xml dump.vcd
+	COCOTB_RESULTS_FILE=trace_results.xml \
+	COCOTB_TEST_MODULES=$(MODULE) \
+	COCOTB_TEST_FILTER=test_wavekit_bounded_semantic_trace \
+	COCOTB_TOPLEVEL=$(TOPLEVEL) TOPLEVEL_LANG=$(TOPLEVEL_LANG) \
+	$(SIM_BUILD)/Vtop --trace --trace-file dump.vcd
+	$(PYTHON_BIN) -m cocotb_tools.check_results trace_results.xml
+{acceptance_rules}
+"""
+
+
 def run_integration_simulation(
     design_name: str,
     top_rtl_path: str,
@@ -2249,19 +2417,13 @@ def run_integration_simulation(
     # sims (run_simulation) already trace unconditionally -- only this path was
     # env-gated. (Per-block sims may stay env-gated for speed if ever needed; the
     # integration/validation path may not, because its audit is fail-closed.)
-    _waves = "1"
-    _trace_args = "--trace --trace-structs"
-    makefile_content = f"""
-SIM = verilator
-TOPLEVEL_LANG = verilog
-VERILOG_SOURCES = {sources_str}
-TOPLEVEL = {safe_name}
-MODULE = {Path(tb_path).stem}
-WAVES = {_waves}
-EXTRA_ARGS += {_trace_args}
-EXTRA_ARGS += --build-jobs 1
-include $(shell cocotb-config --makefiles)/Makefile.sim
-"""
+    try:
+        _tb_source = Path(tb_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        _tb_source = ""
+    makefile_content = _compose_dv_makefile(
+        sim_scope, _tb_source, sources_str, safe_name, Path(tb_path).stem,
+    )
     # Pre-run hygiene: the INTEGRATION/VALIDATION sims are engine-authoritative,
     # rare, and correctness-critical (their PASS verdict hard-requires a WaveKit
     # VCD audit). Unconditionally wipe any pre-existing build products in this dir

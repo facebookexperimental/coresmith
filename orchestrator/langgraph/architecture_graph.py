@@ -59,6 +59,25 @@ _tracer = trace.get_tracer("coresmith.langgraph.architecture_graph")
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+async def _arch_resolve_interrupt(payload: dict) -> dict:
+    """Architecture-phase interrupts through the in-graph chip lead
+    (CORESMITH_ENABLE_CHIP_LEAD) -- previously only the pipeline graph was
+    wrapped, so every PRD/diagram/constraint/final-review park waited on a
+    human even in fully-autonomous runs. Lazy import avoids a module cycle;
+    any failure falls back to a plain parked interrupt."""
+    try:
+        from orchestrator.langgraph.pipeline_graph import (
+            _chip_lead_enabled,
+            _resolve_interrupt,
+        )
+        if _chip_lead_enabled():
+            return await _resolve_interrupt(payload)
+    except ImportError:
+        pass
+    return interrupt(payload)
+
+
 def _pr(state: dict) -> str:
     """Extract project_root from graph state."""
     return state.get("project_root", ".")
@@ -2083,7 +2102,7 @@ async def escalate_final_review_node(state: ArchGraphState) -> dict:
         ),
     }
 
-    response = interrupt(payload)
+    response = await _arch_resolve_interrupt(payload)
 
     action = response.get("action", "abort") if isinstance(response, dict) else "abort"
     feedback_text = response.get("feedback", "") if isinstance(response, dict) else ""
@@ -2185,7 +2204,7 @@ async def escalate_prd_node(state: ArchGraphState) -> dict:
         ),
     }
 
-    response = interrupt(payload)
+    response = await _arch_resolve_interrupt(payload)
 
     action = response.get("action", "abort") if isinstance(response, dict) else "abort"
     has_answers = (
@@ -2272,7 +2291,7 @@ async def escalate_diagram_node(state: ArchGraphState) -> dict:
         ],
     }
 
-    response = interrupt(payload)
+    response = await _arch_resolve_interrupt(payload)
 
     action = response.get("action", "abort") if isinstance(response, dict) else "abort"
 
@@ -2367,7 +2386,7 @@ async def escalate_constraints_node(state: ArchGraphState) -> dict:
             "'accept' to proceed with a documented supersession."
         )
 
-    response = interrupt(payload)
+    response = await _arch_resolve_interrupt(payload)
 
     action = response.get("action", "abort") if isinstance(response, dict) else "abort"
 
@@ -2446,7 +2465,7 @@ async def escalate_exhausted_node(state: ArchGraphState) -> dict:
             "'feedback' after editing the upstream requirement, or 'accept'."
         )
 
-    response = interrupt(payload)
+    response = await _arch_resolve_interrupt(payload)
 
     action = response.get("action", "abort") if isinstance(response, dict) else "abort"
 
