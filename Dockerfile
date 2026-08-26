@@ -83,6 +83,19 @@ ENV PATH="/root/.nix-profile/bin:${PATH}"
 # symlink it into a path the loader actually searches.
 #   build error this fixes:
 #     ImportError: libstdc++.so.6: cannot open shared object file: No such file or directory
+#
+# The candidate must be picked by *library version*, not by store path.
+# `find ... | sort -V | tail -1` sorts whole /nix/store paths, and those
+# begin with a random 32-char hash -- so the "newest" library was really
+# whichever hash happened to sort last. That silently selected nixos-24.05's
+# gcc-13 libstdc++.so.6.0.32 (max CXXABI_1.3.14) even though the store also
+# carries a newer one, and every consumer needing a later ABI then died:
+#     node: /usr/lib/libstdc++.so.6: version `CXXABI_1.3.15' not found
+#           (required by .../icu4c-78.3/lib/libicui18n.so.78)
+# which broke `npm install -g` and failed the image build outright.
+# Sorting on the *basename* orders by the real X.Y suffix. Newest is always
+# the correct pick: libstdc++.so.6 and libz.so.1 are backward-compatible,
+# so the highest version satisfies every older consumer too.
 RUN set -eux \
  && mkdir -p /usr/lib /lib /etc/ld.so.conf.d \
  && for spec in \
@@ -91,7 +104,8 @@ RUN set -eux \
         LIBNAME="${spec%%|*}"; PATTERN="${spec##*|}"; \
         LIB="$(find /nix/store -regextype posix-extended \
                 -regex ".*/${PATTERN}$" -type f 2>/dev/null \
-                | sort -V | tail -1)"; \
+                | awk -F/ '{print $NF" "$0}' \
+                | sort -V | tail -1 | cut -d' ' -f2-)"; \
         if [ -z "${LIB}" ] || [ ! -s "${LIB}" ]; then \
             echo "ERROR: could not locate ${LIBNAME} under /nix/store"; \
             exit 1; \
@@ -118,12 +132,20 @@ ENV LD_LIBRARY_PATH="/usr/lib:/lib:${LD_LIBRARY_PATH}"
 # Also verify g++ is reachable -- verilator shells out to it to
 # compile the testbench simulator and the missing-compiler error
 # only surfaces when sim runs, which is too late.
+#
+# `node --version` is checked here too: node is the first consumer of the
+# libstdc++ symlinked above, and when that symlink points at too old a
+# libstdc++ node cannot start at all. Catching it here reports the ABI
+# mismatch directly instead of surfacing 4 layers later as an opaque
+# `npm install` exit code 1.
 RUN set -eux \
  && which verilator \
  && verilator --version \
  && verilator --version | python3 -c "import sys,re; v=sys.stdin.read().strip(); m=re.search(r'(\d+)\.(\d+)', v); maj,min=int(m.group(1)),int(m.group(2)); assert (maj,min) >= (5,36), f'verilator too old: {v}'; print(f'verilator OK: {v}')" \
  && which g++ \
- && g++ --version | head -1
+ && g++ --version | head -1 \
+ && which node \
+ && node --version
 
 # Make the musl ELF interpreter resolvable at the FHS path the binary
 # is hard-linked against. nix's musl ships ld-musl-x86_64.so.1 which is
