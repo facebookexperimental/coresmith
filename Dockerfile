@@ -243,7 +243,7 @@ RUN mkdir -p /opt/npm-global \
         @anthropic-ai/claude-code \
         @anthropic-ai/claude-code-linux-x64-musl \
         opencode-ai \
-        opencode-linux-x64-musl
+        opencode-linux-x64
 
 # `npm install -g`'s postinstall on the wrapper package may have copied
 # the glibc binary over bin/claude.exe (because Nix Node is glibc-
@@ -254,12 +254,31 @@ RUN set -eux \
  && test -x "${MUSL_BIN}" \
  && ln -sf "${MUSL_BIN}" /opt/npm-global/bin/claude
 
-# OpenCode also ships glibc and musl native variants. This image needs the
-# explicit x64-musl binary for the same reason as Claude Code above.
+# OpenCode ships both glibc and musl native variants, and unlike Claude Code
+# this image needs the *glibc* one. Their ELF requirements differ decisively:
+#
+#   opencode-linux-x64-musl: interp /lib/ld-musl-x86_64.so.1
+#                            NEEDED libstdc++.so.6, libc.musl-x86_64.so.1,
+#                                   libgcc_s.so.1
+#   opencode-linux-x64:      interp /lib64/ld-linux-x86-64.so.2
+#                            NEEDED libc.so.6, ld-linux-x86-64.so.2,
+#                                   libpthread.so.0, libdl.so.2, libm.so.6
+#
+# The musl build wants a *musl* libstdc++ and a libgcc_s.so.1. This image has
+# neither: the libstdc++ symlinked above is glibc-built, and no libgcc_s is
+# published at an FHS path at all. So it failed at build time with
+#   Error loading shared library libgcc_s.so.1: No such file or directory
+#   Error relocating /usr/lib/libstdc++.so.6: arc4random: symbol not found
+#   Error relocating /usr/lib/libstdc++.so.6: __libc_single_threaded: ...
+# (arc4random and __libc_single_threaded are glibc symbols musl does not have).
+#
+# The glibc build needs only core glibc, and its interpreter is already
+# symlinked above for the Codespaces agent -- so it just runs. Claude Code
+# still uses its musl variant, which needs no libstdc++/libgcc_s at all.
 RUN set -eux \
- && OPENCODE_MUSL_BIN=/opt/npm-global/lib/node_modules/opencode-linux-x64-musl/bin/opencode \
- && test -x "${OPENCODE_MUSL_BIN}" \
- && ln -sf "${OPENCODE_MUSL_BIN}" /opt/npm-global/bin/opencode
+ && OPENCODE_GLIBC_BIN=/opt/npm-global/lib/node_modules/opencode-linux-x64/bin/opencode \
+ && test -x "${OPENCODE_GLIBC_BIN}" \
+ && ln -sf "${OPENCODE_GLIBC_BIN}" /opt/npm-global/bin/opencode
 
 # Capture the resolved agent CLI paths at build time and bake them so runtime
 # resolution can't drift if PATH changes under us. Fail the build loud if any
