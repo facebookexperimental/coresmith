@@ -30,9 +30,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ubuntu-latest gives ~14 GB free; the openlane2 base (~4 GB extracted)
+      # + nix-channel update + Sky130 PDK (~2 GB) already push past that, and
+      # `load: true` materialises the whole ~15 GB image a *second* time when
+      # the docker daemon imports the buildx tarball. Without this the export
+      # dies with
+      #   #28 importing to docker
+      #   ERROR: write /blobs/sha256/...: no space left on device
+      # publish-image.yml and test-mcu3.yml already carry this step; it was
+      # simply never added here. Frees ~25 GB up front.
+      - name: Free runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /opt/hostedtoolcache/CodeQL || true
+          sudo docker system prune -af || true
+          df -h /
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # No `cache-from`/`cache-to: type=gha` here, deliberately:
+      #   1. Nothing has ever populated that cache -- the build has failed
+      #      before the export step on every scheduled run -- so every
+      #      `cache-from` was already a cold miss.
+      #   2. This job exists to catch *upstream* rot (base image, nix
+      #      channels, PyPI, Sky130 PDK URLs -- see the header comment). A
+      #      warm layer cache would replay yesterday's layers and hide
+      #      exactly the breakage the nightly is supposed to find.
+      #   3. `mode=max` on a ~15 GB image cannot fit GitHub's 10 GB per-repo
+      #      cache budget anyway; it would thrash and evict.
+      # A cold build measures ~6 min, so there is nothing to buy back.
       - name: Build coresmith image
         uses: docker/build-push-action@v5
         with:
@@ -40,12 +68,22 @@ jobs:
           file: Dockerfile
           tags: coresmith:nightly
           load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
+      # CORESMITH_ALLOW_NO_OPENRAM=1 is the documented opt-out from the
+      # "no OpenRAM, no greenlight" preflight gate in
+      # orchestrator/langgraph/pipeline_helpers.py, and it is legitimate
+      # here: the only design this workflow drives is adder8, an 8-bit
+      # combinational adder with provably no memories, so no generated SRAM
+      # macro can ever be required. The image does not ship OpenRAM, so
+      # without this the toolchain smoke test can never pass -- it would
+      # fail on a capability the nightly does not exercise. Everything the
+      # nightly *does* care about (yosys, OpenROAD, magic, netgen,
+      # verilator, cocotb, the Sky130 PDK) is still checked, and the gate
+      # still fires for every real design.
       - name: Preflight check inside container
         run: |
-          docker run --rm coresmith:nightly bash -lc 'cd /coresmith && make preflight'
+          docker run --rm -e CORESMITH_ALLOW_NO_OPENRAM=1 \
+              coresmith:nightly bash -lc 'cd /coresmith && make preflight'
 
   stage-fixtures:
     name: Stage fixtures (strict)
@@ -91,17 +129,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Same headroom problem as docker-build: `load: true` needs room for
+      # the image twice over. See the comment on that job's copy of this step.
+      - name: Free runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /opt/hostedtoolcache/CodeQL || true
+          sudo docker system prune -af || true
+          df -h /
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Restore coresmith image
+      # `cache-from: type=gha` is gone for the same reason as in
+      # docker-build: nothing populates that cache, so this was already a
+      # cold rebuild in practice -- the step name now says so.
+      - name: Rebuild coresmith image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: Dockerfile
           tags: coresmith:nightly
           load: true
-          cache-from: type=gha
 
       - name: Check secret presence
         id: have_token
@@ -126,6 +176,7 @@ jobs:
               -e CLAUDE_CODE_OAUTH_TOKEN \
               -e CORESMITH_MODEL=sonnet-5 \
               -e CORESMITH_PROFILE=strict \
+              -e CORESMITH_ALLOW_NO_OPENRAM=1 \
               -v "${{ github.workspace }}/.coresmith:/coresmith/.coresmith" \
               coresmith:nightly bash -lc 'cd /coresmith && \
                 python3 scripts/nightly_canary.py \

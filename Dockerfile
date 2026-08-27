@@ -83,6 +83,29 @@ ENV PATH="/root/.nix-profile/bin:${PATH}"
 # symlink it into a path the loader actually searches.
 #   build error this fixes:
 #     ImportError: libstdc++.so.6: cannot open shared object file: No such file or directory
+#
+# The candidate must be picked by *library version*, not by store path.
+# `find ... | sort -V | tail -1` sorts whole /nix/store paths, and those begin
+# with a random 32-char hash -- so the "newest" library was really whichever
+# hash happened to sort last, which makes the choice nondeterministic across
+# builds. Measured in this image, the store holds four candidates:
+#     .../gcc-13.2.0-lib/lib/libstdc++.so.6.0.32      -> max CXXABI_1.3.14
+#     .../gcc-13.2.0-lib/lib/libstdc++.so.6.0.32      -> max CXXABI_1.3.14
+#     .../gfortran-13.2.0-lib/lib/libstdc++.so.6.0.32 -> max CXXABI_1.3.14
+#     .../gcc-15.3.0-lib/lib/libstdc++.so.6.0.34      -> max CXXABI_1.3.15
+# Only the last one satisfies node, whose icu4c needs CXXABI_1.3.15. On CI the
+# hash order landed on a gcc-13 copy, so node could not start at all:
+#     node: /usr/lib/libstdc++.so.6: version `CXXABI_1.3.15' not found
+#           (required by .../icu4c-78.3/lib/libicui18n.so.78)
+# which broke `npm install -g` and failed the image build outright.
+# Sorting on the *basename* orders by the real X.Y suffix. Newest is always
+# the correct pick: libstdc++.so.6 and libz.so.1 are backward-compatible,
+# so the highest version satisfies every older consumer too.
+#
+# The re-key to basename is done with a shell `while read` loop and `${p##*/}`
+# rather than the obvious `awk`: this Nix-only base image has no awk on PATH
+# ("/bin/sh: awk: command not found"), which silently empties the pipeline.
+# Only find/sort/tail plus shell builtins are used here -- all present.
 RUN set -eux \
  && mkdir -p /usr/lib /lib /etc/ld.so.conf.d \
  && for spec in \
@@ -91,7 +114,11 @@ RUN set -eux \
         LIBNAME="${spec%%|*}"; PATTERN="${spec##*|}"; \
         LIB="$(find /nix/store -regextype posix-extended \
                 -regex ".*/${PATTERN}$" -type f 2>/dev/null \
+                | while IFS= read -r p; do \
+                      printf '%s %s\n' "${p##*/}" "${p}"; \
+                  done \
                 | sort -V | tail -1)"; \
+        LIB="${LIB#* }"; \
         if [ -z "${LIB}" ] || [ ! -s "${LIB}" ]; then \
             echo "ERROR: could not locate ${LIBNAME} under /nix/store"; \
             exit 1; \
@@ -118,12 +145,20 @@ ENV LD_LIBRARY_PATH="/usr/lib:/lib:${LD_LIBRARY_PATH}"
 # Also verify g++ is reachable -- verilator shells out to it to
 # compile the testbench simulator and the missing-compiler error
 # only surfaces when sim runs, which is too late.
+#
+# `node --version` is checked here too: node is the first consumer of the
+# libstdc++ symlinked above, and when that symlink points at too old a
+# libstdc++ node cannot start at all. Catching it here reports the ABI
+# mismatch directly instead of surfacing 4 layers later as an opaque
+# `npm install` exit code 1.
 RUN set -eux \
  && which verilator \
  && verilator --version \
  && verilator --version | python3 -c "import sys,re; v=sys.stdin.read().strip(); m=re.search(r'(\d+)\.(\d+)', v); maj,min=int(m.group(1)),int(m.group(2)); assert (maj,min) >= (5,36), f'verilator too old: {v}'; print(f'verilator OK: {v}')" \
  && which g++ \
- && g++ --version | head -1
+ && g++ --version | head -1 \
+ && which node \
+ && node --version
 
 # Make the musl ELF interpreter resolvable at the FHS path the binary
 # is hard-linked against. nix's musl ships ld-musl-x86_64.so.1 which is
@@ -208,7 +243,7 @@ RUN mkdir -p /opt/npm-global \
         @anthropic-ai/claude-code \
         @anthropic-ai/claude-code-linux-x64-musl \
         opencode-ai \
-        opencode-linux-x64-musl
+        opencode-linux-x64
 
 # `npm install -g`'s postinstall on the wrapper package may have copied
 # the glibc binary over bin/claude.exe (because Nix Node is glibc-
@@ -219,12 +254,31 @@ RUN set -eux \
  && test -x "${MUSL_BIN}" \
  && ln -sf "${MUSL_BIN}" /opt/npm-global/bin/claude
 
-# OpenCode also ships glibc and musl native variants. This image needs the
-# explicit x64-musl binary for the same reason as Claude Code above.
+# OpenCode ships both glibc and musl native variants, and unlike Claude Code
+# this image needs the *glibc* one. Their ELF requirements differ decisively:
+#
+#   opencode-linux-x64-musl: interp /lib/ld-musl-x86_64.so.1
+#                            NEEDED libstdc++.so.6, libc.musl-x86_64.so.1,
+#                                   libgcc_s.so.1
+#   opencode-linux-x64:      interp /lib64/ld-linux-x86-64.so.2
+#                            NEEDED libc.so.6, ld-linux-x86-64.so.2,
+#                                   libpthread.so.0, libdl.so.2, libm.so.6
+#
+# The musl build wants a *musl* libstdc++ and a libgcc_s.so.1. This image has
+# neither: the libstdc++ symlinked above is glibc-built, and no libgcc_s is
+# published at an FHS path at all. So it failed at build time with
+#   Error loading shared library libgcc_s.so.1: No such file or directory
+#   Error relocating /usr/lib/libstdc++.so.6: arc4random: symbol not found
+#   Error relocating /usr/lib/libstdc++.so.6: __libc_single_threaded: ...
+# (arc4random and __libc_single_threaded are glibc symbols musl does not have).
+#
+# The glibc build needs only core glibc, and its interpreter is already
+# symlinked above for the Codespaces agent -- so it just runs. Claude Code
+# still uses its musl variant, which needs no libstdc++/libgcc_s at all.
 RUN set -eux \
- && OPENCODE_MUSL_BIN=/opt/npm-global/lib/node_modules/opencode-linux-x64-musl/bin/opencode \
- && test -x "${OPENCODE_MUSL_BIN}" \
- && ln -sf "${OPENCODE_MUSL_BIN}" /opt/npm-global/bin/opencode
+ && OPENCODE_GLIBC_BIN=/opt/npm-global/lib/node_modules/opencode-linux-x64/bin/opencode \
+ && test -x "${OPENCODE_GLIBC_BIN}" \
+ && ln -sf "${OPENCODE_GLIBC_BIN}" /opt/npm-global/bin/opencode
 
 # Capture the resolved agent CLI paths at build time and bake them so runtime
 # resolution can't drift if PATH changes under us. Fail the build loud if any
