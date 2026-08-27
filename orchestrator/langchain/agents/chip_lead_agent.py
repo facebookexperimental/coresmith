@@ -36,7 +36,17 @@ class ChipLeadAgent:
             or os.environ.get("CORESMITH_CHIP_LEAD_MODEL")
             or DEFAULT_MODEL
         )
-        self.llm = ClaudeLLM(model=model, timeout=900)
+        import os as _os
+        try:
+            _to = int(_os.environ.get("CORESMITH_CHIP_LEAD_TIMEOUT_S", "1800")
+                      or "1800")
+        except ValueError:
+            _to = 1800
+        # Arm-F live finding: two consecutive 900s hard-timeouts on one
+        # heavy validation_dv_failure decision tripped the fail-safe twice.
+        # Chip-lead decisions legitimately explore the run tree; give them
+        # the same ceiling as a long audit. Override via env.
+        self.llm = ClaudeLLM(model=model, timeout=_to)
 
     async def decide(
         self,
