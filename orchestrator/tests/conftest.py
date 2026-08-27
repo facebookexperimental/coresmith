@@ -81,6 +81,72 @@ def _reset_profile_state():
     _profile.reset()
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Fail-closed: no live provider CLI in the marker-excluded (PR) suite
+# ═══════════════════════════════════════════════════════════════════════════
+# ``_detect_provider()`` defaults to ``claude_cli``, so any node that reaches a
+# real ``ClaudeLLM.call()`` shells out to the actual Claude CLI:
+#
+#   claude -p --output-format stream-json --model opus --max-turns 50 ...
+#
+# Several graph tests did exactly that while carrying no ``live_llm`` marker --
+# test_pipeline_graph's end-to-end walks reach ``uarch_integration_review``,
+# which runs the Integration Review agent for real. CI installs the Claude CLI
+# (the workflow needs it on PATH so import-time ``ClaudeLLM()`` construction
+# does not raise), so those calls actually launch. That is what turned a
+# minutes-long unit suite into a 2-6 hour job that intermittently hit GitHub's
+# 6-hour ceiling, and what starved the wall-clock budget of the fixed-timeout
+# assertions elsewhere in the suite.
+#
+# Every test NOT marked ``live_llm`` gets the five provider CLI path env vars
+# pointed at a stub that exits non-zero immediately. Resolution still succeeds
+# (the path exists and is executable), so import-time construction behaves
+# exactly as before -- only an actual model invocation changes, and it now
+# fails fast and deterministically instead of burning wall-clock.
+#
+# Escape hatch: ``CORESMITH_ALLOW_LIVE_LLM_IN_TESTS=1`` restores the previous
+# behavior for the whole session.
+
+_PROVIDER_CLI_ENV = (
+    "CLAUDE_CLI_PATH",
+    "CODEX_CLI_PATH",
+    "KIMI_CLI_PATH",
+    "AGY_CLI_PATH",
+    "OPENCODE_CLI_PATH",
+)
+
+_LLM_CLI_STUB_SRC = """#!/bin/sh
+echo "coresmith tests: refusing a live provider CLI call." >&2
+echo "This test is not marked 'live_llm'. Mark it, or stub the agent." >&2
+exit 1
+"""
+
+
+def live_llm_calls_allowed() -> bool:
+    """True when the suite is permitted to shell out to a real provider CLI."""
+    return os.environ.get("CORESMITH_ALLOW_LIVE_LLM_IN_TESTS", "") == "1"
+
+
+@pytest.fixture(scope="session")
+def llm_cli_stub(tmp_path_factory) -> str:
+    """Path to an executable stub that stands in for a provider CLI."""
+    stub = tmp_path_factory.mktemp("llm_cli_stub") / "no-live-llm"
+    stub.write_text(_LLM_CLI_STUB_SRC)
+    stub.chmod(0o755)
+    return str(stub)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_llm_cli(request, monkeypatch, llm_cli_stub):
+    """Point every provider CLI at the stub unless the test opts into live LLM."""
+    if live_llm_calls_allowed():
+        return
+    if request.node.get_closest_marker("live_llm"):
+        return
+    for var in _PROVIDER_CLI_ENV:
+        monkeypatch.setenv(var, llm_cli_stub)
+
+
 @pytest.fixture
 def replay_llm(monkeypatch):
     """Route ``ClaudeLLM`` through the record/replay backend (Package C, C4).

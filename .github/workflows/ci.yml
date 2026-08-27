@@ -13,6 +13,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The unit suite is minutes of work. It previously ran for 2-6 h because
+    # unmarked tests shelled out to a real provider CLI, and one main run was
+    # cancelled at GitHub's 6 h ceiling. A ceiling of our own turns any repeat
+    # into a fast, legible failure instead of a silent all-day burn.
+    timeout-minutes: 60
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
