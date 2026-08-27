@@ -11704,6 +11704,22 @@ async def final_report_node(state: OrchestratorState) -> dict:
             f"cov(min) {sign.get('coverage_min_pct')}%, "
             f"Fmax {sign.get('top_fmax_mhz')} MHz", CYAN)
         log(f"  wrote {root / 'final_report.md'}", CYAN)
+        # Opt-in labeled SFT dataset (CORESMITH_EMIT_SFT=1): publish
+        # <run>/sft/ from the verified artifacts. Never fails the report.
+        try:
+            from orchestrator.langgraph.sft_export import (
+                emit_sft_dataset, sft_enabled,
+            )
+            if sft_enabled():
+                _sft = emit_sft_dataset(pr)
+                if _sft:
+                    _cnt = ", ".join(
+                        f"{k}={v}" for k, v in _sft["counts"].items())
+                    log(f"  [SFT] labeled dataset: {_sft['total_pairs']} "
+                        f"pairs ({_cnt}) -> {root / 'sft'}", GREEN)
+        except Exception as _sft_exc:  # noqa: BLE001
+            log(f"  [SFT] dataset emission failed (non-fatal): {_sft_exc}",
+                YELLOW)
         log(f"{'='*60}\n", CYAN)
         write_graph_event(pr, "Final Report", "graph_node_exit", {
             "status": sign.get("status"),
