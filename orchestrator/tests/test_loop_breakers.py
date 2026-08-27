@@ -459,3 +459,59 @@ class TestHarnessAuditFastpath:
     def test_clean_and_design_logs_do_not_match(self):
         assert pipeline_graph._harness_failure_fingerprint(self.DESIGN_LOG) is None
         assert pipeline_graph._harness_failure_fingerprint("") is None
+
+
+class TestChipLeadFailureRetry:
+    """Arm-F finding: one provider hard-timeout must not trip the sticky
+    fail-safe; a single fresh retry absorbs it, two consecutive failures
+    still trip."""
+
+    @pytest.fixture(autouse=True)
+    def _reset(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(pipeline_graph, "_CHIP_LEAD_TRIPPED", False)
+        monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setenv("CORESMITH_ENABLE_CHIP_LEAD", "1")
+
+    @pytest.mark.asyncio
+    async def test_one_failure_retries_and_recovers(self, monkeypatch):
+        from orchestrator.langchain.agents import chip_lead_agent
+        calls = []
+
+        async def fake_decide(self, *, payload, prior_decisions=None):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("codex CLI timed out after 900s")
+            return {"action": "retry", "reasoning": "recovered"}
+
+        monkeypatch.setattr(chip_lead_agent.ChipLeadAgent, "__init__",
+                            lambda self, model=None: None)
+        monkeypatch.setattr(chip_lead_agent.ChipLeadAgent, "decide",
+                            fake_decide)
+        monkeypatch.setattr(
+            pipeline_graph, "interrupt",
+            lambda p: (_ for _ in ()).throw(AssertionError("parked")))
+        out = await pipeline_graph._resolve_interrupt(
+            {"type": "x", "supported_actions": ["retry", "abort"]})
+        assert out["action"] == "retry"
+        assert len(calls) == 2
+        assert pipeline_graph._CHIP_LEAD_TRIPPED is False
+
+    @pytest.mark.asyncio
+    async def test_two_failures_trip(self, monkeypatch):
+        from orchestrator.langchain.agents import chip_lead_agent
+
+        async def fake_decide(self, *, payload, prior_decisions=None):
+            raise RuntimeError("codex CLI timed out after 900s")
+
+        monkeypatch.setattr(chip_lead_agent.ChipLeadAgent, "__init__",
+                            lambda self, model=None: None)
+        monkeypatch.setattr(chip_lead_agent.ChipLeadAgent, "decide",
+                            fake_decide)
+        parked = []
+        monkeypatch.setattr(pipeline_graph, "interrupt",
+                            lambda p: parked.append(p) or {"action": "abort"})
+        out = await pipeline_graph._resolve_interrupt(
+            {"type": "x", "supported_actions": ["retry", "abort"]})
+        assert out == {"action": "abort"}
+        assert len(parked) == 1
+        assert pipeline_graph._CHIP_LEAD_TRIPPED is True

@@ -930,10 +930,21 @@ async def _resolve_interrupt(payload: dict) -> dict:
             payload=payload, prior_decisions=prior[-10:],
         )
     except Exception as exc:  # noqa: BLE001
-        log(f"  [CHIP-LEAD] agent failed ({exc}) -- tripping to parked "
-            "interrupts", RED)
-        _CHIP_LEAD_TRIPPED = True
-        return interrupt(payload)
+        # Arm-F live finding: a single provider hard-timeout tripped the
+        # fail-safe, and un-tripping needs a daemon restart. One fresh
+        # retry before the trip absorbs one-off provider stalls; a second
+        # consecutive failure still trips.
+        log(f"  [CHIP-LEAD] agent failed ({exc}) -- one retry before "
+            "tripping", YELLOW)
+        try:
+            decision = await ChipLeadAgent().decide(
+                payload=payload, prior_decisions=prior[-10:],
+            )
+        except Exception as exc2:  # noqa: BLE001
+            log(f"  [CHIP-LEAD] agent failed again ({exc2}) -- tripping "
+                "to parked interrupts", RED)
+            _CHIP_LEAD_TRIPPED = True
+            return interrupt(payload)
 
     action = (decision or {}).get("action", "")
     supported = payload.get("supported_actions") or []
@@ -7005,22 +7016,47 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                     _stale2 = stale_uarch_spec_blocks(pr, _passed_names)
                     if _stale2:
                         _s2 = [s["block"] for s in _stale2]
+                        # Arm-F live finding: a retry cannot refresh stamps,
+                        # so persistent staleness used to END the run with
+                        # work pending (a strand needing an operator
+                        # restart-node). Escalate ONCE to an override/abort
+                        # park instead -- deliberate contract corrections are
+                        # exactly the override case.
                         log(f"  [INTEGRATION] staleness persists after retry "
-                            f"({_s2}) -- ending integration (fail-closed, "
-                            f"re-drive the stale blocks first)", RED)
-                        result = {
-                            "aborted": True, "skipped": True,
-                            "reason": ("stale uarch specs persist after "
-                                       f"retry: {_s2}"),
-                            "error": "stale_uarch_specs",
-                            "error_count": len(_stale2),
+                            f"({_s2}) -- escalating to override/abort", RED)
+                        response = (await _resolve_interrupt({
+                            **payload,
+                            "retry_failed": True,
                             "stale_blocks": _s2,
-                        }
-                        write_graph_event(pr, "Integration Check",
-                                          "graph_node_exit", result)
-                        return {"integration_result": result}
-                    log("  [INTEGRATION] staleness cleared on retry -- "
-                        "proceeding to assembly", GREEN)
+                            "supported_actions": ["override", "abort"],
+                            "outer_agent_guidance": (
+                                "A retry was already taken and the staleness "
+                                "persists (retry cannot refresh uArch "
+                                "stamps). If the stamp drift traces to a "
+                                "DELIBERATE spec/contract correction, "
+                                "override; otherwise abort and re-drive the "
+                                "stale blocks."
+                            ),
+                        })) or {}
+                        if response.get("action") == "override":
+                            log("  [INTEGRATION] staleness OVERRIDE (post-"
+                                "retry) -- assembling despite stale specs",
+                                YELLOW)
+                        else:
+                            result = {
+                                "aborted": True, "skipped": True,
+                                "reason": ("stale uarch specs persist after "
+                                           f"retry: {_s2}"),
+                                "error": "stale_uarch_specs",
+                                "error_count": len(_stale2),
+                                "stale_blocks": _s2,
+                            }
+                            write_graph_event(pr, "Integration Check",
+                                              "graph_node_exit", result)
+                            return {"integration_result": result}
+                    else:
+                        log("  [INTEGRATION] staleness cleared on retry -- "
+                            "proceeding to assembly", GREEN)
 
         connections, design_name = await asyncio.to_thread(
             load_architecture_connections, pr

@@ -30,17 +30,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Free runner disk
-        # The ~15 GB image is materialized twice by `load: true` (buildx
-        # tarball + daemon import) on a runner that starts with ~14 GB free;
-        # every scheduled run died on ENOSPC before this step existed.
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-                      /opt/hostedtoolcache/CodeQL || true
-          sudo docker system prune -af || true
-          df -h /
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -51,11 +40,12 @@ jobs:
           file: Dockerfile
           tags: coresmith:nightly
           load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Preflight check inside container
         run: |
-          docker run --rm -e CORESMITH_ALLOW_NO_OPENRAM=1 \
-              coresmith:nightly bash -lc 'cd /coresmith && make preflight'
+          docker run --rm coresmith:nightly bash -lc 'cd /coresmith && make preflight'
 
   stage-fixtures:
     name: Stage fixtures (strict)
@@ -104,17 +94,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Free runner disk
-        # The ~15 GB image is materialized twice by `load: true` (buildx
-        # tarball + daemon import) on a runner that starts with ~14 GB free;
-        # every scheduled run died on ENOSPC before this step existed.
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-                      /opt/hostedtoolcache/CodeQL || true
-          sudo docker system prune -af || true
-          df -h /
-
       - name: Restore coresmith image
         uses: docker/build-push-action@v5
         with:
@@ -122,6 +101,7 @@ jobs:
           file: Dockerfile
           tags: coresmith:nightly
           load: true
+          cache-from: type=gha
 
       - name: Check secret presence
         id: have_token
@@ -144,7 +124,6 @@ jobs:
         run: |
           docker run --rm \
               -e CLAUDE_CODE_OAUTH_TOKEN \
-              -e CORESMITH_ALLOW_NO_OPENRAM=1 \
               -e CORESMITH_MODEL=sonnet-5 \
               -e CORESMITH_PROFILE=strict \
               -v "${{ github.workspace }}/.coresmith:/coresmith/.coresmith" \
