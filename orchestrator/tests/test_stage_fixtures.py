@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,15 @@ pytestmark = pytest.mark.stage_fixture
 
 _REPO = Path(__file__).resolve().parents[2]
 _STAGE_FIXTURES = Path(__file__).parent / "fixtures" / "stage"
+
+# These waits assert P1 -- "the graph TERMINATES", i.e. the resume does not run
+# away unbounded. They are not throughput assertions, so the budget only has to
+# be comfortably larger than a healthy run, never tuned to a runner's speed. A
+# 30 s budget used to lose the race on a loaded GitHub runner and reddened the
+# suite for reasons unrelated to termination.
+_GRAPH_TERMINATION_TIMEOUT_S = float(
+    os.environ.get("CORESMITH_TEST_GRAPH_TIMEOUT_S", "") or 120
+)
 
 
 def _load_snapshot_module():
@@ -121,7 +131,8 @@ async def _drive_to_post_uarch(record_root: Path, thread_id: str) -> None:
             checkpointer=saver, interrupt_after=["generate_uarch_spec"])
         cfg = {"configurable": {"thread_id": thread_id}}
         await asyncio.wait_for(
-            graph.ainvoke(_block_state(str(record_root)), cfg), timeout=30)
+            graph.ainvoke(_block_state(str(record_root)), cfg),
+            timeout=_GRAPH_TERMINATION_TIMEOUT_S)
         snap = await graph.aget_state(cfg)
         assert snap.next == ("review_uarch_spec",), snap.next  # parked post-uarch
     finally:
@@ -192,7 +203,9 @@ class TestSyntheticCheckpointResume:
             assert snap.next == ("review_uarch_spec",)  # still parked post-uarch
 
             n0 = len(fault_backend.call_log)
-            await asyncio.wait_for(ctx.graph.ainvoke(None, ctx.config), timeout=30)
+            await asyncio.wait_for(
+                ctx.graph.ainvoke(None, ctx.config),
+                timeout=_GRAPH_TERMINATION_TIMEOUT_S)
             snap2 = await ctx.aget_state()
             # P1: terminated within budget.
             assert snap2.next == ()

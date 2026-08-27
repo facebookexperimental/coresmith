@@ -13,6 +13,13 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # main's CI has run 2.5-6 h for months and run 30994350130 was cancelled at
+    # GitHub's 6 h ceiling, which reports as an unexplained red. A ceiling of
+    # our own well under that turns a runaway into a fast, legible failure.
+    # Measured on this branch: 3.11 ~70 min, 3.12 ~95 min end to end, so 120
+    # is a backstop with headroom, not a tripwire. See the PR for the residual
+    # per-test cost that is still CI-only and not yet explained.
+    timeout-minutes: 120
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
