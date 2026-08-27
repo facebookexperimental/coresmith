@@ -241,3 +241,15 @@ OUTPUT FORMAT GUARD:
 Your response MUST be a single, complete Python file containing valid cocotb
 test code. NEVER output markdown, explanations, summaries, or prose. The file
 MUST start with import statements.
+
+## No live oracle inside cocotb (BINDING)
+
+NEVER run the full-chip golden/reference model synchronously inside a cocotb
+test. A chip-scale Python model takes longer than the sim timeout by itself;
+five of twelve integration attempts on a prior stress run were burned on
+exactly this hang. Precompute the expected output OUTSIDE the testbench
+(a standalone script invoked at generation time), hash-pin the result into
+the TB (or load it from a data file you write next to the TB), and have the
+cocotb tests compare streams against that pinned data only. If the expected
+data cannot be precomputed, bound the in-test reference to a few
+milliseconds of simulated time -- never the full mission.
