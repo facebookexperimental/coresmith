@@ -186,11 +186,27 @@ def simulate(stimulus):
 # The probe is static (ast over the composition + a standalone import of each
 # block model), so it costs nothing and works on a run that is already hung.
 
-HANGING_CHIP = '''\
-def simulate(stimulus):
+# A simulate() that hangs on purpose, WITHOUT burning CPU.
+#
+# ``_simulate_with_timeout`` runs simulate() on a daemon thread and abandons it
+# on timeout -- correct for the daemon ("cannot block process exit"), but in a
+# test session the thread outlives the test that started it. A `while True:
+# pass` spin then thrashes the GIL for every remaining test in the process: the
+# two tests below that exercise the timeout used to leak two spinning threads
+# and slow all ~2200 subsequent tests from ~10 ms to ~1-3 s each, which was the
+# bulk of CI's multi-hour runtime (and, because 3.11 and 3.12 schedule threads
+# differently, most of why 3.12 ran 3.4x slower than 3.11 on the same commit).
+#
+# Sleeping honours the same contract -- simulate() does not return within the
+# timeout -- for no CPU.
+_HANG_BODY = """def simulate(stimulus):
+    import time
+
     while True:
-        pass
-'''
+        time.sleep(0.05)
+"""
+
+HANGING_CHIP = _HANG_BODY
 
 # A composition where one block's ports are wired to signals nothing else in the
 # whole chip model touches -- an output no one consumes / an input no one drives.
@@ -214,10 +230,7 @@ class chip_model:
         return m
 
 
-def simulate(stimulus):
-    while True:
-        pass
-'''
+''' + _HANG_BODY
 
 BROKEN_BLOCK = "import a_module_that_does_not_exist_anywhere\n"
 

@@ -133,10 +133,31 @@ class TestBothWavekitApiShapes:
             assert old[key] == new[key], key
 
 
+def _wavekit_importable() -> bool:
+    """Can THIS interpreter import wavekit -- without betting the session on it?
+
+    ``pytest.importorskip("wavekit")`` imports in-process, and wavekit pulls in
+    the native ``wavekit.readers.value_change``. On a GitHub runner whose CPU
+    predates whatever the published wheel was built for, that import dies with
+    SIGILL, taking the whole pytest process down (exit 132) after the ~3450
+    tests before it have already passed. It is not catchable: an illegal
+    instruction is not a Python exception.
+
+    ``run_wavekit_vcd_audit`` already probes wavekit out-of-process for exactly
+    this reason (pipeline_helpers ``has_wavekit``). Do the same here, so an
+    unusable wheel is a skip rather than a crashed suite.
+    """
+    return subprocess.run(
+        [sys.executable, "-c", "import wavekit"],
+        capture_output=True, timeout=60,
+    ).returncode == 0
+
+
 class TestAgainstInstalledWavekit:
     def test_real_wavekit_audit_passes(self, tmp_path):
         """End-to-end against whatever WaveKit is actually installed."""
-        pytest.importorskip("wavekit")
+        if not _wavekit_importable():
+            pytest.skip("wavekit is not importable in this interpreter")
         from orchestrator.langgraph.pipeline_helpers import run_wavekit_vcd_audit
 
         vcd = tmp_path / "toy.vcd"

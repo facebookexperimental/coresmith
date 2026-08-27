@@ -47,9 +47,13 @@ def _resolve_project_root() -> Path:
 PROJECT_ROOT = _resolve_project_root()
 # Add both the data root and the code root to sys.path
 _CODE_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-if str(_CODE_ROOT) != str(PROJECT_ROOT):
-    sys.path.insert(0, str(_CODE_ROOT))
+for _root in (str(PROJECT_ROOT), str(_CODE_ROOT)):
+    # Idempotent: this module is re-executed per test (the webview tests load
+    # it by path with a fresh PROJECT_ROOT each time), and an unguarded insert
+    # grew sys.path by two entries per test -- every later import then paid a
+    # linear scan over the accumulated stale entries.
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
 
 # Initialise lightweight OTel tracing (no-op if already done)
 from orchestrator.telemetry import init_telemetry
