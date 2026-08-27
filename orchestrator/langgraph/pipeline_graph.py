@@ -874,6 +874,249 @@ def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+
+_CHIP_LEAD_TRIPPED = False
+
+
+def _chip_lead_enabled() -> bool:
+    """CORESMITH_ENABLE_CHIP_LEAD=1: interrupts resolved by the IN-GRAPH
+    chip-lead agent instead of parking. Default-OFF: parks exactly as today."""
+    return _env_truthy("CORESMITH_ENABLE_CHIP_LEAD")
+
+
+def _chip_lead_ledger_path() -> Path:
+    pr = os.environ.get("CORESMITH_PROJECT_ROOT", ".")
+    return Path(pr) / ".coresmith" / "chip_lead" / "decisions.jsonl"
+
+
+def _chip_lead_max_decisions() -> int:
+    try:
+        return int(os.environ.get("CORESMITH_CHIP_LEAD_MAX_DECISIONS", "50"))
+    except ValueError:
+        return 50
+
+
+async def _resolve_interrupt(payload: dict) -> dict:
+    """Park (default) or let the in-graph chip lead decide. Fail-safe: any
+    chip-lead failure trips to parked interrupts for the process lifetime
+    (re-armed on a fresh run start in init_tier_node)."""
+    global _CHIP_LEAD_TRIPPED
+    if not _chip_lead_enabled() or _CHIP_LEAD_TRIPPED:
+        return interrupt(payload)
+
+    ledger = _chip_lead_ledger_path()
+    # Arm-U audit #10: two concurrently-parked blocks read the same ledger
+    # length -> duplicate decision_index, budget drift. Serialize readers/
+    # writers with an advisory lock on a sidecar lockfile.
+    import fcntl as _fcntl
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    _lockf = open(ledger.parent / ".ledger.lock", "a+")
+    _fcntl.flock(_lockf, _fcntl.LOCK_EX)
+    try:
+        prior = ([ln for ln in ledger.read_text().splitlines() if ln.strip()]
+                 if ledger.exists() else [])
+    finally:
+        _fcntl.flock(_lockf, _fcntl.LOCK_UN)
+        _lockf.close()
+    if len(prior) >= _chip_lead_max_decisions():
+        log(f"  [CHIP-LEAD] decision budget exhausted "
+            f"({len(prior)}/{_chip_lead_max_decisions()}) -- parking", YELLOW)
+        _CHIP_LEAD_TRIPPED = True
+        return interrupt(payload)
+
+    try:
+        from orchestrator.langchain.agents.chip_lead_agent import ChipLeadAgent
+        decision = await ChipLeadAgent().decide(
+            payload=payload, prior_decisions=prior[-10:],
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Arm-F live finding: a single provider hard-timeout tripped the
+        # fail-safe, and un-tripping needs a daemon restart. One fresh
+        # retry before the trip absorbs one-off provider stalls; a second
+        # consecutive failure still trips.
+        log(f"  [CHIP-LEAD] agent failed ({exc}) -- one retry before "
+            "tripping", YELLOW)
+        try:
+            decision = await ChipLeadAgent().decide(
+                payload=payload, prior_decisions=prior[-10:],
+            )
+        except Exception as exc2:  # noqa: BLE001
+            log(f"  [CHIP-LEAD] agent failed again ({exc2}) -- tripping "
+                "to parked interrupts", RED)
+            _CHIP_LEAD_TRIPPED = True
+            return interrupt(payload)
+
+    action = (decision or {}).get("action", "")
+    supported = payload.get("supported_actions") or []
+    if not action or (supported and action not in supported):
+        # Arm-S retro: a single unsupported action ('revise' at a park that
+        # only offered retry/fix_*) tripped the fail-safe and stranded the
+        # run until a human restarted the daemon. Give the agent exactly one
+        # corrective round with the violation spelled out before tripping.
+        log(f"  [CHIP-LEAD] unsupported action {action!r} (supported: "
+            f"{supported}) -- one corrective retry", YELLOW)
+        try:
+            retry_payload = dict(payload)
+            retry_payload["action_correction"] = (
+                f"Your previous answer used action={action!r}, which is NOT "
+                f"in supported_actions={supported}. Answer again choosing "
+                "strictly from that list."
+            )
+            decision = await ChipLeadAgent().decide(
+                payload=retry_payload, prior_decisions=prior[-10:],
+            )
+        except Exception:  # noqa: BLE001
+            decision = None
+        action = (decision or {}).get("action", "")
+        if not action or (supported and action not in supported):
+            log(f"  [CHIP-LEAD] unsupported action {action!r} after "
+                "correction -- tripping to parked interrupts", RED)
+            _CHIP_LEAD_TRIPPED = True
+            return interrupt(payload)
+
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    _lockf = open(ledger.parent / ".ledger.lock", "a+")
+    import fcntl as _fcntl2
+    _fcntl2.flock(_lockf, _fcntl2.LOCK_EX)
+    try:
+        prior = ([ln for ln in ledger.read_text().splitlines() if ln.strip()]
+                 if ledger.exists() else prior)
+    finally:
+        pass
+    with ledger.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "interrupt_type": payload.get("type", ""),
+            "block_name": payload.get("block_name", ""),
+            "action": action,
+            "reasoning": decision.get("reasoning", ""),
+        }) + "\n")
+    write_graph_event(
+        os.environ.get("CORESMITH_PROJECT_ROOT", "."), "Chip Lead",
+        "chip_lead_decision",
+        {"type": payload.get("type", ""), "action": action,
+         "decision_index": len(prior) + 1},
+    )
+    _fcntl2.flock(_lockf, _fcntl2.LOCK_UN)
+    _lockf.close()
+    log(f"  [CHIP-LEAD] {payload.get('type', '?')} -> {action} "
+        f"({len(prior) + 1}/{_chip_lead_max_decisions()})", GREEN)
+    return decision
+
+
+def _artifact_up_to_date(path: Path, state: dict, block_name: str,
+                         also_newer_than: list | None = None) -> bool:
+    """Attempt-1 reuse guard (h264 A/B stale-reuse defect): a generated
+    artifact is reusable only when at least as new as the block's uArch spec
+    AND every path in ``also_newer_than``. ``_file_is_fresh`` alone compares
+    against the FIRST run start, so forced restarts reused RTL whose spec
+    had been corrected hours earlier."""
+    try:
+        m = path.stat().st_mtime
+    except OSError:
+        return False
+    others = [Path(_pr(state)) / "arch" / "uarch_specs" / f"{block_name}.md"]
+    others += list(also_newer_than or [])
+    for other in others:
+        try:
+            if other.exists() and m < other.stat().st_mtime:
+                return False
+        except OSError:
+            continue
+    return True
+
+
+
+def _is_content_free_revise(response: dict) -> bool:
+    """True when a revise carries no substance (no block_actions, feedback,
+    or reasoning) -- the reviewer-churn class that is safe to downgrade to
+    approve. A chip-lead/human revise naming real findings is NOT churn."""
+    return not (response.get("block_actions")
+                or response.get("feedback")
+                or response.get("reasoning"))
+
+
+
+def _apply_revise_uarch(pr: str, response: dict, contract_audit: dict,
+                        stage: str) -> list[str]:
+    """Automate the operator playbook for a chip-level ``revise``: append the
+    revision feedback to each affected block's uArch spec (mtime bump forces
+    regeneration via _artifact_up_to_date) and drop best_result."""
+    feedback = (response.get("feedback")
+                or contract_audit.get("suggested_fix") or "").strip()
+    blocks = (response.get("affected_blocks")
+              or contract_audit.get("affected_blocks") or [])
+    applied: list[str] = []
+    for name in blocks:
+        spec = Path(pr) / "arch" / "uarch_specs" / f"{name}.md"
+        if not spec.exists():
+            continue
+        try:
+            with spec.open("a", encoding="utf-8") as fh:
+                fh.write(
+                    f"\n\n## {stage.upper()} REVISION FEEDBACK (MANDATORY)\n\n"
+                    "Chip-level DV failed against this block's contract. This "
+                    "section OVERRIDES any conflicting statement above:\n\n"
+                    f"{feedback}\n"
+                )
+        except OSError:
+            continue
+        (Path(pr) / ".coresmith" / "blocks" / name
+         / "best_result.json").unlink(missing_ok=True)
+        # Arm-U audit CRITICAL #2/#3: spec appends are destroyed by the
+        # per-tier re-spec, so a correctly-fixed bug regressed 4h later.
+        # constraints.json survives regeneration and is read by the spec/RTL/
+        # TB generators -- pin the revision there too.
+        try:
+            bdir = Path(pr) / ".coresmith" / "blocks" / name
+            bdir.mkdir(parents=True, exist_ok=True)
+            cpath = bdir / "constraints.json"
+            try:
+                cur = json.loads(cpath.read_text()) if cpath.exists() else []
+            except (json.JSONDecodeError, OSError):
+                cur = []
+            cur.append({
+                "rule": (f"{stage.upper()} REVISION (regeneration-proof): "
+                         f"{feedback[:1500]}"),
+                "source": "chip_dv_revise",
+                "attempt": 0,
+            })
+            cpath.write_text(json.dumps(cur, indent=2))
+        except OSError:
+            pass
+        applied.append(name)
+    return applied
+
+
+
+def _persist_chip_fix_constraint(pr: str, action: str, fix_desc: str,
+                                 response: dict, contract_audit: dict) -> None:
+    """Persist a chip-level fix into the affected blocks' constraints.json so
+    regeneration cannot silently resurrect the fixed bug."""
+    blocks = (response.get("affected_blocks")
+              or contract_audit.get("affected_blocks") or [])
+    for name in blocks:
+        bdir = Path(pr) / ".coresmith" / "blocks" / name
+        try:
+            bdir.mkdir(parents=True, exist_ok=True)
+            cpath = bdir / "constraints.json"
+            try:
+                cur = json.loads(cpath.read_text()) if cpath.exists() else []
+            except (json.JSONDecodeError, OSError):
+                cur = []
+            cur.append({
+                "rule": (f"Chip-level {action} applied during DV -- this "
+                         f"behavior MUST be preserved on any regeneration: "
+                         f"{fix_desc}"),
+                "source": "chip_dv_fix",
+                "attempt": 0,
+            })
+            cpath.write_text(json.dumps(cur, indent=2))
+        except OSError:
+            continue
+
+
+
+
 def _spec_pins_ignored() -> bool:
     """CORESMITH_IGNORE_SPEC_PINS=1 disables OPERATOR_SPEC_PIN (regen as today).
 
@@ -1521,7 +1764,7 @@ async def review_uarch_spec_node(state: BlockState) -> dict:
                 "`abort` ends this block without RTL."
             ),
         }
-        response = interrupt(payload) or {}
+        response = (await _resolve_interrupt(payload)) or {}
         action = response.get("action", "revise_interface")
         write_graph_event(_pr(state), "Review Uarch Spec",
                           "uarch_feasibility_resume",
@@ -3552,6 +3795,40 @@ def _evaluate_ppa_gate(
     return _flag(verdict.reasons, verdict.checks)
 
 
+
+def _resolve_probe_top(design_name: str, top_txt: str) -> str:
+    """Resolve the module the chip-top synthesizability probe should target.
+
+    C24 originally assumed "the top is conventionally last" -- but the arm-U
+    integration lead declared the real top FIRST and a small glue adapter
+    (`syntax_start_final_frame_adapter`) last, so the gate probed the adapter,
+    counted 1 gate cell, and failed a chip whose real top synthesizes to
+    158k cells with both DV stages green. Preference order:
+
+    1. a Caravel/openframe wrapper module (deterministic assembly tops),
+    2. a module matching ``design_name`` exactly,
+    3. the unique module never instantiated inside the file (a true top has
+       no instantiation sites; helpers appear again at their use),
+    4. the last-declared module (original C24 convention),
+    5. ``design_name`` verbatim when the file declares nothing.
+    """
+    mods = re.findall(r"^\s*module\s+([A-Za-z_]\w*)", top_txt or "", re.M)
+    for pref in ("openframe_project_wrapper", "user_project_wrapper"):
+        if pref in mods:
+            return pref
+    if design_name in mods:
+        return design_name
+    if mods:
+        uninstantiated = [
+            m for m in mods
+            if len(re.findall(rf"\b{re.escape(m)}\b", top_txt)) == 1
+        ]
+        if len(uninstantiated) == 1:
+            return uninstantiated[0]
+        return mods[-1]
+    return design_name
+
+
 def _chip_top_synth_ok(
     project_root: str,
     design_name: str,
@@ -3638,20 +3915,11 @@ def _chip_top_synth_ok(
     # gate. Resolve the real top from the assembled RTL: prefer a Caravel
     # wrapper module, else the last module declared (the top is conventionally
     # last), else the parsed first module, else fall back to design_name.
-    _top_name = design_name
     try:
         _top_txt = Path(top_rtl_path).read_text(errors="ignore")
-        import re as _re24
-        _mods = _re24.findall(r"^\s*module\s+([A-Za-z_]\w*)", _top_txt, _re24.MULTILINE)
-        for _pref in ("openframe_project_wrapper", "user_project_wrapper"):
-            if _pref in _mods:
-                _top_name = _pref
-                break
-        else:
-            if _mods:
-                _top_name = _mods[-1]
     except OSError:
-        pass
+        _top_txt = ""
+    _top_name = _resolve_probe_top(design_name, _top_txt)
     # F3 (audit): a run may DELIVER a separate locked-ABI top at
     # rtl/chip_top.v (e.g. the ppab_dut chassis contract) that is NOT part of
     # the assembled manifest -- two near-equivalent tops that silently drift
@@ -5151,7 +5419,7 @@ async def ask_human_node(state: BlockState) -> dict:
     except Exception:
         pass
 
-    response = interrupt(payload)
+    response = await _resolve_interrupt(payload)
 
     write_graph_event(_pr(state), "Ask Human", "graph_node_exit", {
         "block": block_name, "action": response.get("action", "unknown"),
@@ -5635,7 +5903,7 @@ async def _retire_pin_mapped_blocks(
                 f"pin_map partially covers '{plan.block}' and the contradiction "
                 f"was not resolved after {_PINMAP_REPARK_CAP} re-parks "
                 f"(uncovered: {plan.uncovered}). Fix prd.pin_map or remove it.")
-        response = interrupt({
+        response = await _resolve_interrupt({
             "type": "pin_map_partial_coverage",
             "block": plan.block,
             "reason": plan.reason,
@@ -5704,6 +5972,12 @@ async def init_tier_node(state: OrchestratorState) -> dict:
         set(b.get("tier", 1) for b in block_queue)
     )
     current_idx = state.get("current_tier_index", 0)
+
+    # Chip-lead trip re-arms on a FRESH run start (tier 0, nothing completed);
+    # mid-run tier re-entries keep a tripped lead parked.
+    global _CHIP_LEAD_TRIPPED
+    if current_idx == 0 and not state.get("completed_blocks"):
+        _CHIP_LEAD_TRIPPED = False
 
     tier = tier_list[current_idx]
     tier_blocks = [b for b in block_queue if b.get("tier", 1) == tier]
@@ -6184,7 +6458,7 @@ async def integration_review_node(state: OrchestratorState) -> dict:
         ),
     }
 
-    response = interrupt(payload)
+    response = await _resolve_interrupt(payload)
     action = response.get("action", "abort")
     if action == "approve" and failed_tier_blocks:
         log(
@@ -6218,10 +6492,15 @@ async def integration_review_node(state: OrchestratorState) -> dict:
                 "Export CORESMITH_STRICT_INTEGRATION_REVIEW=1 to force revise.",
                 YELLOW,
             )
-    if action == "revise" and issues_found == 0 and not review_failed:
+    if (action == "revise" and issues_found == 0 and not review_failed
+            and _is_content_free_revise(response)):
+        # Only downgrade CONTENT-FREE revises (the stale auto-revise churn
+        # class). A chip-lead/human revise carrying reasoning, feedback, or
+        # block_actions names real stale-RTL findings -- discarding one sent
+        # a known-bad chip straight into integration_dv (arm-U audit).
         log(
-            "  [INTEGRATION REVIEW] Clean review returned revise; "
-            "treating as approve",
+            "  [INTEGRATION REVIEW] Clean review returned content-free "
+            "revise; treating as approve",
             YELLOW,
         )
         action = "approve"
@@ -6415,7 +6694,7 @@ async def pipeline_complete_node(state: OrchestratorState) -> dict:
             "missing_blocks": missing_blocks,
         })
 
-        resume = interrupt(payload)
+        resume = await _resolve_interrupt(payload)
 
         action = resume.get("action") if isinstance(resume, dict) else "abort"
         rv_attempts = int(state.get("revalidate_attempts", 0) or 0)
@@ -6713,7 +6992,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                         "verified false alarm. `abort` ends integration."
                     ),
                 }
-                response = interrupt(payload) or {}
+                response = (await _resolve_interrupt(payload)) or {}
                 _act = response.get("action", "retry")
                 write_graph_event(pr, "Integration Check",
                                   "integration_staleness_resume",
@@ -6737,22 +7016,47 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                     _stale2 = stale_uarch_spec_blocks(pr, _passed_names)
                     if _stale2:
                         _s2 = [s["block"] for s in _stale2]
+                        # Arm-F live finding: a retry cannot refresh stamps,
+                        # so persistent staleness used to END the run with
+                        # work pending (a strand needing an operator
+                        # restart-node). Escalate ONCE to an override/abort
+                        # park instead -- deliberate contract corrections are
+                        # exactly the override case.
                         log(f"  [INTEGRATION] staleness persists after retry "
-                            f"({_s2}) -- ending integration (fail-closed, "
-                            f"re-drive the stale blocks first)", RED)
-                        result = {
-                            "aborted": True, "skipped": True,
-                            "reason": ("stale uarch specs persist after "
-                                       f"retry: {_s2}"),
-                            "error": "stale_uarch_specs",
-                            "error_count": len(_stale2),
+                            f"({_s2}) -- escalating to override/abort", RED)
+                        response = (await _resolve_interrupt({
+                            **payload,
+                            "retry_failed": True,
                             "stale_blocks": _s2,
-                        }
-                        write_graph_event(pr, "Integration Check",
-                                          "graph_node_exit", result)
-                        return {"integration_result": result}
-                    log("  [INTEGRATION] staleness cleared on retry -- "
-                        "proceeding to assembly", GREEN)
+                            "supported_actions": ["override", "abort"],
+                            "outer_agent_guidance": (
+                                "A retry was already taken and the staleness "
+                                "persists (retry cannot refresh uArch "
+                                "stamps). If the stamp drift traces to a "
+                                "DELIBERATE spec/contract correction, "
+                                "override; otherwise abort and re-drive the "
+                                "stale blocks."
+                            ),
+                        })) or {}
+                        if response.get("action") == "override":
+                            log("  [INTEGRATION] staleness OVERRIDE (post-"
+                                "retry) -- assembling despite stale specs",
+                                YELLOW)
+                        else:
+                            result = {
+                                "aborted": True, "skipped": True,
+                                "reason": ("stale uarch specs persist after "
+                                           f"retry: {_s2}"),
+                                "error": "stale_uarch_specs",
+                                "error_count": len(_stale2),
+                                "stale_blocks": _s2,
+                            }
+                            write_graph_event(pr, "Integration Check",
+                                              "graph_node_exit", result)
+                            return {"integration_result": result}
+                    else:
+                        log("  [INTEGRATION] staleness cleared on retry -- "
+                            "proceeding to assembly", GREEN)
 
         connections, design_name = await asyncio.to_thread(
             load_architecture_connections, pr
@@ -6842,7 +7146,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                         "block_specs": ".coresmith/block_specs.json",
                     },
                 }
-                response = interrupt(payload) or {}
+                response = (await _resolve_interrupt(payload)) or {}
                 _act = response.get("action", "retry")
                 write_graph_event(pr, "Integration Check",
                                   "block_rtl_unresolved_resume",
@@ -7434,7 +7738,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 },
             }
 
-            response = interrupt(payload)
+            response = await _resolve_interrupt(payload)
 
             action = response.get("action", "abort")
             write_graph_event(pr, "Integration Check", "graph_node_exit", {
@@ -7548,7 +7852,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                             "lint_log": lint_result.get("log_path", ""),
                         },
                     }
-                    response = interrupt(repark_payload)
+                    response = await _resolve_interrupt(repark_payload)
                     action = (
                         response.get("action", "abort")
                         if isinstance(response, dict) else "abort"
@@ -7665,7 +7969,7 @@ async def integration_check_node(state: OrchestratorState) -> dict:
                 },
             }
 
-            response = interrupt(warning_payload)
+            response = await _resolve_interrupt(warning_payload)
             action = (
                 response.get("action", "abort")
                 if isinstance(response, dict)
@@ -8145,7 +8449,7 @@ async def model_integration_node(state: OrchestratorState) -> dict:
             ),
         }
 
-        response = interrupt(payload)
+        response = await _resolve_interrupt(payload)
         action = response.get("action", "abort")
 
         result = {
@@ -8350,7 +8654,7 @@ async def uarch_integration_gate_node(state: OrchestratorState) -> dict:
             if esc is not None:
                 log("  [µARCH-GATE] within-budget DERATE needs chip-lead sign-off",
                     YELLOW)
-                response = interrupt({
+                response = await _resolve_interrupt({
                     "type": "derate_signoff",
                     "fidelity": esc,
                     "supported_actions": ["approve", "revise_uarch", "abort"],
@@ -8571,7 +8875,7 @@ async def uarch_integration_gate_node(state: OrchestratorState) -> dict:
                 "then 'retry'. " + payload["outer_agent_guidance"]
             )
 
-        response = interrupt(payload)
+        response = await _resolve_interrupt(payload)
         action = response.get("action", "abort")
 
         result = {
@@ -10209,6 +10513,7 @@ async def integration_dv_node(state: OrchestratorState) -> dict:
                 "retry",        # regenerate testbench + re-simulate
                 "fix_rtl",      # outer agent fixed RTL, re-run sim only
                 "fix_tb",       # outer agent fixed testbench, re-run sim only
+                "revise",       # feedback -> affected uArch specs + tier regen
                 "abort",        # stop the pipeline
             ],
             "outer_agent_guidance": (
@@ -10291,9 +10596,9 @@ async def integration_dv_decision_node(state: OrchestratorState) -> dict:
     dv = dict(state.get("integration_dv_result") or {})
     payload = dv.get("interrupt_payload") or {
         "type": "integration_dv_failure",
-        "supported_actions": ["retry", "fix_rtl", "fix_tb", "abort"],
+        "supported_actions": ["retry", "fix_rtl", "fix_tb", "revise", "abort"],
     }
-    response = interrupt(payload) or {}
+    response = (await _resolve_interrupt(payload)) or {}
     action = response.get("action", "abort")
     test_count = dv.get("test_count", 0)
     write_graph_event(pr, "Integration DV", "graph_node_exit", {
@@ -10314,6 +10619,14 @@ async def integration_dv_decision_node(state: OrchestratorState) -> dict:
     elif action == "abort":
         dv_result["aborted"] = True
         log("  [INTEG-DV] Aborted", RED)
+    elif action == "revise":
+        revised = _apply_revise_uarch(
+            pr, response, dict(payload.get("contract_audit") or {}),
+            "integration_dv")
+        dv_result["revised_blocks"] = revised
+        log(f"  [INTEG-DV] Revise: uArch feedback appended to "
+            f"{revised or '[] (no specs matched)'}; re-running tiers",
+            YELLOW)
     elif action in ("retry", "fix_rtl", "fix_tb"):
         fix_desc = response.get("rtl_fix_description", "")
         log(
@@ -10341,12 +10654,15 @@ async def integration_dv_decision_node(state: OrchestratorState) -> dict:
         "integration_dv_result": dv_result,
         "pipeline_done": False,
         "pipeline_aborted": action == "abort",
+        **({"current_tier_index": 0} if action == "revise" else {}),
     }
 
 
 def route_after_integration_dv_decision(state: OrchestratorState) -> str:
     """Route the operator's decision back into integration DV or terminate."""
     result = state.get("integration_dv_result") or {}
+    if result.get("action_taken") == "revise":
+        return "init_tier"
     if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
         return "integration_dv"
     return END
@@ -10354,6 +10670,7 @@ def route_after_integration_dv_decision(state: OrchestratorState) -> str:
 
 route_after_integration_dv_decision.__edge_labels__ = {
     "integration_dv": "RETRY / FIX",
+    "init_tier": "REVISE",
     END: "DONE",
 }
 
@@ -10476,6 +10793,45 @@ def contract_audit_staleness(audit: dict | None, context_path: str = "") -> str:
     return ""
 
 
+_HARNESS_FAILURE_FINGERPRINTS = (
+    ("syntax error near unexpected token",
+     "shell syntax error in a make recipe -- the harness/Makefile is broken; "
+     "no design signal was ever evaluated"),
+    ("bash: -c: line",
+     "shell error while composing the sim command -- harness/Makefile bug"),
+    ("No module named test_",
+     "cocotb TB module failed to import at 0 ns (TB copy/stem regression)"),
+    ("ModuleNotFoundError",
+     "TB import failure at load time -- harness environment bug"),
+    ("cocotb-config: command not found",
+     "cocotb toolchain missing from PATH -- environment bug"),
+    ("verilator: command not found",
+     "verilator missing from PATH -- environment bug"),
+)
+
+
+def _harness_failure_fingerprint(sim_log: str) -> str | None:
+    """Match a DV sim log against unambiguous HARNESS-class failure
+    fingerprints (sim never produced a design-level verdict). Returns the
+    explanation string, or None when the failure could be design-related."""
+    text = sim_log or ""
+    for needle, why in _HARNESS_FAILURE_FINGERPRINTS:
+        if needle in text:
+            return why
+    return None
+
+
+def _harness_audit_fastpath_enabled() -> bool:
+    """CORESMITH_HARNESS_AUDIT_FASTPATH (default ON): skip the LLM contract
+    audit when the sim log carries an unambiguous harness-class fingerprint.
+    Runtime profile 2026-08-26: 4 of arm U's 6 validation audits (138-252s
+    each) and one 900s audit timeout re-diagnosed shell errors, not RTL --
+    the audit adds latency and a stale-verdict risk while the right action
+    (fix the harness) is already determined. Set =0 to restore an
+    unconditional audit."""
+    return (os.environ.get("CORESMITH_HARNESS_AUDIT_FASTPATH", "1") or "1") != "0"
+
+
 async def _run_top_level_contract_audit(
     *,
     stage: str,
@@ -10531,6 +10887,60 @@ async def _run_top_level_contract_audit(
     # in front of it is about the failure in front of it.
     context_stamp = _context_fingerprint(str(context_path))
     call_start = _time.time()
+
+    # Per-attempt audit history (arm S/M retro: contract_audit/ kept ONE
+    # file, overwritten every attempt -- operators could not see that early
+    # audits said "CAVLC order" while late ones said "read rendezvous"
+    # without excavating codex_turns.jsonl). Archive the previous audit
+    # before this attempt writes.
+    if output_path.exists():
+        try:
+            _stamp = int(output_path.stat().st_mtime)
+            output_path.rename(
+                audit_dir / f"{safe_stage}_contract_audit_{_stamp}.json")
+        except OSError:
+            output_path.unlink(missing_ok=True)
+
+    # Harness-class fast-path (CORESMITH_HARNESS_AUDIT_FASTPATH, default ON):
+    # an unambiguous harness failure (shell error in a make recipe, TB import
+    # failure at 0 ns, missing toolchain binary) cannot be design-related --
+    # the LLM audit there costs 138-900s and re-derives "fix the harness".
+    _fp = _harness_failure_fingerprint(sim_log)
+    if _fp and _harness_audit_fastpath_enabled():
+        result = ContractAuditAgent._default_result(stage, str(context_path))
+        result.update({
+            "category": "DV_PROCESS_ERROR",
+            "contract_failure": False,
+            "local_fix_possible": True,
+            "confidence": 0.9,
+            "recommended_action": "fix_tb",
+            "suggested_fix": _fp,
+            "outer_agent_summary": (
+                "HARNESS-CLASS failure (LLM audit skipped by fast-path): "
+                f"{_fp}. The simulation never produced a design-level "
+                f"verdict; fix the harness and re-run. Sim log: "
+                f"{sim_log_path or '(inline tail in failure context)'}"
+            ),
+        })
+        result["first_divergence"]["summary"] = _fp
+        result[CONTRACT_AUDIT_STAMP_KEY] = context_stamp
+        result["audited_at"] = round(call_start, 3)
+        output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        write_graph_event(project_root, "Contract Audit", "graph_node_exit", {
+            "stage": stage,
+            "category": "DV_PROCESS_ERROR",
+            "contract_failure": False,
+            "recommended_action": "fix_tb",
+            "confidence": 0.9,
+            "audit_path": str(output_path),
+            "audit_fastpath": True,
+        })
+        log(f"  [CONTRACT-AUDIT] {stage}: harness-class failure -- "
+            "fast-path verdict, LLM audit skipped "
+            "(CORESMITH_HARNESS_AUDIT_FASTPATH=0 restores it)", YELLOW)
+        result["audit_path"] = str(output_path)
+        result["context_path"] = str(context_path)
+        return result
 
     log(f"  [CONTRACT-AUDIT] Auditing {stage} failure...", YELLOW)
     agent = ContractAuditAgent(temperature=0.1)
@@ -11111,6 +11521,7 @@ async def validation_dv_node(state: OrchestratorState) -> dict:
                 "retry",
                 "fix_rtl",
                 "fix_tb",
+                "revise",
                 "abort",
             ],
             "outer_agent_guidance": (
@@ -11175,9 +11586,9 @@ async def validation_dv_decision_node(state: OrchestratorState) -> dict:
     dv = dict(state.get("validation_dv_result") or {})
     payload = dv.get("interrupt_payload") or {
         "type": "validation_dv_failure",
-        "supported_actions": ["retry", "fix_rtl", "fix_tb", "abort"],
+        "supported_actions": ["retry", "fix_rtl", "fix_tb", "revise", "abort"],
     }
-    response = interrupt(payload) or {}
+    response = (await _resolve_interrupt(payload)) or {}
     action = response.get("action", "abort")
     write_graph_event(pr, "Validation DV", "graph_node_exit", {
         "action": action,
@@ -11198,6 +11609,14 @@ async def validation_dv_decision_node(state: OrchestratorState) -> dict:
     elif action == "abort":
         dv_result["aborted"] = True
         log("  [VALIDATION-DV] Aborted", RED)
+    elif action == "revise":
+        revised = _apply_revise_uarch(
+            pr, response, dict(payload.get("contract_audit") or {}),
+            "validation_dv")
+        dv_result["revised_blocks"] = revised
+        log(f"  [VALIDATION-DV] Revise: uArch feedback appended to "
+            f"{revised or '[] (no specs matched)'}; re-running tiers",
+            YELLOW)
     elif action in ("retry", "fix_rtl", "fix_tb"):
         fix_desc = response.get("rtl_fix_description", "")
         log(
@@ -11211,12 +11630,15 @@ async def validation_dv_decision_node(state: OrchestratorState) -> dict:
         "validation_dv_result": dv_result,
         "pipeline_done": False,
         "pipeline_aborted": action == "abort",
+        **({"current_tier_index": 0} if action == "revise" else {}),
     }
 
 
 def route_after_validation_dv_decision(state: OrchestratorState) -> str:
     """Route the operator's decision back into validation DV or terminate."""
     result = state.get("validation_dv_result") or {}
+    if result.get("action_taken") == "revise":
+        return "init_tier"
     if result.get("action_taken") in ("retry", "fix_rtl", "fix_tb"):
         return "validation_dv"
     return END
@@ -11224,6 +11646,7 @@ def route_after_validation_dv_decision(state: OrchestratorState) -> str:
 
 route_after_validation_dv_decision.__edge_labels__ = {
     "validation_dv": "RETRY / FIX",
+    "init_tier": "REVISE",
     END: "DONE",
 }
 
@@ -11281,6 +11704,23 @@ async def final_report_node(state: OrchestratorState) -> dict:
             f"cov(min) {sign.get('coverage_min_pct')}%, "
             f"Fmax {sign.get('top_fmax_mhz')} MHz", CYAN)
         log(f"  wrote {root / 'final_report.md'}", CYAN)
+        # Opt-in labeled SFT dataset (CORESMITH_EMIT_SFT=1): publish
+        # <run>/sft/ from the verified artifacts. Never fails the report.
+        try:
+            from orchestrator.langgraph.sft_export import (
+                emit_sft_dataset,
+                sft_enabled,
+            )
+            if sft_enabled():
+                _sft = emit_sft_dataset(pr)
+                if _sft:
+                    _cnt = ", ".join(
+                        f"{k}={v}" for k, v in _sft["counts"].items())
+                    log(f"  [SFT] labeled dataset: {_sft['total_pairs']} "
+                        f"pairs ({_cnt}) -> {root / 'sft'}", GREEN)
+        except Exception as _sft_exc:  # noqa: BLE001
+            log(f"  [SFT] dataset emission failed (non-fatal): {_sft_exc}",
+                YELLOW)
         log(f"{'='*60}\n", CYAN)
         write_graph_event(pr, "Final Report", "graph_node_exit", {
             "status": sign.get("status"),
@@ -11395,6 +11835,7 @@ def build_pipeline_graph(checkpointer=None):
         "integration_dv_decision", route_after_integration_dv_decision,
         {
             "integration_dv": "integration_dv",
+            "init_tier": "init_tier",
             END: "final_report",
         },
     )
@@ -11410,6 +11851,7 @@ def build_pipeline_graph(checkpointer=None):
         "validation_dv_decision", route_after_validation_dv_decision,
         {
             "validation_dv": "validation_dv",
+            "init_tier": "init_tier",
             END: "final_report",
         },
     )
