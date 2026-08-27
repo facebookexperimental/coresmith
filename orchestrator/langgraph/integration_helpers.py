@@ -247,7 +247,7 @@ _ROLE_CANON = {
 }
 
 
-def _port_role(name: str) -> Optional[str]:
+def _port_role(name: str) -> str | None:
     """Canonical handshake role implied by a port-name suffix, or None.
 
     Arm S/M retro: the substring fallback paired ``*_tready`` with

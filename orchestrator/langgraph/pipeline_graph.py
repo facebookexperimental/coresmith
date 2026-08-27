@@ -10810,7 +10810,7 @@ _HARNESS_FAILURE_FINGERPRINTS = (
 )
 
 
-def _harness_failure_fingerprint(sim_log: str) -> Optional[str]:
+def _harness_failure_fingerprint(sim_log: str) -> str | None:
     """Match a DV sim log against unambiguous HARNESS-class failure
     fingerprints (sim never produced a design-level verdict). Returns the
     explanation string, or None when the failure could be design-related."""
@@ -11708,7 +11708,8 @@ async def final_report_node(state: OrchestratorState) -> dict:
         # <run>/sft/ from the verified artifacts. Never fails the report.
         try:
             from orchestrator.langgraph.sft_export import (
-                emit_sft_dataset, sft_enabled,
+                emit_sft_dataset,
+                sft_enabled,
             )
             if sft_enabled():
                 _sft = emit_sft_dataset(pr)

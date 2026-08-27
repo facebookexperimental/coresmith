@@ -311,8 +311,7 @@ class TestBoundedValidationMakefile:
     )
 
     def _mk(self, scope="validation", tb=None):
-        from orchestrator.langgraph.integration_helpers import (
-            _compose_dv_makefile)
+        from orchestrator.langgraph.integration_helpers import _compose_dv_makefile
         return _compose_dv_makefile(
             scope, self.TB if tb is None else tb, "a.v b.v", "chip_top",
             "test_x_validation")
@@ -336,8 +335,8 @@ class TestBoundedValidationMakefile:
 
     def test_recipe_continuations_intact(self):
         mk = self._mk()
-        line = next(l for l in mk.splitlines()
-                    if "COCOTB_RESULTS_FILE=trace_results" in l)
+        line = next(ln for ln in mk.splitlines()
+                    if "COCOTB_RESULTS_FILE=trace_results" in ln)
         assert line.rstrip().endswith("\\")
 
     def test_unsharded_tb_gets_bounded_but_no_shards(self):
@@ -358,8 +357,7 @@ class TestBoundedValidationMakefile:
         assert "WAVES = 1" in mk and "bounded_waveform" not in mk
 
     def test_mission_line_empty_when_no_specials(self):
-        from orchestrator.langgraph.integration_helpers import (
-            _mission_testcase_line)
+        from orchestrator.langgraph.integration_helpers import _mission_testcase_line
         assert _mission_testcase_line(
             "async def test_a(dut):\n    pass\n") == ""
 
