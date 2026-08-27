@@ -98,21 +98,29 @@ def _reset_profile_state():
 # 6-hour ceiling, and what starved the wall-clock budget of the fixed-timeout
 # assertions elsewhere in the suite.
 #
-# Every test NOT marked ``live_llm`` gets the five provider CLI path env vars
-# pointed at a stub that exits non-zero immediately. Resolution still succeeds
-# (the path exists and is executable), so import-time construction behaves
-# exactly as before -- only an actual model invocation changes, and it now
-# fails fast and deterministically instead of burning wall-clock.
+# For every test NOT marked ``live_llm``, the five ``_find_*_binary`` resolvers
+# in ``coresmith_llm`` return a stub that exits non-zero immediately. Resolution
+# still succeeds (the stub exists and is executable), so import-time
+# construction behaves exactly as before -- only an actual model invocation
+# changes, and it now fails fast instead of burning wall-clock.
+#
+# Patching the resolvers rather than the ``*_CLI_PATH`` env vars is deliberate.
+# ``ClaudeLLM.__init__`` reads the env var FIRST and only falls back to the
+# resolver, so seeding the env would silently outrank the tests that patch a
+# resolver to pin an expected argv -- and ``pipeline_helpers`` preflight reads
+# two of those vars as presence checks. Patching the resolver leaves both
+# behaviors intact: a test that sets the env var or patches the resolver itself
+# still wins, because its patch is applied after this fixture's.
 #
 # Escape hatch: ``CORESMITH_ALLOW_LIVE_LLM_IN_TESTS=1`` restores the previous
 # behavior for the whole session.
 
-_PROVIDER_CLI_ENV = (
-    "CLAUDE_CLI_PATH",
-    "CODEX_CLI_PATH",
-    "KIMI_CLI_PATH",
-    "AGY_CLI_PATH",
-    "OPENCODE_CLI_PATH",
+_PROVIDER_BINARY_FINDERS = (
+    "_find_claude_binary",
+    "_find_codex_binary",
+    "_find_kimi_binary",
+    "_find_agy_binary",
+    "_find_opencode_binary",
 )
 
 _LLM_CLI_STUB_SRC = """#!/bin/sh
@@ -138,13 +146,15 @@ def llm_cli_stub(tmp_path_factory) -> str:
 
 @pytest.fixture(autouse=True)
 def _no_live_llm_cli(request, monkeypatch, llm_cli_stub):
-    """Point every provider CLI at the stub unless the test opts into live LLM."""
+    """Resolve every provider CLI to the stub unless the test opts into live LLM."""
     if live_llm_calls_allowed():
         return
     if request.node.get_closest_marker("live_llm"):
         return
-    for var in _PROVIDER_CLI_ENV:
-        monkeypatch.setenv(var, llm_cli_stub)
+    from orchestrator.langchain.agents import coresmith_llm as _llm
+
+    for finder in _PROVIDER_BINARY_FINDERS:
+        monkeypatch.setattr(_llm, finder, lambda *_a, **_kw: llm_cli_stub)
 
 
 @pytest.fixture

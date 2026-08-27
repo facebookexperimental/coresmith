@@ -18,32 +18,56 @@ import subprocess
 
 import pytest
 
-from orchestrator.tests.conftest import _PROVIDER_CLI_ENV, live_llm_calls_allowed
+from orchestrator.langchain.agents import coresmith_llm
+from orchestrator.tests.conftest import (
+    _PROVIDER_BINARY_FINDERS,
+    live_llm_calls_allowed,
+)
+
+_STUB_NAME = "no-live-llm"
 
 
 class TestGuardIsOnByDefault:
     """Default branch: CORESMITH_ALLOW_LIVE_LLM_IN_TESTS unset."""
 
-    @pytest.mark.parametrize("var", _PROVIDER_CLI_ENV)
-    def test_every_provider_cli_points_at_the_stub(self, var):
-        path = os.environ.get(var, "")
-        assert path, f"{var} should be pointed at the stub"
+    @pytest.mark.parametrize("finder", _PROVIDER_BINARY_FINDERS)
+    def test_every_resolver_returns_the_stub(self, finder):
+        path = getattr(coresmith_llm, finder)()
+        assert _STUB_NAME in path, f"{finder} should resolve to the stub"
         assert os.path.isfile(path) and os.access(path, os.X_OK), (
-            f"{var}={path!r} must resolve to an executable so import-time "
+            f"{finder} must resolve to an executable so import-time "
             "ClaudeLLM() construction still succeeds"
         )
 
     def test_invoking_the_stub_fails_fast(self):
         """The stub must fail, not silently succeed and look like a real reply."""
         proc = subprocess.run(
-            [os.environ["CLAUDE_CLI_PATH"], "-p", "hello"],
+            [coresmith_llm._find_claude_binary(), "-p", "hello"],
             capture_output=True, text=True, timeout=30,
         )
         assert proc.returncode != 0
         assert "live_llm" in proc.stderr
 
+    def test_a_default_llm_resolves_to_the_stub(self):
+        """The guard has to survive the real construction path, not just the resolver."""
+        llm = coresmith_llm.ClaudeLLM()
+        assert _STUB_NAME in llm.claude_path
+
     def test_helper_reports_guard_active(self):
         assert live_llm_calls_allowed() is False
+
+
+class TestGuardYieldsToTheTest:
+    """The fixture must not outrank a test that pins its own binary."""
+
+    def test_env_var_still_wins(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CLI_PATH", "/usr/bin/claude")
+        assert coresmith_llm.ClaudeLLM().claude_path == "/usr/bin/claude"
+
+    def test_a_test_level_resolver_patch_still_wins(self, monkeypatch):
+        monkeypatch.setattr(
+            coresmith_llm, "_find_claude_binary", lambda: "/usr/bin/claude")
+        assert coresmith_llm.ClaudeLLM().claude_path == "/usr/bin/claude"
 
 
 class TestEscapeHatch:
@@ -62,5 +86,4 @@ class TestEscapeHatch:
 @pytest.mark.live_llm
 def test_live_llm_marked_tests_keep_the_real_cli():
     """A test that opts in is left alone -- the marker is the opt-in."""
-    stub_marker = "no-live-llm"
-    assert stub_marker not in os.environ.get("CLAUDE_CLI_PATH", "")
+    assert _STUB_NAME not in coresmith_llm._find_claude_binary()
