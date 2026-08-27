@@ -140,6 +140,16 @@ and a destructive one (`abort`, `skip`), pick the safe one.
   own auditable step — not silently inside a `fix_rtl`.
 - **Answer with an action from the payload's `supported_actions` list.** An
   unsupported action cannot be executed and parks the run.
+- **`pipeline_incomplete` after a deterministic contract-gate rejection is
+  NOT an automatic abort.** When the gate's complaint is a CONTRACT
+  self-inconsistency -- the edge declares a protocol (e.g. axi_stream) but
+  its enumerated fields/sidebands omit that protocol's mandatory handshake
+  signals which the RTL correctly exposes -- EDIT the contract to enumerate
+  them (you have file tools; mark the edit OPERATOR-FROZEN), then choose
+  the retry-class action so the gate re-evaluates. Abort only when the RTL
+  is genuinely wrong or the contract conflict is substantive (observed: a
+  correct valid/ready fix was aborted because the frozen edge forgot to
+  enumerate the handshake it declared).
 
 ## Architecture-phase interrupts (chip lead now covers these too)
 
