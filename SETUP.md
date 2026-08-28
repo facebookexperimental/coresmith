@@ -109,6 +109,10 @@ claude auth login   # default provider, interactive
 # Hosted Kimi K3 alternative:
 # opencode auth login   # select OpenRouter
 # export CORESMITH_LLM_PROVIDER=opencode
+# Meta Muse Spark 1.1 alternative (no opencode auth login needed):
+# export CORESMITH_LLM_PROVIDER=opencode
+# export CORESMITH_OPENCODE_ENDPOINT=muse-spark
+# export META_MODEL_API_KEY=LLM_...
 
 # 3. Python venv + orchestrator
 python3.11 -m venv venv
@@ -145,7 +149,7 @@ otherwise the latest of each works for most blocks.
 | Python | 3.11.x | `python3.11 -m venv venv` |
 | Node.js | 20.20.x | NodeSource repo, *not* apt's 12.x |
 | Claude Code CLI | 2.x | `npm install -g @anthropic-ai/claude-code` |
-| OpenCode CLI | 1.18+ | `npm install -g opencode-ai`; optional OpenRouter/Kimi K3 provider |
+| OpenCode CLI | 1.18+ | `npm install -g opencode-ai`; optional OpenRouter/Kimi K3 or Meta Muse Spark 1.1 endpoint |
 | OSS-CAD-Suite | 2026-04-29 nightly | Bundles Yosys 0.64+, Verilator 5.049, OpenROAD, Magic, netgen, KLayout |
 | Sky130 PDK | volare commit pinned in [`scripts/pdk-version.env`](scripts/pdk-version.env) | `volare ls-remote --pdk sky130` for current pins |
 | Python deps | see `requirements-lock.txt` | `pip install -r requirements-lock.txt` for an exact replay |
