@@ -3170,7 +3170,7 @@ def _evaluate_ppa_gate(
         mf = run_maxfanout_buffered_sta(
             rtl_path, _liberty_p, block_name, _mf_period, _clk,
             timeout_s=_synth_timeout, extra_sources=_mem_lib_srcs,
-            report_dir=_sta_dir,
+            report_dir=_sta_dir, project_root=project_root,
         )
         if mf is not None:
             _meta["wns_ns_base_unbuffered"] = _eff_wns

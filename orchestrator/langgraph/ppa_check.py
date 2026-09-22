@@ -1670,22 +1670,9 @@ def _sta_dontuse_liberty(src_lib: str) -> str:
 
 
 def _maxfanout_synth_script(sources: list[str], lib: str, netlist: Path,
-                            top: str, blackbox_mem: bool, buffered: bool) -> str:
+                            top: str, buffered: bool) -> str:
     reads = " ".join(sources)
-    if blackbox_mem:
-        # Lift inferred memories into a blackboxed submodule (SRAM-macro model)
-        # BEFORE tech mapping, then finish synthesis on the surviving logic, so
-        # a byte buffer doesn't flatten into a thousand-way async read mux whose
-        # unbuffered net delay is a pure synth artifact.
-        mem = (
-            f"synth -top {top} -flatten -run :fine\n"
-            f"select -set mc t:$mem_v2\n"
-            f"submod -name mem_macro @mc\n"
-            f"blackbox mem_macro\n"
-            f"synth -top {top} -run fine:\n"
-        )
-    else:
-        mem = f"synth -top {top} -flatten\n"
+    mem = f"synth -top {top} -flatten\n"
     if buffered:
         # After logic mapping, ABC's `buffer -N` inserts a buffer tree wherever a
         # net exceeds the fan-out cap, then upsize/dnsize gate-sizes the drivers
@@ -1710,8 +1697,9 @@ def _maxfanout_synth_script(sources: list[str], lib: str, netlist: Path,
 def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
                           buffered: bool, period_ns: float, top: str,
                           clk_port: str, yosys_bin: str, sta_bin: str,
-                          timeout_s: int, persist_to: Path | None = None) -> tuple[float | None, str]:
-    """Synth (blackbox-mem, optionally fan-out-buffered) + OpenSTA at period.
+                          timeout_s: int, persist_to: Path | None = None,
+                          project_root: str | Path | None = None) -> tuple[float | None, str]:
+    """Synth (optionally fan-out-buffered) + OpenSTA at period.
 
     Returns ``(wns_ns, "")`` on success or ``(None, detail)`` on any error so a
     caller can fall back to another measurement instead of crashing the gate.
@@ -1719,26 +1707,21 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
     wd = base_wd / tag
     wd.mkdir(parents=True, exist_ok=True)
     netlist = wd / "netlist.v"
-    yp = None
-    # Blackbox-mem synth; fall back to a plain flatten for a design with no
-    # inferred memory (then the blackbox submodule step has nothing to lift).
-    for blackbox in (True, False):
-        ys = wd / "syn.ys"
-        ys.write_text(_maxfanout_synth_script(sources, lib, netlist, top,
-                                              blackbox, buffered))
-        try:
-            yp = subprocess.run([yosys_bin, "-q", str(ys)],
-                                capture_output=True, text=True, timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            return None, f"yosys timed out after {timeout_s}s"
-        except OSError as e:
-            return None, f"yosys invocation failed: {e}"
-        if yp.returncode == 0 and netlist.exists():
-            break
-        if netlist.exists():
-            netlist.unlink()
-    if yp is None or not netlist.exists():
-        tail = ((yp.stdout + yp.stderr)[-400:]) if yp else "yosys not run"
+    # Keep inferred/flop memory in the measured circuit. Blackboxing all
+    # $mem_v2 cells removes real read muxes and write fanout and can turn the
+    # critical path into an optimistic measurement of a different circuit.
+    ys = wd / "syn.ys"
+    ys.write_text(_maxfanout_synth_script(sources, lib, netlist, top, buffered))
+    try:
+        yp = subprocess.run([yosys_bin, "-q", str(ys)],
+                            capture_output=True, text=True, timeout=timeout_s,
+                            cwd=project_root)
+    except subprocess.TimeoutExpired:
+        return None, f"yosys timed out after {timeout_s}s"
+    except OSError as e:
+        return None, f"yosys invocation failed: {e}"
+    if yp.returncode != 0 or not netlist.exists():
+        tail = (yp.stdout + yp.stderr)[-400:]
         return None, "yosys_fail: " + tail
     # OpenSTA's Verilog reader rejects the `signed` qualifier Yosys may emit on
     # surviving vector wires; it is meaningless for gate-level STA.
@@ -1799,6 +1782,7 @@ def run_maxfanout_buffered_sta(
     timeout_s: int = 300,
     extra_sources: list[str] | None = None,
     report_dir: str | Path | None = None,
+    project_root: str | Path | None = None,
 ) -> dict[str, float | None] | None:
     """Fan-out-aware pre-layout STA: max(unbuffered BASE, fan-out-BUFFERED) WNS.
 
@@ -1826,7 +1810,7 @@ def run_maxfanout_buffered_sta(
     if not period_ns or period_ns <= 0:
         return None
 
-    lib = _sta_dontuse_liberty(liberty_path)
+    lib = str(Path(_sta_dontuse_liberty(liberty_path)).resolve())
     # Engine memory-wrapper instances (cs_sram/cs_fpmem/cs_rom) must resolve or
     # `hierarchy -check` fails BOTH sub-flows and the caller falls back to the
     # pessimistic unbuffered mapped-netlist base -- denying exactly the
@@ -1834,17 +1818,19 @@ def run_maxfanout_buffered_sta(
     # library via ``extra_sources`` (see :func:`mem_lib_sources_for_rtl`);
     # sources are deduped by resolved path so a repeated library entry cannot
     # trip yosys module re-definition.
-    _srcs = _dedup_sources(rtl_path, extra_sources)
+    _srcs = [str(Path(p).resolve()) for p in _dedup_sources(rtl_path, extra_sources)]
     wd = Path(tempfile.mkdtemp(prefix="coresmith_mfsta_"))
     try:
-        _persist = Path(report_dir) if report_dir else None
+        _persist = Path(report_dir).resolve() if report_dir else None
         base_wns, base_detail = _measure_wns_from_rtl(
             _srcs, lib, wd, "base", False, period_ns, top_module,
-            clk_port, yosys_bin, sta_bin, timeout_s, persist_to=_persist)
+            clk_port, yosys_bin, sta_bin, timeout_s, persist_to=_persist,
+            project_root=project_root)
         # BUFFERED is the fan-out-aware relaxation; if it errors we keep BASE.
         buf_wns, buf_detail = _measure_wns_from_rtl(
             _srcs, lib, wd, "buf", True, period_ns, top_module,
-            clk_port, yosys_bin, sta_bin, timeout_s, persist_to=_persist)
+            clk_port, yosys_bin, sta_bin, timeout_s, persist_to=_persist,
+            project_root=project_root)
     finally:
         try:
             shutil.rmtree(wd, ignore_errors=True)
