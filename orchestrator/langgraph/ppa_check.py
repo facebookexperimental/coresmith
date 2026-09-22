@@ -1749,10 +1749,14 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
     if persist_to is not None:
         try:
             persist_to.mkdir(parents=True, exist_ok=True)
+            measured_netlist = persist_to / f"{top}_sta_{tag}.v"
+            shutil.copy2(netlist, measured_netlist)
             (persist_to / f"{top}_sta_{tag}.rpt").write_text(
                 f"# OpenSTA fan-out-aware pre-layout report ({tag}: "
                 f"{'fan-out buffered' if buffered else 'unbuffered'}) for {top}\n"
-                f"# period: {period_ns} ns  clock port: {clk_port}\n\n{out}\n", encoding="utf-8")
+                f"# period: {period_ns} ns  clock port: {clk_port}\n"
+                f"# measured netlist (cell names refer to this file): {measured_netlist}\n\n{out}\n",
+                encoding="utf-8")
         except OSError:
             pass
     m = re.search(r"CORESMITH_WNS\s+([-0-9.eE+]+)", out)

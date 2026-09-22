@@ -118,9 +118,13 @@ def test_timing_probe_resolves_rom_and_keeps_inferred_memory(tmp_path, monkeypat
     monkeypatch.setattr(pc.subprocess, "run", run)
     wns, detail = pc._measure_wns_from_rtl(
         [str(rtl)], "x.lib", tmp_path / "build", "buf", buffered, 15.625,
-        "inner", "clk", "yosys", "sta", 30, project_root=project)
+        "inner", "clk", "yosys", "sta", 30, project_root=project,
+        persist_to=tmp_path / "reports")
     assert wns == -3.5 and detail == ""
     assert len(calls) == 2
+    measured = tmp_path / "reports/inner_sta_buf.v"
+    assert measured.read_bytes() == (tmp_path / "build/buf/netlist.v").read_bytes()
+    assert str(measured) in (tmp_path / "reports/inner_sta_buf.rpt").read_text()
 
 
 class TestEvaluatePpaOverride:
