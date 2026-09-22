@@ -4347,6 +4347,19 @@ async def diagnose_node(state: BlockState) -> dict:
     import json as _json
 
     _db(_pr(state)).set_diagnosis(block_name, diag, attempt=state["attempt"])
+    # The worker authors a writable draft, never the read-only SQLite views.
+    # Persist its new constraints here so later view exports cannot erase them.
+    _known_rules = {c.get("rule") for c in _db(_pr(state)).constraints(block_name)}
+    for _raw in diag.get("constraints") or []:
+        _constraint = {"rule": _raw} if isinstance(_raw, str) else _raw
+        if not isinstance(_constraint, dict) or not isinstance(_constraint.get("rule"), str):
+            continue
+        _rule = _constraint["rule"].strip()
+        if not _rule or _rule in _known_rules:
+            continue
+        _extra = {k: v for k, v in _constraint.items() if k not in ("rule", "source", "attempt")}
+        _db(_pr(state)).add_constraint(block_name, _rule, source="debug_agent", attempt=state["attempt"], **_extra)
+        _known_rules.add(_rule)
 
     # Route the structured diagnosis into previous_error.txt so the REGEN
     # (rtl_generator reads previous_error.txt, not diagnosis.json) gets the

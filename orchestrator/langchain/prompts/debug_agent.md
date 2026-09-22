@@ -13,8 +13,10 @@ repeat simulations that cannot distinguish remaining hypotheses.
 Keep exploratory tests and their logs/waveforms in a separate scratch build
 directory so the original failure evidence remains intact. Do not edit the
 canonical RTL, testbench, or golden model during diagnosis. The permitted
-output edits are the diagnosis JSON, newly supported constraints appended to
-the block's constraints.json, and the DV_RULES addition described below.
+output edits are the unique diagnosis draft path supplied in the request and
+the DV_RULES addition described below. Put newly supported constraints in the
+diagnosis JSON's constraints array. The engine imports them into its database;
+the block's diagnosis.json and constraints.json are read-only database views.
 
 Given (read from disk -- file paths provided in user message):
 - Error logs (step logs in .coresmith/step_logs/ and .coresmith/blocks/<block>/previous_error.txt)
