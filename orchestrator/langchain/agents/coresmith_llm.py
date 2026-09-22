@@ -138,6 +138,43 @@ def _killpg_safe(pgid: int, sig: int) -> None:
         pass
 
 
+_PROCESS_SCOPE_ENV = "CORESMITH_CALL_PROCESS_SCOPE"
+
+
+def _signal_scoped_processes(scope: str, sig: int) -> int:
+    """Signal Linux descendants that escaped the CLI's process group.
+
+    Tool runners may start a new session, then orphan a scratch simulator.
+    A unique per-call inherited environment marker preserves ownership after
+    reparenting. Never match by command, working directory, or user alone.
+    pidfds pin the inspected process so PID reuse cannot target another job.
+    Environments are compared in memory and never logged.
+    """
+    if not isinstance(scope, str) or not scope or not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        return 0
+    needle = f"{_PROCESS_SCOPE_ENV}={scope}".encode()
+    count = 0
+    try:
+        entries = list(Path("/proc").iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        descriptor = None
+        try:
+            descriptor = os.pidfd_open(int(entry.name), 0)
+            if needle in (entry / "environ").read_bytes().split(b"\0"):
+                signal.pidfd_send_signal(descriptor, sig)
+                count += 1
+        except (OSError, ValueError):
+            continue
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+    return count
+
+
 def _reap_process_group(
     process: subprocess.Popen, pgid: int, grace_s: float = 10.0
 ) -> None:
@@ -155,6 +192,8 @@ def _reap_process_group(
     ``pgid`` at spawn (rather than re-deriving via ``os.getpgid`` after the
     child may already be reaped) avoids the pid-reuse race.
     """
+    scope = getattr(process, "_coresmith_process_scope", "")
+    _signal_scoped_processes(scope, signal.SIGTERM)
     # Graceful: let the whole group wind down. If only the (already-exited)
     # leader remains, this is a no-op ESRCH.
     _killpg_safe(pgid, signal.SIGTERM)
@@ -175,6 +214,7 @@ def _reap_process_group(
         pass
     # Hard-kill any grandchild that ignored SIGTERM and is still holding pipes.
     _killpg_safe(pgid, signal.SIGKILL)
+    _signal_scoped_processes(scope, signal.SIGKILL)
 
 
 def kill_active_cli_processes() -> int:
@@ -231,7 +271,7 @@ def reap_active_cli_processes(grace_s: float = 10.0) -> int:
     reaped = 0
     for tid, proc in procs:
         try:
-            if proc.poll() is None:
+            if proc.poll() is None or getattr(proc, "_coresmith_process_scope", ""):
                 logger.warning(
                     "Reaping in-flight CLI process group pid=%d (thread %d) on pause",
                     proc.pid, tid,
@@ -2422,6 +2462,9 @@ class ClaudeLLM:
         t0: float,
     ) -> tuple[str, str, int, float, bool, bool, dict]:
         """Run one Kimi ACP session and capture its JSON-RPC transcript."""
+        import uuid
+        child_env = os.environ.copy()
+        child_env[_PROCESS_SCOPE_ENV] = uuid.uuid4().hex
         process = subprocess.Popen(
             [self.kimi_path, "acp"],
             stdin=subprocess.PIPE,
@@ -2429,12 +2472,14 @@ class ClaudeLLM:
             stderr=subprocess.PIPE,
             text=True,
             cwd=workdir,
+            env=child_env,
             bufsize=1,
             # Own session/group so the whole tree (the ACP server plus any
             # tool/sim grandchildren) can be reaped as a group -- the registry
             # invariant reap_active_cli_processes relies on (pgid == pid).
             start_new_session=True,
         )
+        process._coresmith_process_scope = child_env[_PROCESS_SCOPE_ENV]
         _register_process(process)
         # Captured while the child is guaranteed alive and the group leader;
         # re-deriving via os.getpgid() later would race a pid reuse.
@@ -3064,6 +3109,8 @@ class ClaudeLLM:
         child_env["CORESMITH_WORKER_DEADLINE_EPOCH"] = str(
             _time_mod.time() + self.timeout
         )
+        import uuid
+        child_env[_PROCESS_SCOPE_ENV] = uuid.uuid4().hex
         process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -3078,6 +3125,7 @@ class ClaudeLLM:
             # signal the daemon/pytest process itself.
             start_new_session=True,
         )
+        process._coresmith_process_scope = child_env[_PROCESS_SCOPE_ENV]
         _register_process(process)
         # Capture the child's process-group id now, while it is guaranteed
         # alive and the group leader (pgid == pid). Re-deriving it later via
