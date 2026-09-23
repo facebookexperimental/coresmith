@@ -3148,15 +3148,9 @@ def _evaluate_ppa_gate(
     except Exception:  # noqa: BLE001 - period is best-effort
         _period_ns = None
     _meta["period_ns"] = _period_ns
-    # engine-v31 step 1: FAN-OUT-AWARE STA. The base measurement above is the
-    # UNBUFFERED mapped netlist -- it extrapolates tens of ns of pure fan-out
-    # net delay on a high-fan-out net and systematically FALSE-FAILS designs a
-    # real Sky130 set_max_fanout + repair_design pass would close (the AES-v3
-    # one-round-per-clock engine: -17.75 ns unbuffered here vs +14.97 ns
-    # buffered). Also synthesize a max-fan-out-buffered variant from RTL and
-    # gate on max(base, buffered) WNS -- monotonic (buffering only relaxes), so
-    # no design that met timing unbuffered can be false-failed. Deterministic;
-    # falls back to the base measurement when yosys/sta/liberty are absent.
+    # Compare measured pre-placement candidates. The deployment repairs mapped
+    # FF loads that ABC cannot see. Keep timing, area and FFs from the same
+    # selected netlist; inserted buffers are not free area.
     _eff_wns = sta.get("wns_ns")
     _eff_sta_error = sta.get("sta_error")
     _liberty_p = (synth_result or {}).get("liberty_path", "")
@@ -3176,12 +3170,27 @@ def _evaluate_ppa_gate(
             _meta["wns_ns_base_unbuffered"] = _eff_wns
             _meta["wns_ns_buffered"] = mf.get("buffered_wns_ns")
             _meta["fmax_mhz_buffered"] = mf.get("fmax_mhz")
+            _meta["netlist_repair_status"] = mf.get("repair_status")
+            if mf.get("detail"):
+                _meta["sta_maxfanout_detail"] = mf["detail"]
+                log(f"  [PPA] {block_name}: {mf['detail']}", YELLOW)
             if mf.get("sta_ok") and mf.get("wns_ns") is not None:
-                # Best of the unbuffered mapped-netlist base and the fan-out-
-                # buffered RTL synth -- both measure the same reg-to-reg cone.
-                _cands = [w for w in (_eff_wns, mf["wns_ns"]) if w is not None]
-                _eff_wns = max(_cands) if _cands else mf["wns_ns"]
+                if _eff_wns is None or mf["wns_ns"] > _eff_wns:
+                    _eff_wns = mf["wns_ns"]
+                    actual_ff = mf.get("ff_count", actual_ff)
+                    # This measurement maps the full memories into the retained
+                    # netlist, so do not add an estimated SRAM cost again.
+                    actual_area = mf.get("chip_area_um2", actual_area)
+                    _meta.update(ff=actual_ff, area_um2=actual_area,
+                                 ppa_netlist_path=mf.get("netlist_path"),
+                                 ppa_netlist_sha256=mf.get("netlist_sha256"),
+                                 ppa_variant=mf.get("selected_variant"),
+                                 cells=mf.get("cells", _meta.get("cells")),
+                                 tns_ns=mf.get("tns_ns"))
+                    if mf.get("report_path"):
+                        _meta["sta_report_path"] = mf["report_path"]
                 _eff_sta_error = None  # a real measurement rescued a base None/err
+                _meta.pop("sta_error", None)
                 log(f"  [PPA] {block_name}: fan-out-aware STA WNS "
                     f"{mf['wns_ns']:+.2f} ns (base {mf.get('base_wns_ns')}, "
                     f"buffered {mf.get('buffered_wns_ns')}); gating on "

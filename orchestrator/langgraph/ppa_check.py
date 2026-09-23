@@ -458,9 +458,8 @@ def count_cells_from_stat(stat_text: str) -> int | None:
     ms = re.findall(r"Number of cells:\s*(\d[\d,]*)", text)
     if ms:
         return int(ms[-1].replace(",", ""))
-    # Format B (stat breakdown table): the module-total line "<N> cells" --
-    # distinct from "<N> wires" / "<N> wire bits" / "<N> public wires".
-    mb = re.findall(r"(?m)^\s*(\d[\d,]*)\s+cells\s*$", text)
+    # Newer liberty-aware tables include an area column: "21633 2.76E+05 cells".
+    mb = re.findall(r"(?m)^\s*(\d[\d,]*)\s+(?:(?:-|\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)\s+)?cells\s*$", text)
     if mb:
         return int(mb[-1].replace(",", ""))
     return None
@@ -1594,25 +1593,12 @@ def run_pre_layout_sta(
 # --------------------------------------------------------------------------- #
 # Fan-out-aware (max(base, buffered)) pre-layout STA  --  engine-v31, step 1
 # --------------------------------------------------------------------------- #
-# WHY: :func:`run_pre_layout_sta` above measures ONE unbuffered mapped netlist.
-# A Yosys-mapped netlist has NO fan-out buffering, so OpenSTA sees a single
-# min-size gate driving the whole lumped pin capacitance of a high-fan-out net
-# and extrapolates its delay/slew far past the cell's characterized load range
-# -- tens of ns of PURE fan-out delay that a real Sky130 backend's
-# set_max_fanout + repair_design pass removes. That systematically FALSE-FAILS
-# high-fan-out-but-signoff-recoverable designs: the AES-v3 one-round-per-clock
-# engine measured WNS -17.75 ns unbuffered here yet closes at +14.97 ns after
-# standard max-fan-out buffering (and the graded golden AES closes the same
-# way). This function ports the accelerator-chassis grader's fan-out-aware recipe: it
-# synthesizes the RTL to Sky130 cells TWICE from source -- an unbuffered BASE
-# map and a BUFFERED map (ABC ``buffer -N`` + gate sizing, the std-cell
-# analogue of set_max_fanout + repair_design) -- and reports max(base, buffered)
-# WNS. Fan-out buffering only ever RELAXES a path, so taking the best is
-# monotonic: no design that met timing unbuffered can be false-failed, and a
-# high-fan-out design gets the buffered Fmax it would actually achieve on
-# silicon. Both sub-flows are placement-free and RNG-free -> deterministic
-# (same input -> same WNS bit-for-bit); a buffering error falls back to BASE.
-_STA_MAX_FANOUT = 16               # per-net fan-out cap for the buffered pass
+# ABC buffers extracted combinational logic, not every mapped flip-flop load.
+# The deployment's optional repair_netlist tool repairs the complete mapped
+# network before fresh STA. Select a measured netlist with its own area/FF
+# counts; buffering can change both area and timing. These are pre-placement
+# estimates, never routed signoff or a promise of achievable silicon Fmax.
+_STA_MAX_FANOUT = 16               # ABC target; not an all-net fan-out guarantee
 _STA_DONT_USE = ("lpflow", "probe")  # standard dont_use: iso/probe cells skew timing
 _STA_CELL_RE = re.compile(r'cell\s*\(\s*"([^"]+)"\s*\)\s*\{')
 
@@ -1674,9 +1660,8 @@ def _maxfanout_synth_script(sources: list[str], lib: str, netlist: Path,
     reads = " ".join(sources)
     mem = f"synth -top {top} -flatten\n"
     if buffered:
-        # After logic mapping, ABC's `buffer -N` inserts a buffer tree wherever a
-        # net exceeds the fan-out cap, then upsize/dnsize gate-sizes the drivers
-        # -- the std-cell analogue of a Sky130 set_max_fanout + repair_design.
+        # Initial combinational mapping. The deployment repairs mapped FF loads
+        # afterwards; they are not all represented in ABC's extracted network.
         abc = (f'abc -liberty {lib} -script '
                f'"+strash;dch,-f;map,-B,0.9;topo;stime,-c;'
                f'buffer,-N,{_STA_MAX_FANOUT};upsize,-c;dnsize,-c;stime,-p"\n')
@@ -1698,7 +1683,9 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
                           buffered: bool, period_ns: float, top: str,
                           clk_port: str, yosys_bin: str, sta_bin: str,
                           timeout_s: int, persist_to: Path | None = None,
-                          project_root: str | Path | None = None) -> tuple[float | None, str]:
+                          project_root: str | Path | None = None,
+                          repair_tool=None,
+                          measurements: dict | None = None) -> tuple[float | None, str]:
     """Synth (optionally fan-out-buffered) + OpenSTA at period.
 
     Returns ``(wns_ns, "")`` on success or ``(None, detail)`` on any error so a
@@ -1728,6 +1715,30 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
     text = netlist.read_text()
     if " signed " in text:
         netlist.write_text(re.sub(r"\bsigned\b", "", text))
+    info: dict = {"buffering_status": "unavailable" if buffered else "not_requested"}
+    if measurements is not None:
+        measurements[tag] = info
+    if buffered and repair_tool is not None:
+        from orchestrator.pdk.base import ToolRequest
+
+        repaired = repair_tool.run(ToolRequest(
+            verb="repair_netlist", design=top,
+            inputs={"netlist": netlist, "liberty": Path(lib)},
+            params={"clock_ns": period_ns, "clock_port": clk_port},
+            out_dir=wd / "repair", timeout_s=timeout_s))
+        candidate = repaired.artifacts.get("netlist")
+        if repaired.ok and candidate and Path(candidate).is_file():
+            netlist = Path(candidate)
+            info["buffering_status"] = "repaired"
+        else:
+            info["buffering_status"] = "failed"
+            info["buffering_detail"] = "; ".join(c.details for c in repaired.checks)
+        if persist_to is not None:
+            persist_to.mkdir(parents=True, exist_ok=True)
+            for key in ("script", "report"):
+                artifact = repaired.artifacts.get(key)
+                if artifact and Path(artifact).is_file():
+                    shutil.copy2(artifact, persist_to / f"{top}_sta_{tag}_repair{Path(artifact).suffix}")
     tcl = wd / "sta.tcl"
     tcl.write_text(
         f"read_liberty {lib}\n"
@@ -1759,6 +1770,8 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
                 encoding="utf-8")
         except OSError:
             pass
+    if sp.returncode != 0:
+        return None, f"OpenSTA failed (rc={sp.returncode}): " + out[-400:]
     m = re.search(r"CORESMITH_WNS\s+([-0-9.eE+]+)", out)
     if m is None:
         m = re.search(r"worst slack\s*(?:-?max)?\s*([-0-9.eE+]+)", out, re.IGNORECASE)
@@ -1773,6 +1786,31 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
                  f"{top} netlist")
         logger.warning("fan-out-aware STA for %s: %s", top, detail)
         return None, detail
+    if measurements is not None:
+        # Measure the actual STA input, including every inserted buffer. Never
+        # pair a repaired timing result with the original synthesis area.
+        from orchestrator.pdk.checkers import SynthStatChecker
+
+        stats_script = wd / "stat.ys"
+        stats_script.write_text(
+            f'read_liberty -lib "{lib}"\nread_verilog "{netlist}"\n'
+            f'hierarchy -check -top {top}\nstat -liberty "{lib}"\n')
+        try:
+            stats_run = subprocess.run([yosys_bin, "-Q", "-T", str(stats_script)],
+                                       capture_output=True, text=True, timeout=timeout_s)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return None, f"mapped-netlist statistics unavailable: {exc}"
+        stats_text = stats_run.stdout + stats_run.stderr
+        stats = SynthStatChecker.parse_text(stats_text)
+        if persist_to is not None:
+            (persist_to / f"{top}_sta_{tag}_stat.rpt").write_text(stats_text)
+        if stats_run.returncode != 0 or stats["chip_area_um2"] <= 0:
+            return None, "mapped-netlist area unavailable: " + stats_text[-400:]
+        info.update(stats)
+        info.update(wns_ns=val, tns_ns=parse_sta_report(out).get("tns_ns"),
+                    netlist_sha256=hashlib.sha256(netlist.read_bytes()).hexdigest(),
+                    netlist_path=str(persist_to / f"{top}_sta_{tag}.v") if persist_to else None,
+                    report_path=str(persist_to / f"{top}_sta_{tag}.rpt") if persist_to else None)
     return val, ""
 
 
@@ -1787,13 +1825,14 @@ def run_maxfanout_buffered_sta(
     extra_sources: list[str] | None = None,
     report_dir: str | Path | None = None,
     project_root: str | Path | None = None,
-) -> dict[str, float | None] | None:
+) -> dict | None:
     """Fan-out-aware pre-layout STA: max(unbuffered BASE, fan-out-BUFFERED) WNS.
 
     Synthesizes ``rtl_path`` to Sky130 cells from source TWICE at ``period_ns``
-    -- an unbuffered BASE map and an ABC max-fan-out-buffered + gate-sized map --
-    and reports the BEST (max-slack) reg-to-reg WNS. See the module-level comment
-    above for the physics. Deterministic; a buffering error falls back to BASE.
+    -- a BASE map and an ABC map followed by deployment-owned netlist repair --
+    and reports the best reg-to-reg WNS with that netlist's area/FF counts.
+    Missing or failed repair is reported explicitly; the measured ABC fallback
+    remains available. All measurements are pre-placement, not routed signoff.
 
     Returns:
       * ``{base_wns_ns, buffered_wns_ns, wns_ns (=max), fmax_mhz, sta_ok,
@@ -1824,17 +1863,21 @@ def run_maxfanout_buffered_sta(
     # trip yosys module re-definition.
     _srcs = [str(Path(p).resolve()) for p in _dedup_sources(rtl_path, extra_sources)]
     wd = Path(tempfile.mkdtemp(prefix="coresmith_mfsta_"))
+    from orchestrator.pdk.registry import get_deployment
+
+    repair_tool = get_deployment().tool("repair_netlist")
+    measurements: dict = {}
     try:
         _persist = Path(report_dir).resolve() if report_dir else None
         base_wns, base_detail = _measure_wns_from_rtl(
             _srcs, lib, wd, "base", False, period_ns, top_module,
             clk_port, yosys_bin, sta_bin, timeout_s, persist_to=_persist,
-            project_root=project_root)
+            project_root=project_root, measurements=measurements)
         # BUFFERED is the fan-out-aware relaxation; if it errors we keep BASE.
         buf_wns, buf_detail = _measure_wns_from_rtl(
             _srcs, lib, wd, "buf", True, period_ns, top_module,
             clk_port, yosys_bin, sta_bin, timeout_s, persist_to=_persist,
-            project_root=project_root)
+            project_root=project_root, repair_tool=repair_tool, measurements=measurements)
     finally:
         try:
             shutil.rmtree(wd, ignore_errors=True)
@@ -1848,13 +1891,21 @@ def run_maxfanout_buffered_sta(
         return {"base_wns_ns": base_wns, "buffered_wns_ns": buf_wns,
                 "wns_ns": None, "fmax_mhz": None, "sta_ok": False,
                 "sta_error": reason, "detail": reason}
-    wns = max(cands)                      # best -- fan-out buffering is monotonic
+    selected = "buf" if buf_wns is not None and (base_wns is None or buf_wns > base_wns) else "base"
+    wns = max(cands)
     denom = period_ns - wns
     fmax = round(1000.0 / denom, 3) if denom > 0 else None
+    repair_info = measurements.get("buf", {})
+    detail = ""
+    if repair_info.get("buffering_status") in ("failed", "unavailable"):
+        detail = ("Mapped-netlist repair " + repair_info["buffering_status"] +
+                  "; using measured fallback. " + repair_info.get("buffering_detail", ""))
     return {
+        **measurements[selected], "selected_variant": selected,
+        "repair_status": repair_info.get("buffering_status", "not_run"),
         "base_wns_ns": round(base_wns, 4) if base_wns is not None else None,
         "buffered_wns_ns": round(buf_wns, 4) if buf_wns is not None else None,
-        "wns_ns": round(wns, 4), "fmax_mhz": fmax, "sta_ok": True, "detail": "",
+        "wns_ns": round(wns, 4), "fmax_mhz": fmax, "sta_ok": True, "detail": detail,
     }
 
 
