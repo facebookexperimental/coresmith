@@ -932,7 +932,7 @@ def evaluate_ppa(
     ff_budget: int | None,
     ff_tolerance_pct: float = 25.0,
     ff_floor: int = 2000,
-    hard_ff_ceiling: int = 50000,
+    hard_ff_ceiling: int | None = None,
     storage_ff: int | None = None,
     actual_area_um2: float | None = None,
     area_budget_um2: float | None = None,
@@ -950,7 +950,7 @@ def evaluate_ppa(
     mem_price gate honors). The BUDGET dimensions -- area and the logic-FF
     budget -- are then recorded but DEFERRED (``deferred_by_override`` on the
     check, no ``ok`` flip), instead of re-failing a block whose cost the lead
-    already signed off. The absolute FF hard ceiling and the timing dimension
+    already signed off. An explicitly supplied FF ceiling and the timing dimension
     still gate: an accepted [area] blocker never waives routability or timing.
 
     A check is evaluated only when both its actual value and its budget are
@@ -969,7 +969,7 @@ def evaluate_ppa(
     is a LOGIC budget (bulk buffers/FIFOs are priced by the area budget, not
     the FF budget), so a legitimate line buffer / small memory must not be
     charged against it. The budget check judges ``logic_ff = actual_ff -
-    storage_ff``; the absolute hard ceiling still sees TOTAL flops so a
+    storage_ff``; an explicitly supplied hard ceiling still sees TOTAL flops so a
     should-be-SRAM flop explosion is caught regardless of how it is classified.
     This is the false-flag (a legit 144-byte buffer) that got the gate disabled.
     """
@@ -1025,17 +1025,13 @@ def evaluate_ppa(
                     f"SRAM macro synthesized to flops"
                 )
 
-    # Absolute hard ceiling -- fires even with NO flip_flop_budget, and is the
-    # backstop that must stop a block from advancing to chip-top synthesis. A
-    # single block over this many flops is patently unroutable in sky130 and
-    # almost always means a should-be-SRAM memory flopped because the RTL wrote
-    # a behavioral reg-array instead of instantiating a macro (codec mb_emitter:
-    # 136k FF). It does NOT override a deliberately-large budget: if the block is
-    # within its (possibly huge) flip_flop_budget, the uArch owns that choice.
+    # An absolute ceiling must be supplied explicitly. A missing task budget
+    # does not authorize an invented limit or a mandatory memory implementation.
     _over_budget = ff_budget is None or actual_ff is None or (
         actual_ff > ff_budget * (1.0 + ff_tolerance_pct / 100.0)
     )
-    if actual_ff is not None and actual_ff > hard_ff_ceiling and _over_budget:
+    if (hard_ff_ceiling is not None and actual_ff is not None
+            and actual_ff > hard_ff_ceiling and _over_budget):
         already = any(
             c["metric"] == "flip_flop_count" and not c["passed"]
             and not c.get("deferred_by_override") for c in checks
@@ -1048,10 +1044,7 @@ def evaluate_ppa(
         if not already:
             reasons.append(
                 f"flip-flop count {actual_ff:,} exceeds the absolute "
-                f"{hard_ff_ceiling:,}-FF hard ceiling for one block -- a memory "
-                f"that should be an SRAM macro almost certainly flopped (behavioral "
-                f"reg-array, no macro instance). The block must NOT advance to "
-                f"chip-top synthesis; instantiate the named macro instead."
+                f"{hard_ff_ceiling:,}-FF explicitly configured hard ceiling for one block."
             )
 
     # Area is optional; only flag it as unmeasured when one of the pair was
@@ -1685,7 +1678,9 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
                           timeout_s: int, persist_to: Path | None = None,
                           project_root: str | Path | None = None,
                           repair_tool=None,
-                          measurements: dict | None = None) -> tuple[float | None, str]:
+                          measurements: dict | None = None,
+                          mapped_netlist: str | None = None,
+                          sdc_path: str | None = None) -> tuple[float | None, str]:
     """Synth (optionally fan-out-buffered) + OpenSTA at period.
 
     Returns ``(wns_ns, "")`` on success or ``(None, detail)`` on any error so a
@@ -1697,19 +1692,25 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
     # Keep inferred/flop memory in the measured circuit. Blackboxing all
     # $mem_v2 cells removes real read muxes and write fanout and can turn the
     # critical path into an optimistic measurement of a different circuit.
-    ys = wd / "syn.ys"
-    ys.write_text(_maxfanout_synth_script(sources, lib, netlist, top, buffered))
-    try:
-        yp = subprocess.run([yosys_bin, "-q", str(ys)],
-                            capture_output=True, text=True, timeout=timeout_s,
-                            cwd=project_root)
-    except subprocess.TimeoutExpired:
-        return None, f"yosys timed out after {timeout_s}s"
-    except OSError as e:
-        return None, f"yosys invocation failed: {e}"
-    if yp.returncode != 0 or not netlist.exists():
-        tail = (yp.stdout + yp.stderr)[-400:]
-        return None, "yosys_fail: " + tail
+    if mapped_netlist:
+        try:
+            shutil.copy2(mapped_netlist, netlist)
+        except OSError as exc:
+            return None, f"mapped netlist unavailable: {exc}"
+    else:
+        ys = wd / "syn.ys"
+        ys.write_text(_maxfanout_synth_script(sources, lib, netlist, top, buffered))
+        try:
+            yp = subprocess.run([yosys_bin, "-q", str(ys)],
+                                capture_output=True, text=True, timeout=timeout_s,
+                                cwd=project_root)
+        except subprocess.TimeoutExpired:
+            return None, f"yosys timed out after {timeout_s}s"
+        except OSError as e:
+            return None, f"yosys invocation failed: {e}"
+        if yp.returncode != 0 or not netlist.exists():
+            tail = (yp.stdout + yp.stderr)[-400:]
+            return None, "yosys_fail: " + tail
     # OpenSTA's Verilog reader rejects the `signed` qualifier Yosys may emit on
     # surviving vector wires; it is meaningless for gate-level STA.
     text = netlist.read_text()
@@ -1740,11 +1741,18 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
                 if artifact and Path(artifact).is_file():
                     shutil.copy2(artifact, persist_to / f"{top}_sta_{tag}_repair{Path(artifact).suffix}")
     tcl = wd / "sta.tcl"
+    constraints = f"create_clock -name clk -period {period_ns} [get_ports {clk_port}]\n"
+    if sdc_path:
+        try:
+            shutil.copy2(sdc_path, wd / "constraints.sdc")
+        except OSError as exc:
+            return None, f"timing constraints unavailable: {exc}"
+        constraints = f"read_sdc {{{wd / 'constraints.sdc'}}}\n"
     tcl.write_text(
         f"read_liberty {lib}\n"
         f"read_verilog {netlist}\n"
         f"link_design {top}\n"
-        f"create_clock -name clk -period {period_ns} [get_ports {clk_port}]\n"
+        f"{constraints}"
         f"report_checks -path_delay max -group_count 5 -format full_clock_expanded\n"
         f"report_tns\n"
         f'puts "CORESMITH_WNS [worst_slack -max]"\n'
@@ -1825,12 +1833,14 @@ def run_maxfanout_buffered_sta(
     extra_sources: list[str] | None = None,
     report_dir: str | Path | None = None,
     project_root: str | Path | None = None,
+    mapped_netlist: str | None = None,
+    sdc_path: str | None = None,
 ) -> dict | None:
     """Fan-out-aware pre-layout STA: max(unbuffered BASE, fan-out-BUFFERED) WNS.
 
-    Synthesizes ``rtl_path`` to Sky130 cells from source TWICE at ``period_ns``
-    -- a BASE map and an ABC map followed by deployment-owned netlist repair --
-    and reports the best reg-to-reg WNS with that netlist's area/FF counts.
+    When a mapped netlist is supplied, repair and measure that artifact with
+    its SDC; the caller already owns its baseline measurement. Otherwise retain
+    the standalone RTL mapping flow. Report the selected netlist's area/FFs.
     Missing or failed repair is reported explicitly; the measured ABC fallback
     remains available. All measurements are pre-placement, not routed signoff.
 
@@ -1853,7 +1863,10 @@ def run_maxfanout_buffered_sta(
     if not period_ns or period_ns <= 0:
         return None
 
-    lib = str(Path(_sta_dontuse_liberty(liberty_path)).resolve())
+    # Existing maps may contain cells excluded from new mapping. Their timing
+    # models must remain available when measuring the existing circuit.
+    lib = str(Path(liberty_path if mapped_netlist else
+                   _sta_dontuse_liberty(liberty_path)).resolve())
     # Engine memory-wrapper instances (cs_sram/cs_fpmem/cs_rom) must resolve or
     # `hierarchy -check` fails BOTH sub-flows and the caller falls back to the
     # pessimistic unbuffered mapped-netlist base -- denying exactly the
@@ -1869,33 +1882,39 @@ def run_maxfanout_buffered_sta(
     measurements: dict = {}
     try:
         _persist = Path(report_dir).resolve() if report_dir else None
-        base_wns, base_detail = _measure_wns_from_rtl(
-            _srcs, lib, wd, "base", False, period_ns, top_module,
-            clk_port, yosys_bin, sta_bin, timeout_s, persist_to=_persist,
-            project_root=project_root, measurements=measurements)
+        base_wns, base_detail = None, "baseline measured by caller"
+        if not mapped_netlist:
+            base_wns, base_detail = _measure_wns_from_rtl(
+                _srcs, lib, wd, "base", False, period_ns, top_module,
+                clk_port, yosys_bin, sta_bin, timeout_s, persist_to=_persist,
+                project_root=project_root, measurements=measurements)
         # BUFFERED is the fan-out-aware relaxation; if it errors we keep BASE.
         buf_wns, buf_detail = _measure_wns_from_rtl(
             _srcs, lib, wd, "buf", True, period_ns, top_module,
             clk_port, yosys_bin, sta_bin, timeout_s, persist_to=_persist,
-            project_root=project_root, repair_tool=repair_tool, measurements=measurements)
+            project_root=project_root, repair_tool=repair_tool, measurements=measurements,
+            mapped_netlist=mapped_netlist, sdc_path=sdc_path)
     finally:
         try:
             shutil.rmtree(wd, ignore_errors=True)
         except OSError:
             pass
 
+    repair_info = measurements.setdefault("buf", {})
+    if buf_wns is None:
+        repair_info.update(buffering_status="failed", buffering_detail=buf_detail)
     cands = [w for w in (base_wns, buf_wns) if w is not None]
     if not cands:
         reason = f"maxfanout STA produced no timing: base[{base_detail}] buf[{buf_detail}]"
         logger.warning("fan-out-aware STA failed for %s: %s", top_module, reason)
         return {"base_wns_ns": base_wns, "buffered_wns_ns": buf_wns,
                 "wns_ns": None, "fmax_mhz": None, "sta_ok": False,
-                "sta_error": reason, "detail": reason}
+                "sta_error": reason, "detail": reason,
+                "repair_status": repair_info["buffering_status"]}
     selected = "buf" if buf_wns is not None and (base_wns is None or buf_wns > base_wns) else "base"
     wns = max(cands)
     denom = period_ns - wns
     fmax = round(1000.0 / denom, 3) if denom > 0 else None
-    repair_info = measurements.get("buf", {})
     detail = ""
     if repair_info.get("buffering_status") in ("failed", "unavailable"):
         detail = ("Mapped-netlist repair " + repair_info["buffering_status"] +

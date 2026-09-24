@@ -154,7 +154,7 @@ class TestEvaluatePpaOverride:
 
     def test_hard_ceiling_gates_despite_override(self):
         v = evaluate_ppa(actual_ff=60000, ff_budget=1000,
-                         budget_overridden=True)
+                         budget_overridden=True, hard_ff_ceiling=50000)
         assert v.ok is False
         assert any(c["metric"] == "flip_flop_hard_ceiling" and not c["passed"]
                    for c in v.checks)

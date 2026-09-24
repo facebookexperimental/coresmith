@@ -15,6 +15,8 @@ WNS is the authority); PDK-absent runs keep it gating. Env
 """
 from __future__ import annotations
 
+import pytest
+
 from orchestrator.langgraph import pipeline_graph as pg
 from orchestrator.langgraph import ppa_check as pc
 
@@ -86,17 +88,18 @@ class TestDepthGuardRouting:
                             lambda *a, **k: {"wns_ns": 0.0})
         return str(rtl)
 
-    def test_advisory_when_pdk_and_sta_present(self, tmp_path, monkeypatch):
+    def test_mapped_netlist_uses_sta_without_duplicate_depth_probe(self, tmp_path, monkeypatch):
         rtl = self._rig(tmp_path, monkeypatch, sta_available=True)
+        monkeypatch.setattr(pc, "probe_logic_depth",
+                            lambda *a, **k: pytest.fail("STA supersedes depth proxy"))
         ppa_ok, reasons, meta = pg._evaluate_ppa_gate(
             str(tmp_path), "blk", rtl,
             {"ff_count": 4, "chip_area_um2": None},
             require_gate_flag=False,
         )
-        # depth did NOT reject the block; it was recorded as advisory only.
+        # The measured netlist supersedes a second synthesis/depth estimate.
         assert ppa_ok is not False
-        assert meta.get("logic_depth_advisory") is True
-        assert meta.get("logic_depth") == 881
+        assert meta["wns_ns"] == 0.0
         assert not any("combinational depth" in r for r in reasons)
 
     def test_gating_when_pdk_absent(self, tmp_path, monkeypatch):

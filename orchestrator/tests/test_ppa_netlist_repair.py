@@ -87,7 +87,8 @@ def test_repair_uses_requested_corner_and_deployment_settings(repair_request, mo
     assert result.ok and result.artifacts['netlist'].read_text() == 'fresh'
 
 
-def fake_measurement_tools(tmp_path, monkeypatch, repair_status='repaired', buf_wns=5):
+def fake_measurement_tools(tmp_path, monkeypatch, repair_status='repaired', buf_wns=5,
+                           reuse_mapped=False):
     src, lib = tmp_path / 'core.v', tmp_path / 'cells.lib'
     src.write_text('module core(input clk); endmodule')
     lib.write_text('library(test){}')
@@ -97,6 +98,7 @@ def fake_measurement_tools(tmp_path, monkeypatch, repair_status='repaired', buf_
         script = Path(cmd[-1])
         tag = script.parent.name
         if script.name == 'syn.ys':
+            assert not reuse_mapped, 'a mapped input must not be synthesized again'
             script.with_name('netlist.v').write_text(f'module core; // {tag}\nendmodule')
             stdout = ''
         elif script.name == 'stat.ys':
@@ -124,8 +126,14 @@ def fake_measurement_tools(tmp_path, monkeypatch, repair_status='repaired', buf_
     monkeypatch.setattr(registry, 'get_deployment', lambda: SimpleNamespace(tool=lambda name: tool))
     monkeypatch.setattr(pc.shutil, 'which', lambda name: name)
     monkeypatch.setattr(pc.subprocess, 'run', run)
+    kwargs = {}
+    if reuse_mapped:
+        sdc = tmp_path / 'core.sdc'
+        sdc.write_text('create_clock -period 15.625 [get_ports clk]\n'
+                       'set_input_delay -clock clk 3.125 [all_inputs -no_clocks]\n')
+        kwargs = {'mapped_netlist': str(src), 'sdc_path': str(sdc)}
     result = pc.run_maxfanout_buffered_sta(str(src), str(lib), 'core', 15.625,
-                                          report_dir=tmp_path / 'reports')
+                                          report_dir=tmp_path / 'reports', **kwargs)
     return result, seen
 
 
@@ -136,6 +144,14 @@ def test_selected_timing_prices_and_preserves_repaired_netlist(tmp_path, monkeyp
     assert result['chip_area_um2'] == 200 and result['ff_count'] == 5
     assert '// repaired' in Path(result['netlist_path']).read_text()
     assert 'repaired.v' in seen[1]
+
+
+def test_existing_mapping_is_repaired_without_resynthesis(tmp_path, monkeypatch):
+    result, scripts = fake_measurement_tools(tmp_path, monkeypatch, reuse_mapped=True)
+    assert result['sta_ok'] and result['repair_status'] == 'repaired'
+    assert result['wns_ns'] == 5 and result['chip_area_um2'] == 200
+    assert all('read_sdc' in script for script in scripts)
+    assert (tmp_path / 'core.v').read_text() == 'module core(input clk); endmodule'
 
 
 @pytest.mark.parametrize('status', ['failed', 'unavailable'])
