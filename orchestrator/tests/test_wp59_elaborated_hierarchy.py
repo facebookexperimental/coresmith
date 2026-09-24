@@ -54,3 +54,28 @@ def test_top_must_be_explicit():
         "module chip_top(); endmodule module orphan(); leaf u(); endmodule", {"leaf"},
         sources=["module leaf(); endmodule"])
     assert result and "top" in result.lower()
+
+
+@pytest.mark.skipif(not shutil.which("yosys"), reason="requires yosys")
+def test_memory_backed_block_uses_candidate_library(tmp_path):
+    top = tmp_path / "chip_top.v"
+    leaf = tmp_path / "leaf.v"
+    top.write_text("module chip_top(input clk, output [7:0] q); leaf u(clk, q); endmodule")
+    leaf.write_text('''module leaf(input clk, output [7:0] q);
+      cs_fpmem_1rw1r #(.WIDTH(8), .DEPTH(4)) mem (
+        .clk(clk), .ce0(1'b1), .we0(1'b0), .addr0(2'b0),
+        .wdata0(8'b0), .rdata0(q), .ce1(1'b0), .addr1(2'b0), .rdata1());
+    endmodule''')
+    kwargs = dict(source_paths=[str(top), str(leaf)],
+                  top_module="chip_top", project_root=tmp_path)
+    assert assert_blocks_instantiated(top.read_text(), {"leaf"}, **kwargs) is None
+    missing = assert_blocks_instantiated(top.read_text(), {"leaf", "absent"}, **kwargs)
+    assert missing and "absent" in missing and "does NOT instantiate" in missing
+
+
+def test_missing_selected_source_is_infrastructure_failure(tmp_path):
+    result = assert_blocks_instantiated(
+        "module chip_top(); endmodule", {"leaf"},
+        source_paths=[str(tmp_path / "missing.v")], top_module="chip_top",
+        project_root=tmp_path)
+    assert result and result.kind == "infrastructure_error"
