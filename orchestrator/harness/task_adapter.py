@@ -260,7 +260,13 @@ def run_task_adapter(project_root: str, top_rtl: str, block_rtls: Any = None) ->
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["TMPDIR"] = "/tmp"
-    env["XDG_CACHE_HOME"] = "/tmp/cache"
+    # Evaluators must not depend on a writable host home. Older application
+    # libraries prefer HOME to APPDATA and do not honor XDG_CACHE_HOME.
+    cache = work / ".cache"
+    cache.mkdir()
+    env.pop("HOME", None)
+    env["APPDATA"] = str(cache)
+    env["XDG_CACHE_HOME"] = str(cache)
     try:
         command = _sandbox_argv([python, str(_RUNNER), str(Path(apath).resolve()),
                                 str(cand_json), str(provisional), str(work)], work,
