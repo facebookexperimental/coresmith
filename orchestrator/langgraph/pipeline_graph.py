@@ -4350,7 +4350,12 @@ async def diagnose_node(state: BlockState) -> dict:
     # The worker authors a writable draft, never the read-only SQLite views.
     # Persist its new constraints here so later view exports cannot erase them.
     _known_rules = {c.get("rule") for c in _db(_pr(state)).constraints(block_name)}
-    for _raw in diag.get("constraints") or []:
+    # A failed tool/agent has no hardware verdict. Keep its full diagnosis as
+    # evidence without installing speculative implementation requirements.
+    _new_rules = [] if category in {
+        "INFRASTRUCTURE_ERROR", "SIMULATION_INFRASTRUCTURE", "SIM_TIMEOUT", "AGENT_ERROR",
+    } else (diag.get("constraints") or [])
+    for _raw in _new_rules:
         _constraint = {"rule": _raw} if isinstance(_raw, str) else _raw
         if not isinstance(_constraint, dict) or not isinstance(_constraint.get("rule"), str):
             continue

@@ -79,3 +79,19 @@ async def test_native_diagnose_imports_constraints_without_replacing_prior_rules
     db.export_block_views("leaf")
     assert json.loads((tmp_path / ".coresmith/blocks/leaf/constraints.json").read_text()) == rules
     assert db.diagnosis("leaf")["diagnosis"] == "wrong compare"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("category", ["INFRASTRUCTURE_ERROR", "SIM_TIMEOUT", "AGENT_ERROR"])
+async def test_missing_hardware_verdict_cannot_install_design_constraints(tmp_path, monkeypatch, category):
+    from orchestrator.langgraph import pipeline_graph as pg
+    db = open_project(tmp_path)
+    db.add_constraint("leaf", "Keep reset polarity", source="operator")
+    before = db.constraints("leaf")
+    diag = {"category": category, "diagnosis": "Timing repair did not complete",
+            "constraints": [{"rule": "MUST bank the memory into at least 12 instances"}]}
+    monkeypatch.setattr(pg, "diagnose_failure", AsyncMock(return_value=diag))
+    await pg.diagnose_node({"current_block": {"name": "leaf"}, "project_root": str(tmp_path),
+                            "phase": "synth", "attempt": 1, "max_attempts": 3})
+    assert db.diagnosis("leaf")["constraints"] == diag["constraints"]
+    assert db.constraints("leaf") == before

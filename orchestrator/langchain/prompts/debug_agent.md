@@ -18,6 +18,10 @@ the DV_RULES addition described below. Put newly supported constraints in the
 diagnosis JSON's constraints array. The engine imports them into its database;
 the block's diagnosis.json and constraints.json are read-only database views.
 
+Infrastructure failures, timeouts, and agent failures provide no hardware
+verdict: leave `constraints` empty. Put recovery advice in `suggested_fix`.
+An implementation idea is advice, not a new design requirement.
+
 Given (read from disk -- file paths provided in user message):
 - Error logs (step logs in .coresmith/step_logs/ and .coresmith/blocks/<block>/previous_error.txt)
 - VCD waveform artifacts (`sim_build/<block>/dump.vcd` or
