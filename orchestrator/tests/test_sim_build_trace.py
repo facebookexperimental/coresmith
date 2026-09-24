@@ -192,6 +192,7 @@ def test_integration_pre_run_hygiene_clears_agent_debris(tmp_path, monkeypatch):
     seen = {}
 
     class _FakePopen:
+        pid = 12345
         # run_integration_simulation now launches make via subprocess.Popen (own
         # process group, so a timeout kills the whole compiler/sim tree instead
         # of orphaning it) + .communicate(), not subprocess.run -- mock that.
@@ -203,6 +204,8 @@ def test_integration_pre_run_hygiene_clears_agent_debris(tmp_path, monkeypatch):
         def communicate(self, timeout=None):
             return "** TESTS=1 PASS=1 FAIL=0 **", ""
 
+    monkeypatch.setattr("orchestrator.langchain.agents.coresmith_llm._reap_process_group",
+                        lambda *a, **k: None)
     monkeypatch.setattr(ih.subprocess, "Popen", _FakePopen)
 
     adopt(tmp_path, top)

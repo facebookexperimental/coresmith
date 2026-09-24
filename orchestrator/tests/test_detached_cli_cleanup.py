@@ -1,11 +1,15 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
 """A scratch simulator can setsid and outlive its CLI; cleanup stays scoped."""
 import os
-from pathlib import Path
 import signal
 import subprocess
 import sys
 import time
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -23,8 +27,9 @@ def alive(pid):
         return False
 
 
-@pytest.mark.parametrize("pause", [False, True])
-def test_detached_child_reaped_after_parent_exit_without_touching_other_call(tmp_path, pause):
+@pytest.mark.parametrize("pause", [False, True, 'legacy_cancel'])
+@pytest.mark.parametrize("stopped", [False, True])
+def test_detached_child_reaped_after_parent_exit_without_touching_other_call(tmp_path, pause, stopped):
     scope = uuid.uuid4().hex
     other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
                              env={**os.environ, llm._PROCESS_SCOPE_ENV: uuid.uuid4().hex},
@@ -45,7 +50,12 @@ def test_detached_child_reaped_after_parent_exit_without_touching_other_call(tmp
         child_pid = int(parent.stdout.readline())
         parent.wait(timeout=5)
         assert alive(child_pid) and os.getpgid(child_pid) != parent.pid
-        if pause:
+        if stopped:
+            os.kill(child_pid, signal.SIGSTOP)
+        if pause == 'legacy_cancel':
+            llm._register_process(parent)
+            assert llm.kill_active_cli_processes() == 1
+        elif pause:
             llm._register_process(parent)
             assert llm.reap_active_cli_processes(grace_s=.1) == 1
         else:
