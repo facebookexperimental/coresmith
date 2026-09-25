@@ -4347,6 +4347,24 @@ async def diagnose_node(state: BlockState) -> dict:
     import json as _json
 
     _db(_pr(state)).set_diagnosis(block_name, diag, attempt=state["attempt"])
+    # The worker authors a writable draft, never the read-only SQLite views.
+    # Persist its new constraints here so later view exports cannot erase them.
+    _known_rules = {c.get("rule") for c in _db(_pr(state)).constraints(block_name)}
+    # A failed tool/agent has no hardware verdict. Keep its full diagnosis as
+    # evidence without installing speculative implementation requirements.
+    _new_rules = [] if category in {
+        "INFRASTRUCTURE_ERROR", "SIMULATION_INFRASTRUCTURE", "SIM_TIMEOUT", "AGENT_ERROR",
+    } else (diag.get("constraints") or [])
+    for _raw in _new_rules:
+        _constraint = {"rule": _raw} if isinstance(_raw, str) else _raw
+        if not isinstance(_constraint, dict) or not isinstance(_constraint.get("rule"), str):
+            continue
+        _rule = _constraint["rule"].strip()
+        if not _rule or _rule in _known_rules:
+            continue
+        _extra = {k: v for k, v in _constraint.items() if k not in ("rule", "source", "attempt")}
+        _db(_pr(state)).add_constraint(block_name, _rule, source="debug_agent", attempt=state["attempt"], **_extra)
+        _known_rules.add(_rule)
 
     # Route the structured diagnosis into previous_error.txt so the REGEN
     # (rtl_generator reads previous_error.txt, not diagnosis.json) gets the
@@ -4466,9 +4484,12 @@ def _route_decision(debug_result: dict, attempt_history: list[dict],
     # meant calling the chip lead (also an LLM) during the same outage,
     # and once it answered it skipped a block over 3 'attempts'.
     if category == "INFRASTRUCTURE_ERROR":
+        if debug_result.get("needs_human") or escalate:
+            return "ask_human"
         if _infrastructure_streak(attempt_history) >= _infrastructure_retry_cap():
             return "ask_human"
-        return "retry_rtl"
+        return {"synth": "retry_synth", "sim": "retry_sim",
+                "rtl": "retry_rtl", "tb": "retry_tb"}.get(phase, "ask_human")
 
     # Rule 1: Same category 3+ times -> stuck in a loop, escalate
     if category_counts.get(category, 0) >= 3:
@@ -4530,43 +4551,39 @@ async def decide_node(state: BlockState) -> dict:
 
         update: dict = {}
 
-        if action == "retry_tb":
-            update["force_regen_tb"] = True
-
-        elif action == "retry_rtl":
-            # SIM_TIMEOUT retries (engine fix 2026-06-23) do NOT consume the
-            # functional attempt budget: a pure timeout produced no verdict,
-            # so it isn't a "real" diagnose round. run_simulation auto-extends
-            # the cap each time; the SIM_TIMEOUT route rule self-bounds via
-            # CORESMITH_SIM_TIMEOUT_MAX_RETRIES. Re-run the same attempt# with
-            # more wall-clock so the encoder gets a real diagnosis instead of
-            # exhausting attempts on repeated timeouts.
-            _diag_cat = None
+        _diag_cat = None
+        if action.startswith("retry_"):
             try:
                 _diag_cat = (_db(_pr(state)).diagnosis(block_name) or {}).get("category")
-            except Exception:  # noqa: BLE001
-                _diag_cat = None
-            if _diag_cat == "INFRASTRUCTURE_ERROR":
-                # WP-16: the LLM was unavailable; re-run the SAME attempt
-                # after a real backoff. Budget is for design failures.
-                _infra_n = 0
-                try:
-                    _infra_n = _infrastructure_streak(_db(_pr(state)).attempt_history(block_name) or [])
-                except Exception:  # unreadable history cannot reset the retry cap
-                    return {"debug_action": "ask_human"}
-                if _infra_n >= _infrastructure_retry_cap():
-                    return {"debug_action": "ask_human"}
-                backoff_s = min(60 * (2 ** max(_infra_n - 1, 0)), 900)
-                log(f"  [RETRY] INFRASTRUCTURE_ERROR -- re-running attempt "
-                    f"{state['attempt']} after {backoff_s}s backoff (budget not "
-                    f"consumed; consecutive infra failures: {_infra_n})", YELLOW)
-                write_graph_event(_pr(state), "Route Decision", "graph_node_exit", {
-                    "block": block_name, "decision": action,
-                    "infra_retry": True, "backoff_s": backoff_s,
-                })
-                await asyncio.sleep(backoff_s)
-                span.set_attribute("final_decision", action)
-                return update
+            except Exception:
+                return {"debug_action": "ask_human"}
+        if _diag_cat == "INFRASTRUCTURE_ERROR":
+            # WP-16: the LLM was unavailable; re-run the SAME attempt
+            # after a real backoff. Budget is for design failures.
+            _infra_n = 0
+            try:
+                _infra_n = _infrastructure_streak(_db(_pr(state)).attempt_history(block_name) or [])
+            except Exception:  # unreadable history cannot reset the retry cap
+                return {"debug_action": "ask_human"}
+            if _infra_n >= _infrastructure_retry_cap():
+                return {"debug_action": "ask_human"}
+            backoff_s = min(60 * (2 ** max(_infra_n - 1, 0)), 900)
+            log(f"  [RETRY] INFRASTRUCTURE_ERROR -- re-running attempt "
+                f"{state['attempt']} after {backoff_s}s backoff (budget not "
+                f"consumed; consecutive infra failures: {_infra_n})", YELLOW)
+            write_graph_event(_pr(state), "Route Decision", "graph_node_exit", {
+                "block": block_name, "decision": action,
+                "infra_retry": True, "backoff_s": backoff_s,
+            })
+            await asyncio.sleep(backoff_s)
+            span.set_attribute("final_decision", action)
+            if action == "retry_tb":
+                update["force_regen_tb"] = True
+            return update
+
+        if action == "retry_tb":
+            update["force_regen_tb"] = True
+        elif action == "retry_rtl":
             if _diag_cat == "SIM_TIMEOUT":
                 log(f"  [RETRY] SIM_TIMEOUT -- re-running attempt {state['attempt']} "
                     f"with extended sim timeout (budget not consumed)", YELLOW)
@@ -4586,12 +4603,6 @@ async def decide_node(state: BlockState) -> dict:
             else:
                 update["attempt"] = new_attempt
                 log(f"  [RETRY] Attempt {new_attempt}/{state['max_attempts']}", YELLOW)
-
-                diag = _db(_pr(state)).diagnosis(block_name) or {}
-                if diag.get("category") == "INFRASTRUCTURE_ERROR":
-                    backoff_s = min(30 * (2 ** (new_attempt - 1)), 120)
-                    log(f"  [RETRY] Backing off {backoff_s}s after infra failure", YELLOW)
-                    await asyncio.sleep(backoff_s)
 
         span.set_attribute("final_decision", action)
 
@@ -4926,6 +4937,7 @@ def route_decision(state: BlockState) -> str:
         "retry_rtl": "generate_rtl",
         "retry_tb": "generate_testbench",
         "retry_synth": "synthesize",
+        "retry_sim": "simulate",
         "ask_human": "ask_human",
         "escalate": "block_done",
     }
@@ -4936,6 +4948,7 @@ route_decision.__edge_labels__ = {
     "generate_rtl": "RETRY RTL",
     "generate_testbench": "RETRY TB",
     "synthesize": "RETRY SYNTH",
+    "simulate": "RETRY SIM",
     "ask_human": "ASK HUMAN",
     "block_done": "ESCALATE",
 }
@@ -4944,6 +4957,8 @@ route_decision.__edge_labels__ = {
 def route_after_human(state: BlockState) -> str:
     """Route based on the human's resume action."""
     action = (state.get("human_response") or {}).get("action", "retry")
+    if action == "retry" and state.get("phase") == "synth":
+        return "synthesize"
     mapping = {
         "retry": "generate_rtl",
         "fix_rtl": "generate_rtl",
@@ -4956,6 +4971,7 @@ def route_after_human(state: BlockState) -> str:
 
 
 route_after_human.__edge_labels__ = {
+    "synthesize": "RETRY SYNTH",
     "generate_rtl": "RETRY / FIX RTL",
     "generate_testbench": "FIX TB",
     "block_done": "SKIP / ABORT",
