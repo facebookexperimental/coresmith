@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -79,6 +80,30 @@ def test_complete_passing_receipt(tmp_path, monkeypatch):
     adopt(root, top, {"leaf": str(blk)})
     res2 = _run_adapter(str(root), str(top), {"leaf": str(blk)})
     assert res2["candidate_sha"] != res["candidate_sha"]
+
+
+def test_adapter_application_cache_is_private(tmp_path, monkeypatch):
+    parent_home = os.environ.get("HOME")
+    parent_cache = tmp_path / "parent-cache"
+    parent_cache.mkdir()
+    monkeypatch.setenv("APPDATA", str(parent_cache))
+    root, top, blk = _project(tmp_path, '''
+import os
+from pathlib import Path
+CASES = ["cache"]
+def grade(candidate, workdir):
+    assert "HOME" not in os.environ, "read-only host home leaked into application cache selection"
+    cache = Path(os.environ["APPDATA"])
+    (cache / "wisdom.lock").write_text("application cache")
+    assert cache.is_relative_to(Path(workdir)), "cache escaped the evaluator work directory"
+    assert Path(os.environ["XDG_CACHE_HOME"]).is_dir()
+    return {"cases": {"cache": {"ok": True}}}
+''')
+    res = _run_adapter(str(root), str(top), {"leaf": str(blk)})
+    assert res["passed"], res
+    assert not list(parent_cache.iterdir())
+    assert os.environ["APPDATA"] == str(parent_cache)
+    assert os.environ.get("HOME") == parent_home
 
 
 def test_functional_and_budget_failures_are_typed(tmp_path, monkeypatch):
