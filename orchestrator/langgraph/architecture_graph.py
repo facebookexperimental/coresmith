@@ -1478,6 +1478,7 @@ def _is_non_silicon_validation_block(block: dict) -> bool:
 async def finalize_node(state: ArchGraphState) -> dict:
     """Finalize architecture: persist state and write block_specs.json."""
     from orchestrator.architecture.state import load_state, save_state
+    from orchestrator.state_store.project_db import open_project
 
     _event(state, "Finalize Architecture", "graph_node_enter", {
         "round": state["round"],
@@ -1487,6 +1488,12 @@ async def finalize_node(state: ArchGraphState) -> dict:
         span.set_attribute("round", state["round"])
 
         project_root = state["project_root"]
+        # The chip lead can amend the diagram during an accepted review. Use
+        # the registry (which also adopts diagram-file edits), not the graph's
+        # pre-review copy, for both persistence and the implementation handoff.
+        db = open_project(project_root)
+        db.export_views()
+        block_diagram = db.block_diagram() or state["block_diagram"]
 
         # Persist all architecture decisions to state file
         arch_state = load_state(project_root)
@@ -1494,7 +1501,7 @@ async def finalize_node(state: ArchGraphState) -> dict:
         arch_state.target_clock_mhz = state["target_clock_mhz"]
         if state.get("prd_spec"):
             arch_state.prd_spec = state["prd_spec"]
-        arch_state.block_diagram = state["block_diagram"]
+        arch_state.block_diagram = block_diagram
         arch_state.memory_map = state.get("memory_map", {})
         arch_state.clock_tree = state.get("clock_tree", {})
         arch_state.register_spec = state.get("register_spec", {})
@@ -1504,7 +1511,7 @@ async def finalize_node(state: ArchGraphState) -> dict:
             arch_state.pdk_config = state["pdk_config"]
 
         # Build block specs
-        blocks = state["block_diagram"].get("blocks", [])
+        blocks = block_diagram.get("blocks", [])
         block_specs = []
         skipped_non_silicon = []
         for block in blocks:
@@ -1528,9 +1535,7 @@ async def finalize_node(state: ArchGraphState) -> dict:
 
         # Record the block queue for the RTL pipeline handoff (the database
         # regenerates the read-only block_specs.json view).
-        from orchestrator.state_store.project_db import open_project
-
-        open_project(project_root).import_block_specs(block_specs)
+        db.import_block_specs(block_specs)
         specs_path = Path(project_root) / ".coresmith" / "block_specs.json"
 
         span.set_attribute("block_count", len(block_specs))
@@ -1545,6 +1550,7 @@ async def finalize_node(state: ArchGraphState) -> dict:
         })
 
         return {
+            "block_diagram": block_diagram,
             "block_specs_path": str(specs_path),
             "success": True,
             "error": "",
