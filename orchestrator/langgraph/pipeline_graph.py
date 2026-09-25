@@ -232,6 +232,7 @@ class BlockState(TypedDict):
     ppa_ok: bool | None        # deterministic PPA gate verdict (None = not run)
     ppa_reasons: list             # human-readable budget-divergence reasons
     timing_ok: bool | None        # measured WNS >= 0 (None = not measured)
+    timing_required: bool        # missing required timing cannot complete a block
     # Post-synthesis GATE-LEVEL SIM verdict (harness.gate_sim). None = not run.
     # False routes the block to diagnose: the synthesized netlist does not
     # reproduce the behaviour the RTL was verified with, so DV and PPA were
@@ -2759,13 +2760,11 @@ def _ppa_should_park_tooling_missing(
     project_root: str, ppa_ok: bool | None, ppa_meta: dict | None,
     run_key: float | None = None,
 ) -> bool:
-    """A-Fix 2f decision (pure): PARK when the deterministic PPA gate could not
-    run because its tooling (yosys) is absent, under the STRICT profile, and it
-    has not already been waived this run. Legacy profile stays silent (never
-    parks); the global CORESMITH_GATE_FAIL_OPEN escape also suppresses it. A
-    gate that actually judged something (``ppa_ok`` not None) is not
-    unmeasurable and never parks here.
+    """Required timing always parks when unmeasured; retain the legacy
+    strict-profile policy for an absent PDK-free probe tool.
     """
+    if (ppa_meta or {}).get("timing_required") and (ppa_meta or {}).get("timing_unmeasured"):
+        return True
     if not (ppa_meta or {}).get("tooling_missing"):
         return False
     if ppa_ok is not None:
@@ -2780,7 +2779,8 @@ def _ppa_should_park_tooling_missing(
     return not _ppa_tooling_waived(project_root, run_key)
 
 
-def _park_ppa_unmeasurable(state: BlockState, block_name: str) -> None:
+def _park_ppa_unmeasurable(state: BlockState, block_name: str,
+                         timing_error: str = "") -> None:
     """A-Fix 2f: PARK once/run on an unmeasurable (yosys-absent) PPA gate so the
     operator explicitly acknowledges it rather than the gate silently passing.
 
@@ -2789,6 +2789,19 @@ def _park_ppa_unmeasurable(state: BlockState, block_name: str) -> None:
     node re-executes on resume; the guard rechecks and this runs again, but
     ``interrupt`` then returns immediately and the waiver is written.)
     """
+    if timing_error:
+        # Resuming re-executes synthesis before reaching this interrupt again.
+        # No waiver turns missing required timing into a successful block.
+        block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
+        block_dir.mkdir(parents=True, exist_ok=True)
+        (block_dir / "previous_error.txt").write_text(
+            "Required timing is UNMEASURED: " + timing_error +
+            "\nPreserve RTL. Repair the tool/constraints and retry synthesis.\n")
+        interrupt({"type": "ppa_gate_unmeasurable", "block_name": block_name,
+                   "supported_actions": ["retry_synth", "abort"],
+                   "outer_agent_guidance": "Required STA is incomplete: " + timing_error +
+                       ". Preserve RTL; fix the tool or constraints, then retry synthesis."})
+        return
     pr = _pr(state)
     log(f"  [PPA] {block_name}: gate tooling (yosys) ABSENT -- parking "
         f"(strict profile) so an unmeasured PPA is acknowledged, not silently "
@@ -2823,30 +2836,11 @@ def _evaluate_ppa_gate(
     *,
     require_gate_flag: bool = True,
 ) -> tuple[bool | None, list, dict]:
-    """Deterministic PPA gate (CORESMITH_PPA_GATE=1). Returns (ppa_ok, reasons, meta).
+    """Measure PPA on the synthesized netlist, or probe without a PDK.
 
-    Keyed off a memory-PRESERVING probe so a correctly-inferred SRAM is NOT
-    counted as flops (no false positives). The FF/memory check is PDK-free
-    (Yosys only); area + WNS use the liberty synth / STA results when present
-    (host-side). ``ppa_ok`` of None means "not evaluated / cannot judge" and
-    never blocks. ``meta`` carries ``tooling_missing`` (A-Fix 2f) -- True when
-    the gate's PDK-free probe could not run because yosys is absent, so the
-    strict profile can PARK on an unmeasurable gate instead of silently passing.
-
-    ``meta`` also carries the MEASURED probe metrics (rung2 defect 2): ``ff``,
-    ``cells``, ``mem_bits``, ``logic_depth``, ``area_um2``, ``elaborated``,
-    ``budget_ff``, ``budget_area_um2`` -- so callers can persist real numbers to
-    ``ppa_history`` instead of NULLs (the SKIP_SYNTH path used to record all
-    metrics as NULL even though the PDK-free probes ran).
-
-    ``require_gate_flag`` (rung2 defect 2): when False, the PDK-free
-    synthesizability probes (generic-elaborate / cell-explosion / logic-depth /
-    generic-FF-budget -- none need a PDK) run and GATE even when
-    ``CORESMITH_PPA_GATE`` is not seeded. The SKIP_SYNTH branch of
-    ``synthesize_node`` calls with ``require_gate_flag=False`` so an
-    un-synthesizable design is still caught when no real synthesis ran (the
-    exact hole SKIP_SYNTH used to hide). yosys-absent still parks via
-    tooling_missing.
+    Planning budgets are advisory. Required timing must have a finite measured
+    verdict; missing timing parks synthesis without blaming or regenerating RTL.
+    The returned metadata identifies the selected netlist and its measurements.
     """
     from orchestrator.langgraph.ppa_check import (
         evaluate_ppa,
@@ -2904,7 +2898,8 @@ def _evaluate_ppa_gate(
 
     # rung2 defect 2: seed meta with the parsed budgets so a persisted
     # ppa_history row carries them even on an early elaborate-fail flag.
-    _meta: dict = {"budget_ff": ff_budget, "budget_area_um2": area_budget}
+    _meta: dict = {"budget_ff": ff_budget, "budget_area_um2": area_budget,
+                   "timing_required": bool(synth_result)}
     if _budget_overridden:
         _meta["feas_override_deferred"] = True
         log(f"  [PPA] {block_name}: uarch_feasibility_override covers [area] -- "
@@ -2958,142 +2953,112 @@ def _evaluate_ppa_gate(
     # A timeout at 600s is then a GENUINE un-synthesizability signal, not box slowness.
     import os as _os_to
     _synth_timeout = int(_os_to.environ.get("CORESMITH_SYNTH_TIMEOUT_S", "300") or "300")
-    probe = probe_synth_generic(rtl_path, block_name, timeout_s=_synth_timeout)
-    # A-Fix 2f: probe_synth_generic returns None ONLY when yosys is absent (the
-    # RTL already exists), so a None probe means the PDK-free gate could not run
-    # -> tooling missing. The strict profile parks on this (see synthesize_node).
-    if probe is None:
-        _meta["tooling_missing"] = True
-    else:
-        # rung2 defect 2: surface the measured PDK-free metrics so the caller
-        # persists real numbers (not NULLs) to ppa_history.
-        _meta["ff"] = probe.get("logic_ff")
-        _meta["mem_bits"] = probe.get("mem_bits")
-        _meta["elaborated"] = probe.get("elaborated")
-    # A probe that ran but couldn't elaborate (timeout / yosys error) is itself
-    # an unsynthesizability signal -- fail it rather than "can't judge".
-    if probe is not None and probe.get("elaborated") is False:
-        return _flag([probe.get("reason", "design did not elaborate")])
-    probe = probe or {}
+    probe: dict = {}
+    # A mapped netlist is stronger evidence than another generic synthesis.
+    # Keep the PDK-free probes only for runs without a synthesis result.
+    if not synth_result:
+        probe = probe_synth_generic(rtl_path, block_name, timeout_s=_synth_timeout)
+        # A-Fix 2f: probe_synth_generic returns None ONLY when yosys is absent (the
+        # RTL already exists), so a None probe means the PDK-free gate could not run
+        # -> tooling missing. The strict profile parks on this (see synthesize_node).
+        if probe is None:
+            _meta["tooling_missing"] = True
+        else:
+            # rung2 defect 2: surface the measured PDK-free metrics so the caller
+            # persists real numbers (not NULLs) to ppa_history.
+            _meta["ff"] = probe.get("logic_ff")
+            _meta["mem_bits"] = probe.get("mem_bits")
+            _meta["elaborated"] = probe.get("elaborated")
+        # A probe that ran but couldn't elaborate (timeout / yosys error) is itself
+        # an unsynthesizability signal -- fail it rather than "can't judge".
+        if probe is not None and probe.get("elaborated") is False:
+            return _flag([probe.get("reason", "design did not elaborate")])
+        probe = probe or {}
 
-    # Part D: memory-as-flops hard-block gate (default on; PDK-free). The
-    # memory-PRESERVING probe above reads only the block RTL, so an engine
-    # memory WRAPPER (cs_sram_*) is an unresolved blackbox there and a
-    # wrapped-memory-that-flops is invisible to it. This probe reads the design
-    # PLUS the wrapper lib and applies the backend MACRO selection, so a
-    # properly wrapped memory becomes a shell (0 flops) while a raw
-    # `reg [] mem []` array -- or a cs_sram whose geometry can't bind -- stays a
-    # flop array; an ABOVE-threshold flop memory is then a hard fail with
-    # actionable guidance. cs_fpmem and sub-threshold memories are never flagged.
-    from orchestrator.langgraph.sram_wrapper import (
-        fpmem_instances as _fpmem_insts,
-    )
-    from orchestrator.langgraph.sram_wrapper import (
-        gate_memory_as_flops as _gate_mem_flops,
-    )
-    from orchestrator.langgraph.sram_wrapper import (
-        mem_flop_gate_enabled as _mem_flop_gate_on,
-    )
-    if _mem_flop_gate_on():
-        import re as _re_mf
-        _has_mem = bool(probe.get("mem_bits")) or bool(
-            _re_mf.search(r"\bcs_(?:sram|rom|mem)_1rw|\breg\b[^;]*\[", _rtl_text))
-        if _has_mem:
-            from orchestrator.langgraph.ppa_check import probe_memory_flops as _probe_mf
-            mprobe = _probe_mf([rtl_path] + _mem_lib_srcs, block_name,
-                               timeout_s=_synth_timeout, cwd=project_root)
-            if mprobe is not None and mprobe.get("elaborated"):
-                _mfok, _mfreasons = _gate_mem_flops(
-                    mprobe.get("memories") or [],
-                    fpmem_geoms=_fpmem_insts(_rtl_text),
-                )
-                if not _mfok:
-                    return _flag(_mfreasons)
-
-    # Cell-explosion synthesizability guard (default on; runs even under
-    # SKIP_SYNTH -- PDK-free generic techmap). The memory-PRESERVING FF probe
-    # above stops at `proc`, so a combinational-LUT explosion (entropy coding VLC tables
-    # as big LUTs, per-mode-replicated intra prediction, a wide record sliced by
-    # $func) never materializes as gates and the FF-only check can never fail on
-    # it -- the exact class that walls the backend at synthesis. Materialize the
-    # cloud with a generic techmap and fail on a techmap timeout or a cell count
-    # past the ceiling.
-    from orchestrator.langgraph.ppa_check import (
-        max_cell_ceiling as _cell_ceiling,
-    )
-    from orchestrator.langgraph.ppa_check import (
-        probe_synth_cellcount as _probe_cells,
-    )
-    from orchestrator.langgraph.ppa_check import (
-        synth_cell_gate_enabled as _cell_gate_on,
-    )
-    if _cell_gate_on():
-        cprobe = _probe_cells(rtl_path, block_name, timeout_s=_synth_timeout)
-        if cprobe is not None:
-            _meta["cells"] = cprobe.get("cell_count")  # rung2 defect 2
-            if cprobe.get("elaborated") is False:
-                return _flag([cprobe.get("reason", "did not techmap")])
-            _cc = cprobe.get("cell_count")
-            _ceil = _cell_ceiling()
-            if _cc is not None and _cc > _ceil:
-                return _flag([
-                    f"gate-level cell count {_cc:,} exceeds the max-cell "
-                    f"ceiling {_ceil:,} -- un-synthesizable to a tractable "
-                    f"netlist (combinational-LUT explosion / unpipelined "
-                    f"datapath cloud). Register the datapath into pipeline "
-                    f"stages and map large tables to ROM/LUT, not flat logic."
-                ])
-
-    # Combinational-depth guard (fix #4: the pipeline scheduler made enforcing).
-    # PDK-free, runs under SKIP_SYNTH. A datapath collapsed into one
-    # combinational cloud (the unpipelined RD-search class) has an enormous
-    # register-to-register depth; a properly scheduled pipeline keeps each stage
-    # bounded. When a PDK is present the real STA/WNS check below also enforces
-    # this; this proxy covers the SKIP_SYNTH case where no STA exists.
-    from orchestrator.langgraph.ppa_check import (
-        logic_depth_advisory_with_pdk_enabled as _depth_advisory_on,
-    )
-    from orchestrator.langgraph.ppa_check import (
-        logic_depth_gate_enabled as _depth_gate_on,
-    )
-    from orchestrator.langgraph.ppa_check import (
-        max_logic_depth as _max_depth,
-    )
-    from orchestrator.langgraph.ppa_check import (
-        probe_logic_depth as _probe_depth,
-    )
-    from orchestrator.langgraph.ppa_check import (
-        sta_tooling_available as _sta_available,
-    )
-    if _depth_gate_on():
-        dprobe = _probe_depth(rtl_path, block_name, timeout_s=_synth_timeout,
-                              extra_sources=_mem_lib_srcs)
-        if dprobe is not None and dprobe.get("elaborated") is not False:
-            _ld = dprobe.get("logic_depth")
-            _meta["logic_depth"] = _ld  # rung2 defect 2
-            _dmax = _max_depth()
-            # Finding 3: when a real PDK + STA are available the depth proxy is
-            # ADVISORY. The ltp level count can't tell a converged staged design
-            # (881 levels) from a comb cloud (887); left gating it would
-            # short-circuit the STA below -> wns_ns=NULL, then the fail-loud path
-            # rejects the block for a measurement the proxy itself prevented.
-            # Real pre-layout WNS (below) is the timing authority here. A
-            # PDK-absent run keeps it gating -- the only depth signal it has.
-            _depth_advisory = _depth_advisory_on() and _sta_available(synth_result)
-            if _ld is not None and _ld > _dmax:
-                if _depth_advisory:
-                    _meta["logic_depth_advisory"] = True
-                    _meta["logic_depth_max"] = _dmax
-                    log(f"  [PPA] {block_name}: logic depth {_ld:,} > {_dmax:,} "
-                        f"(ADVISORY -- PDK+STA present; recorded, NOT gating; "
-                        f"real pre-layout WNS is the authority)", YELLOW)
-                else:
+        # Cell-explosion synthesizability guard (default on; runs even under
+        # SKIP_SYNTH -- PDK-free generic techmap). The memory-PRESERVING FF probe
+        # above stops at `proc`, so a combinational-LUT explosion (entropy coding VLC tables
+        # as big LUTs, per-mode-replicated intra prediction, a wide record sliced by
+        # $func) never materializes as gates and the FF-only check can never fail on
+        # it -- the exact class that walls the backend at synthesis. Materialize the
+        # cloud with a generic techmap and fail on a techmap timeout or a cell count
+        # past the ceiling.
+        from orchestrator.langgraph.ppa_check import (
+            max_cell_ceiling as _cell_ceiling,
+        )
+        from orchestrator.langgraph.ppa_check import (
+            probe_synth_cellcount as _probe_cells,
+        )
+        from orchestrator.langgraph.ppa_check import (
+            synth_cell_gate_enabled as _cell_gate_on,
+        )
+        if _cell_gate_on():
+            cprobe = _probe_cells(rtl_path, block_name, timeout_s=_synth_timeout)
+            if cprobe is not None:
+                _meta["cells"] = cprobe.get("cell_count")  # rung2 defect 2
+                if cprobe.get("elaborated") is False:
+                    return _flag([cprobe.get("reason", "did not techmap")])
+                _cc = cprobe.get("cell_count")
+                _ceil = _cell_ceiling()
+                if _cc is not None and _cc > _ceil:
                     return _flag([
-                        f"combinational depth {_ld:,} logic levels exceeds the "
-                        f"max {_dmax:,} -- the datapath is an unpipelined "
-                        f"combinational cloud (won't meet timing / walls synth). "
-                        f"Register it into pipeline stages per the stage map."
+                        f"gate-level cell count {_cc:,} exceeds the max-cell "
+                        f"ceiling {_ceil:,} -- un-synthesizable to a tractable "
+                        f"netlist (combinational-LUT explosion / unpipelined "
+                        f"datapath cloud). Register the datapath into pipeline "
+                        f"stages and map large tables to ROM/LUT, not flat logic."
                     ])
+
+        # Combinational-depth guard (fix #4: the pipeline scheduler made enforcing).
+        # PDK-free, runs under SKIP_SYNTH. A datapath collapsed into one
+        # combinational cloud (the unpipelined RD-search class) has an enormous
+        # register-to-register depth; a properly scheduled pipeline keeps each stage
+        # bounded. When a PDK is present the real STA/WNS check below also enforces
+        # this; this proxy covers the SKIP_SYNTH case where no STA exists.
+        from orchestrator.langgraph.ppa_check import (
+            logic_depth_advisory_with_pdk_enabled as _depth_advisory_on,
+        )
+        from orchestrator.langgraph.ppa_check import (
+            logic_depth_gate_enabled as _depth_gate_on,
+        )
+        from orchestrator.langgraph.ppa_check import (
+            max_logic_depth as _max_depth,
+        )
+        from orchestrator.langgraph.ppa_check import (
+            probe_logic_depth as _probe_depth,
+        )
+        from orchestrator.langgraph.ppa_check import (
+            sta_tooling_available as _sta_available,
+        )
+        if _depth_gate_on():
+            dprobe = _probe_depth(rtl_path, block_name, timeout_s=_synth_timeout,
+                                  extra_sources=_mem_lib_srcs)
+            if dprobe is not None and dprobe.get("elaborated") is not False:
+                _ld = dprobe.get("logic_depth")
+                _meta["logic_depth"] = _ld  # rung2 defect 2
+                _dmax = _max_depth()
+                # Finding 3: when a real PDK + STA are available the depth proxy is
+                # ADVISORY. The ltp level count can't tell a converged staged design
+                # (881 levels) from a comb cloud (887); left gating it would
+                # short-circuit the STA below -> wns_ns=NULL, then the fail-loud path
+                # rejects the block for a measurement the proxy itself prevented.
+                # Real pre-layout WNS (below) is the timing authority here. A
+                # PDK-absent run keeps it gating -- the only depth signal it has.
+                _depth_advisory = _depth_advisory_on() and _sta_available(synth_result)
+                if _ld is not None and _ld > _dmax:
+                    if _depth_advisory:
+                        _meta["logic_depth_advisory"] = True
+                        _meta["logic_depth_max"] = _dmax
+                        log(f"  [PPA] {block_name}: logic depth {_ld:,} > {_dmax:,} "
+                            f"(ADVISORY -- PDK+STA present; recorded, NOT gating; "
+                            f"real pre-layout WNS is the authority)", YELLOW)
+                    else:
+                        return _flag([
+                            f"combinational depth {_ld:,} logic levels exceeds the "
+                            f"max {_dmax:,} -- the datapath is an unpipelined "
+                            f"combinational cloud (won't meet timing / walls synth). "
+                            f"Register it into pipeline stages per the stage map."
+                        ])
 
     sta: dict = {}
     _sta_dir = Path(project_root) / "syn" / "output" / block_name
@@ -3148,15 +3113,9 @@ def _evaluate_ppa_gate(
     except Exception:  # noqa: BLE001 - period is best-effort
         _period_ns = None
     _meta["period_ns"] = _period_ns
-    # engine-v31 step 1: FAN-OUT-AWARE STA. The base measurement above is the
-    # UNBUFFERED mapped netlist -- it extrapolates tens of ns of pure fan-out
-    # net delay on a high-fan-out net and systematically FALSE-FAILS designs a
-    # real Sky130 set_max_fanout + repair_design pass would close (the AES-v3
-    # one-round-per-clock engine: -17.75 ns unbuffered here vs +14.97 ns
-    # buffered). Also synthesize a max-fan-out-buffered variant from RTL and
-    # gate on max(base, buffered) WNS -- monotonic (buffering only relaxes), so
-    # no design that met timing unbuffered can be false-failed. Deterministic;
-    # falls back to the base measurement when yosys/sta/liberty are absent.
+    # Compare measured pre-placement candidates. The deployment repairs mapped
+    # FF loads that ABC cannot see. Keep timing, area and FFs from the same
+    # selected netlist; inserted buffers are not free area.
     _eff_wns = sta.get("wns_ns")
     _eff_sta_error = sta.get("sta_error")
     _liberty_p = (synth_result or {}).get("liberty_path", "")
@@ -3170,18 +3129,35 @@ def _evaluate_ppa_gate(
         mf = run_maxfanout_buffered_sta(
             rtl_path, _liberty_p, block_name, _mf_period, _clk,
             timeout_s=_synth_timeout, extra_sources=_mem_lib_srcs,
-            report_dir=_sta_dir,
+            report_dir=_sta_dir, project_root=project_root,
+            mapped_netlist=(synth_result or {}).get("netlist_path"),
+            sdc_path=(synth_result or {}).get("sdc_path"),
         )
         if mf is not None:
             _meta["wns_ns_base_unbuffered"] = _eff_wns
             _meta["wns_ns_buffered"] = mf.get("buffered_wns_ns")
             _meta["fmax_mhz_buffered"] = mf.get("fmax_mhz")
+            _meta["netlist_repair_status"] = mf.get("repair_status")
+            if mf.get("detail"):
+                _meta["sta_maxfanout_detail"] = mf["detail"]
+                log(f"  [PPA] {block_name}: {mf['detail']}", YELLOW)
             if mf.get("sta_ok") and mf.get("wns_ns") is not None:
-                # Best of the unbuffered mapped-netlist base and the fan-out-
-                # buffered RTL synth -- both measure the same reg-to-reg cone.
-                _cands = [w for w in (_eff_wns, mf["wns_ns"]) if w is not None]
-                _eff_wns = max(_cands) if _cands else mf["wns_ns"]
+                if _eff_wns is None or mf["wns_ns"] > _eff_wns:
+                    _eff_wns = mf["wns_ns"]
+                    actual_ff = mf.get("ff_count", actual_ff)
+                    # This measurement maps the full memories into the retained
+                    # netlist, so do not add an estimated SRAM cost again.
+                    actual_area = mf.get("chip_area_um2", actual_area)
+                    _meta.update(ff=actual_ff, area_um2=actual_area,
+                                 ppa_netlist_path=mf.get("netlist_path"),
+                                 ppa_netlist_sha256=mf.get("netlist_sha256"),
+                                 ppa_variant=mf.get("selected_variant"),
+                                 cells=mf.get("cells", _meta.get("cells")),
+                                 tns_ns=mf.get("tns_ns"))
+                    if mf.get("report_path"):
+                        _meta["sta_report_path"] = mf["report_path"]
                 _eff_sta_error = None  # a real measurement rescued a base None/err
+                _meta.pop("sta_error", None)
                 log(f"  [PPA] {block_name}: fan-out-aware STA WNS "
                     f"{mf['wns_ns']:+.2f} ns (base {mf.get('base_wns_ns')}, "
                     f"buffered {mf.get('buffered_wns_ns')}); gating on "
@@ -3207,6 +3183,21 @@ def _evaluate_ppa_gate(
                     log(f"  [PPA] {block_name}: fan-out-aware STA produced NO "
                         f"timing ({_mf_err[:220]}) -- keeping the base "
                         f"measurement {_eff_wns:+.2f} ns", YELLOW)
+        # A failed repair leaves an unbuffered failing circuit, not an RTL
+        # verdict. Preserve a passing baseline, otherwise retry the tool step.
+        if (_meta["timing_required"] and (_eff_wns is None or _eff_wns < 0)
+                and (mf is None or mf.get("repair_status") in {"failed", "unavailable"})):
+            error = ((mf or {}).get("detail") or (mf or {}).get("sta_error")
+                     or "Mapped-netlist repair is unavailable")
+            _meta.update(timing_unmeasured=True, sta_error=error,
+                         wns_ns_unbuffered=sta.get("wns_ns"), wns_ns=None)
+            return None, [error], dict(_meta)
+    import math
+    if _meta["timing_required"] and (
+            _eff_wns is None or not math.isfinite(float(_eff_wns))):
+        _meta.update(wns_ns=None, timing_unmeasured=True,
+                     sta_error=_eff_sta_error or "STA produced no finite slack")
+        return None, [_meta["sta_error"]], dict(_meta)
     _meta["wns_ns"] = _eff_wns
     verdict = evaluate_ppa(
         actual_ff=actual_ff,
@@ -3878,11 +3869,7 @@ async def synthesize_node(state: BlockState) -> dict:
     if result and result.get("log_path"):
         existing_logs["synthesize"] = result["log_path"]
 
-    # Deterministic PPA gate (CORESMITH_PPA_GATE=1). A block can synthesize
-    # cleanly yet blow its budget -- e.g. a memory that should be an SRAM macro
-    # became a flop array. The gate (memory-preserving FF count vs the uArch
-    # flip_flop_budget, + area/WNS when available) routes over-budget blocks
-    # back to diagnose (see route_after_synth) so the synth_fixer restructures.
+    # Measure the selected netlist; advisory budgets cannot skip required STA.
     ppa_ok, ppa_reasons, ppa_meta = (None, [], {})
     if synth_ok:
         ppa_ok, ppa_reasons, ppa_meta = _evaluate_ppa_gate(
@@ -3891,7 +3878,8 @@ async def synthesize_node(state: BlockState) -> dict:
         if _ppa_should_park_tooling_missing(
                 _pr(state), ppa_ok, ppa_meta,
                 state.get("pipeline_run_start") or None):
-            _park_ppa_unmeasurable(state, block_name)
+            _park_ppa_unmeasurable(state, block_name,
+                ppa_meta.get("sta_error", "") if ppa_meta.get("timing_unmeasured") else "")
 
     # --- POST-SYNTHESIS GATE-LEVEL SIMULATION (CORESMITH_GATE_SIM) ----------
     # Everything above this line was measured on two DIFFERENT artifacts: DV /
@@ -3921,13 +3909,13 @@ async def synthesize_node(state: BlockState) -> dict:
     _record_ppa_row(
         _pr(state), block=block_name, attempt=state.get("attempt", 0),
         source="gate", probe="synth",
-        ff=(result or {}).get("ff_count"),
-        cells=(result or {}).get("gate_count"),
-        area_um2=(result or {}).get("chip_area_um2"),
+        ff=ppa_meta.get("ff", (result or {}).get("ff_count")),
+        cells=ppa_meta.get("cells", (result or {}).get("gate_count")),
+        area_um2=ppa_meta.get("area_um2", (result or {}).get("chip_area_um2")),
         wns_ns=ppa_meta.get("wns_ns"),
         tns_ns=ppa_meta.get("tns_ns"),
         ppa_ok=ppa_ok, reasons=ppa_reasons or None,
-        report_path=(result or {}).get("report_path", ""),
+        report_path=ppa_meta.get("sta_report_path", (result or {}).get("report_path", "")),
     )
 
     timing_ok = _timing_ok_from_ppa_meta(ppa_meta)
@@ -3937,6 +3925,7 @@ async def synthesize_node(state: BlockState) -> dict:
         "ppa_ok": ppa_ok,
         "ppa_reasons": ppa_reasons,
         "timing_ok": timing_ok,
+        "timing_required": ppa_meta.get("timing_required", False),
         "gate_sim_ok": gate_sim_ok,
         "gate_sim_status": gate_sim_status,
         "gate_sim_reason": gate_sim_reason,
@@ -4773,6 +4762,7 @@ async def block_done_node(state: BlockState) -> dict:
     all_passed = (
         sim_passed and synth_success
         and state.get("timing_ok") is not False
+        and (not state.get("timing_required") or state.get("timing_ok") is True)
         and not is_skip and not is_abort and not is_escalate
     )
 
@@ -4910,6 +4900,8 @@ def route_after_synth(state: BlockState) -> str:
     # PPA budget verdict (``ppa_ok``) stays advisory (WP-10c).
     if state.get("timing_ok") is False:
         return "diagnose"
+    # The unmeasurable-tool interrupt already ran; retain an incomplete result
+    # if resumed without a measurement instead of sending RTL to diagnosis.
     return "block_done"
 
 
