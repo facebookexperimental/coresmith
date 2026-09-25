@@ -357,3 +357,8 @@ the TB (or load it from a data file you write next to the TB), and have the
 cocotb tests compare streams against that pinned data only. If the expected
 data cannot be precomputed, bound the in-test reference to a few
 milliseconds of simulated time -- never the full mission.
+
+Bound each simulation test with a watchdog driven by the clock, independent
+of successful transactions. Run ad hoc simulations with a wall-clock timeout
+and save their logs. Keep waveform tracing for debugging failures; for long
+missions, capture bounded windows including the failure interval.

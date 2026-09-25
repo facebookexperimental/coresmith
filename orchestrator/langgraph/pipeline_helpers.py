@@ -1997,7 +1997,6 @@ EXTRA_ARGS += -Wno-fatal
     except Exception:  # noqa: BLE001
         pass
 
-    import signal as _signal
     env["MAKEFLAGS"] = (env.get("MAKEFLAGS", "") + " -j2").strip()
     try:
         # Run the build+sim in its OWN process group (start_new_session) so a
@@ -2006,6 +2005,13 @@ EXTRA_ARGS += -Wno-fatal
         # direct `make` child, orphaning the compilers (reparented to PID 1);
         # combined with the retry loop those orphans piled up into thousands of
         # processes -> OOM-killed the daemon (engine fix 2026-06-24).
+        import uuid
+
+        from orchestrator.langchain.agents.coresmith_llm import (
+            _PROCESS_SCOPE_ENV,
+            _reap_process_group,
+        )
+        env = dict(env, **{_PROCESS_SCOPE_ENV: uuid.uuid4().hex})
         _proc = subprocess.Popen(
             [make_bin, "-C", str(sim_dir)],
             stdout=subprocess.PIPE,
@@ -2014,15 +2020,12 @@ EXTRA_ARGS += -Wno-fatal
             env=env,
             start_new_session=True,
         )
+        _proc._coresmith_process_scope = env[_PROCESS_SCOPE_ENV]
         try:
             _out, _err = _proc.communicate(timeout=_sim_timeout)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(_proc.pid), _signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            _proc.wait()
-            raise
+        finally:
+            # Also reap tools that created their own session, including on cancel.
+            _reap_process_group(_proc, _proc.pid, grace_s=1.0)
         result = subprocess.CompletedProcess(
             [make_bin, "-C", str(sim_dir)], _proc.returncode, _out, _err,
         )
@@ -2191,7 +2194,7 @@ EXTRA_ARGS += -Wno-fatal
             "throughput_needs_tb": throughput_needs_tb,
             "throughput": throughput_record,
         }
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         cmd = [make_bin, "-C", str(sim_dir)]
         # Persist the timeout so the NEXT attempt auto-extends (x1.5, capped).
         try:
@@ -2206,6 +2209,14 @@ EXTRA_ARGS += -Wno-fatal
         _msg = (f"SIM_TIMEOUT: Simulation exceeded {_sim_timeout}s ({_mins} min). "
                 f"No functional verdict produced. Next attempt will use an "
                 f"extended timeout (x1.5, cap {_sim_to_cap}s).")
+        partial = (exc.output or b"")
+        stderr = (exc.stderr or b"")
+        if isinstance(partial, bytes):
+            partial = partial.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        _msg += "\nLast simulation output:\n" + (partial + "\n" + stderr)[-12000:]
+        _msg += f"\nSimulation artifacts: {sim_dir}"
         log_path = _write_step_log_error(block_name, "simulate", cmd, _msg, attempt)
         return {"passed": False, "log": _msg, "log_path": log_path,
                 "sim_timed_out": True, "sim_timeout_s": _sim_timeout}

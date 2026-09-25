@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -68,6 +69,7 @@ def test_authoritative_build_recreates_scope(tmp_path, monkeypatch, capsys, scop
     seen = []
 
     class Make:
+        pid = 12345
         returncode = 0
 
         def __init__(self, cmd, **kwargs):
@@ -89,6 +91,8 @@ def test_authoritative_build_recreates_scope(tmp_path, monkeypatch, capsys, scop
             assert timeout == 225  # Retry bookkeeping survived the fresh build.
             return "** TESTS=1 PASS=1 FAIL=0 **", ""
 
+    monkeypatch.setattr("orchestrator.langchain.agents.coresmith_llm._reap_process_group",
+                        lambda *a, **k: None)
     monkeypatch.setattr(ih.subprocess, "Popen", Make)
     for attempt in (2, 3):
         result = ih.run_integration_simulation(
@@ -104,6 +108,46 @@ def test_authoritative_build_recreates_scope(tmp_path, monkeypatch, capsys, scop
     assert prior_log.read_text() == "prior attempt evidence"
     assert (prior_log.parent / f"{scope}_sim_attempt2.log").exists()
     assert "verilator.o" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("scope", ["integration", "validation"])
+@pytest.mark.parametrize("has_waveform", [False, True])
+def test_sim_timeout_returns_partial_evidence(tmp_path, monkeypatch, scope, has_waveform):
+    top, tb = _inputs(tmp_path)
+    adopt(tmp_path, top)
+    monkeypatch.setattr(ph, "_LOG_DIR", tmp_path / ".coresmith" / "step_logs")
+    monkeypatch.setenv("CORESMITH_INTEGRATION_SIM_TIMEOUT_S", "100")
+    monkeypatch.setenv("CORESMITH_INTEGRATION_SIM_TIMEOUT_CAP_S", "1000")
+    sim_dir = tmp_path / "sim_build" / scope
+    reaped = []
+
+    class TimedOutMake:
+        pid = 12345
+
+        def __init__(self, cmd, **kwargs):
+            self.cmd = cmd
+            if has_waveform:
+                (sim_dir / "dump.vcd").write_text("partial waveform")
+
+        def communicate(self, timeout):
+            raise subprocess.TimeoutExpired(
+                self.cmd, timeout, output=b"last cycle: 37", stderr=b"waiting for ready")
+
+    monkeypatch.setattr(ih.subprocess, "Popen", TimedOutMake)
+    monkeypatch.setattr("orchestrator.langchain.agents.coresmith_llm._reap_process_group",
+                        lambda proc, pid, **kwargs: reaped.append((proc, pid)))
+    result = ih.run_integration_simulation(
+        "chip", str(top), {}, str(tb), sim_scope=scope, project_root=tmp_path)
+
+    assert result["passed"] is False
+    assert result["sim_timed_out"] is True
+    assert result["sim_timeout_s"] == 100
+    assert "No functional verdict" in result["log"]
+    assert "last cycle: 37" in result["log"]
+    assert "waiting for ready" in Path(result["log_path"]).read_text()
+    assert result["vcd_path"] == (str(sim_dir / "dump.vcd") if has_waveform else "")
+    assert json.loads((sim_dir / "sim_timeout_state.json").read_text()) == {"timeouts": 1}
+    assert len(reaped) == 1 and reaped[0][1] == TimedOutMake.pid
 
 
 def test_clear_build_products_keeps_inputs(tmp_path):
@@ -136,6 +180,7 @@ def test_block_fingerprint_reuses_then_cleans_top_level(tmp_path, monkeypatch, c
     seen = []
 
     class Make:
+        pid = 12345
         returncode = 0
 
         def __init__(self, cmd, **kwargs):
@@ -144,6 +189,8 @@ def test_block_fingerprint_reuses_then_cleans_top_level(tmp_path, monkeypatch, c
         def communicate(self, timeout):
             return "** TESTS=1 PASS=1 FAIL=0 **", ""
 
+    monkeypatch.setattr("orchestrator.langchain.agents.coresmith_llm._reap_process_group",
+                        lambda *a, **k: None)
     monkeypatch.setattr(ph.subprocess, "Popen", Make)
     block = {"name": "chip_top"}
     ph.run_simulation(block, str(top), str(tb), project_root=tmp_path)

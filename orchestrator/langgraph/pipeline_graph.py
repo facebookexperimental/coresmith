@@ -9352,6 +9352,17 @@ def _harness_audit_fastpath_enabled() -> bool:
     return (os.environ.get("CORESMITH_HARNESS_AUDIT_FASTPATH", "1") or "1") != "0"
 
 
+def _worker_receipts_from_failure(project_root: str, failure: str) -> list[str]:
+    """Only forward receipts explicitly returned by this failed worker call."""
+    folder = (Path(project_root) / ".coresmith" / "worker_failures").resolve()
+    paths = []
+    for name in re.findall(r"Worker failure evidence: ([^\r\n]+)", failure):
+        path = Path(name.strip()).resolve()
+        if path.parent == folder and path.suffix == ".json" and path.is_file():
+            paths.append(str(path))
+    return list(dict.fromkeys(paths))
+
+
 async def _run_top_level_contract_audit(
     *,
     stage: str,
@@ -9389,6 +9400,7 @@ async def _run_top_level_contract_audit(
         "test_count": test_count,
         "requirement_count": requirement_count,
         "sim_log_tail": sim_log[-12000:],
+        "worker_failure_evidence": _worker_receipts_from_failure(project_root, sim_log),
         "sim_log_path": sim_log_path,
         "block_rtl_paths": block_rtl_paths or {},
         "reference_files": {
