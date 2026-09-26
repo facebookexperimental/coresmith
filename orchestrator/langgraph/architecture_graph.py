@@ -74,6 +74,8 @@ async def _arch_resolve_interrupt(payload: dict) -> dict:
         )
         if _chip_lead_enabled():
             return await _resolve_interrupt(payload)
+        from orchestrator.langgraph.pipeline_graph import _park
+        return _park(payload, graph="architecture")
     except ImportError:
         pass
     return interrupt(payload)

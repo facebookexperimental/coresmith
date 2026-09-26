@@ -2154,11 +2154,28 @@ def _build_resume_command(state_snapshot, resume_value, action, constraint,
 
 
 @server.tool()
+async def list_interrupts(status: str = "pending") -> str:
+    """Parked interrupts recorded in the project database (C1-3).
+
+    Args:
+        status: 'pending' (default), 'resolved', 'consumed', 'abandoned' or
+            '' for every row of the current run.
+    """
+    try:
+        from orchestrator.state_store.project_db import open_project
+        rows = open_project(_project_root()).interrupts(status=status or None)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"interrupts table unavailable: {exc}"})
+    return json.dumps({"interrupts": rows, "count": len(rows)}, default=str)
+
+
+@server.tool()
 async def resume_pipeline(
     action: str,
     constraint: str = "",
     rtl_fix_description: str = "",
     block_actions: str = "",
+    interrupt_id: str = "",
 ) -> str:
     """Resume the pipeline after an interrupt or pause.
 
@@ -2166,6 +2183,10 @@ async def resume_pipeline(
     tells the graph what to do next.
 
     Args:
+        interrupt_id: Optional coresmith interrupt id (from list_interrupts).
+            Answers ONE parked branch. While the runner is still executing
+            sibling branches the answer is queued in the interrupts table and
+            applied at the next superstep boundary instead of being refused.
         action: One of 'retry', 'fix_rtl', 'add_constraint', 'skip', 'abort'.
         constraint: Constraint text (required if action is 'add_constraint').
         rtl_fix_description: Description of the RTL fix applied on disk
@@ -2181,6 +2202,21 @@ async def resume_pipeline(
         return json.dumps({
             "error": f"Invalid action: {action}. Must be one of: {sorted(valid_actions)}",
         })
+
+    if interrupt_id and _pipeline.task is not None and not _pipeline.task.done():
+        # C1-3: queue the answer for one parked branch while siblings run.
+        try:
+            from orchestrator.state_store.project_db import open_project
+            ok = open_project(_project_root()).resolve_interrupt(
+                interrupt_id, {"action": action, "constraint": constraint,
+                               "description": rtl_fix_description},
+                resolved_by="mcp")
+        except Exception as exc:  # noqa: BLE001
+            return json.dumps({"error": f"interrupts table unavailable: {exc}"})
+        if not ok:
+            return json.dumps({"error": f"no pending interrupt {interrupt_id!r}"})
+        return json.dumps({"queued": True, "interrupt_id": interrupt_id, "action": action,
+                           "note": "applied at the next superstep boundary"})
 
     if _pipeline.status not in ("interrupted", "paused"):
         # Self-heal: check checkpoint for pending interrupts that the
@@ -2264,6 +2300,26 @@ async def resume_pipeline(
             _snap, resume_value, action, constraint,
             rtl_fix_description, block_actions,
         )
+        if interrupt_id:
+            # C1-3: answer only the branch whose payload carries this id.
+            from langgraph.types import Command
+            _keep = {}
+            for _t in (_snap.tasks if _snap else ()):
+                for _intr in _t.interrupts:
+                    _v = _intr.value if isinstance(_intr.value, dict) else {}
+                    if _v.get("interrupt_id") == interrupt_id:
+                        _keep[_intr.id] = (
+                            getattr(resume_input, "resume", {}) or {}
+                        ).get(_intr.id, resume_value) if isinstance(
+                            getattr(resume_input, "resume", None), dict) else resume_value
+            if not _keep:
+                return json.dumps({"error": f"no parked interrupt {interrupt_id!r}"})
+            resume_input = Command(resume=_keep)
+            try:
+                from orchestrator.state_store.project_db import open_project
+                open_project(_project_root()).consume_lg_interrupts(list(_keep))
+            except Exception:  # noqa: BLE001
+                pass
     except UnsupportedResumeAction as bad:
         # Never remap onto an unsupported action -- reject with the allowed
         # list so the caller re-issues the resume it actually meant.

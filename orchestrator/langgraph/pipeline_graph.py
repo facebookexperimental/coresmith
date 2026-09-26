@@ -943,12 +943,35 @@ def _engine_modified_payload(payload: dict, dirty: list) -> dict:
     return parked
 
 
+def _park(payload: dict, *, node: str = "", graph: str = "pipeline",
+          block: str | None = None, kind: str | None = None):
+    """Park through the interrupts table (C1-3), then ``interrupt()``.
+
+    A resolution already queued for this park (a targeted resume or an
+    operator ruling that arrived while siblings were running) is returned
+    without raising, so the branch continues in place.
+    """
+    pr = os.environ.get("CORESMITH_PROJECT_ROOT", ".")
+    try:
+        from orchestrator.state_store.interrupts import park_and_wait
+        payload, res = park_and_wait(_db(pr), payload, graph=graph,
+                                     node=node or str(payload.get("type") or ""),
+                                     block=block, kind=kind)
+        if res is not None:
+            log(f"  [PARK] {payload.get('type', '?')} answered from the interrupts "
+                f"table ({payload.get('interrupt_id')}) -- continuing without parking", GREEN)
+            return res
+    except Exception as exc:  # noqa: BLE001 - the table is bookkeeping; parking must work
+        log(f"  [PARK] interrupts table unavailable ({exc}); parking plainly", YELLOW)
+    return interrupt(payload)
+
+
 async def _resolve_interrupt(payload: dict) -> dict:
     """Park (default) or let the in-graph chip lead decide. Fail-safe: any
     chip-lead failure trips to parked interrupts for the run (a restart-safe
     ``run_flags`` row, re-armed on a fresh run start in init_tier_node)."""
     if not _chip_lead_enabled() or _chip_lead_tripped():
-        return interrupt(payload)
+        return _park(payload)
 
     pr = os.environ.get("CORESMITH_PROJECT_ROOT", ".")
     db = _db(pr)
@@ -964,7 +987,7 @@ async def _resolve_interrupt(payload: dict) -> dict:
         log(f"  [CHIP-LEAD] decision budget exhausted "
             f"({db.decision_count()}/{_chip_lead_max_decisions()}) -- parking", YELLOW)
         _trip_chip_lead("decision budget exhausted")
-        return interrupt(payload)
+        return _park(payload)
 
     try:
         from orchestrator.langchain.agents.chip_lead_agent import ChipLeadAgent
@@ -986,14 +1009,14 @@ async def _resolve_interrupt(payload: dict) -> dict:
             log(f"  [CHIP-LEAD] agent failed again ({exc2}) -- tripping "
                 "to parked interrupts", RED)
             _trip_chip_lead(f"agent failed twice: {exc2}")
-            return interrupt(payload)
+            return _park(payload)
 
     _dirty = _engine_checkout_guard()
     if _dirty:
         # WP-37: a decision made from a modified engine is invalid. Trip the
         # chip lead and park for a human; never revert automatically.
         _trip_chip_lead("engine checkout modified")
-        return interrupt(_engine_modified_payload(payload, _dirty))
+        return _park(_engine_modified_payload(payload, _dirty))
     action = (decision or {}).get("action", "")
     supported = payload.get("supported_actions") or []
     if not action or (supported and action not in supported):
@@ -1020,7 +1043,7 @@ async def _resolve_interrupt(payload: dict) -> dict:
             log(f"  [CHIP-LEAD] unsupported action {action!r} after "
                 "correction -- tripping to parked interrupts", RED)
             _trip_chip_lead(f"unsupported action {action!r}")
-            return interrupt(payload)
+            return _park(payload)
 
     try:
         async with adb_lease(db, "chip_lead_ledger", ttl_s=30, wait_s=120,
@@ -1033,7 +1056,7 @@ async def _resolve_interrupt(payload: dict) -> dict:
                     f"({db.decision_count()}/{_chip_lead_max_decisions()}) -- parking",
                     YELLOW)
                 _trip_chip_lead("decision budget exhausted")
-                return interrupt(payload)
+                return _park(payload)
             index = db.add_decision(
                 action=action, interrupt_type=payload.get("type", ""),
                 block=payload.get("block_name", ""),
@@ -1046,7 +1069,7 @@ async def _resolve_interrupt(payload: dict) -> dict:
                 pass
     except LeaseUnavailable as exc:
         log(f"  [CHIP-LEAD] ledger lease unavailable ({exc}) -- parking", RED)
-        return interrupt(payload)
+        return _park(payload)
     write_graph_event(
         pr, "Chip Lead", "chip_lead_decision",
         {"type": payload.get("type", ""), "action": action,
@@ -2823,8 +2846,8 @@ def _park_ppa_unmeasurable(state: BlockState, block_name: str,
         (block_dir / "previous_error.txt").write_text(
             "Required timing is UNMEASURED: " + timing_error +
             "\nPreserve RTL. Repair the tool/constraints and retry synthesis.\n")
-        interrupt({"type": "ppa_gate_unmeasurable", "block_name": block_name,
-                   "supported_actions": ["retry_synth", "abort"],
+        _park({"type": "ppa_gate_unmeasurable", "block_name": block_name,
+               "supported_actions": ["retry_synth", "abort"],
                    "outer_agent_guidance": "Required STA is incomplete: " + timing_error +
                        ". Preserve RTL; fix the tool or constraints, then retry synthesis."})
         return
@@ -2835,7 +2858,7 @@ def _park_ppa_unmeasurable(state: BlockState, block_name: str,
     write_graph_event(pr, "PPA Gate Unmeasurable", "interrupt", {
         "block": block_name, "reason": "tooling_missing",
     })
-    interrupt({
+    _park({
         "type": "ppa_gate_unmeasurable",
         "block_name": block_name,
         "supported_actions": ["proceed"],

@@ -24,4 +24,4 @@ def test_engine_modified_payload_discards_decision_and_names_paths():
 def test_resolve_interrupt_parks_on_dirty_engine():
     src = inspect.getsource(pg._resolve_interrupt)
     assert "_dirty = _engine_checkout_guard()" in src
-    assert "return interrupt(_engine_modified_payload(payload, _dirty))" in src
+    assert "return _park(_engine_modified_payload(payload, _dirty))" in src

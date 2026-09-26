@@ -63,6 +63,7 @@ init_telemetry(_PROJECT_ROOT)
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from orchestrator.graph_lifecycle import GraphLifecycle
@@ -190,6 +191,21 @@ def _consumed_now() -> set[str]:
     return set(_consumed_interrupt_ids)
 
 
+def _bind_interrupt_rows(pairs) -> None:
+    """Bind LangGraph ``Interrupt.id`` to the coresmith row it belongs to
+    (the payload carries ``interrupt_id`` when the park went through the
+    interrupts table)."""
+    try:
+        db = _project_db()
+    except Exception:  # noqa: BLE001
+        return
+    for lg_id, value in pairs:
+        cid = value.get("interrupt_id") if isinstance(value, dict) else None
+        if cid:
+            with contextlib.suppress(Exception):
+                db.bind_lg_id(cid, lg_id)
+
+
 async def _count_pending_interrupts() -> int | None:
     """Count parked interrupts. ``None`` means COULD NOT DETERMINE, not zero.
 
@@ -213,12 +229,15 @@ async def _count_pending_interrupts() -> int | None:
         consumed = _consumed_now()
         n = 0
         ids: set[str] = set()
+        pairs = []
         if snap and snap.tasks:
             for t in snap.tasks:
                 for i in t.interrupts:
                     ids.add(i.id)
+                    pairs.append((i.id, i.value))
                     if i.id not in consumed:
                         n += 1
+        _bind_interrupt_rows(pairs)
         # Stamp first-seen here too: this poll runs every _STALL_POLL_S whether
         # or not anyone calls /run/state, so an unattended run still learns when
         # its interrupt was raised.
@@ -480,6 +499,11 @@ class ResumeRequest(BaseModel):
     rtl_fix_description: str = ""
     block_actions: dict | None = None
     rationale: str = ""
+    # C1-3: answer ONE parked branch (coresmith ``interrupt_id`` from
+    # /run/interrupts or the interrupt payload). While the runner is in
+    # flight the answer is queued in the interrupts table and applied at the
+    # next superstep boundary (202) instead of being rejected (409).
+    interrupt_id: str | None = None
 
 
 class RestartBlockRequest(BaseModel):
@@ -737,6 +761,16 @@ def _resume_tick_or_park(has_pending_interrupt: bool, has_next_nodes: bool) -> s
     return "none"
 
 
+@app.get("/run/interrupts")
+async def run_interrupts(status: str | None = None):
+    """The interrupts table for this run (pending by default when asked)."""
+    try:
+        rows = _project_db().interrupts(status=status or None)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"interrupts table unavailable: {exc}") from exc
+    return {"interrupts": rows, "count": len(rows)}
+
+
 @app.post("/run/resume")
 async def run_resume(req: ResumeRequest):
     global _last_resume_ts, _consumed_interrupt_ids
@@ -749,7 +783,32 @@ async def run_resume(req: ResumeRequest):
             _mk.unlink()
     await _pipeline.ensure_graph()
     if _pipeline.task is not None and not _pipeline.task.done():
-        raise HTTPException(409, "pipeline still running; nothing to resume")
+        if req.interrupt_id:
+            # C1-3: a parked branch whose Send() siblings are still running.
+            # LangGraph only resumes at superstep boundaries, so queue the
+            # answer in the interrupts table; the branch picks it up in its
+            # pre-park wait or the boundary applier in run_task resumes just
+            # that branch when the step ends.
+            resolution = {
+                "action": req.action, "feedback": req.feedback,
+                "rtl_fix_description": req.rtl_fix_description,
+                "rationale": req.rationale, "block_actions": req.block_actions or {},
+            }
+            try:
+                ok = _project_db().resolve_interrupt(
+                    req.interrupt_id, resolution, resolved_by="resume")
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(500, f"interrupts table unavailable: {exc}") from exc
+            if not ok:
+                raise HTTPException(404, f"no pending interrupt {req.interrupt_id!r}")
+            return JSONResponse(status_code=202, content={
+                "resumed": False, "queued": True, "interrupt_id": req.interrupt_id,
+                "action": req.action,
+                "note": "applied at the next superstep boundary (or sooner, if the "
+                        "branch is waiting in CORESMITH_INTERRUPT_WAIT_S)",
+            })
+        raise HTTPException(409, "pipeline still running; pass interrupt_id to "
+                                 "queue an answer for one parked branch")
 
     # A resume re-enters the graph in THIS process: pick up any .coresmith/env
     # edits the operator made while the run was parked.
@@ -765,12 +824,19 @@ async def run_resume(req: ResumeRequest):
     if state_snapshot and state_snapshot.tasks:
         for task in state_snapshot.tasks:
             for intr in task.interrupts:
-                interrupts.append((intr.id, intr.value))
                 _val = intr.value if isinstance(intr.value, dict) else {}
+                # C1-3: a targeted resume answers ONE branch; the others stay
+                # parked (they re-raise their interrupt on the next tick).
+                if req.interrupt_id and _val.get("interrupt_id") != req.interrupt_id:
+                    continue
+                interrupts.append((intr.id, intr.value))
                 interrupt_meta.append((
                     _val.get("block", _val.get("block_name", "")),
                     _val.get("supported_actions", []),
                 ))
+    _bind_interrupt_rows(interrupts)
+    if req.interrupt_id and not interrupts:
+        raise HTTPException(404, f"no parked interrupt {req.interrupt_id!r} in the checkpoint")
 
     _has_next = bool(state_snapshot and state_snapshot.next)
     _mode = _resume_tick_or_park(bool(interrupts), _has_next)
@@ -813,10 +879,13 @@ async def run_resume(req: ResumeRequest):
     }
 
     from langgraph.types import Command
-    if len(interrupts) > 1:
+    if len(interrupts) > 1 or req.interrupt_id:
         cmd = Command(resume={iid: resume_value for iid, _ in interrupts})
     else:
         cmd = Command(resume=resume_value)
+    # C1-3: the rows behind these interrupts are answered by this resume.
+    with contextlib.suppress(Exception):
+        _project_db().consume_lg_interrupts([iid for iid, _ in interrupts])
 
     # D5: remember exactly which interrupts this resume answers, BEFORE the
     # graph starts running. Until it checkpoints again, aget_state still returns
@@ -1424,6 +1493,7 @@ def _shape_state(state_snapshot) -> dict:
         return base
 
     values = state_snapshot.values
+    _bind_pairs: list = []
     completed = values.get("completed_blocks", [])
     block_queue = values.get("block_queue", [])
     # Audit F9: completed_blocks is APPEND-ONLY across resumes / re-validation
@@ -1510,8 +1580,11 @@ def _shape_state(state_snapshot) -> dict:
                 was_consumed = intr.id in consumed
                 if was_consumed:
                     consumed_count += 1
+                _bind_pairs.append((intr.id, payload))
                 interrupts.append({
                     "id": intr.id,
+                    "interrupt_id": (payload.get("interrupt_id")
+                                     if isinstance(payload, dict) else None),
                     "payload": payload,
                     "stale_suspected": stale,
                     "stale_basis": basis,
@@ -1520,6 +1593,7 @@ def _shape_state(state_snapshot) -> dict:
                     "consumed_by_resume": was_consumed,
                 })
 
+    _bind_interrupt_rows(_bind_pairs)
     pending_interrupts = [i for i in interrupts if not i["consumed_by_resume"]]
 
     base.update({

@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.state_store.store import _SCHEMA as _SCOREBOARD_SCHEMA
+from orchestrator.state_store.interrupts import InterruptMixin
 from orchestrator.state_store.leases import LeaseMixin
 
 DB_NAME = "project.sqlite"
@@ -247,7 +248,7 @@ def _float(v: Any) -> float | None:
         return None
 
 
-class ProjectDB(LeaseMixin):
+class ProjectDB(LeaseMixin, InterruptMixin):
     """The project database. Construct with :func:`open_project` in most code."""
 
     def __init__(self, project_root: str | Path):

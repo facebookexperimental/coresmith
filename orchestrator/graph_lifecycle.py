@@ -255,6 +255,21 @@ class GraphLifecycle:
         try:
             self.status = "running"
             await self.graph.ainvoke(initial_input, config)
+            # C1-3 boundary applier: answers queued in the interrupts table
+            # for branches that parked during this step are applied now, one
+            # targeted Command(resume={lg_id: ...}) per pass, until nothing
+            # queued remains. Un-answered branches re-raise and stay parked.
+            for _ in range(64):
+                state = await self.graph.aget_state(config)
+                pending = [(i.id, i.value) for t in (state.tasks if state else ())
+                           for i in t.interrupts]
+                if not pending:
+                    break
+                queued = self._queued_resolutions(pending)
+                if not queued:
+                    break
+                from langgraph.types import Command
+                await self.graph.ainvoke(Command(resume=queued), config)
             state = await self.graph.aget_state(config)
             if state and state.tasks:
                 for t in state.tasks:
@@ -272,6 +287,28 @@ class GraphLifecycle:
         except Exception:
             self.status = "error"
             self.error_message = traceback.format_exc()[:10000]
+
+    def _queued_resolutions(self, pending: list[tuple[str, Any]]) -> dict[str, Any]:
+        """``{lg_interrupt_id: resolution}`` for parked branches whose row in
+        the interrupts table is ``resolved``; those rows become ``consumed``."""
+        try:
+            from orchestrator.state_store.project_db import open_project
+            db = open_project(self.project_root)
+        except Exception:  # noqa: BLE001
+            return {}
+        out: dict[str, Any] = {}
+        for lg_id, value in pending:
+            cid = value.get("interrupt_id") if isinstance(value, dict) else None
+            if not cid:
+                continue
+            try:
+                db.bind_lg_id(cid, lg_id)
+                res = db.consume_interrupt(cid)
+            except Exception:  # noqa: BLE001
+                continue
+            if res is not None:
+                out[lg_id] = res
+        return out
 
     # -- Wedge watchdog [dv-hardening-17] ------------------------------------
     #

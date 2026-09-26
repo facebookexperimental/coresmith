@@ -348,8 +348,47 @@ def cmd_leases(args) -> int:
     return EXIT_PASS
 
 
+def cmd_interrupts(args) -> int:
+    """List parked interrupts; ``--resolve ID --action A [--feedback F]`` queues
+    an answer (works with the daemon down; applied on its next tick)."""
+    db = _state_db(args)
+    resolved = None
+    if getattr(args, "resolve", None):
+        if not getattr(args, "action", None):
+            _emit(args, {"error": "--resolve requires --action"}, "--resolve requires --action")
+            return EXIT_USAGE
+        resolution = {"action": args.action, "feedback": args.feedback or "",
+                      "rationale": args.rationale or "", "block_actions": {}}
+        resolved = db.resolve_interrupt(args.resolve, resolution, resolved_by="cli")
+        if not resolved:
+            _emit(args, {"error": f"no pending interrupt {args.resolve!r}"},
+                  f"no pending interrupt {args.resolve!r}")
+            return EXIT_USAGE
+    rows = db.interrupts(status="pending" if getattr(args, "pending", False) else None)
+    lines = [
+        f"{r['id']:<22} {r['status']:<9} {r['graph']:<12} {r['node'][:28]:<28} "
+        f"block={r['block'] or '-'} kind={r['kind']} "
+        f"actions={r['payload'].get('supported_actions', [])}"
+        for r in rows
+    ] or ["(no interrupts recorded)"]
+    if resolved:
+        lines.insert(0, f"queued action={args.action!r} for {args.resolve}")
+    _emit(args, {"interrupts": rows, "resolved": args.resolve if resolved else None},
+          "\n".join(lines))
+    return EXIT_PASS
+
+
 def _register_state(sub) -> None:
     """Read (and a few write) commands over the project database."""
+    it = sub.add_parser("interrupts", help="parked interrupts (project database)")
+    _add_project_root(it)
+    _add_json(it)
+    it.add_argument("--pending", action="store_true", help="only status=pending")
+    it.add_argument("--resolve", default=None, metavar="ID", help="queue an answer for ID")
+    it.add_argument("--action", default=None, help="the answer's action (with --resolve)")
+    it.add_argument("--feedback", default=None)
+    it.add_argument("--rationale", default=None)
+    it.set_defaults(func=_run(cmd_interrupts))
     ls = sub.add_parser("leases", help="process leases held in the project database")
     _add_project_root(ls)
     _add_json(ls)
