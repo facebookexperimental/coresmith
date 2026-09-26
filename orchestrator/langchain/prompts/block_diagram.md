@@ -60,7 +60,7 @@ RULES:
      its behaviour completely>"`; every other block MUST name its golden slice.
    - kind (optional): "primitive" for an engine-generated block. The only
      primitive today is the SoC fabric: `"kind": "primitive", "primitive":
-     "cs_fabric", "tier": 0` plus a `"fabric": {...}` spec (masters, slaves
+     "cs_fabric", "tier": 0` plus a `"fabric": {{...}}` spec (masters, slaves
      with base/size/protocol, widths) as the SoC fabric skill shows. Any
      design with >= 2 initiators sharing a target, or any AXI/APB bus, MUST
      declare its interconnect this way -- never as an arbiter/crossbar/decoder
