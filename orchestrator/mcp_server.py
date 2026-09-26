@@ -1771,6 +1771,11 @@ async def start_pipeline(
     try:
         from orchestrator.state_store.trust import capture_run_baseline
         capture_run_baseline(_project_root())
+        try:
+            from orchestrator.state_store.project_db import open_project
+            open_project(_project_root()).begin_run()
+        except Exception:  # noqa: BLE001 - run id is best-effort here
+            pass
         await _pipeline.safe_start(initial_state, graph_config)
     except RuntimeError as exc:
         return json.dumps({

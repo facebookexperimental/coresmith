@@ -774,6 +774,41 @@ class ProjectDB(LeaseMixin):
         os.chmod(tmp, 0o444)
         os.replace(tmp, target)
 
+    @staticmethod
+    def _write_text_view(target: Path, text: str) -> None:
+        """A read-only non-JSON view (jsonl, markdown), written atomically."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.chmod(tmp, 0o444)
+        os.replace(tmp, target)
+
+    def export_decisions_view(self) -> Path:
+        """``.coresmith/chip_lead/decisions.jsonl`` regenerated from ``decisions``.
+
+        The jsonl used to BE the ledger (guarded by a flock); it is now a
+        read-only view for tools that tail it.
+        """
+        target = self.path.parent / "chip_lead" / "decisions.jsonl"
+        lines = [json.dumps({
+            "interrupt_type": d.get("interrupt_type", ""),
+            "block_name": d.get("block", ""),
+            "action": d.get("action", ""),
+            "reasoning": d.get("reasoning", ""),
+            "decision_index": d.get("decision_index"),
+            "interrupt_id": d.get("interrupt_id", ""),
+            "ts": d.get("ts"),
+        }, default=str) for d in self.decisions()]
+        self._write_text_view(target, ("\n".join(lines) + "\n") if lines else "")
+        return target
+
+    def begin_run(self, run_id: str | None = None) -> str:
+        """Mint (or adopt) the run id every run-scoped table is keyed by."""
+        import uuid
+        rid = run_id or f"run-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        self.set_setting("run_id", rid)
+        return rid
+
     # WP-75: the registry views are read-only by convention, but the chip lead
     # (and operators) edit them with file tools -- the prompts tell them to fix
     # `.coresmith/interface_contracts.json` on disk. Re-exporting the database

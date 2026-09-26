@@ -104,6 +104,16 @@ class GraphLifecycle:
 
     def _foreign_live_daemon_owns_project(self) -> bool:
         """Whether another live daemon owns lifecycle recovery for this run."""
+        # C1: the daemon holds a ``daemon`` lease in the project database;
+        # daemon.json is a view of it (kept for older clients and tests).
+        try:
+            from orchestrator.state_store.project_db import open_project
+            lease = open_project(self.project_root).lease("daemon")
+        except Exception:  # noqa: BLE001 - fall through to the file
+            lease = None
+        if lease is not None and not lease.get("expired"):
+            pid = int(lease.get("holder_pid") or 0)
+            return pid != os.getpid() and self._pid_is_alive(pid)
         daemon_path = os.path.join(
             self.project_root, ".coresmith", "daemon.json"
         )

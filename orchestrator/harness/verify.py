@@ -406,8 +406,8 @@ def verify_chip(
     """Integrated chip_top DV via run_integration_simulation.
 
     Inputs come from ``.coresmith/integration_result.json`` (persisted by
-    integration_check). A flock on ``sim_build/.<scope>.lock`` serializes
-    concurrent chip sims and survives recreation of the scope build directory.
+    integration_check). A ``sim:<scope>`` lease in the project database
+    serializes concurrent chip sims (C1); a crashed sim frees it by pid death.
     """
     t0 = time.monotonic()
     root = Path(pr)
@@ -455,7 +455,6 @@ def verify_chip(
                             verdict=f"integration_helpers import failed: {exc}",
                             duration_s=time.monotonic() - t0)
 
-    import fcntl
     # Agent-invoked chip verify (record_source="agent" -- e.g. a TB-gen agent's
     # in-context check) MUST NOT build in the engine-authoritative
     # sim_build/integration dir: its pre-build would leave a stale/traceless Vtop
@@ -467,7 +466,12 @@ def verify_chip(
     sim_scope = "agent_integration" if record_source == "agent" else "integration"
     lock_dir = root / "sim_build" / sim_scope
     lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir.parent / f".{sim_scope}.lock"
+    # C1: the per-namespace serialization is a lease in the project database
+    # (``sim:<scope>``), not a flock on a sidecar file: a crashed sim releases
+    # by pid death instead of leaving a lock nobody can inspect.
+    from orchestrator.state_store.leases import LeaseUnavailable, db_lease
+    from orchestrator.state_store.project_db import open_project
+    _lease_db = open_project(pr)
     # Pin the seed for the sim (run_integration_simulation inherits os.environ),
     # else --seed only decorated the scoreboard row while the TB drew its own
     # seed and the reported failure did not reproduce. Unlike the block path
@@ -477,19 +481,23 @@ def verify_chip(
     if seed is not None:
         os.environ["CORESMITH_DV_SEED_PIN"] = str(seed)
         os.environ["CORESMITH_DV_SEED"] = str(seed)
-    with open(lock_path, "w") as lockf:
-        try:
-            fcntl.flock(lockf, fcntl.LOCK_EX)
-        except OSError:
-            pass
-        try:
-            res = run_integration_simulation(
-                design, top_rtl, block_rtls, tbp, attempt or 1, sim_scope=sim_scope,
-                project_root=str(pr),
-            )
-        finally:
-            _restore_env("CORESMITH_DV_SEED_PIN", prev_seed_pin)
-            _restore_env("CORESMITH_DV_SEED", prev_seed)
+    try:
+        with db_lease(_lease_db, f"sim:{sim_scope}", ttl_s=1800, wait_s=3600,
+                      meta={"design": design, "source": record_source}):
+            try:
+                res = run_integration_simulation(
+                    design, top_rtl, block_rtls, tbp, attempt or 1, sim_scope=sim_scope,
+                    project_root=str(pr),
+                )
+            finally:
+                _restore_env("CORESMITH_DV_SEED_PIN", prev_seed_pin)
+                _restore_env("CORESMITH_DV_SEED", prev_seed)
+    except LeaseUnavailable as exc:
+        _restore_env("CORESMITH_DV_SEED_PIN", prev_seed_pin)
+        _restore_env("CORESMITH_DV_SEED", prev_seed)
+        return VerifyResult(False, infra_error=True,
+                            verdict=f"integration sim lease unavailable: {exc}",
+                            duration_s=time.monotonic() - t0)
 
     passed = bool(res.get("passed"))
     if scoreboard is not None:

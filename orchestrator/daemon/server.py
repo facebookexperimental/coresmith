@@ -265,18 +265,24 @@ async def _driver_liveness_watch() -> None:
                         "be dead -- resume or restart it.",
                         pending, idle / 60.0, _PROJECT_ROOT,
                     )
+                    _stall = {
+                        "pending_interrupt_count": pending,
+                        "idle_seconds": round(idle),
+                        "interrupt_raised_ts": oldest,
+                        "last_resume_ts": _last_resume_ts,
+                        "noted_at": now,
+                    }
+                    # C1: the fact lives in run_flags; the marker file is a view.
+                    with contextlib.suppress(Exception):
+                        _project_db().set_flag("stalled_interrupt", _stall)
                     try:
-                        marker.write_text(json.dumps({
-                            "pending_interrupt_count": pending,
-                            "idle_seconds": round(idle),
-                            "interrupt_raised_ts": oldest,
-                            "last_resume_ts": _last_resume_ts,
-                            "noted_at": now,
-                        }, indent=2))
+                        marker.write_text(json.dumps(_stall, indent=2))
                     except OSError:
                         pass
             else:
                 # cleared -> remove any stale marker
+                with contextlib.suppress(Exception):
+                    _project_db().clear_flag("stalled_interrupt")
                 with contextlib.suppress(OSError):
                     if marker.exists():
                         marker.unlink()
@@ -538,10 +544,11 @@ async def _lifespan(_app: FastAPI):
     _watch_task = asyncio.create_task(_driver_liveness_watch())
     # Frontend -> backend handoff. Returns immediately when the opt-in is off.
     _auto_backend_task = asyncio.create_task(_auto_backend_watch())
+    _lease_task = asyncio.create_task(_daemon_lease_renew())
     try:
         yield
     finally:
-        for _t in (_watch_task, _auto_backend_task):
+        for _t in (_watch_task, _auto_backend_task, _lease_task):
             _t.cancel()
             with contextlib.suppress(Exception):
                 await _t
@@ -637,6 +644,9 @@ async def run_start(req: StartRequest):
         capture_run_baseline(_PROJECT_ROOT)
     except RuntimeError as exc:
         raise HTTPException(500, str(exc)) from exc
+    # C1: every run-scoped table (run_flags, decisions, interrupts) keys on this.
+    with contextlib.suppress(Exception):
+        _project_db().begin_run()
 
     await _pipeline.reset_for_new_run()
 
@@ -731,6 +741,8 @@ def _resume_tick_or_park(has_pending_interrupt: bool, has_next_nodes: bool) -> s
 async def run_resume(req: ResumeRequest):
     global _last_resume_ts, _consumed_interrupt_ids
     _last_resume_ts = time.time()  # Section 7b: the driver is alive
+    with contextlib.suppress(Exception):
+        _project_db().clear_flag("stalled_interrupt")
     with contextlib.suppress(OSError):
         _mk = Path(_PROJECT_ROOT) / "STALLED_INTERRUPT"
         if _mk.exists():
@@ -1553,15 +1565,61 @@ def _daemon_file() -> Path:
     return Path(_PROJECT_ROOT) / ".coresmith" / "daemon.json"
 
 
+_DAEMON_LEASE_TTL_S = 60.0
+_daemon_lease_token: str | None = None
+
+
+def _project_db():
+    from orchestrator.state_store.project_db import open_project
+    return open_project(_PROJECT_ROOT)
+
+
 def _write_daemon_file(port: int):
+    """Take the ``daemon`` lease for this project and publish daemon.json.
+
+    C1: the lease (pid, port, token, expiry) is the ownership record; the file
+    is a read-only view of it for ``bin/coresmith`` and older tools. A live
+    foreign daemon refuses the start instead of being silently overwritten.
+    """
+    global _daemon_lease_token
+    info = {"project_root": _PROJECT_ROOT, "port": port, "pid": os.getpid(),
+            "started_at": time.time()}
+    try:
+        db = _project_db()
+        token = db.acquire_lease("daemon", _DAEMON_LEASE_TTL_S, meta=info)
+        if token is None:
+            holder = db.lease("daemon") or {}
+            raise SystemExit(
+                f"error: another daemon (pid {holder.get('holder_pid')}@"
+                f"{holder.get('holder_host')}, port {holder.get('meta', {}).get('port')}) "
+                f"owns {_PROJECT_ROOT}; stop it or run "
+                "`coresmith leases --steal daemon --reason ...`")
+        _daemon_lease_token = token
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the file view must still appear
+        log.warning("daemon lease unavailable (%s); writing daemon.json only", exc)
     df = _daemon_file()
     df.parent.mkdir(parents=True, exist_ok=True)
-    df.write_text(json.dumps({
-        "project_root": _PROJECT_ROOT,
-        "port": port,
-        "pid": os.getpid(),
-        "started_at": time.time(),
-    }, indent=2))
+    df.write_text(json.dumps(info, indent=2))
+
+
+async def _daemon_lease_renew() -> None:
+    """Heartbeat the ``daemon`` lease at a third of its TTL."""
+    while True:
+        try:
+            await asyncio.sleep(_DAEMON_LEASE_TTL_S / 3.0)
+            if _daemon_lease_token:
+                ok = await asyncio.to_thread(
+                    _project_db().renew_lease, "daemon", _daemon_lease_token,
+                    _DAEMON_LEASE_TTL_S)
+                if not ok:
+                    log.warning("daemon lease was stolen or released; another "
+                                "daemon may now own %s", _PROJECT_ROOT)
+        except asyncio.CancelledError:
+            break
+        except Exception:  # noqa: BLE001 - the heartbeat must never crash
+            continue
 
 
 def _remove_daemon_file():
@@ -1574,7 +1632,12 @@ def _remove_daemon_file():
     the replacement is happily serving HTTP -- which is exactly the bug
     seen on 2026-05-19 in the mcu3 run.
     """
+    global _daemon_lease_token
     try:
+        if _daemon_lease_token:
+            with contextlib.suppress(Exception):
+                _project_db().release_lease("daemon", _daemon_lease_token)
+            _daemon_lease_token = None
         df = _daemon_file()
         if not df.exists():
             return

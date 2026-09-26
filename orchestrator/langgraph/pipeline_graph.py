@@ -840,7 +840,38 @@ def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-_CHIP_LEAD_TRIPPED = False
+_CHIP_LEAD_TRIPPED = False  # process cache of the run flag below
+
+
+def _chip_lead_tripped() -> bool:
+    """Whether the chip lead is tripped for this run (process cache OR the
+    restart-safe ``run_flags`` row -- a daemon restart used to forget a trip)."""
+    if _CHIP_LEAD_TRIPPED:
+        return True
+    try:
+        return bool(_db(os.environ.get("CORESMITH_PROJECT_ROOT", ".")).get_flag(
+            "chip_lead_tripped", False))
+    except Exception:  # noqa: BLE001 - the cache alone still fails safe
+        return False
+
+
+def _trip_chip_lead(reason: str = "") -> None:
+    global _CHIP_LEAD_TRIPPED
+    _CHIP_LEAD_TRIPPED = True
+    try:
+        _db(os.environ.get("CORESMITH_PROJECT_ROOT", ".")).set_flag(
+            "chip_lead_tripped", {"tripped": True, "reason": reason, "ts": _time.time()})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _untrip_chip_lead() -> None:
+    global _CHIP_LEAD_TRIPPED
+    _CHIP_LEAD_TRIPPED = False
+    try:
+        _db(os.environ.get("CORESMITH_PROJECT_ROOT", ".")).clear_flag("chip_lead_tripped")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _chip_lead_enabled() -> bool:
@@ -914,36 +945,31 @@ def _engine_modified_payload(payload: dict, dirty: list) -> dict:
 
 async def _resolve_interrupt(payload: dict) -> dict:
     """Park (default) or let the in-graph chip lead decide. Fail-safe: any
-    chip-lead failure trips to parked interrupts for the process lifetime
-    (re-armed on a fresh run start in init_tier_node)."""
-    global _CHIP_LEAD_TRIPPED
-    if not _chip_lead_enabled() or _CHIP_LEAD_TRIPPED:
+    chip-lead failure trips to parked interrupts for the run (a restart-safe
+    ``run_flags`` row, re-armed on a fresh run start in init_tier_node)."""
+    if not _chip_lead_enabled() or _chip_lead_tripped():
         return interrupt(payload)
 
-    ledger = _chip_lead_ledger_path()
-    # Arm-U audit #10: two concurrently-parked blocks read the same ledger
-    # length -> duplicate decision_index, budget drift. Serialize readers/
-    # writers with an advisory lock on a sidecar lockfile.
-    import fcntl as _fcntl
-    ledger.parent.mkdir(parents=True, exist_ok=True)
-    _lockf = open(ledger.parent / ".ledger.lock", "a+")
-    _fcntl.flock(_lockf, _fcntl.LOCK_EX)
-    try:
-        prior = ([ln for ln in ledger.read_text().splitlines() if ln.strip()]
-                 if ledger.exists() else [])
-    finally:
-        _fcntl.flock(_lockf, _fcntl.LOCK_UN)
-        _lockf.close()
-    if len(prior) >= _chip_lead_max_decisions():
+    pr = os.environ.get("CORESMITH_PROJECT_ROOT", ".")
+    db = _db(pr)
+    # C1: the decision ledger is the ``decisions`` table; ``decisions.jsonl`` is
+    # a read-only view of it. Two concurrently-parked blocks used to read the
+    # same jsonl length and mint duplicate decision indices; the count and the
+    # append now happen under one lease so the budget cannot be overshot.
+    from orchestrator.state_store.leases import LeaseUnavailable, adb_lease
+
+    prior = db.decisions(last=10)
+    prior_lines = [json.dumps(d, default=str) for d in prior]
+    if db.decision_count() >= _chip_lead_max_decisions():
         log(f"  [CHIP-LEAD] decision budget exhausted "
-            f"({len(prior)}/{_chip_lead_max_decisions()}) -- parking", YELLOW)
-        _CHIP_LEAD_TRIPPED = True
+            f"({db.decision_count()}/{_chip_lead_max_decisions()}) -- parking", YELLOW)
+        _trip_chip_lead("decision budget exhausted")
         return interrupt(payload)
 
     try:
         from orchestrator.langchain.agents.chip_lead_agent import ChipLeadAgent
         decision = await ChipLeadAgent().decide(
-            payload=payload, prior_decisions=prior[-10:],
+            payload=payload, prior_decisions=prior_lines,
         )
     except Exception as exc:  # noqa: BLE001
         # Arm-F live finding: a single provider hard-timeout tripped the
@@ -954,19 +980,19 @@ async def _resolve_interrupt(payload: dict) -> dict:
             "tripping", YELLOW)
         try:
             decision = await ChipLeadAgent().decide(
-                payload=payload, prior_decisions=prior[-10:],
+                payload=payload, prior_decisions=prior_lines,
             )
         except Exception as exc2:  # noqa: BLE001
             log(f"  [CHIP-LEAD] agent failed again ({exc2}) -- tripping "
                 "to parked interrupts", RED)
-            _CHIP_LEAD_TRIPPED = True
+            _trip_chip_lead(f"agent failed twice: {exc2}")
             return interrupt(payload)
 
     _dirty = _engine_checkout_guard()
     if _dirty:
         # WP-37: a decision made from a modified engine is invalid. Trip the
         # chip lead and park for a human; never revert automatically.
-        _CHIP_LEAD_TRIPPED = True
+        _trip_chip_lead("engine checkout modified")
         return interrupt(_engine_modified_payload(payload, _dirty))
     action = (decision or {}).get("action", "")
     supported = payload.get("supported_actions") or []
@@ -985,7 +1011,7 @@ async def _resolve_interrupt(payload: dict) -> dict:
                 "strictly from that list."
             )
             decision = await ChipLeadAgent().decide(
-                payload=retry_payload, prior_decisions=prior[-10:],
+                payload=retry_payload, prior_decisions=prior_lines,
             )
         except Exception:  # noqa: BLE001
             decision = None
@@ -993,46 +1019,41 @@ async def _resolve_interrupt(payload: dict) -> dict:
         if not action or (supported and action not in supported):
             log(f"  [CHIP-LEAD] unsupported action {action!r} after "
                 "correction -- tripping to parked interrupts", RED)
-            _CHIP_LEAD_TRIPPED = True
+            _trip_chip_lead(f"unsupported action {action!r}")
             return interrupt(payload)
 
-    ledger.parent.mkdir(parents=True, exist_ok=True)
-    _lockf = open(ledger.parent / ".ledger.lock", "a+")
-    _fcntl.flock(_lockf, _fcntl.LOCK_EX)
     try:
-        prior = ([ln for ln in ledger.read_text().splitlines() if ln.strip()]
-                 if ledger.exists() else prior)
-        # Re-check the budget under the write lock: the check above happened
-        # before two awaited agent calls, so N concurrently-parked branches
-        # can each have passed it and overshoot the cap.
-        if len(prior) >= _chip_lead_max_decisions():
-            log(f"  [CHIP-LEAD] decision budget exhausted "
-                f"({len(prior)}/{_chip_lead_max_decisions()}) -- parking",
-                YELLOW)
-            _CHIP_LEAD_TRIPPED = True
-            return interrupt(payload)
-        # The append and the event write stay inside the try: a raise here
-        # with the flock held would block every other branch forever on the
-        # (synchronous) flock syscall.
-        with ledger.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps({
-                "interrupt_type": payload.get("type", ""),
-                "block_name": payload.get("block_name", ""),
-                "action": action,
-                "reasoning": decision.get("reasoning", ""),
-                "ts": _time.time(),
-            }) + "\n")
-        write_graph_event(
-            os.environ.get("CORESMITH_PROJECT_ROOT", "."), "Chip Lead",
-            "chip_lead_decision",
-            {"type": payload.get("type", ""), "action": action,
-             "decision_index": len(prior) + 1},
-        )
-    finally:
-        _fcntl.flock(_lockf, _fcntl.LOCK_UN)
-        _lockf.close()
+        async with adb_lease(db, "chip_lead_ledger", ttl_s=30, wait_s=120,
+                             meta={"block": payload.get("block_name", "")}):
+            # Re-check the budget under the lease: the check above happened
+            # before two awaited agent calls, so N concurrently-parked branches
+            # can each have passed it and overshoot the cap.
+            if db.decision_count() >= _chip_lead_max_decisions():
+                log(f"  [CHIP-LEAD] decision budget exhausted "
+                    f"({db.decision_count()}/{_chip_lead_max_decisions()}) -- parking",
+                    YELLOW)
+                _trip_chip_lead("decision budget exhausted")
+                return interrupt(payload)
+            index = db.add_decision(
+                action=action, interrupt_type=payload.get("type", ""),
+                block=payload.get("block_name", ""),
+                reasoning=decision.get("reasoning", ""),
+                interrupt_id=str(payload.get("interrupt_id", "")),
+            )
+            try:
+                db.export_decisions_view()
+            except OSError:
+                pass
+    except LeaseUnavailable as exc:
+        log(f"  [CHIP-LEAD] ledger lease unavailable ({exc}) -- parking", RED)
+        return interrupt(payload)
+    write_graph_event(
+        pr, "Chip Lead", "chip_lead_decision",
+        {"type": payload.get("type", ""), "action": action,
+         "decision_index": index},
+    )
     log(f"  [CHIP-LEAD] {payload.get('type', '?')} -> {action} "
-        f"({len(prior) + 1}/{_chip_lead_max_decisions()})", GREEN)
+        f"({index}/{_chip_lead_max_decisions()})", GREEN)
     return decision
 
 
@@ -5547,9 +5568,8 @@ async def init_tier_node(state: OrchestratorState) -> dict:
 
     # Chip-lead trip re-arms on a FRESH run start (tier 0, nothing completed);
     # mid-run tier re-entries keep a tripped lead parked.
-    global _CHIP_LEAD_TRIPPED
     if current_idx == 0 and not state.get("completed_blocks"):
-        _CHIP_LEAD_TRIPPED = False
+        _untrip_chip_lead()
 
     tier = tier_list[current_idx]
     tier_blocks = [b for b in block_queue if b.get("tier", 1) == tier]
