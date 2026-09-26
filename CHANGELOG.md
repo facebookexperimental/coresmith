@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (feat/soc-stages -- see docs/SOC_STAGES.md)
+- Fabric Resolution: the SoC bus is a generated primitive over vendored
+  pulp-platform `axi` IP (FabricSpec -> yosys-slang -> plain Verilog +
+  cocotbext-axi testbench); `axi4` / `axi_lite` / `apb` contract families.
+- Structured contract `timing` and one generated Interface VIP per edge
+  (cocotb driver/monitor/scoreboard/assertions, `$past` SVA binds); block
+  testbenches must exercise every edge through its VIP.
+- Shell integration: the chip top is assembled from the contracts before the
+  first tier and after every tier; the final top is the same assembly.
+- uArch phase delivers a SystemC TLM-2.0 loosely-timed SoC model.
+- Assertion stage: spec invariants must exist as assertions; phantom claims
+  are rejected.
+- Timing false pass closed: `best` means sim AND synth AND timing; `abc -D`;
+  a `timing_fix` loop.
+- Run state in the project DB: leases, run flags, decisions, interrupts
+  (single-branch resume), LLM slots; operator rulings channel.
+
 ### Changed
 - **Breaking:** the architecture phase no longer runs the uArch exploration,
   Memory Map, Clock Tree, Register Spec or Complexity Review stages, and their

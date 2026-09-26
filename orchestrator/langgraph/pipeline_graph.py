@@ -315,6 +315,7 @@ class OrchestratorState(TypedDict):
 
 
     # Results (accumulated via reducer from all Send branches) ──────────────
+    uarch_phase: Annotated[dict | None, _last]                             # B2
     shell_snapshot: Annotated[dict | None, _last]                          # A4
     integration_contract_failures: Annotated[list[dict], operator.add]    # A4
     completed_blocks: Annotated[list[dict], operator.add]
@@ -5846,6 +5847,172 @@ def _retire_derived_integration_artifacts(project_root: str) -> list[str]:
     return moved
 
 
+def uarch_phase_enabled() -> bool:
+    """B2: uArch specs for every block, plus the SystemC SoC model, before the
+    first RTL tier (CORESMITH_UARCH_PHASE, default on)."""
+    return (os.environ.get("CORESMITH_UARCH_PHASE", "1") or "1").strip().lower() \
+        not in {"0", "false", "no", "off", ""}
+
+
+def system_model_enabled() -> bool:
+    return (os.environ.get("CORESMITH_SYSTEM_MODEL", "1") or "1").strip().lower() \
+        not in {"0", "false", "no", "off", ""}
+
+
+def _system_model_repairs() -> int:
+    try:
+        return max(0, int(os.environ.get("CORESMITH_SYSTEM_MODEL_REPAIRS", "2") or 2))
+    except ValueError:
+        return 2
+
+
+async def _uarch_phase_specs(pr: str, blocks: list[dict]) -> dict:
+    """Author every missing (non-primitive) uArch spec in one session."""
+    spec_dir = Path(pr) / "arch" / "uarch_specs"
+    todo = [b for b in blocks if not _is_primitive(b) and not (spec_dir / f"{b['name']}.md").exists()]
+    if not todo:
+        return {"written": [], "missing": [], "skipped": True}
+    from orchestrator.langgraph.pipeline_helpers import generate_uarch_specs_single_context
+    return await generate_uarch_specs_single_context(todo)
+
+
+async def _uarch_phase_models(pr: str, blocks: list[dict]) -> dict:
+    """SystemC block models (generated fabric router / LLM-authored), the SoC
+    assembly, build and smoke. Never raises; returns the record."""
+    from orchestrator.systemc_model import build, detect, render_block_skeleton, smoke, write_build
+    from orchestrator.systemc_model.conventions import model_name
+    from orchestrator.systemc_model.fabric_model import render_fabric_model
+    rec: dict = {"enabled": True, "toolchain": detect(), "blocks": {}, "build_ok": None, "smoke_ok": None}
+    if not rec["toolchain"]["ok"]:
+        rec["parked_reason"] = "system_model_toolchain_missing: " + rec["toolchain"]["reason"]
+        return rec
+    db = _db(pr)
+    edges = list((db.contracts() or {}).get("contracts") or [])
+    names = [b["name"] for b in blocks if b.get("name")]
+    md = write_build(pr, names, edges, top_name=_shell_top_name(pr),
+                     systemc_home=rec["toolchain"].get("systemc_home") or "")
+    authored: list[str] = []
+    for b in blocks:
+        name = b["name"]
+        hp = md / f"{model_name(name)}.h"
+        cp = md / f"{model_name(name)}.cpp"
+        if _is_primitive(b):
+            try:
+                from orchestrator.fabric import FabricSpec
+                h, c = render_fabric_model(name, FabricSpec.from_json(b.get("fabric") or {}), edges)
+                hp.write_text(h)
+                cp.write_text(c)
+                rec["blocks"][name] = {"source": "generated", "written": True}
+            except Exception as exc:  # noqa: BLE001
+                rec["blocks"][name] = {"source": "generated", "written": False, "error": str(exc)}
+            continue
+        if not hp.exists():
+            hp.write_text(render_block_skeleton(name, edges))
+        _write_contract_slice(pr, name)
+        if cp.exists():
+            rec["blocks"][name] = {"source": "existing", "written": True}
+            continue
+        authored.append(name)
+    from orchestrator.langchain.agents.systemc_model_generator import SystemCModelGenerator
+    agent = SystemCModelGenerator()
+    sem = asyncio.Semaphore(max(1, int(os.environ.get("CORESMITH_SYSTEM_MODEL_PARALLEL", "4") or 4)))
+
+    async def _author(name: str):
+        async with sem:
+            try:
+                out = await agent.generate(name, project_root=pr,
+                                           header_path=f"model/{model_name(name)}.h")
+                rec["blocks"][name] = {"source": "agent", "written": bool(out.get("written"))}
+            except Exception as exc:  # noqa: BLE001
+                rec["blocks"][name] = {"source": "agent", "written": False, "error": str(exc)[:300]}
+    await asyncio.gather(*(_author(n) for n in authored))
+    missing = [n for n, r in rec["blocks"].items() if not r.get("written")]
+    if missing:
+        rec["build_ok"] = False
+        rec["missing_models"] = missing
+        return rec
+    res = await asyncio.to_thread(build, md)
+    for attempt in range(1, _system_model_repairs() + 1):
+        if res["ok"]:
+            break
+        failing = [n for n in authored if f"{model_name(n)}" in res["log"]] or authored
+        log(f"  [SYSTEMC] build failed; repair round {attempt} for {', '.join(failing)}", YELLOW)
+        for n in failing:
+            try:
+                await agent.generate(n, project_root=pr, header_path=f"model/{model_name(n)}.h",
+                                     compiler_log=res["log"], attempt=attempt + 1)
+            except Exception as exc:  # noqa: BLE001
+                log(f"  [SYSTEMC] {n}: repair failed: {exc}", RED)
+        res = await asyncio.to_thread(build, md)
+    rec["build_ok"] = bool(res["ok"])
+    rec["build_log"] = res["log"][-2000:]
+    if res["ok"]:
+        sm = await asyncio.to_thread(smoke, md)
+        rec["smoke_ok"] = bool(sm["ok"])
+        rec["smoke_log"] = sm["log"][-2000:]
+    import hashlib
+    for name in names:
+        cp = md / f"{model_name(name)}.cpp"
+        try:
+            db.upsert_model(name, path=str(cp), sha=(hashlib.sha256(cp.read_bytes()).hexdigest()[:16]
+                                                     if cp.exists() else ""),
+                            spec_contract_version=str(db.block_contract_version(name)),
+                            build_ok=rec["build_ok"], smoke_ok=rec.get("smoke_ok"))
+        except Exception:  # noqa: BLE001
+            pass
+    return rec
+
+
+async def uarch_phase_node(state: OrchestratorState) -> dict:
+    """B2: the uArch stage as a chip-level phase.
+
+    Before the first RTL tier: (1) every block's uArch spec is authored in one
+    session; (2) every block gets a SystemC TLM-2.0 LT model (a generated
+    router for the fabric primitive, LLM-authored from the generated skeleton
+    for the rest); (3) the SoC model is assembled, built (with a bounded
+    compiler-repair loop) and smoked. Results go to ``models`` and
+    ``.coresmith/system_model.json``. A missing toolchain is recorded, not
+    fatal; CORESMITH_UARCH_PHASE_GATE=1 makes a failed model build park.
+    """
+    pr = _pr(state)
+    if not uarch_phase_enabled():
+        return {}
+    blocks = list(state.get("block_queue") or [])
+    write_graph_event(pr, "uArch Phase", "graph_node_enter", {"blocks": len(blocks)})
+    result: dict = {"specs": {}, "system_model": {"enabled": system_model_enabled()}}
+    try:
+        result["specs"] = await _uarch_phase_specs(pr, blocks)
+        log(f"  [UARCH-PHASE] specs: {len(result['specs'].get('written') or [])} written, "
+            f"{len(result['specs'].get('missing') or [])} missing", GREEN)
+    except Exception as exc:  # noqa: BLE001 - per-block generation will fill the gaps
+        result["specs"] = {"error": str(exc)[:300]}
+        log(f"  [UARCH-PHASE] chip-level spec authoring failed ({exc}); blocks will spec per tier", YELLOW)
+    if system_model_enabled():
+        try:
+            result["system_model"] = await _uarch_phase_models(pr, blocks)
+        except Exception as exc:  # noqa: BLE001
+            result["system_model"] = {"enabled": True, "error": str(exc)[:300]}
+        sm = result["system_model"]
+        log(f"  [UARCH-PHASE] system model: build={sm.get('build_ok')} smoke={sm.get('smoke_ok')}"
+            + (f" ({sm.get('parked_reason')})" if sm.get("parked_reason") else ""),
+            GREEN if sm.get("smoke_ok") else YELLOW)
+    try:
+        (Path(pr) / ".coresmith" / "system_model.json").write_text(json.dumps(result, indent=2, default=str))
+    except OSError:
+        pass
+    write_graph_event(pr, "uArch Phase", "graph_node_exit", {
+        "specs_written": len(result["specs"].get("written") or []),
+        "model_build_ok": result["system_model"].get("build_ok"),
+        "model_smoke_ok": result["system_model"].get("smoke_ok")})
+    gate = (os.environ.get("CORESMITH_UARCH_PHASE_GATE", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+    if gate and result["system_model"].get("enabled") and result["system_model"].get("build_ok") is False:
+        _park({"type": "uarch_phase_failed", "system_model": result["system_model"],
+               "supported_actions": ["retry", "skip", "abort"],
+               "outer_agent_guidance": "The SystemC SoC model did not build; fix model/ or skip."},
+              node="uarch_phase")
+    return {"uarch_phase": result}
+
+
 def shell_integration_enabled() -> bool:
     """A4: assemble the chip top from the contracts before any RTL exists and
     after every tier (CORESMITH_SHELL_INTEGRATION, default on)."""
@@ -6089,7 +6256,7 @@ def fan_out_tier(state: OrchestratorState) -> list[Send]:
     revise = state.get("revise_blocks") or None
     if revise:
         tier_blocks = [b for b in tier_blocks if b["name"] in revise]
-    single_context = _uarch_single_context_enabled()
+    single_context = _uarch_single_context_enabled() or uarch_phase_enabled()
     # A2: a block whose contract edges moved after its uArch spec was written
     # re-specs instead of reusing the stale spec (``_stale_specs`` previously
     # had no caller, so a contract revision never propagated).
@@ -11234,8 +11401,10 @@ def build_pipeline_graph(checkpointer=None):
     # with real RTL after every tier, so integration drift is caught early.
     orchestrator.add_node("shell_init", shell_integration_init_node)
     orchestrator.add_node("shell_update", shell_integration_update_node)
+    orchestrator.add_node("uarch_phase", uarch_phase_node)
     orchestrator.add_edge(START, "shell_init")
-    orchestrator.add_edge("shell_init", "init_tier")
+    orchestrator.add_edge("shell_init", "uarch_phase")
+    orchestrator.add_edge("uarch_phase", "init_tier")
     orchestrator.add_conditional_edges("init_tier", fan_out_tier)
     orchestrator.add_edge("process_block", "shell_update")
     orchestrator.add_edge("shell_update", "integration_review_prepare")

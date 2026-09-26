@@ -54,6 +54,7 @@ class MissingSkillError(RuntimeError):
 #: that can be SELECTED must have an entry -- :func:`skill_manifest` raises
 #: otherwise, so adding a skill file without describing it fails loudly.
 SKILL_PURPOSES: dict[str, str] = {
+    "systemc_tlm_lt": "Rules for the SystemC TLM-2.0 loosely-timed block models the uArch phase delivers.",
     "soc_fabric": (
         "Declare the SoC bus as a generated fabric primitive (pulp axi crossbar, "
         "AXI-Lite/APB bridges, error slave) instead of hand-writing arbiters or "

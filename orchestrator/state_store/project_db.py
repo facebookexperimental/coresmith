@@ -235,6 +235,18 @@ CREATE TABLE IF NOT EXISTS ruling_uses (
     ts REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ruling_uses_ruling ON ruling_uses(ruling_id);
+-- SystemC models (B2): one row per block model delivered by the uArch phase.
+CREATE TABLE IF NOT EXISTS models (
+    block TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'systemc',
+    path TEXT,
+    sha TEXT,
+    spec_contract_version TEXT,
+    build_ok INTEGER,
+    smoke_ok INTEGER,
+    ts REAL NOT NULL,
+    PRIMARY KEY (block, kind)
+);
 -- Shell integration (A4): every deterministic assembly of the chip top.
 CREATE TABLE IF NOT EXISTS integration_snapshots (
     id INTEGER PRIMARY KEY,
@@ -850,6 +862,28 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin):
         }, default=str) for d in self.decisions()]
         self._write_text_view(target, ("\n".join(lines) + "\n") if lines else "")
         return target
+
+    def upsert_model(self, block: str, *, path: str = "", sha: str = "", spec_contract_version: str = "",
+                     build_ok: bool | None = None, smoke_ok: bool | None = None,
+                     kind: str = "systemc") -> None:
+        with self._tx() as db:
+            db.execute(
+                "INSERT INTO models(block, kind, path, sha, spec_contract_version, build_ok, smoke_ok, ts) "
+                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(block, kind) DO UPDATE SET path=excluded.path, "
+                "sha=excluded.sha, spec_contract_version=excluded.spec_contract_version, "
+                "build_ok=excluded.build_ok, smoke_ok=excluded.smoke_ok, ts=excluded.ts",
+                (block, kind, path, sha, spec_contract_version,
+                 None if build_ok is None else int(bool(build_ok)),
+                 None if smoke_ok is None else int(bool(smoke_ok)), time.time()))
+
+    def model_for(self, block: str, kind: str = "systemc") -> dict | None:
+        with self._conn() as db:
+            row = db.execute("SELECT * FROM models WHERE block=? AND kind=?", (block, kind)).fetchone()
+        return dict(row) if row else None
+
+    def models(self) -> list[dict]:
+        with self._conn() as db:
+            return [dict(r) for r in db.execute("SELECT * FROM models ORDER BY block").fetchall()]
 
     def add_integration_snapshot(self, snap: dict) -> int:
         with self._tx() as db:
