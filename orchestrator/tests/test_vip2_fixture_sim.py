@@ -37,7 +37,7 @@ def _run(tmp_path, rtl_name, monkeypatch, sva=True):
     shutil.copy(_FX / rtl_name, rtl)
     tb = tmp_path / "tb" / "test_responder.py"
     tb.parent.mkdir()
-    shutil.copy(_FX / "test_responder.py", tb)
+    shutil.copy(_FX / "responder_tb.py", tb)
     monkeypatch.setattr(ph, "create_golden_model_wrapper", lambda *a, **k: None)
     return ph.run_simulation({"name": "responder"}, str(rtl), str(tb), project_root=str(tmp_path))
 

@@ -40,7 +40,7 @@ def test_node_renders_from_the_database(tmp_path, monkeypatch):
     assert out["interface_vip_index"]["edges"] == 1 and out["interface_vip_index"]["errors"] == {}
     assert out["interface_vip_index"]["contract_version"] == db.contracts_version()
     py = tmp_path / ".coresmith" / "vip" / "a__m_q__to__b__s_q.py"
-    assert py.exists() and "##2" in (tmp_path / ".coresmith" / "vip" / "a__m_q__to__b__s_q__consumer_sva.sv").read_text()
+    assert py.exists() and "$past(s_q_req_valid, 2) |-> s_q_rsp_valid" in (tmp_path / ".coresmith" / "vip" / "a__m_q__to__b__s_q__consumer_sva.sv").read_text()
     idx = json.loads((tmp_path / ".coresmith" / "vip_index.json").read_text())
     assert idx["edges"]["a__m_q__to__b__s_q"]["consumer"] == "b"
 
