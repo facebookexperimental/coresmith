@@ -2,8 +2,7 @@
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge
-
-from vip.req__m_q__to__responder__s_q import Driver, Monitor, Scoreboard, assertions, SIDES
+from vip.req__m_q__to__responder__s_q import SIDES, Driver, Monitor, Scoreboard, assertions
 
 
 async def _reset(dut):

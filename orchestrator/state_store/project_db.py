@@ -43,10 +43,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from orchestrator.state_store.store import _SCHEMA as _SCOREBOARD_SCHEMA
 from orchestrator.state_store.interrupts import InterruptMixin
 from orchestrator.state_store.leases import LeaseMixin
 from orchestrator.state_store.rulings import RulingMixin
+from orchestrator.state_store.store import _SCHEMA as _SCOREBOARD_SCHEMA
 
 DB_NAME = "project.sqlite"
 # Result kinds that carry a per-block pass and are exported as block views.

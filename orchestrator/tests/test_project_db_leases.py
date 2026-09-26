@@ -5,7 +5,6 @@
 """Leases, run flags and decisions live in the project database (C1)."""
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 import threading
@@ -51,7 +50,8 @@ class TestLeasePrimitives:
         p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         tok = db.acquire_lease("x", 300, pid=p.pid)
         assert db.acquire_lease("x", 300) is None
-        p.kill(); p.wait()
+        p.kill()
+        p.wait()
         tok2 = db.acquire_lease("x", 300)
         assert tok2 and tok2 != tok
         assert db.lease("x")["stolen_from"]["reason"] == "holder_dead"
@@ -92,7 +92,11 @@ class TestDbLease:
 
         t1 = threading.Thread(target=worker, args=("a",))
         t2 = threading.Thread(target=worker, args=("b",))
-        t1.start(); time.sleep(0.05); t2.start(); t1.join(); t2.join()
+        t1.start()
+        time.sleep(0.05)
+        t2.start()
+        t1.join()
+        t2.join()
         assert order == ["a-in", "a-out", "b-in", "b-out"]
 
     def test_unavailable_raises_after_wait(self, tmp_path):
@@ -143,13 +147,17 @@ class TestRunFlagsAndDecisions:
         def w():
             seen.append(db.add_decision(action="retry"))
         ts = [threading.Thread(target=w) for _ in range(8)]
-        [t.start() for t in ts]; [t.join() for t in ts]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
         assert sorted(seen) == list(range(1, 9))
 
 
 class TestCli:
     def test_leases_command_lists_and_steals(self, tmp_path):
         import argparse
+
         from orchestrator.harness import cli
         db = open_project(tmp_path)
         db.acquire_lease("daemon", 300, meta={"port": 1})
