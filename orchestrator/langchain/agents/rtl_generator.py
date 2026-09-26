@@ -620,6 +620,9 @@ def build_user_message(
             "complete Verilog module and write it to the output path."
         )
 
+    from orchestrator.state_store.rulings import rulings_section
+    parts.append(rulings_section(project_root, consumer="rtl_generator", block=block_name,
+                                 attempt=attempt))
     return "\n".join(parts)
 
 

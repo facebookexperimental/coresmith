@@ -528,6 +528,8 @@ class UarchSpecGenerator:
                     "golden was omitted for brevity -- it does not exist."
                 )
 
+            from orchestrator.state_store.rulings import rulings_section
+            parts.append(rulings_section(project_root, consumer="uarch_spec", block=block_name))
             user_message = "\n".join(parts)
 
             # Per-call system prompt: port_naming always inline, the rest
@@ -723,6 +725,8 @@ class UarchSpecGenerator:
                 '{"specs_written": [<block names>], "notes": "<cross-block '
                 'naming decisions>"}.'
             )
+            from orchestrator.state_store.rulings import rulings_section
+            parts.append(rulings_section(project_root, consumer="uarch_spec_many", arch=True))
             user_message = "\n".join(parts)
             system_prompt = build_system_prompt()  # no per-block evidence: all skills inline
             span.set_attribute("system_prompt_chars", len(system_prompt))

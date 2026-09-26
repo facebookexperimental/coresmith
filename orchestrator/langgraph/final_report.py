@@ -163,6 +163,28 @@ def _chip_throughput(project_root: str) -> dict:
             "reason": "no chip throughput measured"}
 
 
+def _operator_rulings(project_root: str) -> list[dict]:
+    """Every ruling recorded for the run, with its consumption ledger (C2)."""
+    try:
+        from orchestrator.state_store.project_db import open_project
+        db = open_project(project_root)
+        out = []
+        for r in db.rulings(active_only=False):
+            uses = db.ruling_uses(r["id"])
+            out.append({
+                "id": r["id"], "scope": r["scope"], "text": r["text"],
+                "rationale": r.get("rationale", ""), "source": r["source"],
+                "question_ref": r.get("question_ref"), "ts": r["ts"],
+                "revoked": bool(r.get("revoked_ts")), "revoked_reason": r.get("revoked_reason"),
+                "conflicts": r.get("conflicts") or [],
+                "uses": len(uses),
+                "consumers": sorted({u["consumer"] for u in uses}),
+            })
+        return out
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _engine_provenance(project_root: str) -> dict:
     """Engine git SHA stamped at run start (+ mid-run-change flag). Section 7a.
 
@@ -595,6 +617,7 @@ def build_final_report(state: dict, project_root: str, *,
         "target_clock_mhz": target_clock_mhz,
         "engine_sha": engine_prov.get("sha", ""),
         "engine_sha_changed_mid_run": bool(engine_prov.get("changed")),
+        "operator_rulings": _operator_rulings(project_root),
         "signoff": {
             "status": status,
             "status_reason": status_reason,
@@ -959,6 +982,24 @@ def render_markdown(report: dict) -> str:
         "correctness._"
     )
     lines.append("")
+    rulings = report.get("operator_rulings") or []
+    if rulings:
+        lines.append("")
+        lines.append("## Operator rulings applied")
+        lines.append("")
+        lines.append("| id | scope | source | ruling | uses | consumers | flags |")
+        lines.append("|---|---|---|---|---|---|---|")
+        for r in rulings:
+            flags = []
+            if r.get("revoked"):
+                flags.append("revoked")
+            if r.get("conflicts"):
+                flags.append("conflicts-with-requirements")
+            lines.append(
+                f"| R{r['id']} | {r['scope']} | {r['source']} | "
+                f"{str(r['text']).replace('|', '/')[:120]} | {r.get('uses', 0)} | "
+                f"{', '.join(r.get('consumers') or [])} | {', '.join(flags)} |")
+        lines.append("")
     return "\n".join(lines)
 
 

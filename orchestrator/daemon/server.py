@@ -506,6 +506,19 @@ class ResumeRequest(BaseModel):
     interrupt_id: str | None = None
 
 
+class RulingRequest(BaseModel):
+    scope: str
+    text: str
+    rationale: str = ""
+    source: str = "human"
+    question_ref: str | None = None
+    supersedes_id: int | None = None
+
+
+class RevokeRulingRequest(BaseModel):
+    reason: str = ""
+
+
 class RestartBlockRequest(BaseModel):
     block_name: str
     from_node: str = "generate_rtl"
@@ -759,6 +772,57 @@ def _resume_tick_or_park(has_pending_interrupt: bool, has_next_nodes: bool) -> s
     if has_next_nodes:
         return "tick"
     return "none"
+
+
+@app.post("/rulings")
+async def rulings_add(req: RulingRequest):
+    """Record an operator ruling (C2). Resolves any pending interrupt it
+    answers; if the runner is idle and one was resolved, it is applied now."""
+    from orchestrator.state_store.rulings import apply_ruling_to_interrupts
+    try:
+        db = _project_db()
+        rid = db.add_ruling(req.scope, req.text, rationale=req.rationale, source=req.source,
+                            question_ref=req.question_ref, supersedes_id=req.supersedes_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"rulings table unavailable: {exc}") from exc
+    ruling = db.ruling(rid)
+    resolved = apply_ruling_to_interrupts(db, ruling)
+    with contextlib.suppress(Exception):
+        db.export_rulings_view()
+    applied = False
+    if resolved and not _pipeline_task_in_flight():
+        # Idle runner: a plain tick lets run_task's boundary applier consume
+        # the queued answers for exactly those branches.
+        with contextlib.suppress(Exception):
+            await _pipeline.ensure_graph()
+            await _pipeline.safe_resume(None, {"configurable": {"thread_id": _pipeline.thread_id}})
+            applied = True
+    return {"id": rid, "ruling": ruling, "resolved_interrupts": resolved,
+            "applied_now": applied, "conflicts": ruling["conflicts"]}
+
+
+@app.get("/rulings")
+async def rulings_list(scope: str | None = None, all: bool = False):
+    try:
+        rows = _project_db().rulings(scope=scope or None, active_only=not all)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"rulings table unavailable: {exc}") from exc
+    return {"rulings": rows, "count": len(rows)}
+
+
+@app.post("/rulings/{ruling_id}/revoke")
+async def rulings_revoke(ruling_id: int, req: RevokeRulingRequest):
+    try:
+        db = _project_db()
+        ok = db.revoke_ruling(ruling_id, req.reason)
+        db.export_rulings_view()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"rulings table unavailable: {exc}") from exc
+    if not ok:
+        raise HTTPException(404, f"no active ruling {ruling_id}")
+    return {"revoked": True, "id": ruling_id}
 
 
 @app.get("/run/interrupts")

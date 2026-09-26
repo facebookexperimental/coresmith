@@ -122,6 +122,8 @@ async def generate_ers_doc(
             f"IMPORTANT: Write the complete ERS JSON to: {target_path}\n"
             "After writing, respond with only the file path confirmation."
         )
+        from orchestrator.state_store.rulings import rulings_section
+        user_message += rulings_section(project_root, consumer="ers", arch=True)
 
         import os as _os
 

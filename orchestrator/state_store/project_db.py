@@ -46,6 +46,7 @@ from typing import Any
 from orchestrator.state_store.store import _SCHEMA as _SCOREBOARD_SCHEMA
 from orchestrator.state_store.interrupts import InterruptMixin
 from orchestrator.state_store.leases import LeaseMixin
+from orchestrator.state_store.rulings import RulingMixin
 
 DB_NAME = "project.sqlite"
 # Result kinds that carry a per-block pass and are exported as block views.
@@ -209,6 +210,31 @@ CREATE TABLE IF NOT EXISTS interrupts (
     consumed_ts REAL
 );
 CREATE INDEX IF NOT EXISTS idx_interrupts_status ON interrupts(status, graph);
+-- Operator rulings (C2): additive run-time policy, never under inputs/.
+CREATE TABLE IF NOT EXISTS rulings (
+    id INTEGER PRIMARY KEY,
+    scope TEXT NOT NULL,             -- global | arch | block:<name> | edge:<edge_id>
+    question_ref TEXT,               -- interrupt:<id> | prd:<qid> | block:<name>:<kind>
+    text TEXT NOT NULL,
+    rationale TEXT,
+    source TEXT NOT NULL DEFAULT 'human',   -- human | chip_lead | coordinator
+    ts REAL NOT NULL,
+    supersedes_id INTEGER,
+    revoked_ts REAL,
+    revoked_reason TEXT,
+    conflict_json TEXT
+);
+CREATE TABLE IF NOT EXISTS ruling_uses (
+    id INTEGER PRIMARY KEY,
+    ruling_id INTEGER NOT NULL,
+    consumer TEXT NOT NULL,
+    block TEXT,
+    node TEXT,
+    attempt INTEGER,
+    run_id TEXT NOT NULL DEFAULT '',
+    ts REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ruling_uses_ruling ON ruling_uses(ruling_id);
 """
 
 _BLOCK_COLUMNS = ("tier", "subsystem", "description", "python_source", "rtl_target",
@@ -248,7 +274,7 @@ def _float(v: Any) -> float | None:
         return None
 
 
-class ProjectDB(LeaseMixin, InterruptMixin):
+class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin):
     """The project database. Construct with :func:`open_project` in most code."""
 
     def __init__(self, project_root: str | Path):
@@ -867,6 +893,10 @@ class ProjectDB(LeaseMixin, InterruptMixin):
             contracts = self.contracts()
             if contracts:
                 self._export_view(cdir / "interface_contracts.json", contracts)
+            try:
+                self.export_rulings_view()
+            except OSError:
+                pass
         finally:
             self._exporting_views = False
         note = cdir / "STATE.md"

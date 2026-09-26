@@ -2154,6 +2154,68 @@ def _build_resume_command(state_snapshot, resume_value, action, constraint,
 
 
 @server.tool()
+async def add_ruling(scope: str, text: str, rationale: str = "", question_ref: str = "",
+                     source: str = "coordinator", supersedes_id: int = 0) -> str:
+    """Record a binding operator ruling (C2) without touching inputs/.
+
+    Args:
+        scope: 'global' | 'arch' | 'block:<name>' | 'edge:<edge_id>'.
+        text: The ruling. Injected into every applicable prompt as a binding
+            section; block-scoped rulings also become persistent constraints.
+        rationale: Why (shown next to the ruling).
+        question_ref: Optional 'interrupt:<id>' | 'prd:<qid>' | 'prd:*' |
+            'block:<name>:<kind>' -- resolves the matching pending interrupt so
+            the parked branch resumes on its own.
+        source: 'human' | 'chip_lead' | 'coordinator'.
+        supersedes_id: Id of an earlier ruling this one replaces (0 = none).
+    """
+    from orchestrator.state_store.project_db import open_project
+    from orchestrator.state_store.rulings import apply_ruling_to_interrupts
+    try:
+        db = open_project(_project_root())
+        rid = db.add_ruling(scope, text, rationale=rationale, source=source,
+                            question_ref=question_ref or None,
+                            supersedes_id=supersedes_id or None)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"rulings table unavailable: {exc}"})
+    ruling = db.ruling(rid)
+    resolved = apply_ruling_to_interrupts(db, ruling)
+    try:
+        db.export_rulings_view()
+    except Exception:  # noqa: BLE001
+        pass
+    return json.dumps({"id": rid, "resolved_interrupts": resolved,
+                       "conflicts": ruling["conflicts"]}, default=str)
+
+
+@server.tool()
+async def list_rulings(scope: str = "", include_revoked: bool = False) -> str:
+    """Operator rulings recorded for this project (C2)."""
+    from orchestrator.state_store.project_db import open_project
+    try:
+        rows = open_project(_project_root()).rulings(scope=scope or None,
+                                                     active_only=not include_revoked)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"rulings table unavailable: {exc}"})
+    return json.dumps({"rulings": rows, "count": len(rows)}, default=str)
+
+
+@server.tool()
+async def revoke_ruling(ruling_id: int, reason: str = "") -> str:
+    """Revoke an operator ruling; its block constraints are dropped too."""
+    from orchestrator.state_store.project_db import open_project
+    try:
+        db = open_project(_project_root())
+        ok = db.revoke_ruling(ruling_id, reason)
+        db.export_rulings_view()
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"rulings table unavailable: {exc}"})
+    return json.dumps({"revoked": ok, "id": ruling_id})
+
+
+@server.tool()
 async def list_interrupts(status: str = "pending") -> str:
     """Parked interrupts recorded in the project database (C1-3).
 

@@ -2683,6 +2683,8 @@ async def fix_lint_errors(
         f"Read the lint errors, then use the Edit tool to fix the RTL file "
         f"in-place. Do NOT rewrite the entire file -- make targeted fixes."
     )
+    from orchestrator.state_store.rulings import rulings_section_env
+    user_message += rulings_section_env(consumer="fix_lint", block=block_name)
 
     block_title = block_name.replace("_", " ").title()
     llm = ClaudeLLM(
@@ -2768,6 +2770,8 @@ async def fix_synth_errors(
         f"Read previous_error.txt and the synthesis errors, then fix the RTL. "
         f"{edit_instr}"
     )
+    from orchestrator.state_store.rulings import rulings_section_env
+    user_message += rulings_section_env(consumer="fix_synth", block=block_name)
 
     block_title = block_name.replace("_", " ").title()
     llm = ClaudeLLM(
@@ -2848,6 +2852,8 @@ async def fix_testbench_errors(
         f"Read the simulation log to understand the failure, then read the "
         f"testbench and RTL. Fix the testbench in-place using the Edit tool."
     )
+    from orchestrator.state_store.rulings import rulings_section_env
+    user_message += rulings_section_env(consumer="fix_testbench", block=block_name)
 
     block_title = block_name.replace("_", " ").title()
     # 600s default; bump via CORESMITH_TB_FIX_TIMEOUT for complex blocks

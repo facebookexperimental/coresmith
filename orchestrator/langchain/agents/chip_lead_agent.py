@@ -71,6 +71,11 @@ class ChipLeadAgent:
                 "payload references (RTL, step logs, contract audit) before "
                 "deciding. Reply with ONLY the JSON decision object."
             )
+            from orchestrator.state_store.rulings import rulings_section_env
+            prompt += rulings_section_env(
+                consumer="chip_lead", arch=True,
+                block=payload.get("block_name") or payload.get("block") or None,
+                node=itype)
             content = await self.llm.call(
                 system=CHIP_LEAD_PROMPT,
                 prompt=prompt,

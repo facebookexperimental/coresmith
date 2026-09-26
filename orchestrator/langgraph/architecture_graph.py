@@ -86,6 +86,19 @@ def _pr(state: dict) -> str:
     return state.get("project_root", ".")
 
 
+def _rulings_for_payload(project_root: str) -> list[dict]:
+    """Active arch-scoped rulings, for an interrupt payload (C2)."""
+    pr = str(project_root or "").strip()
+    if not pr or pr == ".":
+        return []
+    try:
+        from orchestrator.state_store.project_db import open_project
+        return [{"id": r["id"], "scope": r["scope"], "text": r["text"]}
+                for r in open_project(pr).rulings_for(arch=True)]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _event(state: dict, node: str, event_type: str, data: dict | None = None) -> None:
     """Emit a graph event tagged for the architecture graph."""
     merged = {"graph": "architecture"}
@@ -723,8 +736,9 @@ async def gather_requirements_node(state: ArchGraphState) -> dict:
         if user_answers:
             span.set_attribute("answer_count", len(user_answers))
 
+        from orchestrator.state_store.rulings import rulings_section as _rs
         result = await gather_prd(
-            requirements=state["requirements"],
+            requirements=state["requirements"] + _rs(_pr(state), consumer="gather_prd", arch=True),
             pdk_summary=state["pdk_summary"],
             target_clock_mhz=state["target_clock_mhz"],
             user_answers=user_answers,
@@ -876,8 +890,9 @@ async def block_diagram_node(state: ArchGraphState) -> dict:
                     for v in violations
                 ]
 
+        from orchestrator.state_store.rulings import rulings_section as _rs
         result = await analyze_block_diagram(
-            requirements=state["requirements"],
+            requirements=state["requirements"] + _rs(_pr(state), consumer="block_diagram", arch=True),
             pdk_summary=state["pdk_summary"],
             target_clock_mhz=state["target_clock_mhz"],
             existing_diagram=state.get("block_diagram"),
@@ -1812,6 +1827,7 @@ async def escalate_final_review_node(state: ArchGraphState) -> dict:
         "feedback_rounds_used": _feedback_rounds_used(
             state.get("human_response_history"), "final_review"),
         "feedback_rounds_cap": _max_feedback_rounds(),
+        "operator_rulings": _rulings_for_payload(_pr(state)),
         "supported_actions": ["accept", "feedback", "abort"],
         "instructions": (
             "Architecture is complete. Review the design summary above.\n\n"

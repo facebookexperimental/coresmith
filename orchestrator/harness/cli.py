@@ -378,8 +378,75 @@ def cmd_interrupts(args) -> int:
     return EXIT_PASS
 
 
+def cmd_ruling(args) -> int:
+    """``coresmith ruling add|list|revoke`` -- the operator rulings channel (C2)."""
+    db = _state_db(args)
+    from orchestrator.state_store.rulings import apply_ruling_to_interrupts
+    verb = getattr(args, "verb", "list")
+    if verb == "add":
+        try:
+            rid = db.add_ruling(args.scope, args.text, rationale=args.rationale or "",
+                                source=args.source or "human",
+                                question_ref=args.question_ref or None,
+                                supersedes_id=args.supersedes)
+        except ValueError as exc:
+            _emit(args, {"error": str(exc)}, f"error: {exc}")
+            return EXIT_USAGE
+        ruling = db.ruling(rid)
+        resolved = apply_ruling_to_interrupts(db, ruling)
+        db.export_rulings_view()
+        payload = {"id": rid, "ruling": ruling, "resolved_interrupts": resolved,
+                   "conflicts": ruling["conflicts"]}
+        lines = [f"ruling R{rid} [{ruling['scope']}] recorded"]
+        if resolved:
+            lines.append(f"resolved {len(resolved)} pending interrupt(s): {resolved}")
+        if ruling["conflicts"]:
+            lines.append(f"WARNING conflicts with requirements.md: {ruling['conflicts']}")
+        _emit(args, payload, "\n".join(lines))
+        return EXIT_PASS
+    if verb == "revoke":
+        ok = db.revoke_ruling(args.id, args.reason or "")
+        db.export_rulings_view()
+        _emit(args, {"revoked": ok, "id": args.id},
+              f"R{args.id} {'revoked' if ok else 'not found or already revoked'}")
+        return EXIT_PASS if ok else EXIT_USAGE
+    rows = db.rulings(scope=getattr(args, "scope", None) or None,
+                      active_only=not getattr(args, "all", False))
+    lines = [f"R{r['id']:<4} {r['scope']:<24} {r['source']:<10} "
+             f"{'REVOKED ' if r.get('revoked_ts') else ''}{r['text'][:90]}"
+             + (f"  (q: {r['question_ref']})" if r.get('question_ref') else "")
+             for r in rows] or ["(no rulings)"]
+    _emit(args, {"rulings": rows}, "\n".join(lines))
+    return EXIT_PASS
+
+
 def _register_state(sub) -> None:
     """Read (and a few write) commands over the project database."""
+    rp = sub.add_parser("ruling", help="operator rulings: add | list | revoke")
+    rsub = rp.add_subparsers(dest="verb")
+    ra = rsub.add_parser("add", help="record a binding ruling")
+    _add_project_root(ra)
+    _add_json(ra)
+    ra.add_argument("--scope", required=True, help="global | arch | block:<name> | edge:<edge_id>")
+    ra.add_argument("--text", required=True)
+    ra.add_argument("--rationale", default="")
+    ra.add_argument("--source", default="human", choices=["human", "chip_lead", "coordinator"])
+    ra.add_argument("--question-ref", dest="question_ref", default=None,
+                    help="interrupt:<id> | prd:<qid> | prd:* | block:<name>:<kind>")
+    ra.add_argument("--supersedes", type=int, default=None)
+    ra.set_defaults(func=_run(cmd_ruling), verb="add")
+    rl = rsub.add_parser("list", help="list rulings")
+    _add_project_root(rl)
+    _add_json(rl)
+    rl.add_argument("--scope", default=None)
+    rl.add_argument("--all", action="store_true", help="include revoked/superseded")
+    rl.set_defaults(func=_run(cmd_ruling), verb="list")
+    rr = rsub.add_parser("revoke", help="revoke a ruling")
+    _add_project_root(rr)
+    _add_json(rr)
+    rr.add_argument("id", type=int)
+    rr.add_argument("--reason", default="")
+    rr.set_defaults(func=_run(cmd_ruling), verb="revoke")
     it = sub.add_parser("interrupts", help="parked interrupts (project database)")
     _add_project_root(it)
     _add_json(it)

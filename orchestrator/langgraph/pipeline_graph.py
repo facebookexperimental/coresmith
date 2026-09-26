@@ -682,7 +682,7 @@ async def _park_conformance_unrepairable(state: BlockState, block_name: str,
 # Constraint sources that survive a fresh block lifecycle: chip-level DV
 # decisions and operator rules are pinned precisely because the spec appends
 # they mirror are destroyed by the per-tier re-spec.
-_PERSISTENT_CONSTRAINT_SOURCES = ("chip_dv_revise", "chip_dv_fix", "human")
+_PERSISTENT_CONSTRAINT_SOURCES = ("chip_dv_revise", "chip_dv_fix", "human", "operator_ruling")
 
 
 from orchestrator.state_store.project_db import open_project as _open_project  # noqa: E402

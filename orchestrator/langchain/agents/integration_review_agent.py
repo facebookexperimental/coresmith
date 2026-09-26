@@ -341,6 +341,8 @@ class IntegrationReviewAgent:
                 "are read-only. Report a summary of findings and unresolved issues."
             )
 
+            from orchestrator.state_store.rulings import rulings_section
+            parts.append(rulings_section(project_root, consumer="integration_review", arch=True))
             user_message = "\n".join(parts)
 
             content = await self.llm.call(

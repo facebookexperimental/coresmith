@@ -249,6 +249,8 @@ class TestbenchGeneratorAgent:
                 )
 
             run_name = f"Generate Testbench [{block_title}]"
+            from orchestrator.state_store.rulings import rulings_section
+            user_message += rulings_section(project_root, consumer="testbench", block=block_name)
             await self.llm.call(
                 system=SYSTEM_PROMPT,
                 prompt=user_message,
