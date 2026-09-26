@@ -66,9 +66,14 @@ class InterruptMixin:
         """Record a park; idempotent on the deterministic id. Returns
         ``(interrupt_id, payload_with_id)``."""
         rid = self.run_id()
-        iid = str(payload.get("interrupt_id") or interrupt_id_for(
-            payload, graph=graph, node=node, run_id=rid))
-        out = {**payload, "interrupt_id": iid}
+        # Always derived from the stable keys: a payload copied from another
+        # park (a new attempt, another block) gets its own row, and the same
+        # park re-executed after a resume lands on the same one.
+        iid = interrupt_id_for(payload, graph=graph, node=node, run_id=rid)
+        # Mutate in place: callers (and tests) hold the payload object and
+        # expect the parked value to BE it.
+        payload["interrupt_id"] = iid
+        out = payload
         with self._tx() as db:
             row = db.execute("SELECT status FROM interrupts WHERE id=?", (iid,)).fetchone()
             if row is None:

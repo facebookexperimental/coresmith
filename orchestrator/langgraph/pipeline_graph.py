@@ -848,9 +848,11 @@ def _chip_lead_tripped() -> bool:
     restart-safe ``run_flags`` row -- a daemon restart used to forget a trip)."""
     if _CHIP_LEAD_TRIPPED:
         return True
+    pr = os.environ.get("CORESMITH_PROJECT_ROOT", "").strip()
+    if not pr:
+        return False
     try:
-        return bool(_db(os.environ.get("CORESMITH_PROJECT_ROOT", ".")).get_flag(
-            "chip_lead_tripped", False))
+        return bool(_db(pr).get_flag("chip_lead_tripped", False))
     except Exception:  # noqa: BLE001 - the cache alone still fails safe
         return False
 
@@ -858,8 +860,11 @@ def _chip_lead_tripped() -> bool:
 def _trip_chip_lead(reason: str = "") -> None:
     global _CHIP_LEAD_TRIPPED
     _CHIP_LEAD_TRIPPED = True
+    pr = os.environ.get("CORESMITH_PROJECT_ROOT", "").strip()
+    if not pr:
+        return
     try:
-        _db(os.environ.get("CORESMITH_PROJECT_ROOT", ".")).set_flag(
+        _db(pr).set_flag(
             "chip_lead_tripped", {"tripped": True, "reason": reason, "ts": _time.time()})
     except Exception:  # noqa: BLE001
         pass
@@ -868,8 +873,11 @@ def _trip_chip_lead(reason: str = "") -> None:
 def _untrip_chip_lead() -> None:
     global _CHIP_LEAD_TRIPPED
     _CHIP_LEAD_TRIPPED = False
+    pr = os.environ.get("CORESMITH_PROJECT_ROOT", "").strip()
+    if not pr:
+        return
     try:
-        _db(os.environ.get("CORESMITH_PROJECT_ROOT", ".")).clear_flag("chip_lead_tripped")
+        _db(pr).clear_flag("chip_lead_tripped")
     except Exception:  # noqa: BLE001
         pass
 
@@ -944,14 +952,21 @@ def _engine_modified_payload(payload: dict, dirty: list) -> dict:
 
 
 def _park(payload: dict, *, node: str = "", graph: str = "pipeline",
-          block: str | None = None, kind: str | None = None):
+          block: str | None = None, kind: str | None = None, interrupt_fn=None):
     """Park through the interrupts table (C1-3), then ``interrupt()``.
 
     A resolution already queued for this park (a targeted resume or an
     operator ruling that arrived while siblings were running) is returned
-    without raising, so the branch continues in place.
+    without raising, so the branch continues in place. ``interrupt_fn`` lets
+    another graph module raise through its own ``interrupt`` binding.
+    ``payload`` is parked as-is (the id is added in place).
     """
-    pr = os.environ.get("CORESMITH_PROJECT_ROOT", ".")
+    raise_fn = interrupt_fn or interrupt
+    pr = os.environ.get("CORESMITH_PROJECT_ROOT", "").strip()
+    if not pr:
+        # No declared project root: nothing to record against. Never open a
+        # database in the process cwd.
+        return raise_fn(payload)
     try:
         from orchestrator.state_store.interrupts import park_and_wait
         payload, res = park_and_wait(_db(pr), payload, graph=graph,
@@ -963,7 +978,7 @@ def _park(payload: dict, *, node: str = "", graph: str = "pipeline",
             return res
     except Exception as exc:  # noqa: BLE001 - the table is bookkeeping; parking must work
         log(f"  [PARK] interrupts table unavailable ({exc}); parking plainly", YELLOW)
-    return interrupt(payload)
+    return raise_fn(payload)
 
 
 async def _resolve_interrupt(payload: dict) -> dict:
