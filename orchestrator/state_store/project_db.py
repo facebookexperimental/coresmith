@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.state_store.store import _SCHEMA as _SCOREBOARD_SCHEMA
+from orchestrator.state_store.leases import LeaseMixin
 
 DB_NAME = "project.sqlite"
 # Result kinds that carry a per-block pass and are exported as block views.
@@ -152,12 +153,61 @@ CREATE TABLE IF NOT EXISTS constraints (
 CREATE INDEX IF NOT EXISTS idx_constraints_block ON constraints(block);
 CREATE TABLE IF NOT EXISTS results (
     block TEXT NOT NULL,
-    kind TEXT NOT NULL,          -- best | integration | gate_sim | conformance | dv_summary | throughput | ...
+    kind TEXT NOT NULL,          -- best | dv_best | integration | gate_sim | conformance | dv_summary | throughput | ...
     value_json TEXT NOT NULL,
     report_path TEXT,
     ts REAL,
     PRIMARY KEY (block, kind)
 );
+-- Run state (C1): process locks and per-run facts that used to live in
+-- flocks, PID files and in-memory sets. See state_store/leases.py.
+CREATE TABLE IF NOT EXISTS leases (
+    name TEXT PRIMARY KEY,
+    holder_pid INTEGER NOT NULL,
+    holder_host TEXT NOT NULL,
+    token TEXT NOT NULL,
+    acquired_ts REAL NOT NULL,
+    expires_ts REAL NOT NULL,
+    meta_json TEXT,
+    stolen_from_json TEXT
+);
+CREATE TABLE IF NOT EXISTS run_flags (
+    name TEXT NOT NULL,
+    run_id TEXT NOT NULL DEFAULT '',
+    value_json TEXT,
+    ts REAL NOT NULL,
+    PRIMARY KEY (name, run_id)
+);
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY,
+    interrupt_id TEXT,
+    interrupt_type TEXT,
+    block TEXT,
+    action TEXT NOT NULL,
+    reasoning TEXT,
+    decision_index INTEGER NOT NULL,
+    run_id TEXT NOT NULL DEFAULT '',
+    ts REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_run ON decisions(run_id);
+CREATE TABLE IF NOT EXISTS interrupts (
+    id TEXT PRIMARY KEY,             -- coresmith interrupt id (in the payload)
+    lg_interrupt_id TEXT,            -- LangGraph Interrupt.id once the daemon has seen it
+    graph TEXT NOT NULL,             -- architecture | pipeline | backend
+    branch TEXT,
+    node TEXT NOT NULL,
+    block TEXT,
+    kind TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',   -- pending | resolved | consumed | abandoned
+    resolution_json TEXT,
+    resolved_by TEXT,
+    run_id TEXT NOT NULL DEFAULT '',
+    ts REAL NOT NULL,
+    resolved_ts REAL,
+    consumed_ts REAL
+);
+CREATE INDEX IF NOT EXISTS idx_interrupts_status ON interrupts(status, graph);
 """
 
 _BLOCK_COLUMNS = ("tier", "subsystem", "description", "python_source", "rtl_target",
@@ -197,7 +247,7 @@ def _float(v: Any) -> float | None:
         return None
 
 
-class ProjectDB:
+class ProjectDB(LeaseMixin):
     """The project database. Construct with :func:`open_project` in most code."""
 
     def __init__(self, project_root: str | Path):

@@ -324,8 +324,38 @@ def cmd_settings(args) -> int:
     return EXIT_PASS
 
 
+def cmd_leases(args) -> int:
+    """List the run's process leases; ``--steal NAME --reason R`` drops one."""
+    db = _state_db(args)
+    stolen = None
+    if getattr(args, "steal", None):
+        if not getattr(args, "reason", None):
+            _emit(args, {"error": "--steal requires --reason"}, "--steal requires --reason")
+            return EXIT_USAGE
+        stolen = db.steal_lease(args.steal, args.reason)
+    rows = db.leases()
+    payload = {"leases": rows, "stolen": stolen}
+    lines = [
+        f"{r['name']:<28} pid={r['holder_pid']}@{r['holder_host']} "
+        f"{'EXPIRED' if r['expired'] else 'live'} "
+        f"expires_in={r['expires_ts'] - __import__('time').time():+.0f}s "
+        f"meta={ {k: v for k, v in r['meta'].items() if k != 'ttl_s'} }"
+        for r in rows
+    ] or ["(no leases)"]
+    if stolen:
+        lines.insert(0, f"stole {stolen['name']} from pid {stolen['holder_pid']} ({args.reason})")
+    _emit(args, payload, "\n".join(lines))
+    return EXIT_PASS
+
+
 def _register_state(sub) -> None:
     """Read (and a few write) commands over the project database."""
+    ls = sub.add_parser("leases", help="process leases held in the project database")
+    _add_project_root(ls)
+    _add_json(ls)
+    ls.add_argument("--steal", default=None, metavar="NAME", help="drop a lease by name")
+    ls.add_argument("--reason", default=None, help="why the lease is being stolen")
+    ls.set_defaults(func=_run(cmd_leases))
     for name, handler, help_ in (
         ("blocks", cmd_blocks, "the block queue (project database)"),
         ("results", cmd_results, "recorded gate results per block"),
