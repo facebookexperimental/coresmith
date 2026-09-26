@@ -253,10 +253,13 @@ def test_prompt_requires_agent_scratch_builds(prompt):
 
 
 def test_chip_verify_lock_survives_scope_recreation(tmp_path, monkeypatch):
-    import fcntl
+    """C1: the per-scope serialization is a ``sim:<scope>`` lease in the
+    project database, so recreating the disposable scope dir cannot drop it
+    and a contender sees it held for the whole sim."""
     import shutil
 
     from orchestrator.harness.verify import verify_chip
+    from orchestrator.state_store.project_db import open_project
 
     top, tb = _inputs(tmp_path)
     state = tmp_path / ".coresmith"
@@ -264,17 +267,18 @@ def test_chip_verify_lock_survives_scope_recreation(tmp_path, monkeypatch):
     (state / "integration_result.json").write_text(json.dumps({
         "top_rtl_path": str(top), "tb_path": str(tb),
     }))
+    db = open_project(tmp_path)
 
     def simulate(*args, sim_scope, **kwargs):
         sim_dir = tmp_path / "sim_build" / sim_scope
         shutil.rmtree(sim_dir)
         sim_dir.mkdir()
-        locks = list((tmp_path / "sim_build").rglob("*.lock"))
-        assert len(locks) == 1, "The held lock must live outside the disposable scope"
-        with locks[0].open("w") as contender:
-            with pytest.raises(BlockingIOError):
-                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert not list((tmp_path / "sim_build").rglob("*.lock")), "no lock files any more"
+        held = db.lease(f"sim:{sim_scope}")
+        assert held is not None and not held["expired"]
+        assert db.acquire_lease(f"sim:{sim_scope}", 10) is None  # a contender waits
         return {"passed": True}
 
     monkeypatch.setattr(ih, "run_integration_simulation", simulate)
     assert verify_chip(tmp_path, record_source="gate").passed
+    assert db.leases() == []

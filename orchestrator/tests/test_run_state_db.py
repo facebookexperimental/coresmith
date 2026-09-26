@@ -26,8 +26,8 @@ class _Lead:
 
 
 def _arm(monkeypatch, tmp_path, action="retry"):
-    from orchestrator.langgraph import pipeline_graph as pg
     import orchestrator.langchain.agents.chip_lead_agent as cla
+    from orchestrator.langgraph import pipeline_graph as pg
     monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
     monkeypatch.setenv("CORESMITH_ENABLE_CHIP_LEAD", "1")
     monkeypatch.setattr(pg, "_CHIP_LEAD_TRIPPED", False)
@@ -105,7 +105,9 @@ class TestDaemonLease:
         assert not (tmp_path / ".coresmith" / "daemon.json").exists()
 
     def test_a_live_foreign_daemon_refuses_the_start(self, tmp_path, monkeypatch):
-        import subprocess, sys
+        import subprocess
+        import sys
+
         from orchestrator.daemon import server as ds
         monkeypatch.setattr(ds, "_PROJECT_ROOT", str(tmp_path))
         monkeypatch.setattr(ds, "_daemon_lease_token", None)
@@ -116,14 +118,17 @@ class TestDaemonLease:
             with pytest.raises(SystemExit):
                 ds._write_daemon_file(4243)
         finally:
-            p.kill(); p.wait()
+            p.kill()
+            p.wait()
         # ...but a dead holder is displaced
         ds._write_daemon_file(4243)
         assert db.lease("daemon")["holder_pid"] == os.getpid()
         ds._remove_daemon_file()
 
     def test_lifecycle_sees_a_foreign_daemon_through_the_lease(self, tmp_path):
-        import subprocess, sys
+        import subprocess
+        import sys
+
         from orchestrator.graph_lifecycle import GraphLifecycle
         gl = GraphLifecycle.__new__(GraphLifecycle)
         gl.project_root = str(tmp_path)
@@ -134,7 +139,8 @@ class TestDaemonLease:
             db.acquire_lease("daemon", 300, pid=p.pid)
             assert gl._foreign_live_daemon_owns_project() is True
         finally:
-            p.kill(); p.wait()
+            p.kill()
+            p.wait()
         assert gl._foreign_live_daemon_owns_project() is False  # holder dead
         tok = db.acquire_lease("daemon", 300)  # ourselves
         assert gl._foreign_live_daemon_owns_project() is False
@@ -149,8 +155,10 @@ class TestSimLease:
         (tmp_path / ".coresmith" / "integration_result.json").write_text(json.dumps({
             "design_name": "chip", "top_rtl_path": "rtl/top.v",
             "block_rtl_paths": [], "tb_path": "tb/test_chip.py"}))
-        (tmp_path / "rtl").mkdir(); (tmp_path / "rtl" / "top.v").write_text("module chip; endmodule\n")
-        (tmp_path / "tb").mkdir(); (tmp_path / "tb" / "test_chip.py").write_text("# tb\n")
+        (tmp_path / "rtl").mkdir()
+        (tmp_path / "rtl" / "top.v").write_text("module chip; endmodule\n")
+        (tmp_path / "tb").mkdir()
+        (tmp_path / "tb" / "test_chip.py").write_text("# tb\n")
         seen = {}
 
         def fake_sim(design, top, blocks, tb, attempt, sim_scope=None, project_root=None):
