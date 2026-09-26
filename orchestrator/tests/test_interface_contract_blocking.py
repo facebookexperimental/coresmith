@@ -180,7 +180,7 @@ def test_node_clean_routes_to_memory_map(monkeypatch, tmp_path):
     # router reads the clean constraint_result -> Memory Map
     state_after = dict(_state(tmp_path))
     state_after.update(out)
-    assert ag.route_after_interface_definition(state_after) == "Engineering Requirements"
+    assert ag.route_after_interface_definition(state_after) == "Interface VIP"
 
 
 def test_node_gate_off_never_blocks(monkeypatch, tmp_path):
@@ -193,7 +193,7 @@ def test_node_gate_off_never_blocks(monkeypatch, tmp_path):
     out = _run(ag.interface_definition_node(_state(tmp_path)))
     # gate off -> violations ignored, no structural constraint_result
     assert "constraint_result" not in out
-    assert ag.route_after_interface_definition(out) == "Engineering Requirements"
+    assert ag.route_after_interface_definition(out) == "Interface VIP"
 
 
 def test_router_ignores_stale_constraint_result(monkeypatch):
@@ -202,7 +202,7 @@ def test_router_ignores_stale_constraint_result(monkeypatch):
     stale = {"constraint_result": {"has_structural": True,
                                    "source": "constraint_check",
                                    "violations": [{"violation": "x"}]}}
-    assert ag.route_after_interface_definition(stale) == "Engineering Requirements"
+    assert ag.route_after_interface_definition(stale) == "Interface VIP"
 
 
 # ---------------------------------------------------------------------------
@@ -255,12 +255,28 @@ def test_streaming_on_cycle_still_requires_fifo():
 
 def test_new_families_accepted_no_crash():
     # each new family with a coherent single edge produces no structural error
+    # (A2: a req_resp edge states its latency -- that is part of the contract)
     for proto in ("req_resp", "mem_write", "valid_only", "static"):
         c = [{"producer_block": "a", "consumer_block": "b",
               "handshake_protocol": proto, "data_width_bits": 8,
               "fields": [{"name": "d", "width": 8, "msb": 7, "lsb": 0}]}]
+        if proto == "req_resp":
+            c[0]["timing"] = {"req_to_rsp_cycles": {"exact": 1}}
         v, _ = _validate_contracts({"contracts": c}, [{"from": "a", "to": "b"}])
         assert v["contract_violations"] == [], (proto, v["contract_violations"])
+        assert isinstance(c[0]["timing"], dict)  # defaults filled for every family
+
+
+def test_req_resp_without_latency_is_a_structural_violation(monkeypatch):
+    c = [{"producer_block": "a", "consumer_block": "b", "edge_id": "a__q__to__b__q",
+          "handshake_protocol": "req_resp", "data_width_bits": 8,
+          "fields": [{"name": "d", "width": 8, "msb": 7, "lsb": 0}]}]
+    monkeypatch.setenv("CORESMITH_CONTRACT_TIMING_GATE", "1")
+    v, _ = _validate_contracts({"contracts": c}, [{"from": "a", "to": "b"}])
+    assert [x["type"] for x in v["contract_violations"]] == ["missing_timing"]
+    monkeypatch.setenv("CORESMITH_CONTRACT_TIMING_GATE", "0")
+    v, _ = _validate_contracts({"contracts": c}, [{"from": "a", "to": "b"}])
+    assert v["contract_violations"] == []
 
 
 # ---------------------------------------------------------------------------

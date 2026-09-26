@@ -182,6 +182,7 @@ class ArchGraphState(TypedDict):
     register_spec: dict | None
     benchmark_data: dict | None
     constraint_result: dict | None
+    interface_vip_index: dict | None   # A2: {edges, errors, contract_version}
     human_feedback: str
 
     # Doc-fix repair path: how many times the Doc Fix node has regenerated a
@@ -1080,6 +1081,48 @@ def _ers_before_constraints_enabled() -> bool:
     return (
         os.environ.get("CORESMITH_ERS_BEFORE_CONSTRAINTS", "1") or "1"
     ) != "0"
+
+
+async def interface_vip_node(state: ArchGraphState) -> dict:
+    """A2: render one interface VIP per frozen contract edge (deterministic).
+
+    The Interface Definition stage froze fields, families and the structured
+    ``timing`` object; this node turns each edge into ``.coresmith/vip/<edge>.py``
+    (cocotb Driver/Monitor/Scoreboard/assertions) and SVA bind files, and
+    writes ``vip_index.json``. Both blocks on an edge test against THIS code,
+    never a hand-written neighbour model. Re-runs after every contract revision.
+    """
+    _event(state, "Interface VIP", "graph_node_enter", {"round": state.get("round")})
+    from orchestrator.langgraph.vip_lib.codegen import vip_enabled, write_all_vips
+    if not vip_enabled():
+        _event(state, "Interface VIP", "graph_node_exit", {"skipped": "CORESMITH_INTERFACE_VIP=0"})
+        return {}
+    pr = _pr(state)
+    contracts: list = []
+    version = None
+    try:
+        from orchestrator.state_store.project_db import open_project
+        db = open_project(pr)
+        contracts = list((db.contracts() or {}).get("contracts") or [])
+        version = db.contracts_version()
+    except Exception:  # noqa: BLE001 - fall back to the graph state
+        contracts = []
+    if not contracts:
+        contracts = list(((state.get("interface_contracts") or {}).get("contracts")) or [])
+    dut_modules = {}
+    for b in ((state.get("block_diagram") or {}).get("blocks") or []):
+        if isinstance(b, dict) and b.get("name"):
+            dut_modules[b["name"]] = str(b.get("rtl_module") or b.get("name"))
+    with _tracer.start_as_current_span("Interface VIP") as span:
+        index = write_all_vips(pr, contracts, contract_version=version, dut_modules=dut_modules)
+        errors = {k: v["error"] for k, v in index["edges"].items() if v.get("error")}
+        span.set_attribute("edge_count", len(index["edges"]))
+        span.set_attribute("error_count", len(errors))
+    _event(state, "Interface VIP", "graph_node_exit", {
+        "edges": len(index["edges"]), "errors": len(errors), "contract_version": version,
+    })
+    return {"interface_vip_index": {"edges": len(index["edges"]), "errors": errors,
+                                    "contract_version": version}}
 
 
 async def engineering_requirements_node(state: ArchGraphState) -> dict:
@@ -2567,7 +2610,7 @@ def route_after_interface_definition(state: ArchGraphState) -> str:
     diverts the flow (a stale constraint_result from a prior round is
     ignored)."""
     if not _interface_contract_gate_enabled():
-        return "Engineering Requirements"
+        return "Interface VIP"
     cr = state.get("constraint_result", {}) or {}
     violations = cr.get("violations", []) or []
     interface_blocked = (
@@ -2575,7 +2618,7 @@ def route_after_interface_definition(state: ArchGraphState) -> str:
         and cr.get("has_structural")
         and len(violations) > 0
     )
-    target = "Escalate Constraints" if interface_blocked else "Engineering Requirements"
+    target = "Escalate Constraints" if interface_blocked else "Interface VIP"
 
     span = trace.get_current_span()
     if span.is_recording():
@@ -2591,7 +2634,7 @@ def route_after_interface_definition(state: ArchGraphState) -> str:
     return target
 
 route_after_interface_definition.__edge_labels__ = {
-    "Engineering Requirements": "OK",
+    "Interface VIP": "OK",
     "Escalate Constraints": "CONTRACT VIOLATIONS",
 }
 
@@ -2955,6 +2998,7 @@ def build_architecture_graph(checkpointer=None):
     graph.add_node("Block Diagram", block_diagram_node)
     graph.add_node("Output Contract Review", output_contract_review_node)
     graph.add_node("Interface Definition", interface_definition_node)
+    graph.add_node("Interface VIP", interface_vip_node)
     graph.add_node("Engineering Requirements", engineering_requirements_node)
     graph.add_node("Constraint Check", constraint_check_node)
     graph.add_node("Finalize Architecture", finalize_node)
@@ -3003,6 +3047,8 @@ def build_architecture_graph(checkpointer=None):
     graph.add_conditional_edges(
         "Interface Definition", route_after_interface_definition,
     )
+    # A2: the VIPs are rendered from the frozen contracts before the ERS.
+    graph.add_edge("Interface VIP", "Engineering Requirements")
 
     # Interface Definition -> ERS -> Constraint Check (WP-13 dropped the
     # Memory Map / Clock Tree / Register Spec stages).

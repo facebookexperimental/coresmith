@@ -272,6 +272,11 @@ def _max_interface_width() -> int:
 # ``CORESMITH_INTERFACE_FAMILY_PROPAGATION=0`` restores the pre-fix behavior
 # (specialist's self-consistent invention is trusted verbatim).
 
+from orchestrator.architecture.specialists.contract_timing import (  # noqa: E402
+    normalize_timing,
+    timing_violations,
+)
+
 _STREAMING_FAMILIES = frozenset({"axi_stream", "srdy_drdy"})
 _NO_BACKPRESSURE_FAMILIES = frozenset({"mem_write", "valid_only", "static"})
 _BACKPRESSURE_SEMANTICS = frozenset(
@@ -547,6 +552,9 @@ def _propagate_edge_families(
                     "(always-accepted edge; flow_control_policy forced to "
                     "free_running / no feedback / depth 0)."
                 )
+        # A2: the structured timing object follows the anchored family.
+        _changed, _tnotes = normalize_timing(c)
+        notes.extend(_tnotes)
     return result, notes
 
 
@@ -757,6 +765,13 @@ def _validate_contracts(
         for bad in illegal_contract_names(contracts):
             _violation(str(bad.get("edge_id") or "?"), "illegal_identifier",
                        bad["message"])
+
+    # A2: interface timing is part of the frozen contract. Every contract gets
+    # its family defaults; a req_resp edge must state its latency explicitly.
+    for c in contracts:
+        normalize_timing(c)
+        for v in timing_violations(c):
+            _violation(v["edge"], v["type"], v["violation"])
 
     return ({"contract_violations": violations}, notes)
 

@@ -2233,6 +2233,52 @@ def _is_likely_testbench_bug(sim_log: str) -> bool:
     return any(p in sim_log for p in _TB_BUG_PATTERNS)
 
 
+def _write_contract_slice(project_root, block_name: str) -> str:
+    """``.coresmith/blocks/<block>/contract_slice.json``: the block's edges with
+    their frozen fields and timing, for the TB author (A2)."""
+    try:
+        edges = _db(project_root).contract_edges_for_block(block_name)
+    except Exception:  # noqa: BLE001
+        edges = []
+    bdir = Path(project_root) / ".coresmith" / "blocks" / block_name
+    bdir.mkdir(parents=True, exist_ok=True)
+    target = bdir / "contract_slice.json"
+    try:
+        from orchestrator.architecture.specialists.contract_timing import (
+            normalize_timing,
+            timing_summary,
+        )
+        payload = []
+        for e in edges:
+            if not isinstance(e, dict):
+                continue
+            e = json.loads(json.dumps(e, default=str))  # a copy; the DB row stays as imported
+            normalize_timing(e)
+            payload.append({**e, "timing_summary": timing_summary(e)})
+        target.write_text(json.dumps({"block": block_name, "edges": payload}, indent=2,
+                                     default=str))
+    except OSError:
+        pass
+    return str(target)
+
+
+def _vip_tb_lint(project_root, block_name: str, tb_path) -> list[str]:
+    """Problems with the TB against the block's generated VIPs (empty = ok,
+    also when the VIP stage is off or produced nothing for this block)."""
+    try:
+        from orchestrator.langgraph.vip_lib import lint_tb_imports
+        from orchestrator.langgraph.vip_lib.codegen import vip_enabled, vips_for_block
+        if not vip_enabled():
+            return []
+        required = vips_for_block(project_root, block_name)
+        if not required:
+            return []
+        text = Path(tb_path).read_text(errors="replace") if Path(tb_path).exists() else ""
+        return lint_tb_imports(text, required)
+    except Exception:  # noqa: BLE001 - the lint is a gate on the VIP, not on DV itself
+        return []
+
+
 async def generate_testbench_node(state: BlockState) -> dict:
     """Generate testbench, run simulation, and fix TB locally on failure.
 
@@ -2246,6 +2292,7 @@ async def generate_testbench_node(state: BlockState) -> dict:
     """
     block = state["current_block"]
     block_name = block["name"]
+    _write_contract_slice(_pr(state), block_name)
     attempt = state["attempt"]
     # A blocks.yaml entry that omits `testbench` must not crash the whole
     # run -- it previously raised KeyError here and aborted every other
@@ -2491,6 +2538,25 @@ async def generate_testbench_node(state: BlockState) -> dict:
         tb_path = str(tb_path_obj)
 
         # --- Step 2: Simulate with local TB fix loop ---
+        # A2: the block's contract slice (fields + timing) is on disk for the
+        # TB author, and every edge with a generated VIP must be exercised
+        # through it. A TB that hand-models a neighbour instead is rejected
+        # before any simulation runs.
+        _vip_problems = _vip_tb_lint(_pr(state), block_name, tb_path_obj)
+        if _vip_problems:
+            block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
+            block_dir.mkdir(parents=True, exist_ok=True)
+            (block_dir / "previous_error.txt").write_text(
+                "TESTBENCH REJECTED BY THE INTERFACE-VIP LINT (no sim was run). "
+                "Regenerate the testbench so that it imports and uses the generated "
+                "VIP of every listed edge:\n\n" + "\n".join(f"- {p}" for p in _vip_problems)
+                + "\n", encoding="utf-8")
+            for _p in _vip_problems[:6]:
+                log(f"  [VIP-LINT] {block_name}: {_p}", RED)
+            write_graph_event(_pr(state), "Interface VIP Lint", "gate_failed", {
+                "block": block_name, "problems": _vip_problems[:8]})
+            return {"tb_path": tb_path, "sim_passed": False, "phase": "tb",
+                    "force_regen_tb": True, "step_log_paths": existing_logs}
         sim_passed = False
         sim_result = None
         block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
@@ -4379,6 +4445,19 @@ async def diagnose_node(state: BlockState) -> dict:
                 "constraints": [],
                 "affected_blocks": [],
             }
+    elif phase == "tb":
+        if "INTERFACE-VIP LINT" in error_log:
+            _fast_diag = {
+                "category": "TESTBENCH_BUG",
+                "confidence": 1.0,
+                "diagnosis": "Testbench does not import/use the generated interface VIP(s) of its edges.",
+                "suggested_fix": "Regenerate the testbench importing each listed VIP and driving those edges only through it.",
+                "needs_human": False,
+                "is_testbench_bug": True,
+                "escalate": False,
+                "constraints": [],
+                "affected_blocks": [],
+            }
     elif phase == "synth":
         # Synthesis succeeded and only the measured timing failed: that is a
         # pipelining/structure problem the timing-closure loop owns, not a
@@ -5703,6 +5782,14 @@ def fan_out_tier(state: OrchestratorState) -> list[Send]:
     if revise:
         tier_blocks = [b for b in tier_blocks if b["name"] in revise]
     single_context = _uarch_single_context_enabled()
+    # A2: a block whose contract edges moved after its uArch spec was written
+    # re-specs instead of reusing the stale spec (``_stale_specs`` previously
+    # had no caller, so a contract revision never propagated).
+    stale = {d["block"] for d in _stale_specs(state["project_root"],
+                                                [b["name"] for b in tier_blocks])}
+    if stale:
+        log(f"  Stale uArch specs (contracts revised): {', '.join(sorted(stale))} "
+            "-- re-specifying", YELLOW)
 
     sends = []
     for block in tier_blocks:
@@ -5729,7 +5816,8 @@ def fan_out_tier(state: OrchestratorState) -> list[Send]:
             "human_response": None,
             "completed_blocks": [],
             "step_log_paths": {},
-            "reuse_spec": (bool(revise[block["name"]]) if revise
+            "reuse_spec": (False if block["name"] in stale
+                           else bool(revise[block["name"]]) if revise
                            else single_context),
         }))
 

@@ -394,3 +394,21 @@ Bound each simulation test with a watchdog driven by the clock, independent
 of successful transactions. Run ad hoc simulations with a wall-clock timeout
 and save their logs. Keep waveform tracing for debugging failures; for long
 missions, capture bounded windows including the failure interval.
+
+18. INTERFACE VIPs ARE THE ONLY MODEL OF A NEIGHBOUR (MANDATORY):
+    Every edge of this block that has a generated VIP is listed under
+    "Interface VIPs" in the working files. For each one you MUST
+    `from vip.<module> import Driver, Monitor, Scoreboard, assertions, SIDES`
+    and drive/observe that channel ONLY through it: `Driver(dut, side)` to
+    present beats/requests (or `.ready(...)`/`.respond(...)` when the DUT is
+    the producer), `Monitor(dut, side).start()` to collect accepted beats,
+    and `cocotb.start_soon(assertions(dut, side))` in EVERY test so the
+    contract's timing (`timing.req_to_rsp_cycles`, `valid_hold_until_ready`,
+    `valid_to_ready_max_stall`, `reset_idle_cycles`) is asserted. Never write
+    your own driver, responder, ready-toggler or latency model for such an
+    edge -- a hand-written neighbour is exactly the drift the VIP exists to
+    prevent, and a testbench that omits a listed VIP import is rejected by a
+    deterministic lint before simulation. Read the contract slice
+    (`.coresmith/blocks/<block>/contract_slice.json`) for the frozen fields
+    and timing; do not re-derive them from the uArch prose.
+

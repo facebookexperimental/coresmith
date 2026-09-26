@@ -75,6 +75,14 @@ Produce JSON with a single top-level object:
         "feedback_cycle": <bool>,
         "rationale": "<one sentence — why this elasticity is sufficient to avoid the producer/consumer deadlock>"
       },
+      "timing": {
+        "req_to_rsp_cycles": {"min": <int>, "max": <int|null>, "exact": <int|null>} | null,
+        "valid_to_ready_max_stall": <int|null>,
+        "ordering": "in_order" | "out_of_order_tagged" | "n/a",
+        "burst": {"last_signal": "<tlast-like sideband or null>", "max_beats": <int|null>},
+        "reset_idle_cycles": <int>,
+        "valid_hold_until_ready": <bool>
+      },
       "representations": {
         "enums": [
           {"name": "shared_decoder_error_code", "width": 7,
@@ -232,6 +240,26 @@ retire on `out_valid_q && out_ready_q`). Internal edges keep the standard
    `request_response` / `elastic_fifo` are WRONG for it. The
    `feedback_cycle = true` + backpressure semantics rule applies only to the
    two streaming families (`axi_stream` / `srdy_drdy`).
+
+5b. **`timing` is the cycle-level interface lock -- both sides are built to
+   it and the generated interface VIP asserts it.** Fill it for EVERY edge:
+
+   * `req_resp`: `req_to_rsp_cycles` is MANDATORY -- the cycles from the
+     request being accepted to the response qualifier being high. Use
+     `exact` when the responder is a fixed pipeline ("exactly 1 cycle
+     later" -> `{"min":1,"max":1,"exact":1}`), `min`/`max` when it is
+     bounded, `max: null` when it is only lower-bounded. The uArch spec's
+     §6a and the RTL of BOTH blocks must quote the same number.
+   * `axi_stream` / `srdy_drdy`: `valid_hold_until_ready: true` (a valid
+     beat stays presented until accepted); `valid_to_ready_max_stall` is the
+     consumer's worst stall in cycles or `null` if unbounded; `burst` names
+     the last-beat sideband when packets exist.
+   * `mem_write` / `valid_only` / `static`: no latency, no stall
+     (always-accepted); leave those fields `null`/`false`.
+   * `reset_idle_cycles`: how many cycles after reset deassertion every
+     valid/strobe on the edge is guaranteed low (normally 1).
+   * `ordering`: `in_order` unless responses carry an id/tag that permits
+     reordering (`out_of_order_tagged`); `n/a` for static wires.
 
 6. **If the requirements imply a specific bit ordering** (e.g., a
    golden reference model uses MSB-first byte serialization, or the

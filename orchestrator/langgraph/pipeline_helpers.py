@@ -1858,6 +1858,18 @@ def run_simulation(block: dict, rtl_path, tb_path: str, attempt: int = 1,
     _cov_line = ""
     if _cov.coverage_enabled() or _cov.line_cov_gate_enabled():
         _cov_line = "EXTRA_ARGS += --coverage\n"
+    # A2: the block's generated interface-VIP SVA binds run under --assert.
+    # The Python assertions() coroutine in the VIP stays the oracle; the bind
+    # is the same rule expressed for the simulator's checker.
+    try:
+        from orchestrator.langgraph.vip_lib.codegen import sva_bind_enabled, vips_for_block
+        _sva = [r["sva"] for r in vips_for_block(root, block_name)
+                if r.get("sva") and Path(r["sva"]).exists()] if sva_bind_enabled() else []
+        if _sva:
+            _verilog_sources = " ".join([_verilog_sources] + _sva)
+            _cov_line += "EXTRA_ARGS += --assert\n"
+    except Exception:  # noqa: BLE001 - VIP binds are an add-on to the build
+        pass
 
     # Branch-parity: force the DESIGN onto its synth-side `ifdef world (e.g.
     # -DSYNTHESIS) while the cs_* wrapper stays behavioral (it selects its body
@@ -1915,7 +1927,9 @@ EXTRA_ARGS += -Wno-fatal
     venv_bin = str(Path(sys.prefix) / "bin")
     env["PATH"] = f"{venv_bin}:{env.get('PATH', '/usr/bin:/bin')}"
     env["SHELL"] = shutil.which("bash") or "/bin/bash"
-    env["PYTHONPATH"] = f"{sim_dir}:{root}:{env.get('PYTHONPATH', '')}"
+    # ``.coresmith`` on the path makes ``from vip.<edge> import ...`` resolve
+    # to the generated interface VIPs (A2).
+    env["PYTHONPATH"] = f"{sim_dir}:{root}:{Path(root) / '.coresmith'}:{env.get('PYTHONPATH', '')}"
 
     # ANTI-MEMORIZATION DV SEED (engine fix, 2026-06-21).
     # Per-block DV stimulus must be UNPREDICTABLE at RTL-generation time, so a
