@@ -54,6 +54,11 @@ class MissingSkillError(RuntimeError):
 #: that can be SELECTED must have an entry -- :func:`skill_manifest` raises
 #: otherwise, so adding a skill file without describing it fails loudly.
 SKILL_PURPOSES: dict[str, str] = {
+    "soc_fabric": (
+        "Declare the SoC bus as a generated fabric primitive (pulp axi crossbar, "
+        "AXI-Lite/APB bridges, error slave) instead of hand-writing arbiters or "
+        "decoders; port naming and address-map rules."
+    ),
     "arithmetic_precision": (
         "bit-width derivation, Q-format, rounding/saturation/wraparound rules "
         "for fixed-point datapaths"
