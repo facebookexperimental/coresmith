@@ -97,6 +97,21 @@ RULES:
     that sim-body / synth-macro split lives ONLY inside the PROVIDED `cs_*`
     wrapper library (`rtl_lib/cs_sram.v`) -- you just INSTANTIATE the wrapper;
     never write that split in your own module.
+17b. ASSERTIONS FOR EVERY SPEC INVARIANT -- MANDATORY (deterministic gate):
+    The uArch spec's §4a lists invariant ids (`INV-...`) and §6a/the
+    interface contract fix cycle-level timing. For EACH §4a id emit a real,
+    simulator-checked assertion in the RTL, tagged on the line above it with
+    `// INV: <id>` (several ids: `// INV: INV-A, INV-B`), inside
+    `` `ifndef SYNTHESIS `` ... `` `endif ``. Verilator-safe forms:
+      `// INV: INV-X-001`
+      `always @(posedge clk) if (rst_n && !(<condition>)) $error("INV-X-001 violated");`
+    or `assert property (@(posedge clk) disable iff (!rst_n) <antecedent> |-> ##N <consequent>);`
+    The contract timing of your edges (`TIM-*`) is asserted by the generated
+    interface VIP bind; you may add your own too. NEVER write a comment such
+    as "checked by assertion" / "asserted in the TB" without the assertion
+    within three lines -- the gate rejects phantom claims. The assertion
+    stage runs after lint and before the testbench: a block whose spec
+    promises an invariant the RTL does not assert is sent back to you.
 18. THROUGHPUT IS CYCLE-MEASURED IN DV -- HARD CONSTRAINT (automatic rejection):
     Your implementation WILL be cycle-measured in DV (a `test_throughput_measure`
     case counts clock edges per op) and the block is REJECTED if its measured

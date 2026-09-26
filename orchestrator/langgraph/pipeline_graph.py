@@ -233,6 +233,7 @@ class BlockState(TypedDict):
     ppa_reasons: list             # human-readable budget-divergence reasons
     timing_ok: bool | None        # measured WNS >= 0 (None = not measured)
     timing_required: bool        # missing required timing cannot complete a block
+    assertion_ok: bool            # A3: spec invariants exist as assertions in the RTL
     sta_report_path: str          # worst-path STA report the timing verdict came from
     timing_fix_attempts: int      # timing_fix loop iterations consumed (A1c)
     # Post-synthesis GATE-LEVEL SIM verdict (harness.gate_sim). None = not run.
@@ -2231,6 +2232,58 @@ def _is_likely_testbench_bug(sim_log: str) -> bool:
     them apart than this string-match heuristic.
     """
     return any(p in sim_log for p in _TB_BUG_PATTERNS)
+
+
+async def assertion_check_node(state: BlockState) -> dict:
+    """A3: the invariants the spec promises exist as assertions in the RTL.
+
+    Runs after RTL generation + lint and before testbench generation. The
+    checklist is §4a's ``INV-*`` ids plus a ``TIM-*`` per contract timing rule
+    (satisfied by the edge's VIP SVA bind); comments that claim an assertion
+    with none nearby are phantom claims. Gate by default
+    (CORESMITH_ASSERTION_STAGE=1), ``advisory`` records only, ``0`` skips.
+    """
+    from orchestrator.langgraph import assertion_stage as _as
+    block = state["current_block"]
+    block_name = block["name"]
+    if _as.mode() == "off":
+        return {"assertion_ok": True}
+    rtl_path = state.get("rtl_path") or str(Path(_pr(state)) / block.get("rtl_target", f"rtl/{block_name}.v"))
+    write_graph_event(_pr(state), "Assertion Check", "graph_node_enter", {"block": block_name})
+    report = await asyncio.to_thread(_as.evaluate, _pr(state), block_name, rtl_path)
+    n_missing, n_phantom = len(report["missing"]), len(report["phantom_claims"])
+    if not report["missing"] and not report["phantom_claims"]:
+        log(f"  [ASSERT] {block_name}: {report['assertion_count']} assertion(s); "
+            f"{len(report['covered'])}/{len(report['checklist'])} invariants covered", GREEN)
+    else:
+        log(f"  [ASSERT] {block_name}: {n_missing} invariant(s) without an assertion, "
+            f"{n_phantom} phantom claim(s) ({report['mode']})",
+            YELLOW if report["mode"] == "advisory" else RED)
+        for inv in report["missing"][:6]:
+            log(f"    missing {inv['id']}", RED)
+        for p in report["phantom_claims"][:4]:
+            log(f"    phantom line {p['line']}: {p['text'][:90]}", RED)
+    write_graph_event(_pr(state), "Assertion Check", "graph_node_exit", {
+        "block": block_name, "ok": report["ok"], "mode": report["mode"],
+        "missing": [i["id"] for i in report["missing"]][:16], "phantom": n_phantom,
+        "assertions": report["assertion_count"],
+    })
+    if report["ok"]:
+        return {"assertion_ok": True}
+    block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
+    block_dir.mkdir(parents=True, exist_ok=True)
+    (block_dir / "previous_error.txt").write_text(_as.feedback_text(report) + "\n", encoding="utf-8")
+    return {"assertion_ok": False, "phase": "assertions"}
+
+
+def route_after_assertions(state: BlockState) -> str:
+    return "generate_testbench" if state.get("assertion_ok", True) else "diagnose"
+
+
+route_after_assertions.__edge_labels__ = {
+    "generate_testbench": "ASSERTIONS OK",
+    "diagnose": "MISSING / PHANTOM",
+}
 
 
 def _write_contract_slice(project_root, block_name: str) -> str:
@@ -4409,7 +4462,19 @@ async def diagnose_node(state: BlockState) -> dict:
     import re as _re
     _fast_diag = None
     if phase == "sim":
-        if "has no attribute" in error_log or "AttributeError" in error_log:
+        if _re.search(r"Assertion failed|VIPError|%Error.*assert", error_log):
+            _fast_diag = {
+                "category": "ASSERTION_FAILED",
+                "confidence": 0.95,
+                "diagnosis": "A design assertion (RTL SVA/immediate assertion or interface-VIP contract rule) fired in simulation.",
+                "suggested_fix": "Fix the RTL so the asserted invariant/contract timing holds; do not weaken the assertion or the VIP.",
+                "needs_human": False,
+                "is_testbench_bug": False,
+                "escalate": False,
+                "constraints": [],
+                "affected_blocks": [],
+            }
+        elif "has no attribute" in error_log or "AttributeError" in error_log:
             _fast_diag = {
                 "category": "TESTBENCH_BUG",
                 "confidence": 1.0,
@@ -4445,6 +4510,18 @@ async def diagnose_node(state: BlockState) -> dict:
                 "constraints": [],
                 "affected_blocks": [],
             }
+    elif phase == "assertions":
+        _fast_diag = {
+            "category": "ASSERTION_COVERAGE",
+            "confidence": 1.0,
+            "diagnosis": "The RTL lacks assertions for spec invariants or claims assertions that do not exist.",
+            "suggested_fix": "Add `// INV: <id>` + a real assertion under `ifndef SYNTHESIS` for each missing id; delete or back phantom claims.",
+            "needs_human": False,
+            "is_testbench_bug": False,
+            "escalate": False,
+            "constraints": [],
+            "affected_blocks": [],
+        }
     elif phase == "tb":
         if "INTERFACE-VIP LINT" in error_log:
             _fast_diag = {
@@ -5223,12 +5300,12 @@ route_after_uarch_review.__edge_labels__ = {
 
 
 def route_after_rtl(state: BlockState) -> str:
-    """Route after RTL generation + lint: CLEAN -> testbench, FAIL -> diagnose."""
-    return "generate_testbench" if state.get("lint_clean") else "diagnose"
+    """Route after RTL generation + lint: CLEAN -> assertion check, FAIL -> diagnose."""
+    return "assertion_check" if state.get("lint_clean") else "diagnose"
 
 
 route_after_rtl.__edge_labels__ = {
-    "generate_testbench": "LINT CLEAN",
+    "assertion_check": "LINT CLEAN",
     "diagnose": "LINT FAIL",
 }
 
@@ -5354,6 +5431,7 @@ def build_block_subgraph():
     graph.add_node("generate_uarch_spec", generate_uarch_spec_node)
     graph.add_node("review_uarch_spec", review_uarch_spec_node)
     graph.add_node("generate_rtl", generate_rtl_node)
+    graph.add_node("assertion_check", assertion_check_node)
     graph.add_node("generate_testbench", generate_testbench_node)
     graph.add_node("synthesize", synthesize_node)
     graph.add_node("timing_fix", timing_fix_node)
@@ -5368,6 +5446,7 @@ def build_block_subgraph():
     graph.add_edge("generate_uarch_spec", "review_uarch_spec")
     graph.add_conditional_edges("review_uarch_spec", route_after_uarch_review)
     graph.add_conditional_edges("generate_rtl", route_after_rtl)
+    graph.add_conditional_edges("assertion_check", route_after_assertions)
     graph.add_conditional_edges("generate_testbench", route_after_tb)
     graph.add_conditional_edges("synthesize", route_after_synth)
 
