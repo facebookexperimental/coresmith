@@ -1,0 +1,9 @@
+{"edge_id": "req__m_q__to__responder__s_q", "producer_block": "req", "producer_port": "m_q",
+ "consumer_block": "responder", "consumer_port": "s_q", "handshake_protocol": "req_resp",
+ "data_width_bits": 8,
+ "fields": [{"name": "addr", "width": 8, "msb": 7, "lsb": 0}],
+ "sideband_signals": [{"name": "req_valid", "width": 1, "direction": "producer->consumer"},
+                      {"name": "req_gnt", "width": 1, "direction": "consumer->producer"},
+                      {"name": "rsp_valid", "width": 1, "direction": "consumer->producer"},
+                      {"name": "rdata", "width": 8, "direction": "consumer->producer"}],
+ "timing": {"req_to_rsp_cycles": {"exact": 1}}}

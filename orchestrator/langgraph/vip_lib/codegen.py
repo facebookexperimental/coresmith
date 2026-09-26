@@ -6,12 +6,21 @@
 
 Pure string templates over ``EdgeContract`` -- deterministic, so the same
 contract always yields byte-identical VIP code (fingerprinted).
+
+Sampling convention of the generated cocotb code (it is what makes the
+contract's cycle counting unambiguous):
+
+* drivers change DUT inputs just after a rising edge (``RisingEdge`` + one
+  delta step);
+* monitors and assertions sample at the FALLING edge, when the inputs driven
+  this cycle and the registered outputs updated at this cycle's rising edge
+  are all stable "current-cycle" values;
+* a request accepted in cycle t and answered in cycle t+N has latency N.
 """
 from __future__ import annotations
 
 import json
 import os
-import re
 import time
 from pathlib import Path
 
@@ -48,19 +57,23 @@ Usage in a block testbench (cocotb):
     from vip.{module} import Driver, Monitor, Scoreboard, assertions, SIDES
     side = SIDES["consumer"]            # the DUT is the consumer of this edge
     drv = Driver(dut, side)            # drives the DUT's INPUT ports of the edge
-    mon = Monitor(dut, side)           # observes accepted beats on the edge
+    mon = Monitor(dut, side).start()   # observes accepted beats on the edge
     sb  = Scoreboard()
     cocotb.start_soon(assertions(dut, side))   # timing rules from contract.timing
     await drv.reset()
     await drv.send({{"field": value, ...}})    # or drv.request(...) for req_resp
     beat = await mon.next()
 
+Sampling convention: drivers change inputs just after a rising edge; monitors
+and assertions sample at the falling edge (stable current-cycle values); a
+request accepted in cycle t and answered in cycle t+N has latency N.
+
 {summary}
 """
 from __future__ import annotations
 
 import cocotb
-from cocotb.triggers import RisingEdge, ReadOnly, Timer
+from cocotb.triggers import FallingEdge, ReadOnly, RisingEdge, Timer
 
 EDGE_ID = {edge_id_q}
 FAMILY = {family_q}
@@ -115,6 +128,26 @@ def _in_reset(dut):
     return v == 0 if v is not None else True
 
 
+async def _cycle_start(dut):
+    """Just after a rising edge: safe to change inputs for the new cycle."""
+    await RisingEdge(_clk(dut))
+    await Timer(1, "step")
+
+
+async def _sample(dut):
+    """Mid-cycle sampling point (falling edge, read-only phase)."""
+    await FallingEdge(_clk(dut))
+    await ReadOnly()
+
+
+def _ready_ok(dut, side):
+    return (READY is None) or (not _has(dut, side, READY)) or _val(_sig(dut, side, READY)) == 1
+
+
+def _payload(dut, side, names):
+    return {{name: _val(_sig(dut, side, name)) for name in names if _has(dut, side, name)}}
+
+
 class Scoreboard:
     """In-order expected-vs-observed comparison of beats (dicts)."""
 
@@ -147,14 +180,14 @@ _STREAM = '''
 class Driver:
     """Producer-side driver of a {family} edge: presents a beat and holds it
     until accepted (valid_hold_until_ready), honouring the DUT's ready.
-    On the producer side (DUT drives valid) it drives READY instead
-    (``Driver.ready(pattern)``)."""
+    When the DUT is the producer it drives READY instead (``Driver.ready``)."""
 
     def __init__(self, dut, side):
         self.dut, self.side = dut, side
         self.sent = []
 
     async def reset(self):
+        await _cycle_start(self.dut)
         if self.side["role"] == "consumer":
             _sig(self.dut, self.side, VALID).value = 0
             for name in PAYLOAD:
@@ -162,12 +195,12 @@ class Driver:
                     _sig(self.dut, self.side, name).value = 0
         elif READY and _has(self.dut, self.side, READY):
             _sig(self.dut, self.side, READY).value = 1
-        await RisingEdge(_clk(self.dut))
 
     async def send(self, beat, last=False, timeout_cycles=10000):
-        """Present ``beat`` ({{signal: int}}) and wait until accepted."""
+        """Present ``beat`` ({{signal: int}}) and hold it until accepted."""
         assert self.side["role"] == "consumer", "send() drives the DUT's input side"
         dut, side = self.dut, self.side
+        await _cycle_start(dut)
         for name, v in beat.items():
             if _has(dut, side, name):
                 _sig(dut, side, name).value = int(v)
@@ -175,14 +208,13 @@ class Driver:
             _sig(dut, side, LAST).value = int(bool(last))
         _sig(dut, side, VALID).value = 1
         for _ in range(timeout_cycles):
-            await RisingEdge(_clk(dut))
-            await ReadOnly()
-            accepted = (READY is None) or (not _has(dut, side, READY)) or _val(_sig(dut, side, READY)) == 1
-            if accepted:
+            await _sample(dut)
+            if _ready_ok(dut, side):
                 break
+            await RisingEdge(_clk(dut))
         else:
             raise VIPError(f"{{EDGE_ID}}: beat not accepted within {{timeout_cycles}} cycles")
-        await Timer(1, "step")
+        await _cycle_start(dut)
         _sig(dut, side, VALID).value = 0
         self.sent.append(dict(beat))
 
@@ -192,22 +224,23 @@ class Driver:
         assert READY and _has(self.dut, self.side, READY)
         sig = _sig(self.dut, self.side, READY)
         if pattern is None:
+            await _cycle_start(self.dut)
             sig.value = 1
             return
         it = iter(pattern)
         n = 0
         while cycles is None or n < cycles:
+            await _cycle_start(self.dut)
             try:
                 sig.value = int(next(it))
             except StopIteration:
                 sig.value = 1
                 return
-            await RisingEdge(_clk(self.dut))
             n += 1
 
 
 class Monitor:
-    """Observes accepted beats (valid && ready at the clock edge)."""
+    """Observes accepted beats (valid && ready, sampled mid-cycle)."""
 
     def __init__(self, dut, side, scoreboard=None):
         self.dut, self.side, self.sb = dut, side, scoreboard
@@ -221,14 +254,11 @@ class Monitor:
     async def _run(self):
         dut, side = self.dut, self.side
         while True:
-            await RisingEdge(_clk(dut))
-            await ReadOnly()
+            await _sample(dut)
             if _in_reset(dut):
                 continue
-            v = _val(_sig(dut, side, VALID))
-            r = 1 if (READY is None or not _has(dut, side, READY)) else _val(_sig(dut, side, READY))
-            if v == 1 and r == 1:
-                beat = {{name: _val(_sig(dut, side, name)) for name in PAYLOAD if _has(dut, side, name)}}
+            if _val(_sig(dut, side, VALID)) == 1 and _ready_ok(dut, side):
+                beat = _payload(dut, side, PAYLOAD)
                 if LAST and _has(dut, side, LAST):
                     beat["__last"] = _val(_sig(dut, side, LAST))
                 self.beats.append(beat)
@@ -258,15 +288,14 @@ async def assertions(dut, side):
     stall = 0
     since_reset = None
     while True:
-        await RisingEdge(_clk(dut))
-        await ReadOnly()
+        await _sample(dut)
         if _in_reset(dut):
             since_reset = 0
             prev_valid = 0
             stall = 0
             continue
         v = _val(_sig(dut, side, VALID)) or 0
-        r = 1 if (READY is None or not _has(dut, side, READY)) else (_val(_sig(dut, side, READY)) or 0)
+        r = 1 if _ready_ok(dut, side) else 0
         payload = tuple(_val(_sig(dut, side, name)) for name in PAYLOAD if _has(dut, side, name))
         if since_reset is not None:
             if since_reset < idle and v:
@@ -299,6 +328,7 @@ class Driver:
         self.responses = []
 
     async def reset(self):
+        await _cycle_start(self.dut)
         if self.side["role"] == "consumer":
             _sig(self.dut, self.side, VALID).value = 0
             for name in PAYLOAD:
@@ -309,68 +339,67 @@ class Driver:
                 _sig(self.dut, self.side, RSP_VALID).value = 0
             if READY and _has(self.dut, self.side, READY):
                 _sig(self.dut, self.side, READY).value = 1
-        await RisingEdge(_clk(self.dut))
 
     async def request(self, req, timeout_cycles=10000):
         """Issue one request, wait for acceptance, then for the response
-        inside the contract latency window. Returns the response dict."""
+        inside the contract latency window. Returns the response dict
+        (with ``__latency`` = cycles after the accept cycle)."""
         assert self.side["role"] == "consumer", "request() drives the DUT's request port"
         dut, side = self.dut, self.side
+        await _cycle_start(dut)
         for name, v in req.items():
             if _has(dut, side, name):
                 _sig(dut, side, name).value = int(v)
         _sig(dut, side, VALID).value = 1
-        accepted_at = None
-        for i in range(timeout_cycles):
-            await RisingEdge(_clk(dut))
-            await ReadOnly()
-            gnt = (READY is None) or (not _has(dut, side, READY)) or _val(_sig(dut, side, READY)) == 1
-            if gnt:
-                accepted_at = i
+        accepted = False
+        for _ in range(timeout_cycles):
+            await _sample(dut)
+            if _ready_ok(dut, side):
+                accepted = True
                 break
-        if accepted_at is None:
+            await RisingEdge(_clk(dut))
+        if not accepted:
             raise VIPError(f"{{EDGE_ID}}: request not accepted within {{timeout_cycles}} cycles")
-        await Timer(1, "step")
-        _sig(dut, side, VALID).value = 0
         self.requests.append(dict(req))
         lat = TIMING.get("req_to_rsp_cycles") or {{}}
         lo, hi = lat.get("min"), lat.get("max")
-        waited = 0
-        limit = hi if hi is not None else timeout_cycles
+        limit = int(hi) if hi is not None else timeout_cycles
+        # cycle t = the accept cycle; the next mid-cycle sample is cycle t+1
+        await _cycle_start(dut)
+        _sig(dut, side, VALID).value = 0
+        waited = 1
         while True:
-            await ReadOnly()
+            await _sample(dut)
             if _has(dut, side, RSP_VALID) and _val(_sig(dut, side, RSP_VALID)) == 1:
                 if lo is not None and waited < int(lo):
                     raise VIPError(f"{{EDGE_ID}}: response after {{waited}} cycle(s) < contract min {{lo}}")
-                rsp = {{name: _val(_sig(dut, side, name)) for name in RESPONSE if _has(dut, side, name)}}
+                rsp = _payload(dut, side, RESPONSE)
+                rsp["__latency"] = waited
                 self.responses.append(rsp)
-                await Timer(1, "step")
                 return rsp
-            if waited >= int(limit):
+            if waited >= limit:
                 raise VIPError(f"{{EDGE_ID}}: no response after {{waited}} cycle(s); contract max {{hi}}")
             await RisingEdge(_clk(dut))
             waited += 1
 
     async def respond(self, handler, latency=None):
         """Responder model when the DUT is the requester: on each accepted
-        request call ``handler(req) -> rsp dict`` and drive it after
-        ``latency`` cycles (default: the contract's exact/min)."""
+        request call ``handler(req) -> rsp dict`` and drive it ``latency``
+        cycles later (default: the contract's exact/min)."""
         assert self.side["role"] == "producer"
         dut, side = self.dut, self.side
         lat = TIMING.get("req_to_rsp_cycles") or {{}}
         n = latency if latency is not None else (lat.get("exact") if lat.get("exact") is not None else (lat.get("min") or 1))
         pending = []
         while True:
-            await RisingEdge(_clk(dut))
-            await ReadOnly()
-            v = _val(_sig(dut, side, VALID)) or 0
-            gnt = 1 if (READY is None or not _has(dut, side, READY)) else (_val(_sig(dut, side, READY)) or 0)
-            if v and gnt:
-                req = {{name: _val(_sig(dut, side, name)) for name in PAYLOAD if _has(dut, side, name)}}
-                pending.append([int(n), handler(req)])
-            await Timer(1, "step")
-            fire = [p for p in pending if p[0] <= 1]
-            pending = [[p[0] - 1, p[1]] for p in pending if p[0] > 1]
+            await _sample(dut)
+            if not _in_reset(dut) and _val(_sig(dut, side, VALID)) == 1 and _ready_ok(dut, side):
+                pending.append([int(n), handler(_payload(dut, side, PAYLOAD))])
+            await _cycle_start(dut)
+            for p in pending:
+                p[0] -= 1
+            fire = [p for p in pending if p[0] <= 0]
+            pending = [p for p in pending if p[0] > 0]
             if _has(dut, side, RSP_VALID):
                 _sig(dut, side, RSP_VALID).value = 1 if fire else 0
             if fire:
@@ -380,7 +409,7 @@ class Driver:
 
 
 class Monitor:
-    """Observes accepted requests and responses on the edge."""
+    """Observes accepted requests and responses on the edge (mid-cycle)."""
 
     def __init__(self, dut, side, scoreboard=None):
         self.dut, self.side, self.sb = dut, side, scoreboard
@@ -397,24 +426,22 @@ class Monitor:
         dut, side = self.dut, self.side
         outstanding = []
         while True:
-            await RisingEdge(_clk(dut))
-            await ReadOnly()
+            await _sample(dut)
             if _in_reset(dut):
                 outstanding = []
                 continue
-            v = _val(_sig(dut, side, VALID)) or 0
-            gnt = 1 if (READY is None or not _has(dut, side, READY)) else (_val(_sig(dut, side, READY)) or 0)
+            accept = _val(_sig(dut, side, VALID)) == 1 and _ready_ok(dut, side)
             for o in outstanding:
                 o[0] += 1
             if _has(dut, side, RSP_VALID) and _val(_sig(dut, side, RSP_VALID)) == 1:
-                rsp = {{name: _val(_sig(dut, side, name)) for name in RESPONSE if _has(dut, side, name)}}
+                rsp = _payload(dut, side, RESPONSE)
                 self.responses.append(rsp)
                 if outstanding:
                     self.latencies.append(outstanding.pop(0)[0])
                 if self.sb is not None:
                     self.sb.observe(rsp)
-            if v and gnt:
-                req = {{name: _val(_sig(dut, side, name)) for name in PAYLOAD if _has(dut, side, name)}}
+            if accept:
+                req = _payload(dut, side, PAYLOAD)
                 self.requests.append(req)
                 outstanding.append([0, req])
 
@@ -440,14 +467,13 @@ async def assertions(dut, side):
     outstanding = []
     since_reset = None
     while True:
-        await RisingEdge(_clk(dut))
-        await ReadOnly()
+        await _sample(dut)
         if _in_reset(dut):
             outstanding = []
             since_reset = 0
             continue
         v = _val(_sig(dut, side, VALID)) or 0
-        gnt = 1 if (READY is None or not _has(dut, side, READY)) else (_val(_sig(dut, side, READY)) or 0)
+        accept = bool(v) and _ready_ok(dut, side)
         rv = (_val(_sig(dut, side, RSP_VALID)) or 0) if _has(dut, side, RSP_VALID) else 0
         if since_reset is not None:
             if since_reset < idle and v:
@@ -466,7 +492,7 @@ async def assertions(dut, side):
         for age in outstanding:
             if hi is not None and age > int(hi):
                 raise VIPError(f"{{EDGE_ID}}: request unanswered for {{age}} cycle(s) > contract max {{hi}}")
-        if v and gnt:
+        if accept:
             outstanding.append(0)
 '''
 
@@ -480,25 +506,25 @@ class Driver:
         self.sent = []
 
     async def reset(self):
+        await _cycle_start(self.dut)
         if self.side["role"] == "consumer":
             if VALID and _has(self.dut, self.side, VALID):
                 _sig(self.dut, self.side, VALID).value = 0
             for name in PAYLOAD:
                 if _has(self.dut, self.side, name):
                     _sig(self.dut, self.side, name).value = 0
-        await RisingEdge(_clk(self.dut))
 
     async def send(self, beat, hold_cycles=1):
         assert self.side["role"] == "consumer", "send() drives the DUT's input side"
         dut, side = self.dut, self.side
+        await _cycle_start(dut)
         for name, v in beat.items():
             if _has(dut, side, name):
                 _sig(dut, side, name).value = int(v)
         if VALID and _has(dut, side, VALID):
             _sig(dut, side, VALID).value = 1
         for _ in range(hold_cycles):
-            await RisingEdge(_clk(dut))
-        await Timer(1, "step")
+            await _cycle_start(dut)
         if VALID and _has(dut, side, VALID):
             _sig(dut, side, VALID).value = 0
         self.sent.append(dict(beat))
@@ -520,11 +546,10 @@ class Monitor:
         dut, side = self.dut, self.side
         prev = None
         while True:
-            await RisingEdge(_clk(dut))
-            await ReadOnly()
+            await _sample(dut)
             if _in_reset(dut):
                 continue
-            beat = {{name: _val(_sig(dut, side, name)) for name in PAYLOAD if _has(dut, side, name)}}
+            beat = _payload(dut, side, PAYLOAD)
             if VALID and _has(dut, side, VALID):
                 if _val(_sig(dut, side, VALID)) == 1:
                     self.beats.append(beat)
@@ -553,8 +578,7 @@ async def assertions(dut, side):
     idle = int(TIMING.get("reset_idle_cycles") or 0)
     since_reset = None
     while True:
-        await RisingEdge(_clk(dut))
-        await ReadOnly()
+        await _sample(dut)
         if _in_reset(dut):
             since_reset = 0
             continue
@@ -596,21 +620,23 @@ def render_vip_module(edge: dict) -> str:
     if ec.family in ("axi_stream", "srdy_drdy"):
         body += _STREAM.format(family=ec.family)
     elif ec.family == "req_resp":
-        body += _REQ_RESP
+        body += _REQ_RESP.format()  # un-double the braces; no fields to fill
     else:
         body += _VALID_ONLY.format(family=ec.family)
     return body
 
 
 # --------------------------------------------------------------------------
-# SVA bind (Verilator --assert subset: |->, |=>, ##N, $past, $stable)
+# SVA bind ($past-based: no cycle-delay operators, so plain `verilator --assert`)
 # --------------------------------------------------------------------------
 
 def render_sva_bind(edge: dict, dut_module: str, role: str) -> str:
     """A bindable checker for the DUT on ``role`` side of the edge.
 
-    Only rules Verilator supports are emitted; the Python ``assertions()``
-    coroutine remains the oracle for the rest.
+    Every property is written with ``$past`` instead of cycle-delay
+    operators, so it compiles under plain ``verilator --assert`` (no
+    ``--timing``) and on any simulator; the Python ``assertions()`` coroutine
+    remains the oracle for rules that need unbounded history.
     """
     ec = EdgeContract.from_contract(edge)
     sd = ec.side(role)
@@ -620,48 +646,52 @@ def render_sva_bind(edge: dict, dut_module: str, role: str) -> str:
     props: list[str] = []
     v = ec.valid_signal
     r = ec.ready_signal
-    if v and v in sd.ports:
-        ports.append(f"input wire {sd.port(v)}")
+    pv = sd.port(v) if v and v in sd.ports else None
+    pr = sd.port(r) if r and r in sd.ports else None
+    if pv:
+        ports.append(f"input wire {pv}")
         idle = int(t.get("reset_idle_cycles") or 0)
         if idle >= 1:
             props.append(
                 f"  // reset_idle_cycles={idle}: valid low right after reset deasserts\n"
                 f"  a_reset_idle: assert property (@(posedge clk) "
-                f"($past(!rst_n) && rst_n) |-> !{sd.port(v)});")
-    if ec.family in ("axi_stream", "srdy_drdy") and v and r and r in sd.ports:
-        ports.append(f"input wire {sd.port(r)}")
+                f"($past(!rst_n) && rst_n) |-> !{pv});")
+    if ec.family in ("axi_stream", "srdy_drdy") and pv and pr:
+        ports.append(f"input wire {pr}")
         if t.get("valid_hold_until_ready"):
             props.append(
                 f"  // valid_hold_until_ready: a presented beat stays until accepted\n"
                 f"  a_hold: assert property (@(posedge clk) disable iff (!rst_n) "
-                f"({sd.port(v)} && !{sd.port(r)}) |=> {sd.port(v)});")
+                f"$past({pv} && !{pr}) |-> {pv});")
         ms = t.get("valid_to_ready_max_stall")
-        if ms is not None and int(ms) >= 1:
+        if ms is not None and 1 <= int(ms) <= 32:
+            n = int(ms)
+            terms = " && ".join([f"({pv} && !{pr})"] + [f"$past({pv} && !{pr}, {k})" for k in range(1, n + 1)])
             props.append(
-                f"  // valid_to_ready_max_stall={ms}\n"
-                f"  a_stall: assert property (@(posedge clk) disable iff (!rst_n) "
-                f"{sd.port(v)} |-> ##[0:{int(ms)}] {sd.port(r)});")
+                f"  // valid_to_ready_max_stall={n}: never {n + 1} consecutive stalled cycles\n"
+                f"  a_stall: assert property (@(posedge clk) disable iff (!rst_n) !({terms}));")
     if ec.family == "req_resp":
         rv = ec.response_valid_signal
         lat = t.get("req_to_rsp_cycles") or {}
-        if rv and rv in sd.ports and v and v in sd.ports:
-            ports.append(f"input wire {sd.port(rv)}")
-            accept = sd.port(v) + (f" && {sd.port(r)}" if r and r in sd.ports else "")
-            if r and r in sd.ports:
-                ports.append(f"input wire {sd.port(r)}")
-            if lat.get("exact") is not None:
+        if rv and rv in sd.ports and pv:
+            prv = sd.port(rv)
+            ports.append(f"input wire {prv}")
+            if pr:
+                ports.append(f"input wire {pr}")
+            accept = f"({pv} && {pr})" if pr else pv
+            if lat.get("exact") is not None and int(lat["exact"]) >= 1:
                 n = int(lat["exact"])
                 props.append(
                     f"  // req_to_rsp_cycles exact={n}\n"
                     f"  a_latency: assert property (@(posedge clk) disable iff (!rst_n) "
-                    f"({accept}) |-> ##{n} {sd.port(rv)});")
-            elif lat.get("max") is not None:
-                lo, hi = int(lat.get("min") or 0), int(lat["max"])
+                    f"$past({accept}, {n}) |-> {prv});")
+            elif lat.get("max") is not None and int(lat["max"]) >= 1:
+                lo, hi = max(0, int(lat.get("min") or 0)), int(lat["max"])
+                window = " || ".join([prv] + [f"$past({prv}, {k})" for k in range(1, hi - lo + 1)])
                 props.append(
-                    f"  // req_to_rsp_cycles [{lo}:{hi}]\n"
+                    f"  // req_to_rsp_cycles [{lo}:{hi}]: a response lands within the window\n"
                     f"  a_latency: assert property (@(posedge clk) disable iff (!rst_n) "
-                    f"({accept}) |-> ##[{lo}:{hi}] {sd.port(rv)});")
-    # de-dup ports
+                    f"$past({accept}, {hi}) |-> ({window}));")
     seen, uports = set(), []
     for p in ports:
         if p not in seen:
@@ -670,6 +700,7 @@ def render_sva_bind(edge: dict, dut_module: str, role: str) -> str:
     lines = [
         f"// GENERATED interface checker for edge {ec.edge_id} ({role} side of {sd.block}).",
         "// Rendered from the frozen contract's timing object; do not edit.",
+        "// $past-based (no cycle-delay operators): compiles under `verilator --assert` without --timing.",
         "`ifndef SYNTHESIS",
         f"module {name} (",
         "  " + ",\n  ".join(uports),
@@ -760,6 +791,3 @@ def vip_enabled() -> bool:
 def sva_bind_enabled() -> bool:
     return (os.environ.get("CORESMITH_VIP_SVA_BIND", "1") or "1").strip().lower() \
         not in {"0", "false", "no", "off", ""}
-
-
-_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")

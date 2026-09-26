@@ -88,12 +88,14 @@ class TestCodegen:
     def test_sva_bind_emits_the_timing_rules(self):
         sv = V.render_sva_bind(_req_resp(), "coherence_controller", "consumer")
         assert "bind coherence_controller" in sv
-        assert "|-> ##1 s_l1d_req_rsp_valid" in sv and "a_reset_idle" in sv
+        assert "$past((s_l1d_req_req_valid && s_l1d_req_req_gnt), 1) |-> s_l1d_req_rsp_valid" in sv
+        assert "a_reset_idle" in sv and "##" not in sv
         sv = V.render_sva_bind(_stream(), "b", "consumer")
-        assert "##[0:4] s_axis_px_tready" in sv and "a_hold" in sv
+        assert "$past(s_axis_px_tvalid && !s_axis_px_tready, 4)" in sv and "a_hold" in sv
         e = _req_resp()
         e["timing"] = {"req_to_rsp_cycles": {"min": 1, "max": 3}}
-        assert "##[1:3]" in V.render_sva_bind(e, "cc", "consumer")
+        sv = V.render_sva_bind(e, "cc", "consumer")
+        assert "$past((s_l1d_req_req_valid && s_l1d_req_req_gnt), 3) |-> (s_l1d_req_rsp_valid || $past(s_l1d_req_rsp_valid, 1) || $past(s_l1d_req_rsp_valid, 2))" in sv
         sv = V.render_sva_bind(_valid_only(), "tre", "consumer")
         assert "a_reset_idle" in sv and "a_latency" not in sv
 
