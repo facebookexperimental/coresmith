@@ -476,6 +476,12 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin):
                     d[k] = ""
             if d["tier"] is None:
                 d["tier"] = "1"
+            # B1: a primitive block (generated fabric) carries its kind and spec
+            # through the queue; ordinary blocks are unchanged.
+            extra = _uj(r["extra_json"], {}) or {}
+            for k in ("kind", "primitive", "fabric", "golden_exempt", "no_golden_reason", "subsystem"):
+                if k in extra and k not in d:
+                    d[k] = extra[k]
             out.append(d)
         return out
 

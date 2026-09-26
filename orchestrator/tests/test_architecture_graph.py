@@ -282,6 +282,7 @@ class TestReviewDiagram:
         # test_block_complexity_gate.py / test_output_contract_gate.py.
         monkeypatch.setenv("CORESMITH_COMPLEXITY_GATE", "0")
         monkeypatch.setenv("CORESMITH_OUTPUT_CONTRACT_GATE", "0")
+        monkeypatch.setenv("CORESMITH_FABRIC_RESOLUTION", "0")
         state = {"block_diagram": {"blocks": [{"name": "a"}], "questions": []}}
         assert review_diagram(state) == "Interface Definition"
 
@@ -301,6 +302,7 @@ class TestRouteAfterDiagramEscalation:
         # stage before Memory Map), mirroring review_diagram's clean path.
         monkeypatch.setenv("CORESMITH_COMPLEXITY_GATE", "0")
         monkeypatch.setenv("CORESMITH_OUTPUT_CONTRACT_GATE", "0")
+        monkeypatch.setenv("CORESMITH_FABRIC_RESOLUTION", "0")
         state = {"human_response": {"action": "continue"}}
         assert route_after_diagram_escalation(state) == "Interface Definition"
 

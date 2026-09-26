@@ -183,6 +183,7 @@ class ArchGraphState(TypedDict):
     benchmark_data: dict | None
     constraint_result: dict | None
     interface_vip_index: dict | None   # A2: {edges, errors, contract_version}
+    fabric_resolution: dict | None     # B1: {fabrics, notes, unresolved, history}
     human_feedback: str
 
     # Doc-fix repair path: how many times the Doc Fix node has regenerated a
@@ -1081,6 +1082,93 @@ def _ers_before_constraints_enabled() -> bool:
     return (
         os.environ.get("CORESMITH_ERS_BEFORE_CONSTRAINTS", "1") or "1"
     ) != "0"
+
+
+def _fabric_resolution_enabled() -> bool:
+    import os as _os
+    return (_os.environ.get("CORESMITH_FABRIC_RESOLUTION", "1") or "1").strip().lower() \
+        not in {"0", "false", "no", "off", ""}
+
+
+async def fabric_resolution_node(state: ArchGraphState) -> dict:
+    """B1: the SoC bus is a generated primitive, never a hand-written block.
+
+    Deterministic: declared fabric blocks are validated and their edges typed
+    (axi4 / axi_lite / apb, fabric-side prefixes); interconnect-shaped blocks
+    without a spec, or targets shared by several initiators, park with a
+    proposed FabricSpec skeleton (``fabric_ambiguous``) for the chip lead /
+    operator to complete. ``accept`` with ``feedback`` = a JSON FabricSpec
+    adopts it for the named block; ``skip`` keeps the diagram as drawn.
+    """
+    _event(state, "Fabric Resolution", "graph_node_enter", {"round": state.get("round")})
+    from orchestrator.architecture.specialists.fabric_resolution import resolve
+    doc = dict(state.get("block_diagram") or {})
+    if not _fabric_resolution_enabled() or not doc.get("blocks"):
+        _event(state, "Fabric Resolution", "graph_node_exit", {"skipped": True})
+        return {}
+    result = resolve(doc)
+    rounds = 0
+    history: list[dict] = []
+    while result["errors"] or result["ambiguous"]:
+        rounds += 1
+        payload = {
+            "type": "fabric_ambiguous",
+            "phase": "fabric_resolution",
+            "round": rounds,
+            "fabric_errors": result["errors"],
+            "ambiguous": result["ambiguous"],
+            "notes": result["notes"],
+            "supported_actions": ["accept", "skip", "abort"],
+            "outer_agent_guidance": (
+                "The design has interconnect that is not a declared fabric primitive. "
+                "Reply `accept` with `feedback` = a JSON object {\"block\": <name>, "
+                "\"fabric\": <FabricSpec>} (fill base/size for every slave; see "
+                "skills/soc_fabric.md) to make that block the generated fabric; "
+                "`skip` to keep the diagram as drawn; `abort` to stop."),
+        }
+        response = await _arch_resolve_interrupt(payload)
+        history.append({"payload_round": rounds, "response": response})
+        action = str((response or {}).get("action") or "skip")
+        if action == "abort":
+            _event(state, "Fabric Resolution", "graph_node_exit", {"aborted": True})
+            return {"fabric_resolution": {"aborted": True, "history": history}}
+        if action != "accept" or rounds > 3:
+            break
+        fb = (response or {}).get("feedback")
+        try:
+            import json as _json
+            fb = _json.loads(fb) if isinstance(fb, str) else fb
+            block_name = str(fb["block"])
+            spec = fb["fabric"]
+        except Exception:  # noqa: BLE001 - malformed answer: ask again
+            continue
+        blocks = []
+        found = False
+        for b in doc.get("blocks") or []:
+            if b.get("name") == block_name:
+                b = {**b, "kind": "primitive", "primitive": "cs_fabric", "fabric": spec}
+                found = True
+            blocks.append(b)
+        if not found:
+            blocks.append({"name": block_name, "kind": "primitive", "primitive": "cs_fabric",
+                           "fabric": spec, "tier": 0, "description": "SoC fabric"})
+        doc = {**doc, "blocks": blocks}
+        result = resolve(doc)
+    new_doc = result["diagram"]
+    if result["fabrics"]:
+        try:
+            from orchestrator.state_store.project_db import open_project
+            open_project(_pr(state)).import_block_diagram(new_doc)
+        except Exception as exc:  # noqa: BLE001
+            _event(state, "Fabric Resolution", "stage_error", {"error": str(exc)[:200]})
+    _event(state, "Fabric Resolution", "graph_node_exit", {
+        "fabrics": result["fabrics"], "ambiguous": [a["block"] for a in result["ambiguous"]],
+        "errors": len(result["errors"]), "rounds": rounds,
+    })
+    return {"block_diagram": new_doc,
+            "fabric_resolution": {"fabrics": result["fabrics"], "notes": result["notes"],
+                                  "unresolved": [a["block"] for a in result["ambiguous"]],
+                                  "history": history}}
 
 
 async def interface_vip_node(state: ArchGraphState) -> dict:
@@ -2394,9 +2482,29 @@ def _post_diagram_gate_target() -> str:
     wired 'Interface Definition', so ANY design whose block diagram asked a
     clarifying question (the common case) SKIPPED the complexity/decomposition
     gate entirely -- the residual_recon_engine fusion was never checked."""
+    if _fabric_resolution_enabled():
+        return "Fabric Resolution"
+    return _post_fabric_target()
+
+
+def _post_fabric_target() -> str:
     if _output_contract_gate_enabled():
         return "Output Contract Review"
     return "Interface Definition"
+
+
+def route_after_fabric_resolution(state: ArchGraphState) -> str:
+    fr = state.get("fabric_resolution") or {}
+    if fr.get("aborted"):
+        return "Abort"
+    return _post_fabric_target()
+
+
+route_after_fabric_resolution.__edge_labels__ = {
+    "Output Contract Review": "RESOLVED",
+    "Interface Definition": "RESOLVED",
+    "Abort": "ABORT",
+}
 
 
 def review_diagram(state: ArchGraphState) -> str:
@@ -2432,6 +2540,7 @@ def review_diagram(state: ArchGraphState) -> str:
 
 review_diagram.__edge_labels__ = {
     "Escalate Diagram": "QUESTIONS",
+    "Fabric Resolution": "CLEAN",
     "Complexity Review": "CLEAN",
     "Output Contract Review": "CLEAN",
     "Interface Definition": "CLEAN",
@@ -2662,6 +2771,7 @@ def route_after_diagram_escalation(state: ArchGraphState) -> str:
     return target
 
 route_after_diagram_escalation.__edge_labels__ = {
+    "Fabric Resolution": "CONTINUE",
     "Complexity Review": "CONTINUE",
     "Output Contract Review": "CONTINUE",
     "Interface Definition": "CONTINUE",
@@ -2998,6 +3108,7 @@ def build_architecture_graph(checkpointer=None):
     graph.add_node("Block Diagram", block_diagram_node)
     graph.add_node("Output Contract Review", output_contract_review_node)
     graph.add_node("Interface Definition", interface_definition_node)
+    graph.add_node("Fabric Resolution", fabric_resolution_node)
     graph.add_node("Interface VIP", interface_vip_node)
     graph.add_node("Engineering Requirements", engineering_requirements_node)
     graph.add_node("Constraint Check", constraint_check_node)
@@ -3033,6 +3144,9 @@ def build_architecture_graph(checkpointer=None):
     # Block Diagram -> review (conditional). Clean diagrams route to the
     # output-contract ownership gate (when enabled) before interfaces freeze.
     graph.add_conditional_edges("Block Diagram", review_diagram)
+
+    # B1: clean diagram -> Fabric Resolution -> the decomposition gates.
+    graph.add_conditional_edges("Fabric Resolution", route_after_fabric_resolution)
 
     # Output Contract Review -> pass (Interface Definition) or re-decompose (Block Diagram)
     graph.add_conditional_edges(

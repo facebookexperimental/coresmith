@@ -233,6 +233,7 @@ class BlockState(TypedDict):
     ppa_reasons: list             # human-readable budget-divergence reasons
     timing_ok: bool | None        # measured WNS >= 0 (None = not measured)
     timing_required: bool        # missing required timing cannot complete a block
+    primitive_failed: bool        # B1: the generated primitive could not be materialized
     assertion_ok: bool            # A3: spec invariants exist as assertions in the RTL
     sta_report_path: str          # worst-path STA report the timing verdict came from
     timing_fix_attempts: int      # timing_fix loop iterations consumed (A1c)
@@ -2234,6 +2235,105 @@ def _is_likely_testbench_bug(sim_log: str) -> bool:
     return any(p in sim_log for p in _TB_BUG_PATTERNS)
 
 
+def _is_primitive(block: dict) -> bool:
+    return str((block or {}).get("kind") or "").lower() == "primitive"
+
+
+async def materialize_primitive_node(state: BlockState) -> dict:
+    """B1: a primitive block (the SoC fabric) is generated, not authored.
+
+    Writes the block's RTL (plain Verilog elaborated from the vendored pulp
+    IP), its cocotb testbench and a short generated uArch spec, then hands
+    the block to the ordinary DV/synth chain with the testbench preserved.
+    """
+    block = state["current_block"]
+    block_name = block["name"]
+    pr = Path(_pr(state))
+    write_graph_event(str(pr), "Materialize Primitive", "graph_node_enter", {"block": block_name})
+    block_dir = pr / ".coresmith" / "blocks" / block_name
+    block_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        from orchestrator.fabric import FabricSpec, generate_fabric
+        spec = FabricSpec.from_json(block.get("fabric") or {})
+        errs = spec.validate()
+        if errs:
+            raise ValueError("invalid FabricSpec: " + "; ".join(errs))
+        rtl_target = pr / (block.get("rtl_target") or f"rtl/interconnect/{spec.module_name}.v")
+        tb_target = pr / (block.get("testbench") or f"tb/cocotb/test_{spec.module_name}.py")
+        art = await asyncio.to_thread(generate_fabric, spec, rtl_target.parent, tb_dir=tb_target.parent)
+        rtl_target.parent.mkdir(parents=True, exist_ok=True)
+        if Path(art.rtl_path) != rtl_target:
+            rtl_target.write_text(Path(art.rtl_path).read_text())
+        if Path(art.tb_path) != tb_target:
+            tb_target.parent.mkdir(parents=True, exist_ok=True)
+            tb_target.write_text(Path(art.tb_path).read_text())
+        spec_md = pr / "arch" / "uarch_specs" / f"{block_name}.md"
+        spec_md.parent.mkdir(parents=True, exist_ok=True)
+        spec_md.write_text(_primitive_spec_markdown(block_name, spec, art))
+        try:
+            _db(str(pr)).stamp_block_spec(block_name)
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception as exc:  # noqa: BLE001
+        (block_dir / "previous_error.txt").write_text(f"primitive materialization failed: {exc}\n")
+        log(f"  [PRIMITIVE] {block_name}: generation failed: {exc}", RED)
+        write_graph_event(str(pr), "Materialize Primitive", "graph_node_exit",
+                          {"block": block_name, "ok": False, "error": str(exc)[:300]})
+        return {"phase": "rtl", "lint_clean": False, "debug_action": "escalate",
+                "primitive_failed": True}
+    log(f"  [PRIMITIVE] {block_name}: {art.module} generated "
+        f"({'cached' if art.cached else 'elaborated'}); {len(art.ports)} ports", GREEN)
+    write_graph_event(str(pr), "Materialize Primitive", "graph_node_exit",
+                      {"block": block_name, "ok": True, "module": art.module, "cached": art.cached})
+    return {"rtl_path": str(rtl_target), "tb_path": str(tb_target), "phase": "lint",
+            "lint_clean": True, "uarch_approved": True, "preserve_testbench": True,
+            "force_regen_tb": False, "assertion_ok": True}
+
+
+def _primitive_spec_markdown(block_name: str, spec, art) -> str:
+    lines = [f"# {block_name} -- generated SoC fabric ({spec.module_name})", "",
+             "GENERATED primitive: plain-Verilog elaboration of the pulp-platform axi crossbar and "
+             "bridges from a FabricSpec (see skills/soc_fabric.md). Not authored by the uArch/RTL "
+             "agents; verified by its generated cocotbext-axi testbench.", "",
+             "## 1. Block Overview", "",
+             f"{len(spec.masters)} AXI4 master port(s) x {len(spec.slaves)} slave port(s); "
+             f"{spec.addr_width}-bit address, {spec.data_width}-bit data; master id width "
+             f"{max(m.id_width for m in spec.masters)}, slave-port id width {spec.mst_id_width}; "
+             f"ordering {spec.ordering}; unmapped addresses answer DECERR.", "",
+             "## 2. Interface Specification", "", "| port | dir | width |", "|---|---|---|"]
+    lines += [f"| {p['name']} | {p['dir']} | {p['width']} |" for p in art.ports]
+    lines += ["", "## Address map", "", "| slave | protocol | base | size |", "|---|---|---|---|"]
+    lines += [f"| m_{s.name} | {s.protocol} | {s.base:#x} | {s.size:#x} |" for s in spec.slaves]
+    lines += ["", "### 4a. Cross-Block Semantic Invariants", "",
+              "- INV-FABRIC-DECODE-001: every transaction is delivered to exactly the slave whose "
+              "range contains its address; unmapped addresses return DECERR.",
+              "- INV-FABRIC-ORDER-002: responses to one master with the same id return in issue order.",
+              "", "### 6a. Output Timing Contract", "",
+              "All channels are AXI valid/ready; latency through the crossbar is 1 cycle per cut "
+              "(CUT_ALL_AX). The generated testbench measures throughput.", ""]
+    return "\n".join(lines)
+
+
+def route_after_init(state: BlockState) -> str:
+    return "materialize_primitive" if _is_primitive(state.get("current_block") or {}) else "generate_uarch_spec"
+
+
+route_after_init.__edge_labels__ = {
+    "generate_uarch_spec": "AUTHORED",
+    "materialize_primitive": "PRIMITIVE",
+}
+
+
+def route_after_materialize(state: BlockState) -> str:
+    return "block_done" if state.get("primitive_failed") else "generate_testbench"
+
+
+route_after_materialize.__edge_labels__ = {
+    "generate_testbench": "GENERATED",
+    "block_done": "FAILED",
+}
+
+
 async def assertion_check_node(state: BlockState) -> dict:
     """A3: the invariants the spec promises exist as assertions in the RTL.
 
@@ -2246,7 +2346,7 @@ async def assertion_check_node(state: BlockState) -> dict:
     from orchestrator.langgraph import assertion_stage as _as
     block = state["current_block"]
     block_name = block["name"]
-    if _as.mode() == "off":
+    if _as.mode() == "off" or _is_primitive(block):
         return {"assertion_ok": True}
     rtl_path = state.get("rtl_path") or str(Path(_pr(state)) / block.get("rtl_target", f"rtl/{block_name}.v"))
     write_graph_event(_pr(state), "Assertion Check", "graph_node_enter", {"block": block_name})
@@ -2595,7 +2695,7 @@ async def generate_testbench_node(state: BlockState) -> dict:
         # TB author, and every edge with a generated VIP must be exercised
         # through it. A TB that hand-models a neighbour instead is rejected
         # before any simulation runs.
-        _vip_problems = _vip_tb_lint(_pr(state), block_name, tb_path_obj)
+        _vip_problems = [] if _is_primitive(block) else _vip_tb_lint(_pr(state), block_name, tb_path_obj)
         if _vip_problems:
             block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
             block_dir.mkdir(parents=True, exist_ok=True)
@@ -5429,6 +5529,7 @@ def build_block_subgraph():
     # Nodes (10 -- lint, simulate, increment_attempt are folded in)
     graph.add_node("init_block", init_block_node)
     graph.add_node("generate_uarch_spec", generate_uarch_spec_node)
+    graph.add_node("materialize_primitive", materialize_primitive_node)
     graph.add_node("review_uarch_spec", review_uarch_spec_node)
     graph.add_node("generate_rtl", generate_rtl_node)
     graph.add_node("assertion_check", assertion_check_node)
@@ -5442,7 +5543,8 @@ def build_block_subgraph():
 
     # Happy path
     graph.add_edge(START, "init_block")
-    graph.add_edge("init_block", "generate_uarch_spec")
+    graph.add_conditional_edges("init_block", route_after_init)
+    graph.add_conditional_edges("materialize_primitive", route_after_materialize)
     graph.add_edge("generate_uarch_spec", "review_uarch_spec")
     graph.add_conditional_edges("review_uarch_spec", route_after_uarch_review)
     graph.add_conditional_edges("generate_rtl", route_after_rtl)
@@ -5898,6 +6000,7 @@ def fan_out_tier(state: OrchestratorState) -> list[Send]:
             "reuse_spec": (False if block["name"] in stale
                            else bool(revise[block["name"]]) if revise
                            else single_context),
+            "preserve_testbench": _is_primitive(block),
         }))
 
     return sends

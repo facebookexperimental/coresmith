@@ -41,7 +41,7 @@ _SKILLS_TEXT = _load_skills(
     "feedback_coupled_decomposition", "serialization_contract",
     "buffer_stride_contract", "output_contract_ownership",
     "memory_macro_vs_flops", "arithmetic_precision",
-    "pipeline_contract", "throughput_budget_contract")
+    "pipeline_contract", "throughput_budget_contract", "soc_fabric")
 # NOTE: skill text may contain literal ``{...}`` (e.g. the serialization
 # contract's ``{pred_mode(k), coeff_bits(k)}`` bit-layout example). It must NOT
 # be passed through ``str.format()`` or those braces are parsed as format

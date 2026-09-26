@@ -48,7 +48,7 @@ SYSTEM_PROMPT = _PROMPT_FILE.read_text(encoding="utf-8")
 # integration_lead use.
 _SKILLS_TEXT = _load_skills(
     "axi_stream", "srdy_drdy", "arithmetic_precision", "serialization_contract",
-    "buffer_stride_contract", "qspi_slave_frontend_protocol")
+    "buffer_stride_contract", "qspi_slave_frontend_protocol", "soc_fabric")
 if _SKILLS_TEXT:
     SYSTEM_PROMPT = (
         SYSTEM_PROMPT
@@ -279,6 +279,9 @@ from orchestrator.architecture.specialists.contract_timing import (  # noqa: E40
 
 _STREAMING_FAMILIES = frozenset({"axi_stream", "srdy_drdy"})
 _NO_BACKPRESSURE_FAMILIES = frozenset({"mem_write", "valid_only", "static"})
+# B1: memory-mapped bus families -- every channel is valid/ready, the signal
+# set is the canonical AMBA one (orchestrator/fabric/amba.py).
+_BUS_FAMILIES = frozenset({"axi4", "axi_lite", "apb"})
 _BACKPRESSURE_SEMANTICS = frozenset(
     {"elastic_fifo", "credit", "request_response", "skid"}
 )

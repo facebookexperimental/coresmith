@@ -28,7 +28,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-STREAMING = ("axi_stream", "srdy_drdy")
+STREAMING = ("axi_stream", "srdy_drdy", "axi4", "axi_lite", "apb")  # bus families: valid/ready per channel
 REQ_RESP = ("req_resp",)
 ALWAYS_ACCEPTED = ("mem_write", "valid_only")
 STATIC = ("static",)

@@ -594,6 +594,10 @@ async def assertions(dut, side):
 '''
 
 
+
+from .bus_template import BUS_TEMPLATE as _BUS  # noqa: E402
+
+
 def render_vip_module(edge: dict) -> str:
     ec = EdgeContract.from_contract(edge)
     from orchestrator.architecture.specialists.contract_timing import timing_summary
@@ -621,6 +625,9 @@ def render_vip_module(edge: dict) -> str:
         body += _STREAM.format(family=ec.family)
     elif ec.family == "req_resp":
         body += _REQ_RESP.format()  # un-double the braces; no fields to fill
+    elif ec.family in ("axi4", "axi_lite", "apb"):
+        from orchestrator.fabric.amba import HANDSHAKES
+        body += f"HANDSHAKES = {HANDSHAKES[ec.family]!r}\n" + _BUS
     else:
         body += _VALID_ONLY.format(family=ec.family)
     return body
