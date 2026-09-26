@@ -315,6 +315,8 @@ class OrchestratorState(TypedDict):
 
 
     # Results (accumulated via reducer from all Send branches) ──────────────
+    shell_snapshot: Annotated[dict | None, _last]                          # A4
+    integration_contract_failures: Annotated[list[dict], operator.add]    # A4
     completed_blocks: Annotated[list[dict], operator.add]
 
     # Blocks a declared PRD pin map RETIRED before µarch/RTL (init_tier_node).
@@ -5844,6 +5846,131 @@ def _retire_derived_integration_artifacts(project_root: str) -> list[str]:
     return moved
 
 
+def shell_integration_enabled() -> bool:
+    """A4: assemble the chip top from the contracts before any RTL exists and
+    after every tier (CORESMITH_SHELL_INTEGRATION, default on)."""
+    return (os.environ.get("CORESMITH_SHELL_INTEGRATION", "1") or "1").strip().lower() \
+        not in {"0", "false", "no", "off", ""}
+
+
+def _deterministic_top_enabled() -> bool:
+    """A4: the final chip top is the same deterministic assembly (non-Caravel
+    designs; CORESMITH_DETERMINISTIC_TOP, default on)."""
+    return (os.environ.get("CORESMITH_DETERMINISTIC_TOP", "1") or "1").strip().lower() \
+        not in {"0", "false", "no", "off", ""}
+
+
+def _shell_top_name(pr: str) -> str:
+    from orchestrator.harness.top_module import declared_top
+    try:
+        return declared_top(pr) or "chip_top"
+    except Exception:  # noqa: BLE001
+        return "chip_top"
+
+
+def _shell_assemble(pr: str, block_queue: list[dict], *, tier=None, all_real: bool = False):
+    """Assemble the shell top: real RTL for blocks with a published pass
+    (``best``), stubs for the rest. Returns (assembly, elab, snapshot) or None
+    when shell integration does not apply (Caravel chassis / disabled)."""
+    from orchestrator.chassis.profile import declared_chassis
+    from orchestrator.langgraph.shell_integration import assemble_top, elaborate, write_snapshot
+    try:
+        if declared_chassis(pr) is not None:
+            return None
+    except Exception:  # noqa: BLE001 - an unreadable chassis declaration: assemble anyway
+        pass
+    db = _db(pr)
+    edges = list((db.contracts() or {}).get("contracts") or [])
+    names = [b["name"] for b in block_queue if b.get("name")]
+    rtl_paths: dict[str, str] = {}
+    for b in block_queue:
+        name = b.get("name")
+        if not name:
+            continue
+        target = Path(pr) / (b.get("rtl_target") or f"rtl/{name}.v")
+        if target.exists() and (all_real or db.result(name, "best")):
+            rtl_paths[name] = str(target)
+    asm = assemble_top(pr, top_name=_shell_top_name(pr), blocks=names, edges=edges,
+                       rtl_paths=rtl_paths, out_dir=Path(pr) / ".coresmith" / "shell")
+    elab = elaborate(asm) if not asm.wiring_errors else {"ran": False, "ok": None,
+                                                         "reason": "wiring errors"}
+    snap = write_snapshot(pr, asm, elab, tier=tier)
+    return asm, elab, snap
+
+
+async def shell_integration_init_node(state: OrchestratorState) -> dict:
+    """A4 tier 0: every block as a contract stub, wired and elaborated -- the
+    port-passing netlist exists before a line of RTL is written."""
+    pr = _pr(state)
+    if not shell_integration_enabled():
+        return {}
+    write_graph_event(pr, "Shell Integration", "graph_node_enter", {"phase": "init"})
+    try:
+        res = await asyncio.to_thread(_shell_assemble, pr, list(state.get("block_queue") or []), tier="init")
+    except Exception as exc:  # noqa: BLE001 - the shell must never block a run start
+        log(f"  [SHELL] initial assembly failed: {exc}", YELLOW)
+        write_graph_event(pr, "Shell Integration", "graph_node_exit", {"phase": "init", "error": str(exc)[:300]})
+        return {}
+    if res is None:
+        write_graph_event(pr, "Shell Integration", "graph_node_exit", {"phase": "init", "skipped": True})
+        return {}
+    asm, elab, snap = res
+    ok = not asm.wiring_errors and elab.get("ok") is not False
+    log(f"  [SHELL] {asm.module_name}: {len(asm.instantiated)} block(s) as stubs, {asm.wires} nets, "
+        f"{len(asm.boundary_ports)} boundary port(s); elaboration "
+        f"{'CLEAN' if elab.get('ok') else elab.get('reason') or 'ERRORS'}", GREEN if ok else RED)
+    for e in (asm.wiring_errors + (elab.get("errors") or []))[:8]:
+        log(f"    {e}", RED)
+    write_graph_event(pr, "Shell Integration", "graph_node_exit", {
+        "phase": "init", "ok": ok, "stubs": len(asm.stubs), "wires": asm.wires,
+        "wiring_errors": asm.wiring_errors[:8], "elab_errors": (elab.get("errors") or [])[:8]})
+    return {"shell_snapshot": snap}
+
+
+async def shell_integration_update_node(state: OrchestratorState) -> dict:
+    """A4 after every tier: re-assemble with the real RTL of every block that
+    has a published pass; a real block whose ports drift from the contract is
+    caught HERE, at the block that introduced it."""
+    pr = _pr(state)
+    if not shell_integration_enabled():
+        return {}
+    tier = None
+    try:
+        tier = (state.get("tier_list") or [None])[state.get("current_tier_index", 0)]
+    except (IndexError, TypeError):
+        tier = None
+    write_graph_event(pr, "Shell Integration", "graph_node_enter", {"phase": "update", "tier": tier})
+    try:
+        res = await asyncio.to_thread(_shell_assemble, pr, list(state.get("block_queue") or []), tier=tier)
+    except Exception as exc:  # noqa: BLE001
+        log(f"  [SHELL] assembly failed: {exc}", YELLOW)
+        write_graph_event(pr, "Shell Integration", "graph_node_exit", {"phase": "update", "error": str(exc)[:300]})
+        return {}
+    if res is None:
+        return {}
+    asm, elab, snap = res
+    real = [b for b in asm.instantiated if b not in asm.stubs]
+    failures = []
+    for err in asm.wiring_errors + (elab.get("errors") or []):
+        blk = next((b for b in real if err.startswith(f"{b}:") or f"u_{b}" in err or f"{b}." in err), None)
+        if blk:
+            failures.append({"block": blk, "category": "INTEGRATION_CONTRACT", "detail": err, "tier": tier})
+    ok = not asm.wiring_errors and elab.get("ok") is not False
+    log(f"  [SHELL] {asm.module_name}: {len(real)} real / {len(asm.stubs)} stub block(s); elaboration "
+        f"{'CLEAN' if elab.get('ok') else elab.get('reason') or 'ERRORS'}"
+        + (f"; {len(failures)} block-attributable contract failure(s)" if failures else ""),
+        GREEN if ok else RED)
+    for f in failures[:8]:
+        log(f"    {f['block']}: {f['detail']}", RED)
+    write_graph_event(pr, "Shell Integration", "graph_node_exit", {
+        "phase": "update", "tier": tier, "ok": ok, "real": real, "stubs": asm.stubs,
+        "failures": failures[:8]})
+    out: dict = {"shell_snapshot": snap}
+    if failures:
+        out["integration_contract_failures"] = failures
+    return out
+
+
 async def init_tier_node(state: OrchestratorState) -> dict:
     """Compute the tier list (once) and log the current tier."""
     pr = state.get("project_root", str(PROJECT_ROOT))
@@ -7523,6 +7650,66 @@ async def _prepare_integration_check(state: OrchestratorState) -> dict:
             # else: wiring hazards / not-clean assembly -> fall through to the
             # Integration Lead below (which raises the integration_failure
             # interrupt for retry).
+
+        # A4: a non-Caravel design gets the SAME deterministic assembly the shell
+        # used all run, now with every block real. The Integration Lead is only
+        # consulted when the contracts cannot wire the top cleanly.
+        if _chassis is None and _deterministic_top_enabled():
+            try:
+                _shell = await asyncio.to_thread(
+                    _shell_assemble, pr, list(state.get("block_queue") or []), tier="final", all_real=True)
+            except Exception as _exc:  # noqa: BLE001
+                _shell = None
+                log(f"  [INTEGRATION] deterministic top assembly failed ({_exc}); "
+                    "falling back to the Integration Lead", YELLOW)
+            if _shell is not None:
+                _asm, _elab, _snap = _shell
+                if not _asm.wiring_errors and not _asm.stubs:
+                    _lint = await asyncio.to_thread(
+                        lint_top_level, _asm.rtl_path, list(_asm.sources), design_name,
+                        top_module=_asm.module_name, project_root=pr)
+                    if _lint.get("clean"):
+                        log(f"  [INTEGRATION] deterministic top {_asm.module_name}: "
+                            f"{len(_asm.instantiated)} blocks, {_asm.wires} nets, lint CLEAN", GREEN)
+                        _blocks_paths = {b: rtl_paths[b] for b in _asm.instantiated if b in rtl_paths}
+                        integration_result = {
+                            "design_name": design_name,
+                            "top_module": _asm.module_name,
+                            "top_rtl_path": _asm.rtl_path,
+                            "block_count": len(_asm.instantiated),
+                            "wire_count": _asm.wires,
+                            "skipped_connections": [],
+                            "mismatches": [],
+                            "error_count": 0,
+                            "warning_count": 0,
+                            "lint_clean": True,
+                            "lint_errors": "",
+                            "block_rtl_paths": _blocks_paths,
+                            "deterministic_top_assembled": True,
+                            "boundary_ports": _asm.boundary_ports,
+                            "missing_instantiations": [],
+                        }
+                        write_graph_event(pr, "Integration Check", "graph_node_exit", {
+                            "success": True, "top_module": _asm.module_name,
+                            "block_count": len(_asm.instantiated), "wire_count": _asm.wires,
+                            "lint_clean": True, "deterministic_top_assembled": True})
+                        from orchestrator.harness.top_module import write_candidate_receipt
+                        try:
+                            write_candidate_receipt(pr, _asm.module_name, _asm.rtl_path, _blocks_paths,
+                                                    note="deterministic shell assembly",
+                                                    expected_blocks=set(_asm.instantiated),
+                                                    integration_result=integration_result)
+                        except (ValueError, OSError) as _exc:
+                            log(f"  [INTEGRATION] candidate receipt failed ({_exc}); "
+                                "falling back to the Integration Lead", YELLOW)
+                        else:
+                            return {"integration_result": integration_result}
+                    else:
+                        log("  [INTEGRATION] deterministic top does not lint cleanly -- "
+                            "falling back to the Integration Lead", YELLOW)
+                else:
+                    for _we in (_asm.wiring_errors[:8] or [f"stubs remain: {_asm.stubs}"]):
+                        log(f"  [INTEGRATION] deterministic top: {_we}", YELLOW)
 
         log("  [INTEGRATION] Calling Integration Lead agent...", YELLOW)
         agent = IntegrationLeadAgent()
@@ -11043,9 +11230,15 @@ def build_pipeline_graph(checkpointer=None):
     orchestrator.add_edge("final_report", END)
 
     # Edges (shared)
-    orchestrator.add_edge(START, "init_tier")
+    # A4: the shell top exists before the first tier and is re-assembled
+    # with real RTL after every tier, so integration drift is caught early.
+    orchestrator.add_node("shell_init", shell_integration_init_node)
+    orchestrator.add_node("shell_update", shell_integration_update_node)
+    orchestrator.add_edge(START, "shell_init")
+    orchestrator.add_edge("shell_init", "init_tier")
     orchestrator.add_conditional_edges("init_tier", fan_out_tier)
-    orchestrator.add_edge("process_block", "integration_review_prepare")
+    orchestrator.add_edge("process_block", "shell_update")
+    orchestrator.add_edge("shell_update", "integration_review_prepare")
     orchestrator.add_edge("integration_review_prepare", "integration_review")
     orchestrator.add_conditional_edges("integration_review", route_after_integration_review)
     orchestrator.add_conditional_edges(

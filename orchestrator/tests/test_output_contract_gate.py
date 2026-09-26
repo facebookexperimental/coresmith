@@ -67,6 +67,7 @@ def test_node_redecomposes_then_caps(monkeypatch):
 
 
 def test_gate_env_toggle(monkeypatch):
+    monkeypatch.setenv("CORESMITH_FABRIC_RESOLUTION", "0")  # B1: the fabric hop precedes the gates
     # Isolate the output-contract gate from the complexity gate (which, when
     # ON, would take precedence on the clean-diagram route).
     monkeypatch.setenv("CORESMITH_COMPLEXITY_GATE", "0")

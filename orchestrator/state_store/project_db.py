@@ -235,6 +235,22 @@ CREATE TABLE IF NOT EXISTS ruling_uses (
     ts REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ruling_uses_ruling ON ruling_uses(ruling_id);
+-- Shell integration (A4): every deterministic assembly of the chip top.
+CREATE TABLE IF NOT EXISTS integration_snapshots (
+    id INTEGER PRIMARY KEY,
+    tier TEXT,
+    ts REAL NOT NULL,
+    top TEXT,
+    rtl_path TEXT,
+    real_blocks_json TEXT,
+    stub_blocks_json TEXT,
+    wires INTEGER,
+    boundary_ports INTEGER,
+    elaborated INTEGER,
+    wiring_errors_json TEXT,
+    elab_errors_json TEXT,
+    run_id TEXT NOT NULL DEFAULT ''
+);
 """
 
 _BLOCK_COLUMNS = ("tier", "subsystem", "description", "python_source", "rtl_target",
@@ -479,7 +495,7 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin):
             # B1: a primitive block (generated fabric) carries its kind and spec
             # through the queue; ordinary blocks are unchanged.
             extra = _uj(r["extra_json"], {}) or {}
-            for k in ("kind", "primitive", "fabric", "golden_exempt", "no_golden_reason", "subsystem"):
+            for k in ("kind", "primitive", "fabric", "golden_exempt", "no_golden_reason"):
                 if k in extra and k not in d:
                     d[k] = extra[k]
             out.append(d)
@@ -834,6 +850,32 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin):
         }, default=str) for d in self.decisions()]
         self._write_text_view(target, ("\n".join(lines) + "\n") if lines else "")
         return target
+
+    def add_integration_snapshot(self, snap: dict) -> int:
+        with self._tx() as db:
+            cur = db.execute(
+                "INSERT INTO integration_snapshots(tier, ts, top, rtl_path, real_blocks_json, "
+                "stub_blocks_json, wires, boundary_ports, elaborated, wiring_errors_json, "
+                "elab_errors_json, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (_s(snap.get("tier")), float(snap.get("ts") or time.time()), _s(snap.get("top")),
+                 _s(snap.get("rtl_path")), _j(snap.get("real_blocks") or []),
+                 _j(snap.get("stub_blocks") or []), _int(snap.get("wires")),
+                 _int(snap.get("boundary_ports")),
+                 None if snap.get("elaborated") is None else int(bool(snap.get("elaborated"))),
+                 _j(snap.get("wiring_errors") or []), _j(snap.get("elab_errors") or []),
+                 self.run_id()))
+            return int(cur.lastrowid)
+
+    def latest_integration_snapshot(self) -> dict | None:
+        with self._conn() as db:
+            row = db.execute("SELECT * FROM integration_snapshots ORDER BY id DESC LIMIT 1").fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        for k in ("real_blocks", "stub_blocks", "wiring_errors", "elab_errors"):
+            d[k] = _uj(d.pop(f"{k}_json"), [])
+        d["elaborated"] = None if d["elaborated"] is None else bool(d["elaborated"])
+        return d
 
     def begin_run(self, run_id: str | None = None) -> str:
         """Mint (or adopt) the run id every run-scoped table is keyed by."""
