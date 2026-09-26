@@ -89,11 +89,14 @@ def cmd_dv_status(args) -> int:
     rows = []
     try:
         for item in _pdb.results(block or None):
-            if item["kind"] != "best":
+            # ``best`` = published pass (sim AND synth AND timing);
+            # ``dv_best`` = DV pass only, not yet done.
+            if item["kind"] not in ("best", "dv_best"):
                 continue
             data = item["value"]
             rows.append({
                 "block": item["block"], "scope": "rtl", "source": "results",
+                "kind": item["kind"], "done": item["kind"] == "best",
                 "passed": bool(data.get("sim_passed")),
                 "attempt": data.get("attempt"),
                 "tests_passed": data.get("tests_passed"),
@@ -104,7 +107,8 @@ def cmd_dv_status(args) -> int:
     payload = {"source": "results", "block": block, "rows": rows}
     human = "\n".join(
         f"{r['block']:<22} rtl        "
-        f"{'PASS' if r['passed'] else 'FAIL'} (best result) "
+        f"{'PASS' if r['passed'] else 'FAIL'} "
+        f"({'done: sim+synth+timing' if r.get('done') else 'dv pass only'}) "
         f"tests={r.get('tests_passed')}/{r.get('tests_total')}"
         for r in rows
     ) or "(no DV rows or best results recorded)"

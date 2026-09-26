@@ -233,6 +233,8 @@ class BlockState(TypedDict):
     ppa_reasons: list             # human-readable budget-divergence reasons
     timing_ok: bool | None        # measured WNS >= 0 (None = not measured)
     timing_required: bool        # missing required timing cannot complete a block
+    sta_report_path: str          # worst-path STA report the timing verdict came from
+    timing_fix_attempts: int      # timing_fix loop iterations consumed (A1c)
     # Post-synthesis GATE-LEVEL SIM verdict (harness.gate_sim). None = not run.
     # False routes the block to diagnose: the synthesized netlist does not
     # reproduce the behaviour the RTL was verified with, so DV and PPA were
@@ -822,6 +824,8 @@ async def init_block_node(state: BlockState) -> dict:
         "synth_gate_count": 0,
         "rtl_path": "",
         "tb_path": "",
+        "sta_report_path": "",
+        "timing_fix_attempts": 0,
         "debug_action": "",
         "human_response": None,
         "step_log_paths": {},
@@ -1066,6 +1070,7 @@ def _apply_revise_uarch(pr: str, response: dict, contract_audit: dict,
         except OSError:
             continue
         _db(pr).clear_result(name, "best")
+        _db(pr).clear_result(name, "dv_best")
         try:
             _bdir = Path(pr) / ".coresmith" / "blocks" / name
             _bdir.mkdir(parents=True, exist_ok=True)
@@ -2453,7 +2458,7 @@ async def generate_testbench_node(state: BlockState) -> dict:
                 span.set_attribute("passed", True)
                 span.set_attribute("tb_fixes", sim_attempt)
 
-                _db(_pr(state)).set_result(block_name, "best", {
+                _db(_pr(state)).set_result(block_name, _dv_result_kind(), {
                     "sim_passed": True,
                     "attempt": attempt,
                     "tests_passed": sim_result.get("tests_passed", 0),
@@ -3342,7 +3347,7 @@ def _container_leaf_map(project_root: str, block_names: list) -> dict:
     out: dict = {}
     for name in block_names:
         try:
-            br = _db(project_root).result(name, "best")
+            br = _block_pass_record(_db(project_root), name)
             if not br:
                 continue
             # Resolve the block's measured RTL: rtl_target when recorded;
@@ -3926,6 +3931,7 @@ async def synthesize_node(state: BlockState) -> dict:
         "ppa_reasons": ppa_reasons,
         "timing_ok": timing_ok,
         "timing_required": ppa_meta.get("timing_required", False),
+        "sta_report_path": str(ppa_meta.get("sta_report_path") or ""),
         "gate_sim_ok": gate_sim_ok,
         "gate_sim_status": gate_sim_status,
         "gate_sim_reason": gate_sim_reason,
@@ -3937,6 +3943,35 @@ async def synthesize_node(state: BlockState) -> dict:
 # ---------------------------------------------------------------------------
 # Node: diagnose
 # ---------------------------------------------------------------------------
+
+def done_result_gate_enabled() -> bool:
+    """``best`` means sim AND synth AND timing (CORESMITH_DONE_RESULT_GATE, default on).
+
+    Before this gate the sim-pass record was written as ``best`` before synth
+    and timing ran, and two consumers (the integration-review reverify and the
+    container leaf map) read it as "the block is done". In the SoC benchmark
+    rv64_core sat at WNS -27.6 ns with a green ``best`` on disk. With the gate
+    on, DV writes ``dv_best`` and only ``block_done`` publishes ``best``.
+    """
+    return os.environ.get(
+        "CORESMITH_DONE_RESULT_GATE", "1"
+    ).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _dv_result_kind() -> str:
+    """The result kind the sim-pass is recorded under."""
+    return "dv_best" if done_result_gate_enabled() else "best"
+
+
+def _block_pass_record(db, name: str) -> dict | None:
+    """The block's DV pass record regardless of which kind carries it."""
+    return db.result(name, "dv_best") or db.result(name, "best")
+
+
+def _block_done_record(db, name: str) -> dict | None:
+    """The block's published pass (sim AND synth AND timing) -- ``best``."""
+    return db.result(name, "best")
+
 
 def _timing_ok_from_ppa_meta(ppa_meta: dict | None) -> bool | None:
     """Translate PPA timing metadata without losing fail-closed outcomes."""
@@ -4285,6 +4320,25 @@ async def diagnose_node(state: BlockState) -> dict:
                 "constraints": [],
                 "affected_blocks": [],
             }
+    elif phase == "synth":
+        # Synthesis succeeded and only the measured timing failed: that is a
+        # pipelining/structure problem the timing-closure loop owns, not a
+        # question for the debug agent (which cannot see the STA path).
+        if (timing_fix_enabled() and state.get("synth_success")
+                and state.get("timing_ok") is False
+                and int(state.get("timing_fix_attempts") or 0) < timing_fix_max()):
+            _fast_diag = {
+                "category": "TIMING_VIOLATION",
+                "confidence": 1.0,
+                "diagnosis": "Synthesis succeeded; pre-layout STA reports negative slack.",
+                "suggested_fix": "Re-pipeline the worst path (timing_fix loop) without changing the interface contract.",
+                "needs_human": False,
+                "is_testbench_bug": False,
+                "escalate": False,
+                "constraints": [],
+                "affected_blocks": [],
+                "timing_fix": True,
+            }
     elif phase == "lint":
         if "Module not found" in error_log or "Cannot find file" in error_log:
             _fast_diag = {
@@ -4311,6 +4365,8 @@ async def diagnose_node(state: BlockState) -> dict:
         history = _db(_pr(state)).attempt_history(block_name)
         _db(_pr(state)).set_diagnosis(block_name, _fast_diag, attempt=state["attempt"])
         fast_action = "retry_tb" if _fast_diag.get("is_testbench_bug") else "retry_rtl"
+        if _fast_diag.get("timing_fix"):
+            fast_action = "retry_rtl_timing"
         write_graph_event(_pr(state), "Diagnose Failure", "graph_node_exit", {
             "block": block_name, "category": _fast_diag["category"],
             "confidence": _fast_diag["confidence"], "needs_human": False,
@@ -4605,6 +4661,142 @@ async def decide_node(state: BlockState) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Node: timing_fix  (A1c -- measured-timing repair loop)
+# ---------------------------------------------------------------------------
+
+def timing_fix_enabled() -> bool:
+    """Route a timing-only synth failure to the timing-closure loop
+    (CORESMITH_TIMING_FIX, default on)."""
+    return os.environ.get(
+        "CORESMITH_TIMING_FIX", "1"
+    ).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def timing_fix_max() -> int:
+    """Timing-fix iterations per block before the failure goes to the
+    ordinary diagnose path (CORESMITH_TIMING_FIX_MAX, default 2)."""
+    try:
+        return max(0, int(os.environ.get("CORESMITH_TIMING_FIX_MAX", "2") or 2))
+    except ValueError:
+        return 2
+
+
+async def timing_fix_node(state: BlockState) -> dict:
+    """Repair a block whose synthesis passed but whose measured timing failed.
+
+    The debug agent never sees the STA path, so it re-attacks a timing miss as
+    a functional bug. This node hands the worst-path report to the
+    ``TimingClosureAgent`` (previously dead code), writes the re-pipelined RTL,
+    re-lints and re-runs DV (the contract latency is frozen: a fix that changes
+    the interface escalates instead), and sends the block back to synthesize.
+    """
+    block = state["current_block"]
+    block_name = block["name"]
+    rtl_path = state.get("rtl_path") or str(Path(_pr(state)) / block.get("rtl_target", f"rtl/{block_name}.v"))
+    tb_path = state.get("tb_path") or ""
+    attempt = int(state.get("attempt") or 1)
+    n = int(state.get("timing_fix_attempts") or 0) + 1
+    block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
+    block_dir.mkdir(parents=True, exist_ok=True)
+
+    write_graph_event(_pr(state), "Timing Fix", "graph_node_enter", {
+        "block": block_name, "attempt": attempt, "timing_fix_attempt": n,
+    })
+
+    sta_report = ""
+    _rp = state.get("sta_report_path") or ""
+    if _rp and Path(_rp).exists():
+        try:
+            sta_report = Path(_rp).read_text()[-20000:]
+        except OSError:
+            sta_report = ""
+    rtl_src = Path(rtl_path).read_text() if Path(rtl_path).exists() else ""
+    if not rtl_src:
+        (block_dir / "previous_error.txt").write_text(
+            f"timing_fix: RTL not found at {rtl_path}")
+        return {"debug_action": "escalate", "timing_fix_attempts": n}
+
+    with _tracer.start_as_current_span(f"Timing Fix [{block_name}]") as span:
+        span.set_attribute("block_name", block_name)
+        span.set_attribute("timing_fix_attempt", n)
+        from orchestrator.langchain.agents.timing_closure import TimingClosureAgent
+        try:
+            fix = await TimingClosureAgent().fix_timing(
+                block_name=block_name, rtl_source=rtl_src, sta_report=sta_report,
+                target_clock_mhz=float(state.get("target_clock_mhz", 50.0)),
+                worst_slack_ns=None,
+            )
+        except Exception as exc:  # noqa: BLE001 - the loop must not crash the block
+            fix = {"verilog": rtl_src, "strategy": "ERROR", "interface_changed": False,
+                   "escalate": True, "error": str(exc)}
+        span.set_attribute("strategy", str(fix.get("strategy")))
+
+    log(f"  [TIMING] {block_name}: fix #{n} strategy={fix.get('strategy')} "
+        f"interface_changed={bool(fix.get('interface_changed'))}", YELLOW)
+
+    if fix.get("escalate") or fix.get("interface_changed"):
+        # The interface (latency/ports) is frozen by the contract; a repair
+        # that needs to move it is an architecture question, not a retry.
+        (block_dir / "previous_error.txt").write_text(
+            "timing_fix: the timing-closure agent could not repair the path "
+            "without changing the block interface "
+            f"(strategy={fix.get('strategy')}, interface_changed="
+            f"{bool(fix.get('interface_changed'))}). "
+            + str(fix.get("error") or ""))
+        write_graph_event(_pr(state), "Timing Fix", "graph_node_exit", {
+            "block": block_name, "outcome": "escalate"})
+        return {"debug_action": "escalate", "timing_fix_attempts": n, "phase": "synth"}
+
+    new_rtl = str(fix.get("verilog") or "").strip() + "\n"
+    Path(rtl_path).write_text(new_rtl)
+
+    lint = await asyncio.to_thread(lint_rtl, rtl_path, block_name, attempt)
+    if not lint.get("clean"):
+        (block_dir / "previous_error.txt").write_text(
+            "timing_fix: re-pipelined RTL fails lint\n" + str(lint.get("log", ""))[-5000:])
+        write_graph_event(_pr(state), "Timing Fix", "graph_node_exit", {
+            "block": block_name, "outcome": "lint_fail"})
+        return {"phase": "lint", "lint_clean": False, "timing_fix_attempts": n}
+
+    if tb_path and Path(tb_path).exists():
+        sim = await asyncio.to_thread(
+            run_simulation, block, rtl_path, tb_path, attempt, project_root=_pr(state))
+        if not sim.get("passed"):
+            (block_dir / "previous_error.txt").write_text(
+                "timing_fix: re-pipelined RTL fails DV\n" + str(sim.get("log", ""))[-5000:])
+            write_graph_event(_pr(state), "Timing Fix", "graph_node_exit", {
+                "block": block_name, "outcome": "sim_fail"})
+            return {"phase": "sim", "sim_passed": False, "timing_fix_attempts": n}
+        try:
+            _db(_pr(state)).update_result(
+                block_name, _dv_result_kind(), sim_passed=True, timing_fix_attempt=n,
+                **_pass_provenance(_pr(state), block_name, rtl_path, tb_path))
+        except Exception:  # noqa: BLE001
+            pass
+
+    write_graph_event(_pr(state), "Timing Fix", "graph_node_exit", {
+        "block": block_name, "outcome": "resynth"})
+    return {"phase": "synth", "sim_passed": True, "lint_clean": True,
+            "timing_fix_attempts": n, "debug_action": "retry_synth"}
+
+
+def route_after_timing_fix(state: BlockState) -> str:
+    """synthesize on a repaired block; diagnose on lint/DV regression; escalate."""
+    if state.get("debug_action") == "escalate":
+        return "block_done"
+    if state.get("phase") in ("lint", "sim"):
+        return "diagnose"
+    return "synthesize"
+
+
+route_after_timing_fix.__edge_labels__ = {
+    "synthesize": "REPAIRED",
+    "diagnose": "REGRESSED",
+    "block_done": "ESCALATE",
+}
+
+
+# ---------------------------------------------------------------------------
 # Node: ask_human  (INTERRUPT)
 # ---------------------------------------------------------------------------
 
@@ -4801,8 +4993,33 @@ async def block_done_node(state: BlockState) -> dict:
             "step_log_paths": step_log_paths,
             "completed_at": completed_at,
         }
+        if done_result_gate_enabled():
+            # Publish the block's pass: the DV record plus the synth/timing
+            # facts it was earned with. Only this node may write ``best``.
+            try:
+                _pdb = _db(_pr(state))
+                _dv = dict(_pdb.result(block_name, "dv_best") or {})
+                _pdb.set_result(block_name, "best", {
+                    **_dv,
+                    "sim_passed": True,
+                    "synth_success": True,
+                    "timing_ok": state.get("timing_ok"),
+                    "timing_required": bool(state.get("timing_required")),
+                    "gate_count": gate_count,
+                    "attempt": attempt,
+                    "done": True,
+                })
+            except Exception as _exc:  # noqa: BLE001 - never lose the pass
+                log(f"  [{block_name}] could not publish best result: {_exc}", YELLOW)
         log(f"  [{block_name}] PASSED (attempt {attempt})", GREEN)
     else:
+        if done_result_gate_enabled():
+            # A block that is not done has no published pass, whatever an
+            # earlier round recorded. ``dv_best`` stays (sim did pass).
+            try:
+                _db(_pr(state)).clear_result(block_name, "best")
+            except Exception:  # noqa: BLE001
+                pass
         error_path = block_dir / "previous_error.txt"
         error_text = error_path.read_text()[:500] if error_path.exists() else ""
         result = {
@@ -4930,6 +5147,7 @@ def route_decision(state: BlockState) -> str:
         "retry_tb": "generate_testbench",
         "retry_synth": "synthesize",
         "retry_sim": "simulate",
+        "retry_rtl_timing": "timing_fix",
         "ask_human": "ask_human",
         "escalate": "block_done",
     }
@@ -4940,6 +5158,7 @@ route_decision.__edge_labels__ = {
     "generate_rtl": "RETRY RTL",
     "generate_testbench": "RETRY TB",
     "synthesize": "RETRY SYNTH",
+    "timing_fix": "TIMING FIX",
     "simulate": "RETRY SIM",
     "ask_human": "ASK HUMAN",
     "block_done": "ESCALATE",
@@ -4999,6 +5218,7 @@ def build_block_subgraph():
     graph.add_node("generate_rtl", generate_rtl_node)
     graph.add_node("generate_testbench", generate_testbench_node)
     graph.add_node("synthesize", synthesize_node)
+    graph.add_node("timing_fix", timing_fix_node)
     graph.add_node("diagnose", diagnose_node)
     graph.add_node("decide", decide_node)
     graph.add_node("ask_human", ask_human_node)
@@ -5016,6 +5236,7 @@ def build_block_subgraph():
     # Failure path
     graph.add_edge("diagnose", "decide")
     graph.add_conditional_edges("decide", route_decision)
+    graph.add_conditional_edges("timing_fix", route_after_timing_fix)
     graph.add_conditional_edges("ask_human", route_after_human)
 
     # Terminal
@@ -5565,6 +5786,7 @@ def _plan_targeted_revise(
                 pass
         plan[name] = bool(canonical.exists()) and not needs_respec and name not in adopt_failed
         _db(pr).clear_result(name, "best")
+        _db(pr).clear_result(name, "dv_best")
     return plan
 
 
@@ -5637,10 +5859,12 @@ async def integration_review_node(state: OrchestratorState) -> dict:
     if pending:
         import hashlib
         try:
+            # A reverify skip needs the PUBLISHED pass (sim AND synth AND
+            # timing), not merely the DV pass, earned against this spec.
             verified = all(
                 hashlib.sha256((Path(pr) / "arch/uarch_specs" / f"{name}.md").read_bytes()).hexdigest() == digest
-                and (_db(pr).result(name, "best") or {}).get("spec_sha256") == digest
-                and (_db(pr).result(name, "best") or {}).get("sim_passed") is True
+                and (_block_done_record(_db(pr), name) or {}).get("spec_sha256") == digest
+                and (_block_done_record(_db(pr), name) or {}).get("sim_passed") is True
                 for name, digest in pending.items())
         except OSError:
             verified = False
@@ -7824,9 +8048,10 @@ def _route_uarch_patch_on_retry(project_root: str, block_names: list[str]) -> li
             # revised µarch. Invalidate the recorded sim-pass so the re-validate
             # pass REGENERATES the RTL from the revised spec.
             try:
-                if _db(project_root).result(name, "best"):
-                    _db(project_root).update_result(
-                        name, "best", sim_passed=False, uarch_patch_invalidated=True)
+                for _kind in ("best", "dv_best"):
+                    if _db(project_root).result(name, _kind):
+                        _db(project_root).update_result(
+                            name, _kind, sim_passed=False, uarch_patch_invalidated=True)
             except Exception:  # noqa: BLE001
                 pass
             marker.write_text(f"confidence={conf:g}; sections_applied={n_applied}\n")

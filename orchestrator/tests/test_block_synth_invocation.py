@@ -220,3 +220,47 @@ class TestTheThresholdHasOneSource:
                 "cs_rom_1r #(.WIDTH(8), .DEPTH(3309)) u_b (.clk(c));\n"
                 "cs_mem_1rw1r #(.WIDTH(32), .DEPTH(1024)) u_c (.clk(c));\n")
         assert sorted(sw.macro_wrapper_instances(text)) == [(8, 3309), (32, 1024)]
+
+
+# ---------------------------------------------------------------------------
+# A1b: the liberty synth maps against the SDC period (abc -D), not area-only
+# ---------------------------------------------------------------------------
+
+def _liberty_script_for(tmp_path, monkeypatch, mhz):
+    monkeypatch.setattr(ph, "PROJECT_ROOT", tmp_path)
+    monkeypatch.delenv("CORESMITH_SYNTH_GENERIC", raising=False)
+    lib = tmp_path / "fake.lib"
+    lib.write_text("library(fake) {}\n")
+    monkeypatch.setattr(ph, "LIBERTY_FILE", lib)
+    f = _mem_block(tmp_path, "tblk", "  assign q = a[7:0];")
+
+    def _fake_run(cmd, **kw):
+        raise _StopBeforeYosys()
+
+    monkeypatch.setattr(ph.subprocess, "run", _fake_run)
+    with pytest.raises(_StopBeforeYosys):
+        ph.synthesize_block({"name": "tblk"}, str(f), target_clock_mhz=mhz)
+    return (tmp_path / "syn" / "output" / "tblk" / "synth_tblk.ys").read_text()
+
+
+class TestBlockSynthDelayTarget:
+    def test_abc_gets_the_sdc_period_in_ps(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CORESMITH_SYNTH_ABC_DELAY_TARGET", "1")
+        script = _liberty_script_for(tmp_path, monkeypatch, 100.0)
+        assert "abc -liberty" in script and " -D 10000" in script
+        assert ph.abc_liberty_cmd("x.lib", 64.0).endswith("-D 15625")
+
+    def test_flag_off_keeps_area_only_mapping(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CORESMITH_SYNTH_ABC_DELAY_TARGET", "0")
+        script = _liberty_script_for(tmp_path, monkeypatch, 100.0)
+        assert "abc -liberty" in script and " -D " not in script
+
+    def test_sta_script_uses_the_same_period(self, monkeypatch, tmp_path):
+        from orchestrator.langgraph import ppa_check as pc
+        monkeypatch.setenv("CORESMITH_SYNTH_ABC_DELAY_TARGET", "1")
+        s = pc._maxfanout_synth_script(["a.v"], "x.lib", tmp_path / "n.v", "top",
+                                       buffered=False, period_ns=15.625)
+        assert "abc -liberty x.lib -D 15625" in s
+        s2 = pc._maxfanout_synth_script(["a.v"], "x.lib", tmp_path / "n.v", "top",
+                                        buffered=True, period_ns=15.625)
+        assert "-D 15625" not in s2  # the buffered script has its own abc script

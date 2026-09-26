@@ -2313,6 +2313,33 @@ def _sdc_reset_false_path_enabled() -> bool:
     ).strip().lower() not in {"0", "false", "no", "off", ""}
 
 
+def _clock_period_ns(target_clock_mhz: float) -> float:
+    """THE clock period used by the SDC and by the synth delay target."""
+    return 1000.0 / float(target_clock_mhz)
+
+
+def synth_abc_delay_target_enabled() -> bool:
+    """``abc -D <period_ps>`` at block synth (CORESMITH_SYNTH_ABC_DELAY_TARGET, default on).
+
+    Without a delay target ABC maps for area only, so the block-level WNS is
+    partly a mapping artifact: the SoC benchmark's rv64_core came back at
+    -27.6 ns with three unbuffered high-fanout gates and a re-rippled adder on
+    the worst path. The same period the SDC constrains is handed to ABC so the
+    number STA reports is a property of the RTL, not of an unconstrained map.
+    """
+    return os.environ.get(
+        "CORESMITH_SYNTH_ABC_DELAY_TARGET", "1"
+    ).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def abc_liberty_cmd(liberty: str, target_clock_mhz: float | None) -> str:
+    """The ``abc -liberty`` line for a timing-aware block synth."""
+    cmd = f"abc -liberty {liberty}"
+    if target_clock_mhz and synth_abc_delay_target_enabled():
+        cmd += f" -D {int(round(_clock_period_ns(target_clock_mhz) * 1000))}"
+    return cmd
+
+
 def _build_sdc_content(rtl_source: str, target_clock_mhz: float) -> str:
     """THE single SDC generator.
 
@@ -2322,7 +2349,7 @@ def _build_sdc_content(rtl_source: str, target_clock_mhz: float) -> str:
     exempts the reset tree from timing with a guarded ``set_false_path`` so the
     unbuffered pre-layout reset net can't masquerade as the block WNS.
     """
-    period_ns = 1000.0 / target_clock_mhz
+    period_ns = _clock_period_ns(target_clock_mhz)
     # Empty (no clock port at all) selects the virtual-clock branch below.
     clock_port = _detect_clock_port_or_empty(rtl_source)
 
@@ -2509,7 +2536,7 @@ memory_bram
 memory_map
 synth -run fine:
 dfflibmap -liberty {liberty}
-abc -liberty {liberty}
+{abc_liberty_cmd(liberty, target_clock_mhz)}
 opt_clean
 stat -liberty {liberty}
 write_verilog -noattr {netlist_path}

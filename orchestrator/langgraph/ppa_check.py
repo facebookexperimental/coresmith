@@ -1649,7 +1649,8 @@ def _sta_dontuse_liberty(src_lib: str) -> str:
 
 
 def _maxfanout_synth_script(sources: list[str], lib: str, netlist: Path,
-                            top: str, buffered: bool) -> str:
+                            top: str, buffered: bool,
+                            period_ns: float | None = None) -> str:
     reads = " ".join(sources)
     mem = f"synth -top {top} -flatten\n"
     if buffered:
@@ -1660,6 +1661,15 @@ def _maxfanout_synth_script(sources: list[str], lib: str, netlist: Path,
                f'buffer,-N,{_STA_MAX_FANOUT};upsize,-c;dnsize,-c;stime,-p"\n')
     else:
         abc = f"abc -liberty {lib}\n"
+        if period_ns and period_ns > 0:
+            try:
+                from orchestrator.langgraph.pipeline_helpers import (
+                    synth_abc_delay_target_enabled as _dt,
+                )
+                if _dt():
+                    abc = f"abc -liberty {lib} -D {int(round(period_ns * 1000))}\n"
+            except Exception:  # noqa: BLE001 - the delay target is best-effort
+                pass
     return (
         f"read_verilog -sv {reads}\n"
         f"hierarchy -check -top {top}\n"
@@ -1699,7 +1709,8 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
             return None, f"mapped netlist unavailable: {exc}"
     else:
         ys = wd / "syn.ys"
-        ys.write_text(_maxfanout_synth_script(sources, lib, netlist, top, buffered))
+        ys.write_text(_maxfanout_synth_script(sources, lib, netlist, top, buffered,
+                                              period_ns=period_ns))
         try:
             yp = subprocess.run([yosys_bin, "-q", str(ys)],
                                 capture_output=True, text=True, timeout=timeout_s,

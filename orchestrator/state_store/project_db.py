@@ -46,6 +46,14 @@ from typing import Any
 from orchestrator.state_store.store import _SCHEMA as _SCOREBOARD_SCHEMA
 
 DB_NAME = "project.sqlite"
+# Result kinds that carry a per-block pass and are exported as block views.
+#   dv_best -- the block's DV pass (sim green), written the moment cocotb passes;
+#   best    -- the block's PUBLISHED pass: sim AND synth AND timing met (written
+#              by block_done only). Consumers that mean "the block is done" must
+#              read ``best``; consumers that mean "DV passed" read ``dv_best``.
+RESULT_VIEW_KINDS = ("best", "dv_best")
+
+
 DRAFTS_DIR = "drafts"
 BLOCK_VIEW_KINDS = ("constraints", "diagnosis", "attempt_history", "best_result")
 
@@ -638,7 +646,7 @@ class ProjectDB:
         return _uj(row["value_json"], None) if row else None
 
     def set_result(self, block: str, kind: str, value: dict, report_path: str | None = None) -> None:
-        if kind == "best" and "spec_sha256" not in value:
+        if kind in RESULT_VIEW_KINDS and "spec_sha256" not in value:
             import hashlib
             spec = self.root / "arch/uarch_specs" / f"{block}.md"
             if spec.is_file():
@@ -650,7 +658,7 @@ class ProjectDB:
                 "report_path=excluded.report_path, ts=excluded.ts",
                 (block, kind, _j(value), report_path, time.time()),
             )
-        if kind == "best":
+        if kind in RESULT_VIEW_KINDS:
             self.export_block_views(block)
 
     def update_result(self, block: str, kind: str, **fields: Any) -> dict:
@@ -665,25 +673,35 @@ class ProjectDB:
     def clear_result(self, block: str, kind: str) -> None:
         with self._tx() as db:
             db.execute("DELETE FROM results WHERE block=? AND kind=?", (block, kind))
-        if kind == "best":
+        if kind in RESULT_VIEW_KINDS:
             self.export_block_views(block)
 
     def invalidate_results_for_specs(self, spec_hashes: dict[str, str]) -> list[str]:
-        """Archive and clear best results for different (or unrecorded) spec bytes."""
+        """Archive and clear pass results for different (or unrecorded) spec bytes.
+
+        Both the DV-only pass (``dv_best``) and the published block pass
+        (``best``) are earned against one reviewed spec; a changed spec voids
+        both.
+        """
         invalidated = []
         with self._tx() as db:
             for block, digest in spec_hashes.items():
-                row = db.execute("SELECT value_json FROM results WHERE block=? AND kind='best'",
-                                 (block,)).fetchone()
-                best = _uj(row["value_json"], {}) if row else None
-                if best is None or best.get("spec_sha256") == digest:
-                    continue
-                archived = {"previous_best": best, "adopted_spec_sha256": digest,
-                            "reason": "reviewed spec changed; verification required"}
-                db.execute("INSERT OR REPLACE INTO results(block,kind,value_json,ts) VALUES(?,?,?,?)",
-                           (block, "spec_invalidated", _j(archived), time.time()))
-                db.execute("DELETE FROM results WHERE block=? AND kind='best'", (block,))
-                invalidated.append(block)
+                hit = False
+                for kind in RESULT_VIEW_KINDS:
+                    row = db.execute("SELECT value_json FROM results WHERE block=? AND kind=?",
+                                     (block, kind)).fetchone()
+                    best = _uj(row["value_json"], {}) if row else None
+                    if best is None or best.get("spec_sha256") == digest:
+                        continue
+                    archived = {"previous_best": best, "previous_kind": kind,
+                                "adopted_spec_sha256": digest,
+                                "reason": "reviewed spec changed; verification required"}
+                    db.execute("INSERT OR REPLACE INTO results(block,kind,value_json,ts) VALUES(?,?,?,?)",
+                               (block, "spec_invalidated", _j(archived), time.time()))
+                    db.execute("DELETE FROM results WHERE block=? AND kind=?", (block, kind))
+                    hit = True
+                if hit:
+                    invalidated.append(block)
         for block in invalidated:
             self.export_block_views(block)
         return invalidated
@@ -783,12 +801,13 @@ class ProjectDB:
         self._write_view(bdir / "attempt_history.json", self.attempt_history(block))
         self._write_view(bdir / "attempt_history_all_rounds.json", self.attempt_history(block, all_rounds=True))
         self._write_view(bdir / "diagnoses_all_rounds.json", self.diagnoses(block))
-        best = self.result(block, "best")
-        target = bdir / "best_result.json"
-        if best is None:
-            target.unlink(missing_ok=True)
-        else:
-            self._write_view(target, best)
+        for kind, fname in (("best", "best_result.json"), ("dv_best", "dv_best_result.json")):
+            val = self.result(block, kind)
+            target = bdir / fname
+            if val is None:
+                target.unlink(missing_ok=True)
+            else:
+                self._write_view(target, val)
 
     def drafts_dir(self) -> Path:
         d = self.path.parent / DRAFTS_DIR
@@ -828,7 +847,8 @@ class ProjectDB:
             imported.append("interface_contracts.json")
         blocks_dir = cdir / "blocks"
         if blocks_dir.is_dir():
-            kinds = (("best", "best_result.json"), ("coverage", "coverage.json"),
+            kinds = (("best", "best_result.json"), ("dv_best", "dv_best_result.json"),
+                     ("coverage", "coverage.json"),
                      ("throughput", "throughput.json"), ("dv_summary", "dv_summary.json"),
                      ("ppa", "ppa_report.json"), ("provenance", "provenance.json"))
             for bdir in sorted(p for p in blocks_dir.iterdir() if p.is_dir()):
@@ -858,6 +878,17 @@ class ProjectDB:
                     if isinstance(val, dict):
                         self.set_result(name, kind, val, report_path=str(bdir / fname))
                         imported.append(f"blocks/{name}/{fname}")
+                # A pre-gate run recorded its sim-pass as ``best`` before synth
+                # and timing ran. Under the done-result gate that record is a
+                # DV pass only: keep it as ``dv_best`` and let ``best`` mean
+                # "sim AND synth AND timing" from here on.
+                legacy_best = results.get("best")
+                if (isinstance(legacy_best, dict) and not legacy_best.get("done")
+                        and not isinstance(results.get("dv_best"), dict)):
+                    self.set_result(name, "dv_best", legacy_best,
+                                    report_path=str(bdir / "best_result.json"))
+                    self.clear_result(name, "best")
+                    imported.append(f"blocks/{name}/best_result.json->dv_best")
         self.set_setting("legacy_import_done", "1")
         self.export_views()
         return imported
