@@ -125,7 +125,9 @@ def test_legacy_import_once(tmp_path):
     assert db.contracts_version() == 1
     assert db.attempt_history("ctrl")[0]["category"] == "X"
     assert db.constraints("ctrl")[0]["rule"] == "r"
-    assert db.result("ctrl", "best") == {"sim_passed": True}
+    # A1: a pre-gate ``best`` (no ``done`` flag) is only a DV pass -> ``dv_best``.
+    assert db.result("ctrl", "best") is None
+    assert db.result("ctrl", "dv_best") == {"sim_passed": True}
     # second open does not re-import (would duplicate attempts)
     db2 = open_project(tmp_path)
     assert len(db2.attempt_history("ctrl")) == 1
