@@ -141,3 +141,13 @@ def test_generated_testbench_passes_in_simulation(tmp_path, monkeypatch):
     res = ph.run_simulation({"name": "cs_fabric_soc"}, art.rtl_path, art.tb_path,
                             project_root=str(tmp_path))
     assert res["passed"], res.get("log", "")[-4000:]
+
+
+def test_wrapper_declares_apb_types_once_for_many_apb_slaves():
+    spec = FabricSpec(name="soc", masters=[FabricMaster("cpu0"), FabricMaster("gpu")],
+                      slaves=[FabricSlave("ram", "axi4", 0x8000_0000, 0x1000_0000)]
+                      + [FabricSlave(f"p{i}", "apb", 0x1000_0000 + i * 0x1000, 0x1000) for i in range(7)])
+    assert spec.validate() == []
+    sv = render_wrapper_sv(spec)
+    assert sv.count("} apb_req_t;") == 1 and sv.count("} apb_resp_t;") == 1
+    assert sv.count("axi_lite_to_apb #(") == 7

@@ -29,7 +29,7 @@ def render_soc_model(blocks: list[str], edges: list[dict], *, top_name: str = "s
     for b in blocks:
         L.append(f"    {model_name(b)} u_{b}(\"{b}\");")
         L.append(f"    u_{b}.clk(clk); u_{b}.rst_n(rst_n);")
-    fifos, signals = [], []
+    fifos, signals, signal_of = [], [], {}
     for e in edges:
         bd = channel_binding(e)
         if bd["producer"] not in blocks or bd["consumer"] not in blocks:
@@ -43,8 +43,16 @@ def render_soc_model(blocks: list[str], edges: list[dict], *, top_name: str = "s
             L.append(f"    sc_fifo<cs_beat_t> {name}(\"{name}\", 16);   // {bd['edge_id']}")
             L.append(f"    {p}.{bd['producer_member']}({name}); {c}.{bd['consumer_member']}({name});")
         else:
+            # One sc_signal per producer port: an sc_out binds exactly once, so a
+            # static value fanning out to several blocks shares the signal.
+            key = (p, bd["producer_member"])
+            if key in signal_of:
+                name = signal_of[key]
+                L.append(f"    {c}.{bd['consumer_member']}({name});   // {bd['edge_id']} (fan-out)")
+                continue
             name = f"s_{len(signals)}"
             signals.append(name)
+            signal_of[key] = name
             L.append(f"    sc_signal<cs_word_t> {name}(\"{name}\");   // {bd['edge_id']}")
             L.append(f"    {p}.{bd['producer_member']}({name}); {c}.{bd['consumer_member']}({name});")
     L += ["    rst_n.write(false);",

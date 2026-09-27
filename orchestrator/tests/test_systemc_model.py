@@ -96,6 +96,14 @@ class TestConventions:
         assert "sc_signal<cs_word_t> s_0" in src and "u_pads.s_led(s_0)" in src
         assert "SOC_MODEL_SMOKE_OK" in src
 
+    def test_static_fan_out_shares_one_signal(self):
+        # An sc_out binds exactly once: two consumers of the same static
+        # producer port must share the signal (E109 on the first SoC run).
+        fan = {**_E3, "edge_id": "sink__m_led__to__req__s_led", "consumer_block": "req", "consumer_port": "s_led"}
+        src = render_soc_model(_BLOCKS, _EDGES + [fan], top_name="tiny")
+        assert src.count("u_sink.m_led(") == 1
+        assert "u_pads.s_led(s_0)" in src and "u_req.s_led(s_0)" in src and "s_1" not in src
+
 
 @pytest.mark.slow
 @pytest.mark.skipif(not detect()["ok"], reason="SystemC toolchain not available")

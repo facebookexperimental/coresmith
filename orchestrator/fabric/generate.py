@@ -197,10 +197,12 @@ def render_wrapper_sv(spec: FabricSpec) -> str:
                 L.append(f"  assign lite_rsp_{j}.r_valid = {p}rvalid; assign {p}rready = lite_req_{j}.r_ready; "
                          f"assign lite_rsp_{j}.r = '{{data: {p}rdata, resp: {p}rresp}};")
             else:  # apb
-                L.append("  typedef struct packed { addr_t paddr; logic [2:0] pprot; logic psel; logic penable; "
-                         "logic pwrite; data_t pwdata; strb_t pstrb; } apb_req_t;")
-                L.append("  typedef struct packed { logic pready; data_t prdata; logic pslverr; } apb_resp_t;") \
-                    if j == spec.slave_index(next(x.name for x in spec.slaves if x.protocol == "apb")) else None
+                # The APB struct types are module-scoped: emit them once, at the
+                # first APB slave (a second typedef is a redefinition in Verilator).
+                if j == spec.slave_index(next(x.name for x in spec.slaves if x.protocol == "apb")):
+                    L.append("  typedef struct packed { addr_t paddr; logic [2:0] pprot; logic psel; logic penable; "
+                             "logic pwrite; data_t pwdata; strb_t pstrb; } apb_req_t;")
+                    L.append("  typedef struct packed { logic pready; data_t prdata; logic pslverr; } apb_resp_t;")
                 L.append(f"  apb_req_t apb_req_{j}; apb_resp_t apb_rsp_{j};")
                 L.append(f"  localparam rule_t [0:0] ApbMap_{j} = '{{ '{{idx: 0, start_addr: {AW}'h{s.base:X}, "
                          f"end_addr: {AW}'h{s.base + s.size:X}}} }};")
