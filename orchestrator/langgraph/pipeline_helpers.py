@@ -2351,7 +2351,40 @@ def abc_liberty_cmd(liberty: str, target_clock_mhz: float | None) -> str:
     cmd = f"abc -liberty {liberty}"
     if target_clock_mhz and synth_abc_delay_target_enabled():
         cmd += f" -D {int(round(_clock_period_ns(target_clock_mhz) * 1000))}"
-    return cmd
+    return cmd + synth_dont_use_flags(liberty)
+
+
+_DONT_USE_CACHE: dict = {}
+
+
+def synth_dont_use_flags(liberty: str) -> str:
+    """B2 ENGINE_ISSUES #9: ``-dont_use`` flags for dfflibmap/abc, mirroring the
+    frozen chip flow (common/physical/synth.tcl): the PDK's OpenLane
+    ``no_synth.cells`` list plus every lpflow_/probe/spare/delay cell in the
+    liberty. Without them ABC mapped the SoC fabric into 1,100+ lpflow
+    isolation cells (4.6 ns each) and pre-layout STA reported -29 ns of pure
+    mapping artefact. Off with CORESMITH_SYNTH_DONT_USE=0; "" when nothing found."""
+    if (os.environ.get("CORESMITH_SYNTH_DONT_USE", "1") or "1").strip().lower() in {"0", "false", "no", "off"}:
+        return ""
+    lib = str(liberty or "")
+    if lib in _DONT_USE_CACHE:
+        return _DONT_USE_CACHE[lib]
+    cells: list[str] = []
+    try:
+        lp = Path(lib)
+        m = re.search(r"^(.*)/libs\.ref/([^/]+)/lib/", lib)
+        if m:
+            ns = Path(m.group(1)) / "libs.tech" / "openlane" / m.group(2) / "no_synth.cells"
+            if ns.is_file():
+                cells += [c.strip() for c in ns.read_text().splitlines() if c.strip()]
+        if lp.is_file():
+            txt = lp.read_text(errors="ignore")
+            cells += re.findall(r'cell\s*\(\s*"?((?:[a-z0-9]+_+)+(?:lpflow_|probe|macro_sparecell|clkdlybuf|dlygate)[a-z0-9_]*)"?\s*\)', txt)
+    except Exception:  # noqa: BLE001 - best effort; no flags rather than a broken script
+        cells = []
+    flags = "".join(f" -dont_use {c}" for c in sorted(set(cells)))
+    _DONT_USE_CACHE[lib] = flags
+    return flags
 
 
 def _build_sdc_content(rtl_source: str, target_clock_mhz: float) -> str:
@@ -2549,7 +2582,7 @@ synth -run begin:fine
 memory_bram
 memory_map
 synth -run fine:
-dfflibmap -liberty {liberty}
+dfflibmap -liberty {liberty}{synth_dont_use_flags(liberty)}
 {abc_liberty_cmd(liberty, target_clock_mhz)}
 opt_clean
 stat -liberty {liberty}
