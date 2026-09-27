@@ -100,7 +100,7 @@ class _FakeHarnessAgent:
     def __init__(self, *a, **k):
         pass
 
-    async def generate(self, *, project_root, blocks, attempt=1, compiler_log="", run_log="", summary=None):
+    async def generate(self, *, project_root, blocks, attempt=1, compiler_log="", run_log="", summary=None, arch=False):
         _FakeHarnessAgent.calls.append((attempt, bool(compiler_log), bool(run_log)))
         d = Path(project_root) / "model" / "frd_eval"
         d.mkdir(parents=True, exist_ok=True)

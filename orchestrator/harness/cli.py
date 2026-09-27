@@ -407,6 +407,74 @@ def cmd_status(args) -> int:
     _emit(args, payload, "\n".join(lines))
     return EXIT_PASS
 
+
+def cmd_model(args) -> int:
+    """``coresmith model init|build|run|eval|register --arch`` -- the executable SAD as tools."""
+    from orchestrator.harness.tools import model as mt
+    db = _state_db(args)
+    verb = getattr(args, "verb", "build")
+    if not getattr(args, "arch", False):
+        _emit(args, {"error": "only --arch is implemented in step 2 (per-block refine comes with the uArch stage)"},
+              "error: pass --arch")
+        return EXIT_USAGE
+    if verb == "init":
+        res = mt.arch_init(db.root)
+        _emit(args, res, f"{res['path']} {'created' if res.get('created') else 'exists'}" + (f"\n  {res['hint']}" if res.get("hint") else ""))
+        return EXIT_PASS
+    if verb == "build":
+        res = mt.arch_build(db.root)
+        lines = [f"arch model build: {'OK' if res['ok'] else 'FAILED'}"] + ([res["error"]] if res.get("error") else []) \
+            + [f"  {q}" for q in res.get("problems") or []] + ([res["log"][-1500:]] if not res["ok"] and res.get("log") else [])
+        _emit(args, res, "\n".join(lines))
+        return EXIT_PASS if res["ok"] else (EXIT_INFRA if res.get("tool_error") else EXIT_FAIL)
+    if verb == "run":
+        res = mt.arch_run(db.root, ns=int(getattr(args, "ns", 10000) or 10000))
+        st = res.get("stats") or {}
+        lines = [f"arch model run: {'OK' if res['ok'] else 'FAILED'}"]
+        if st:
+            lines.append(f"  total_cycles={st.get('total_cycles')} dynamic_mw={st.get('dynamic_mw', 0):.3f} decerr={st.get('decerr')}")
+            for l in st.get("links") or []:
+                lines.append(f"  link {l['from']}->{l['to']}: {l['bytes']} B, {l['bytes_per_cycle']:.3f} B/cyc, util {l['utilization']:.2f}, max_out {l['max_outstanding']}")
+        elif res.get("log"):
+            lines.append(res["log"][-800:])
+        _emit(args, res, "\n".join(lines))
+        return EXIT_PASS if res["ok"] else EXIT_FAIL
+    if verb == "eval":
+        res = mt.arch_eval(db, db.root, timeout_s=getattr(args, "timeout", None), repairs=getattr(args, "repairs", None))
+        s = res.get("summary") or {}
+        lines = [f"arch FRD evaluation: {'PASS' if res.get('gate_ok') else 'NOT PASSING'}" + (f" ({res['error']})" if res.get("error") else "")]
+        if s:
+            lines.append(f"  {s['counts']} failed={s['failed'][:10]} unanswered_must={s['unanswered_must'][:10]}")
+        if res.get("report"):
+            lines.append(f"  report: {res['report']}")
+        _emit(args, res, "\n".join(lines))
+        return EXIT_PASS if res.get("gate_ok") else EXIT_FAIL
+    if verb == "register":
+        res = mt.arch_register(db, db.root)
+        _emit(args, res, f"arch_model registered v{res['artifact']['version']}" if res.get("ok") else f"error: {res.get('error')}")
+        return EXIT_PASS if res.get("ok") else EXIT_FAIL
+    return EXIT_USAGE
+
+
+def cmd_fabric(args) -> int:
+    """``coresmith fabric derive`` -- FabricSpec from the measured link table."""
+    from orchestrator.harness.tools import model as mt
+    db = _state_db(args)
+    res = mt.fabric_derive(db, db.root, name=getattr(args, "name", None) or None,
+                           headroom=float(getattr(args, "headroom", 2.0) or 2.0), write=not getattr(args, "dry_run", False))
+    if not res.get("ok"):
+        _emit(args, res, "fabric derive: FAILED " + str(res.get("error") or res.get("problems")))
+        return EXIT_FAIL
+    f = res["fabric"]
+    lines = [f"fabric '{f['name']}': {len(f['masters'])} masters x {len(f['slaves'])} slaves, data {f['data_width']} b, "
+             f"outstanding {f['max_outstanding']} (busiest link {f['derived_from']['busiest_link_bytes_per_cycle']:.3f} B/cyc, headroom {f['derived_from']['headroom']})"]
+    lines += [f"  master {m['name']}" for m in f["masters"]]
+    lines += [f"  slave {s['name']} {s['protocol']} @ {s['base']} +{s['size']}" for s in f["slaves"]]
+    if res.get("path"):
+        lines.append(f"  written: {res['path']}")
+    _emit(args, res, "\n".join(lines))
+    return EXIT_PASS
+
 def cmd_blocks(args) -> int:
     """The block queue from the project database."""
     db = _state_db(args)
@@ -639,6 +707,22 @@ def _register_state(sub) -> None:
     sn = ssub.add_parser("next"); _add_project_root(sn); _add_json(sn); sn.set_defaults(func=_run(cmd_stage), verb="next")
     stp = sub.add_parser("status", help="one-screen run status (stage, artifacts, items, questions, blockers)")
     _add_project_root(stp); _add_json(stp); stp.set_defaults(func=_run(cmd_status))
+    mp = sub.add_parser("model", help="executable models: init | build | run | eval | register (--arch)")
+    msub = mp.add_subparsers(dest="verb")
+    for v, h in (("init", "write a template model/arch/arch_model.json"), ("build", "generate + compile"),
+                 ("run", "run the smoke scenario; writes stats.json"), ("eval", "FRD evaluation (agent-authored harness)"),
+                 ("register", "register the arch_model artifact")):
+        mv = msub.add_parser(v, help=h); mv.add_argument("--arch", action="store_true")
+        if v == "run":
+            mv.add_argument("--ns", type=int, default=10000)
+        if v == "eval":
+            mv.add_argument("--timeout", type=int); mv.add_argument("--repairs", type=int)
+        _add_project_root(mv); _add_json(mv); mv.set_defaults(func=_run(cmd_model), verb=v)
+    fp = sub.add_parser("fabric", help="fabric tools: derive (FabricSpec from the arch model's link table)")
+    fsub = fp.add_subparsers(dest="verb")
+    fd = fsub.add_parser("derive"); fd.add_argument("--name"); fd.add_argument("--headroom", type=float, default=2.0)
+    fd.add_argument("--dry-run", dest="dry_run", action="store_true")
+    _add_project_root(fd); _add_json(fd); fd.set_defaults(func=_run(cmd_fabric), verb="derive")
     ls = sub.add_parser("leases", help="process leases held in the project database")
     _add_project_root(ls)
     _add_json(ls)

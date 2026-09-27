@@ -5982,61 +5982,16 @@ def frd_eval_enabled() -> bool:
 
 
 async def _frd_evaluation(pr: str, md, names: list[str]) -> dict:
-    """The FRD evaluated on the assembled model: requirement list -> agent-
-    authored harness (``model/frd_eval/*.cpp``) -> build -> run -> verdicts.
-    Repairs are bounded (CORESMITH_FRD_EVAL_REPAIRS, default 3) and only for
-    harness defects (compile error, crash, hang, missing DONE); a ``fail``
-    verdict is the finding. Never raises; returns the record the gate reads."""
+    """The FRD evaluated on the assembled SoC model (see
+    ``systemc_model.frd_eval.evaluate``); the verdicts are also recorded as
+    ``model_eval`` checks in the ontology."""
     from orchestrator.systemc_model import frd_eval as fe
-    rec: dict = {"enabled": True, "gate_ok": None}
-    frd = Path(pr) / "arch" / "frd_spec.md"
-    if not frd.exists():
-        rec["skipped"] = "no arch/frd_spec.md"
-        return rec
-    reqs = fe.extract_requirements(frd.read_text(encoding="utf-8", errors="replace"))
-    fe.write_requirements(md, reqs)
-    rec["requirements"] = len(reqs)
-    if not reqs:
-        rec["skipped"] = "the FRD has no identified requirements (**ID**: XXX-NNN blocks)"
-        return rec
-    timeout_s = int(os.environ.get("CORESMITH_FRD_EVAL_TIMEOUT_S", "1800") or 1800)
-    repairs = max(0, int(os.environ.get("CORESMITH_FRD_EVAL_REPAIRS", "3") or 3))
-    from orchestrator.langchain.agents.frd_eval_generator import FRDEvalGenerator
-    agent = FRDEvalGenerator()
-    compiler_log, run_log, summary, run = "", "", None, None
-    for attempt in range(1, repairs + 2):
-        if not (attempt == 1 and fe.harness_sources(md)):   # reuse an existing harness first
-            try:
-                await agent.generate(project_root=pr, blocks=names, attempt=attempt,
-                                     compiler_log=compiler_log, run_log=run_log, summary=summary)
-            except Exception as exc:  # noqa: BLE001
-                rec["error"] = f"harness author failed: {str(exc)[:300]}"
-                log(f"  [FRD-EVAL] {rec['error']}", RED)
-                break
-        b = await asyncio.to_thread(fe.build_harness, md)
-        rec["built"] = bool(b["ok"])
-        if not b["ok"]:
-            compiler_log, run_log = b["log"], ""
-            log(f"  [FRD-EVAL] harness build failed (attempt {attempt})", YELLOW)
-            continue
-        run = await asyncio.to_thread(fe.run_harness, md, timeout_s=timeout_s)
-        summary = fe.summarize(reqs, run["results"])
-        rec.update({"done": run["done"], "rc": run.get("rc"), "summary": summary})
-        if run["done"]:
-            break
-        compiler_log, run_log = "", run["log"]
-        log(f"  [FRD-EVAL] harness did not run to completion (attempt {attempt})", YELLOW)
-    if run is not None:
-        rec["report"] = str(fe.write_report(pr, md, reqs, run, summary))
-    rec["gate_ok"] = bool(run and run["done"] and summary and summary["gate_ok"])
-    if summary:
-        c = summary["counts"]
-        log(f"  [FRD-EVAL] {len(reqs)} requirement(s): pass={c['pass']} fail={c['fail']} "
-            f"not_testable={c['not_testable']} skipped={c['skipped']} unanswered_must={len(summary['unanswered_must'])}"
-            f" -> gate_ok={rec['gate_ok']}", GREEN if rec["gate_ok"] else RED)
-        if summary["failed"]:
-            log(f"  [FRD-EVAL] failing: {', '.join(summary['failed'][:12])}", RED)
-    return rec
+    try:
+        db = _db(pr)
+    except Exception:  # noqa: BLE001
+        db = None
+    return await fe.evaluate(pr, md, names, arch=False, db=db)
+
 
 
 def uarch_phase_gate_enabled() -> bool:

@@ -67,3 +67,20 @@ the same tables (`state_store/ontology.py`: `artifacts`, `items`, `item_links`,
 
 Every verb takes `--json`. Registration is content-hashed (`artifacts.version`
 bumps on change) and never edits the document.
+
+### Step 2: the executable SAD (`coresmith model … --arch`, `coresmith fabric derive`)
+
+`model/arch/arch_model.json` describes the chip as components (initiators,
+targets with address windows / service latency / bandwidth, `both` for DMA-like
+blocks, `instances`) and links (latency, bytes/cycle). `coresmith model build
+--arch` generates an abstract SystemC performance model (`systemc_model/
+arch_model.py`: generic initiators driven by a scenario body, targets, a fabric
+that accounts bytes / utilization / queueing / outstanding depth per link,
+energy proxies), `model run --arch` smokes it and writes `stats.json`, `model
+eval --arch` has the harness agent write the mission scenario
+(`model/arch/frd_eval/`) and records one `model_eval` check per FRD item, and
+`coresmith fabric derive` turns the measured link table into
+`.coresmith/fabric_spec.json` (masters, slaves, data width from the busiest
+link with headroom, outstanding depth) -- the fabric is an output of analysis.
+The `arch_model` stage cannot be left until every must-have FRD item has a
+model_eval verdict.

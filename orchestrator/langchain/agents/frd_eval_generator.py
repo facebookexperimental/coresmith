@@ -43,20 +43,46 @@ class FRDEvalGenerator:
                              timeout=scaled(3600, env="CORESMITH_FRD_EVAL_TIMEOUT"))
 
     async def generate(self, *, project_root: str, blocks: list[str], attempt: int = 1,
-                       compiler_log: str = "", run_log: str = "", summary: dict | None = None) -> dict:
-        parts = ["Write the FRD evaluation harness for this SoC's SystemC model.", "",
-                 "## Working files (read them)",
-                 "- Requirements to answer: model/frd_eval/requirements.json (every id needs a verdict line)",
-                 "- FRD: arch/frd_spec.md (acceptance criteria, the Mission-Scale Acceptance Test, model-check notes)",
-                 "- SoC model: model/soc_model_top.h (public u_<block> members; bind clk/rst_n; reset_all/dump_all)",
-                 "- Block model headers: model/<block>_model.h for: " + ", ".join(blocks),
-                 "- uArch specs: arch/uarch_specs/<block>.md (register maps, behaviour the model implements)",
-                 "- Contract slices: .coresmith/blocks/<block>/contract_slice.json",
-                 "- Mission stimulus: inputs/acceptance_stimulus.py and inputs/references/ (firmware, oracles, hashes)",
-                 "- Common header: model/cs_model_common.h (cs_transact, cs_mem::load_bin, cs_clock_period)",
-                 "", "## Output",
-                 "Write model/frd_eval/frd_eval.cpp (plus any frd_eval/*.h|*.cpp helpers you need) and reply with the JSON block.",
-                 "Build: `make -C model frd_eval/frd_eval`; run: `model/frd_eval/frd_eval` (no arguments)."]
+                       compiler_log: str = "", run_log: str = "", summary: dict | None = None,
+                       arch: bool = False) -> dict:
+        if arch:
+            parts = ["Write the FRD evaluation harness for this SoC's EXECUTABLE ARCHITECTURE MODEL (the abstract "
+                     "SystemC performance model, before decomposition).", "",
+                     "## Working files (read them)",
+                     "- Requirements to answer: model/arch/frd_eval/requirements.json (every id needs a verdict line)",
+                     "- FRD: arch/frd_spec.md (acceptance criteria, the Mission-Scale Acceptance Test, model-check notes)",
+                     "- Architecture spec: model/arch/arch_model.json (components, windows, latencies, links)",
+                     "- Model top: model/arch/arch_model_top.h -- `arch_model_top top`; initiators `top.u_<name>[i]` are "
+                     "`cs_arch_initiator` (set `->body = [&](cs_arch_initiator& me){...}` BEFORE sc_start; inside use "
+                     "me.issue/rd64/wr64/compute(cycles)/idle(cycles)); targets `top.u_<name>` (`load_bin`, `mem`); "
+                     "`top.stats_json(os, cycles)` gives per-link bytes/cycle, utilization, outstanding, energy",
+                     "- Primitives: model/arch/cs_arch_common.h",
+                     "- Workload data: inputs/acceptance_stimulus.py, inputs/references/ (measured triangle counts, oracle logs, "
+                     "frame sizes) -- derive the transaction mix from MEASURED numbers, cite them in the evidence",
+                     "", "## What the scenario must do",
+                     "Reproduce the mission's traffic at the architecture level: per frame/iteration the bytes each initiator "
+                     "moves to each target, the compute cycles it spends, its dependencies (e.g. GPU waits for the CPU's "
+                     "submission; video DMA reads a full frame per vsync). Run enough iterations for steady state (or the "
+                     "whole mission if it fits the time budget) and judge every PERF/IFACE/INV requirement the FRD's "
+                     "'Model check' lines make observable here; cycle-based PERF verdicts use the model's cycle "
+                     "accounting and say so. Print the stats JSON in the evidence of the requirements that depend on it.",
+                     "", "## Output",
+                     "Write model/arch/frd_eval/frd_eval.cpp (plus helpers under model/arch/frd_eval/) and reply with the JSON block.",
+                     "Build: `make -C model/arch frd_eval/frd_eval`; run: `model/arch/frd_eval/frd_eval` (no arguments)."]
+        else:
+            parts = ["Write the FRD evaluation harness for this SoC's SystemC model.", "",
+                     "## Working files (read them)",
+                     "- Requirements to answer: model/frd_eval/requirements.json (every id needs a verdict line)",
+                     "- FRD: arch/frd_spec.md (acceptance criteria, the Mission-Scale Acceptance Test, model-check notes)",
+                     "- SoC model: model/soc_model_top.h (public u_<block> members; bind clk/rst_n; reset_all/dump_all)",
+                     "- Block model headers: model/<block>_model.h for: " + ", ".join(blocks),
+                     "- uArch specs: arch/uarch_specs/<block>.md (register maps, behaviour the model implements)",
+                     "- Contract slices: .coresmith/blocks/<block>/contract_slice.json",
+                     "- Mission stimulus: inputs/acceptance_stimulus.py and inputs/references/ (firmware, oracles, hashes)",
+                     "- Common header: model/cs_model_common.h (cs_transact, cs_mem::load_bin, cs_clock_period)",
+                     "", "## Output",
+                     "Write model/frd_eval/frd_eval.cpp (plus any frd_eval/*.h|*.cpp helpers you need) and reply with the JSON block.",
+                     "Build: `make -C model frd_eval/frd_eval`; run: `model/frd_eval/frd_eval` (no arguments)."]
         if compiler_log:
             parts += ["", f"## Compiler errors from attempt {attempt - 1} (fix them in place)",
                       "```", compiler_log[-8000:], "```"]
@@ -74,10 +100,10 @@ class FRDEvalGenerator:
         with _tracer.start_as_current_span("FRD Evaluation Harness") as span:
             span.set_attribute("attempt", attempt)
             content = await self.llm.call(system=SYSTEM_PROMPT, prompt="\n".join(parts),
-                                          run_name="FRD Evaluation Harness"
+                                          run_name=("Architecture " if arch else "") + "FRD Evaluation Harness"
                                           + (f" (repair {attempt})" if attempt > 1 else ""))
         out = _parse(content)
-        srcs = sorted((Path(project_root) / "model" / "frd_eval").glob("*.cpp"))
+        srcs = sorted((Path(project_root) / "model" / ("arch/frd_eval" if arch else "frd_eval")).glob("*.cpp"))
         out["sources"] = [str(s) for s in srcs]
         out["written"] = bool(srcs)
         return out

@@ -169,13 +169,13 @@ def summarize(reqs: list[dict], results: list[dict]) -> dict:
             "gate_ok": not failed and not unanswered_must and not unreasoned}
 
 
-def write_report(project_root, model_dir, reqs: list[dict], run: dict, summary: dict) -> Path:
-    """``.coresmith/frd_eval.json`` (machine) + ``model/frd_eval/REPORT.md`` (human)."""
+def write_report(project_root, model_dir, reqs: list[dict], run: dict, summary: dict, *, name: str = "frd_eval") -> Path:
+    """``.coresmith/<name>.json`` (machine) + ``<model_dir>/frd_eval/REPORT.md`` (human)."""
     pr = Path(project_root)
     rec = {"summary": summary, "results": run.get("results", []), "done": run.get("done"), "rc": run.get("rc"),
-           "requirements": [q["id"] for q in reqs]}
+           "requirements": [q["id"] for q in reqs], "model_dir": str(model_dir)}
     (pr / ".coresmith").mkdir(exist_ok=True)
-    out = pr / ".coresmith" / "frd_eval.json"
+    out = pr / ".coresmith" / f"{name}.json"
     out.write_text(json.dumps(rec, indent=2))
     by_id = {r["id"]: r for r in run.get("results", [])}
     L = ["# FRD evaluation on the SystemC SoC model", "",
@@ -189,3 +189,82 @@ def write_report(project_root, model_dir, reqs: list[dict], run: dict, summary: 
         L.append(f"| {i} | - | {by_id[i]['status']} | (not an FRD id) {str(by_id[i].get('evidence',''))[:120]} |")
     (Path(model_dir) / "frd_eval" / "REPORT.md").write_text("\n".join(L) + "\n")
     return out
+
+
+def _log(msg: str) -> None:
+    try:
+        from orchestrator.langgraph.pipeline_helpers import GREEN, RED, YELLOW, log   # noqa: F401
+    except Exception:  # noqa: BLE001
+        print(msg)
+        return
+    colour = RED if ("gate_ok=False" in msg or "failing:" in msg or "author failed" in msg) \
+        else (YELLOW if "attempt" in msg else GREEN)
+    log(msg, colour)
+
+
+async def evaluate(project_root, model_dir, blocks: list[str], *, arch: bool = False, agent=None,
+                   timeout_s: int | None = None, repairs: int | None = None, db=None, record_sha: str = "") -> dict:
+    """The FRD evaluated on a model (the SoC LT model, or the executable SAD
+    when ``arch``): requirement list -> agent-authored harness
+    (``<model_dir>/frd_eval/*.cpp``) -> build -> run -> verdicts. Repairs are
+    bounded and only for harness defects (compile error, crash, hang, missing
+    DONE); a ``fail`` verdict is the finding. Never raises. When ``db`` is
+    given every verdict is recorded as a ``model_eval`` check (hash-bound)."""
+    md = Path(model_dir)
+    rec: dict = {"enabled": True, "gate_ok": None, "arch": arch}
+    frd = Path(project_root) / "arch" / "frd_spec.md"
+    if not frd.exists():
+        rec["skipped"] = "no arch/frd_spec.md"
+        return rec
+    reqs = extract_requirements(frd.read_text(encoding="utf-8", errors="replace"))
+    write_requirements(md, reqs)
+    rec["requirements"] = len(reqs)
+    if not reqs:
+        rec["skipped"] = "the FRD has no identified requirements (**ID**: XXX-NNN blocks)"
+        return rec
+    timeout_s = timeout_s or int(os.environ.get("CORESMITH_FRD_EVAL_TIMEOUT_S", "1800") or 1800)
+    repairs = max(0, int(os.environ.get("CORESMITH_FRD_EVAL_REPAIRS", "3") or 3) if repairs is None else repairs)
+    if agent is None:
+        from orchestrator.langchain.agents.frd_eval_generator import FRDEvalGenerator
+        agent = FRDEvalGenerator()
+    compiler_log, run_log, summary, run = "", "", None, None
+    for attempt in range(1, repairs + 2):
+        if not (attempt == 1 and harness_sources(md)):   # reuse an existing harness first
+            try:
+                await agent.generate(project_root=str(project_root), blocks=blocks, attempt=attempt,
+                                     compiler_log=compiler_log, run_log=run_log, summary=summary, arch=arch)
+            except Exception as exc:  # noqa: BLE001
+                rec["error"] = f"harness author failed: {str(exc)[:300]}"
+                _log(f"  [FRD-EVAL] {rec['error']}")
+                break
+        b = build_harness(md)
+        rec["built"] = bool(b["ok"])
+        if not b["ok"]:
+            compiler_log, run_log = b["log"], ""
+            _log(f"  [FRD-EVAL] harness build failed (attempt {attempt})")
+            continue
+        run = run_harness(md, timeout_s=timeout_s)
+        summary = summarize(reqs, run["results"])
+        rec.update({"done": run["done"], "rc": run.get("rc"), "summary": summary})
+        if run["done"]:
+            break
+        compiler_log, run_log = "", run["log"]
+        _log(f"  [FRD-EVAL] harness did not run to completion (attempt {attempt})")
+    if run is not None:
+        rec["report"] = str(write_report(project_root, md, reqs, run, summary, name="frd_eval_arch" if arch else "frd_eval"))
+    rec["gate_ok"] = bool(run and run["done"] and summary and summary["gate_ok"])
+    if summary:
+        c = summary["counts"]
+        _log(f"  [FRD-EVAL] {len(reqs)} requirement(s): pass={c['pass']} fail={c['fail']} "
+             f"not_testable={c['not_testable']} skipped={c['skipped']} unanswered_must={len(summary['unanswered_must'])}"
+             f" -> gate_ok={rec['gate_ok']}")
+        if summary["failed"]:
+            _log(f"  [FRD-EVAL] failing: {', '.join(summary['failed'][:12])}")
+    if db is not None and run is not None and run.get("done"):
+        for r in run["results"]:
+            try:
+                db.add_check(r["id"], "model_eval", r["status"], evidence=str(r.get("evidence") or ""),
+                             sha=record_sha, actor="frd_eval" + ("_arch" if arch else ""))
+            except Exception:  # noqa: BLE001
+                pass
+    return rec
