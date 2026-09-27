@@ -509,9 +509,12 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin):
             # B1: a primitive block (generated fabric) carries its kind and spec
             # through the queue; ordinary blocks are unchanged.
             extra = _uj(r["extra_json"], {}) or {}
-            for k in ("kind", "primitive", "fabric", "golden_exempt", "no_golden_reason"):
+            for k in ("kind", "primitive", "fabric", "golden_exempt", "no_golden_reason", "cluster", "instances", "owns"):
                 if k in extra and k not in d:
                     d[k] = extra[k]
+            # step 4: cluster workers group by ``cluster`` (explicit) or ``subsystem``
+            if r["subsystem"] and "subsystem" not in d:
+                d["subsystem"] = r["subsystem"]
             out.append(d)
         return out
 

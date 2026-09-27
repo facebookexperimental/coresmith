@@ -97,3 +97,19 @@ warm) with the exact blockers until the run enters `blocks`, is stopped
 and `status.json` live under `.coresmith/architect/`. With
 `CORESMITH_ARCHITECT_SITTING=1` the pipeline's `init_tier` parks
 (`architect_stage_pending`) until the stage machine has reached `blocks`.
+
+### Step 4: the block gate as a tool and cluster workers
+
+`coresmith block-status <b>` / `coresmith block-done <b>` (`harness/tools/
+block.py`): the gate a block must pass -- contract conformance, lint +
+simulation with the VIPs (coverage), full synthesis on the frozen flow,
+pre-layout timing -- publishes `best` (the same record `block_done_node`
+writes) and a `block_dv` check on every FRD item the block owns; refusals come
+with a stage report and tool failures are typed `tool_error`. With
+`CORESMITH_FANOUT=cluster` (default when the architect sitting is on) the tier
+loop sends ONE cluster worker per `cluster`/`subsystem` group
+(`process_cluster_node` -> `architect/cluster.py`: a resumable claude session
+with the cluster prompt `cluster_worker.md` + the RTL/TB/timing guidance as
+appendix) instead of one subgraph per block; primitives still materialize on
+the block path. `block_specs()` now carries `subsystem`, `cluster`,
+`instances` and `owns`.

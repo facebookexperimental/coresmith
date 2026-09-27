@@ -502,6 +502,35 @@ def cmd_architect(args) -> int:
     _emit(args, st, json.dumps(st, indent=2, default=str))
     return EXIT_PASS
 
+
+def cmd_block_status(args) -> int:
+    from orchestrator.harness.tools.block import block_status
+    db = _state_db(args)
+    st = block_status(db, db.root, args.block)
+    lines = [f"{st['block']}: {'DONE' if st['done'] else 'pending'} tier={st['tier']} cluster={st['cluster'] or '-'}"
+             + (" (primitive)" if st["primitive"] else ""),
+             f"  rtl {st['rtl_path']} {'ok' if st['rtl_exists'] else 'MISSING'}; tb {st['tb_path']} {'ok' if st['tb_exists'] else 'MISSING'}",
+             f"  edges {len(st['edges'])}, vips {len(st['vips'])}, owns {', '.join(st['owned_items']) or '-'}, attempts {st['attempts']}"]
+    if st.get("best"):
+        lines.append(f"  best: wns {st['best'].get('wns_ns')} gates {st['best'].get('gate_count')} attempt {st['best'].get('attempt')}")
+    _emit(args, st, "\n".join(lines))
+    return EXIT_PASS
+
+
+def cmd_block_done(args) -> int:
+    from orchestrator.harness.tools.block import block_done
+    db = _state_db(args)
+    res = block_done(db, db.root, args.block, target_clock_mhz=float(getattr(args, "target_clock_mhz", 50.0) or 50.0),
+                     seed=getattr(args, "seed", None), actor=getattr(args, "actor", "") or "cluster")
+    lines = [f"block-done {args.block}: {'PUBLISHED' if res['ok'] else 'REFUSED'}" + (f" -- {res.get('reason')}" if res.get("reason") else "")]
+    for k, v in (res.get("stages") or {}).items():
+        lines.append(f"  {k:<12} {'ok' if v.get('ok') else ('tool_error' if v.get('tool_error') else 'FAIL')} "
+                     + " ".join(f"{kk}={vv}" for kk, vv in v.items() if kk not in ("ok", "details", "log") and vv not in (None, "", [], {}))[:200])
+    _emit(args, res, "\n".join(lines))
+    if res["ok"]:
+        return EXIT_PASS
+    return EXIT_INFRA if res.get("tool_error") else EXIT_FAIL
+
 def cmd_blocks(args) -> int:
     """The block queue from the project database."""
     db = _state_db(args)
@@ -758,6 +787,12 @@ def _register_state(sub) -> None:
     _add_project_root(a1); _add_json(a1); a1.set_defaults(func=_run(cmd_architect), verb="start")
     a2 = asb.add_parser("status"); _add_project_root(a2); _add_json(a2); a2.set_defaults(func=_run(cmd_architect), verb="status")
     a3 = asb.add_parser("stop"); _add_project_root(a3); _add_json(a3); a3.set_defaults(func=_run(cmd_architect), verb="stop")
+    bs = sub.add_parser("block-status", help="one block: paths, edges, VIPs, owned items, published pass")
+    bs.add_argument("block"); _add_project_root(bs); _add_json(bs); bs.set_defaults(func=_run(cmd_block_status))
+    bd = sub.add_parser("block-done", help="the block gate: conformance -> DV -> synth -> timing; publishes best on a pass")
+    bd.add_argument("block"); bd.add_argument("--target-clock-mhz", dest="target_clock_mhz", type=float, default=50.0)
+    bd.add_argument("--seed", type=int); bd.add_argument("--actor", default="")
+    _add_project_root(bd); _add_json(bd); bd.set_defaults(func=_run(cmd_block_done))
     ls = sub.add_parser("leases", help="process leases held in the project database")
     _add_project_root(ls)
     _add_json(ls)
