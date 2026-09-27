@@ -122,3 +122,42 @@ def test_fan_out_from_one_output_is_not_a_hazard(tmp_path):
     asm = SI.assemble_top(tmp_path, top_name="chip_top", blocks=["req", "rsp", "pads", "x"],
                           edges=[_EDGE, _PIN_EDGE, two_drivers], rtl_paths={}, out_dir=tmp_path / "shell2")
     assert any("driven from two edges" in e for e in asm.wiring_errors)
+
+
+def _sram_rsp_rtl(tmp_path):
+    """The responder with its rdata held in the engine's cs_sram_1rw1r."""
+    rsp = _rsp_rtl(tmp_path)
+    rsp.write_text(rsp.read_text().replace("endmodule", """  wire [7:0] mem_q;
+  cs_sram_1rw1r #(.WIDTH(8), .DEPTH(16)) u_mem (
+    .clk(clk), .ce0(s_q_req_valid), .we0(s_q_req_valid), .addr0(s_q_addr[3:0]),
+    .wdata0(s_q_addr), .wmask0(1'b1), .rdata0(), .ce1(1'b1), .addr1(s_q_addr[3:0]), .rdata1(mem_q));
+endmodule"""))
+    return rsp
+
+
+def test_engine_primitive_lib_joins_the_shell_sources(tmp_path):
+    from orchestrator.langgraph.sram_wrapper import engine_lib_sources, wrapper_lib_path
+    rsp = _sram_rsp_rtl(tmp_path)
+    plain = _rsp_rtl(tmp_path, name="plain")
+    assert engine_lib_sources([str(rsp)]) == [wrapper_lib_path()]
+    assert engine_lib_sources([str(plain)]) == []                       # no primitive, no lib
+    assert engine_lib_sources([str(rsp), wrapper_lib_path()]) == []     # never twice
+    if shutil.which("verilator") is None:
+        pytest.skip("verilator not installed")
+    # live-run defect: every block using cs_sram_1rw1r failed shell elaboration
+    # with MODMISSING although it passed its own DV/synth against rtl_lib
+    asm = SI.assemble_top(tmp_path, top_name="chip_top", blocks=["req", "rsp"], edges=[_EDGE],
+                          rtl_paths={"rsp": str(rsp)}, out_dir=tmp_path / "shell")
+    res = SI.elaborate(asm)
+    assert res["ran"] and res["ok"], res
+
+
+def test_missing_engine_module_is_not_blamed_on_the_block():
+    rsp_err = "%Error-MODMISSING: /p/rtl/rsp.v:177:3: Cannot find file containing module: '{}'"
+    errs = [rsp_err.format(m) for m in ("cs_sram_1rw1r", "cs_rom_1r", "cs_fabric_soc", "cs_mem_macro_shell")]
+    blamed, engine = SI.attribute_errors(errs, ["req", "rsp"])
+    assert blamed == [] and engine == errs
+    # a module the block itself should have provided is still the block's
+    own = rsp_err.format("rsp_helper")
+    blamed, engine = SI.attribute_errors([own, "rsp: contract port 's_q_addr' missing from rsp.v"], ["rsp"])
+    assert [b for b, _ in blamed] == ["rsp", "rsp"] and engine == []

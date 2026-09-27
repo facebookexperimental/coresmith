@@ -76,6 +76,7 @@ from orchestrator.langgraph.integration_helpers import (
     load_architecture_connections,
     module_for_block,
     parse_verilog_ports,
+    primitive_rtl_target,
     run_integration_simulation,
 )
 from orchestrator.langgraph.pipeline_helpers import (
@@ -2295,7 +2296,7 @@ async def materialize_primitive_node(state: BlockState) -> dict:
         errs = spec.validate()
         if errs:
             raise ValueError("invalid FabricSpec: " + "; ".join(errs))
-        rtl_target = pr / (block.get("rtl_target") or f"rtl/interconnect/{spec.module_name}.v")
+        rtl_target = _block_rtl_target(pr, block)
         tb_target = pr / (block.get("testbench") or f"tb/cocotb/test_{spec.module_name}.py")
         art = await asyncio.to_thread(generate_fabric, spec, rtl_target.parent, tb_dir=tb_target.parent)
         rtl_target.parent.mkdir(parents=True, exist_ok=True)
@@ -6137,6 +6138,15 @@ def _shell_top_name(pr: str) -> str:
         return "chip_top"
 
 
+def _block_rtl_target(pr, block: dict) -> Path:
+    """Where a block's RTL lives: its ``rtl_target``, else a primitive fabric's
+    ``rtl/interconnect/<module>.v`` (materialize_primitive_node), else
+    ``rtl/<name>.v``."""
+    if block.get("rtl_target"):
+        return Path(pr) / block["rtl_target"]
+    return primitive_rtl_target(pr, block) or Path(pr) / "rtl" / f"{block.get('name')}.v"
+
+
 def _shell_assemble(pr: str, block_queue: list[dict], *, tier=None, all_real: bool = False):
     """Assemble the shell top: real RTL for blocks with a published pass
     (``best``), stubs for the rest. Returns (assembly, elab, snapshot) or None
@@ -6156,7 +6166,7 @@ def _shell_assemble(pr: str, block_queue: list[dict], *, tier=None, all_real: bo
         name = b.get("name")
         if not name:
             continue
-        target = Path(pr) / (b.get("rtl_target") or f"rtl/{name}.v")
+        target = _block_rtl_target(pr, b)
         if target.exists() and (all_real or db.result(name, "best")):
             rtl_paths[name] = str(target)
     asm = assemble_top(pr, top_name=_shell_top_name(pr), blocks=names, edges=edges,
@@ -6218,32 +6228,35 @@ async def shell_integration_update_node(state: OrchestratorState) -> dict:
     if res is None:
         return {}
     asm, elab, snap = res
+    from orchestrator.langgraph.shell_integration import attribute_errors
     real = [b for b in asm.instantiated if b not in asm.stubs]
-    failures = []
-    for err in asm.wiring_errors + (elab.get("errors") or []):
-        blk = next((b for b in real if err.startswith(f"{b}:") or f"u_{b}" in err or f"{b}." in err), None)
-        if blk:
-            failures.append({"block": blk, "category": "INTEGRATION_CONTRACT", "detail": err, "tier": tier})
+    blamed, engine_errors = attribute_errors(asm.wiring_errors + (elab.get("errors") or []), real)
+    failures = [{"block": blk, "category": "INTEGRATION_CONTRACT", "detail": err, "tier": tier}
+                for blk, err in blamed]
     ok = not asm.wiring_errors and elab.get("ok") is not False
     log(f"  [SHELL] {asm.module_name}: {len(real)} real / {len(asm.stubs)} stub block(s); elaboration "
         f"{'CLEAN' if elab.get('ok') else elab.get('reason') or 'ERRORS'}"
-        + (f"; {len(failures)} block-attributable contract failure(s)" if failures else ""),
+        + (f"; {len(failures)} block-attributable contract failure(s)" if failures else "")
+        + (f"; {len(engine_errors)} engine/tool error(s), not attributed to blocks" if engine_errors else ""),
         GREEN if ok else RED)
     for f in failures[:8]:
         log(f"    {f['block']}: {f['detail']}", RED)
+    for e in engine_errors[:8]:
+        log(f"    ENGINE: {e}", RED)
     write_graph_event(pr, "Shell Integration", "graph_node_exit", {
         "phase": "update", "tier": tier, "ok": ok, "real": real, "stubs": asm.stubs,
-        "failures": failures[:8]})
-    # Step 6 gate (post-mortem lesson #1): with the architect sitting on, a
-    # tier whose assembled top does not elaborate does not advance -- the run
-    # parks with the errors so the cause is fixed first (coresmith3: MODMISSING
-    # cs_sram_1rw1r for 40+ min while tiers kept advancing).
-    if architect_sitting_enabled() and (elab.get("ok") is False or asm.wiring_errors):
+        "failures": failures[:8], "engine_errors": engine_errors[:8]})
+    # With the architect sitting on, a tier whose assembled top does not
+    # elaborate does not advance: park with the errors so the cause is fixed
+    # first. Errors attributed to the engine's own primitives (engine_errors)
+    # are a tool problem, not a design failure, and do not park.
+    _design_errors = [e for e in (elab.get("errors") or []) if e not in (engine_errors or [])]
+    if architect_sitting_enabled() and (asm.wiring_errors or (elab.get("ok") is False and _design_errors)):
         _park({"type": "shell_not_elaborated", "tier": tier,
-               "wiring_errors": list(asm.wiring_errors)[:20], "elab_errors": list(elab.get("errors") or [])[:20],
+               "wiring_errors": list(asm.wiring_errors)[:20], "elab_errors": _design_errors[:20],
                "supported_actions": ["retry", "skip", "abort"],
                "outer_agent_guidance": "The chip top assembled from the published blocks does not elaborate; "
-                                       "fix the cause (missing library/wrapper, port mismatch) and retry."},
+                                       "fix the cause (missing wrapper, port mismatch) and retry."},
               node="shell_update")
     out: dict = {"shell_snapshot": snap}
     if failures:
@@ -7477,6 +7490,13 @@ async def _prepare_integration_check(state: OrchestratorState) -> dict:
         connections, design_name = await asyncio.to_thread(
             load_architecture_connections, pr
         )
+        # The task's declared top (CORESMITH_TOP_MODULE / task.yaml), not the
+        # "chip_top" default; an unreadable declaration is reported at adoption.
+        try:
+            from orchestrator.harness.top_module import declared_top
+            design_name = declared_top(pr) or design_name
+        except Exception:  # noqa: BLE001
+            pass
 
         if not connections and len(passed_blocks) < 1:
             log("  [INTEGRATION] No architecture connections found -- "
@@ -8031,7 +8051,11 @@ async def _prepare_integration_check(state: OrchestratorState) -> dict:
                     if _lint.get("clean"):
                         log(f"  [INTEGRATION] deterministic top {_asm.module_name}: "
                             f"{len(_asm.instantiated)} blocks, {_asm.wires} nets, lint CLEAN", GREEN)
-                        _blocks_paths = {b: rtl_paths[b] for b in _asm.instantiated if b in rtl_paths}
+                        # Adopt what the shell instantiated: a boundary block
+                        # named like the top is its renamed <top>_core copy, never
+                        # the original (a second `module <top>`), and hierarchy
+                        # adoption checks module names, not block names.
+                        _blocks_paths = dict(_asm.block_sources)
                         integration_result = {
                             "design_name": design_name,
                             "top_module": _asm.module_name,
@@ -8057,7 +8081,7 @@ async def _prepare_integration_check(state: OrchestratorState) -> dict:
                         try:
                             write_candidate_receipt(pr, _asm.module_name, _asm.rtl_path, _blocks_paths,
                                                     note="deterministic shell assembly",
-                                                    expected_blocks=set(_asm.instantiated),
+                                                    expected_blocks=set(_asm.block_modules.values()),
                                                     integration_result=integration_result)
                         except (ValueError, OSError) as _exc:
                             log(f"  [INTEGRATION] candidate receipt failed ({_exc}); "

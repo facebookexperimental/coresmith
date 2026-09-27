@@ -298,15 +298,18 @@ def assemble_top(project_root, *, top_name: str, blocks: list[str], edges: list[
 
 
 def elaborate(assembly: Assembly, *, timeout_s: int = 600) -> dict:
-    """Verilator lint of the assembled top with its sources."""
+    """Verilator lint of the assembled top with its sources, plus the engine
+    primitive library the blocks were verified against (cs_sram_* etc.)."""
     import shutil
     import subprocess
+
+    from orchestrator.langgraph.sram_wrapper import engine_lib_sources
     vb = shutil.which("verilator")
     if not vb:
         return {"ran": False, "ok": None, "reason": "verilator not installed"}
     cmd = [vb, "--lint-only", "-Wno-fatal", "-Wno-WIDTH", "-Wno-UNUSED", "-Wno-UNOPTFLAT",
            "-Wno-PINMISSING", "-Wno-DECLFILENAME", "--top-module", assembly.module_name,
-           assembly.rtl_path, *assembly.sources]
+           assembly.rtl_path, *assembly.sources, *engine_lib_sources(assembly.sources)]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -314,6 +317,31 @@ def elaborate(assembly: Assembly, *, timeout_s: int = 600) -> dict:
     errs = [ln for ln in (p.stdout + p.stderr).splitlines() if "%Error" in ln]
     return {"ran": True, "ok": p.returncode == 0 and not errs, "errors": errs[:20],
             "log": (p.stdout + p.stderr)[-4000:]}
+
+
+_MODMISSING_RE = re.compile(r"Cannot find file containing module:\s*'?(\w+)'?")
+
+
+def attribute_errors(errors: list[str], real_blocks: list[str]) -> tuple[list[tuple[str, str]], list[str]]:
+    """Split assembly/elaboration errors into ``[(block, error)]`` the block
+    must answer for, and engine/tool errors that no block caused.
+
+    A missing module the engine itself supplies (``cs_sram_*``, ``cs_fabric_*``,
+    ...) is an engine/tool problem -- the block passed its own gates against
+    that library -- so it must not send the block back for another round.
+    """
+    from orchestrator.langgraph.sram_wrapper import is_engine_module
+    blamed: list[tuple[str, str]] = []
+    engine: list[str] = []
+    for err in errors:
+        m = _MODMISSING_RE.search(err)
+        if m and is_engine_module(m.group(1)):
+            engine.append(err)
+            continue
+        blk = next((b for b in real_blocks if err.startswith(f"{b}:") or f"u_{b}" in err or f"{b}." in err), None)
+        if blk:
+            blamed.append((blk, err))
+    return blamed, engine
 
 
 def write_snapshot(project_root, assembly: Assembly, elab: dict, *, tier=None) -> dict:

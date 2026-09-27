@@ -128,6 +128,40 @@ def wrapper_lib_path() -> str:
     return str(Path(__file__).resolve().parent / "rtl_lib" / "cs_sram.v")
 
 
+def engine_lib_sources(sources) -> list[str]:
+    """The engine primitive library a source set must be read with -- the same
+    ``[wrapper_lib_path()]`` block lint/DV add -- or ``[]``.
+
+    Needed when any source instantiates a CoreSmith memory primitive; not
+    added twice, nor when a source already defines the primitives (an
+    inlined copy would be a duplicate definition).
+    """
+    lib = wrapper_lib_path()
+    paths = [str(p) for p in sources or () if p]
+    if any(Path(p).resolve() == Path(lib) for p in paths):
+        return []
+    text = "".join(Path(p).read_text(errors="replace") for p in paths if Path(p).is_file())
+    if not uses_wrapper(text) or re.search(r"\bmodule\s+cs_(?:sram|mem|fpmem|rom)_", text):
+        return []
+    return [lib] if Path(lib).is_file() else []
+
+
+# Modules the engine itself supplies: the rtl_lib memory family (parsed from
+# the lib, plus the prefixes as a floor) and the generated fabric primitives.
+_ENGINE_MODULE_RE = re.compile(r"^cs_(?:sram|mem|fpmem|rom|fabric)_\w+$")
+
+
+def is_engine_module(name: str) -> bool:
+    """True if ``name`` is a module the engine provides, never a block's own."""
+    if _ENGINE_MODULE_RE.match(name or ""):
+        return True
+    try:
+        lib_src = Path(wrapper_lib_path()).read_text(errors="ignore")
+    except OSError:
+        return False
+    return re.search(rf"^\s*module\s+{re.escape(name)}\b", lib_src, re.MULTILINE) is not None
+
+
 # A module spanning `module <name> ... endmodule`. Verilog modules don't nest,
 # so a non-greedy match to the first endmodule is correct.
 _MODULE_RE = re.compile(r"\bmodule\s+(\w+)\b(.*?)\bendmodule\b", re.DOTALL)

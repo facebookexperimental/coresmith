@@ -97,3 +97,22 @@ class TestShellNodes:
                 "input wire [7:0] m_q_rdata);\n  assign m_q_addr = 0; assign m_q_req_valid = 0;\nendmodule\n")
         asm, elab, snap = pg._shell_assemble(str(tmp_path), _QUEUE, tier="final", all_real=True)
         assert asm.stubs == [] and asm.wiring_errors == [] and snap["real_blocks"] == ["req", "rsp"]
+
+
+def test_engine_primitive_modmissing_does_not_requeue_blocks(tmp_path, monkeypatch):
+    """The live-run symptom: an engine-lib MODMISSING in a published block's
+    file became an INTEGRATION_CONTRACT failure and re-ran the tier."""
+    from orchestrator.langgraph import shell_integration as SI
+    monkeypatch.setenv("CORESMITH_SHELL_INTEGRATION", "1")
+    monkeypatch.delenv("CORESMITH_TOP_MODULE", raising=False)
+    db = _project(tmp_path)
+    (tmp_path / "rtl").mkdir()
+    (tmp_path / "rtl" / "rsp.v").write_text(
+        (_FX / "responder.v").read_text().replace("module responder", "module rsp"))
+    db.set_result("rsp", "best", {"sim_passed": True, "done": True})
+    err = (f"%Error-MODMISSING: {tmp_path}/rtl/rsp.v:12:3: "
+           "Cannot find file containing module: 'cs_sram_1rw1r'")
+    monkeypatch.setattr(SI, "elaborate", lambda asm, **kw: {"ran": True, "ok": False, "errors": [err]})
+    out = asyncio.run(pg.shell_integration_update_node(_state(tmp_path)))
+    assert "integration_contract_failures" not in out
+    assert out["shell_snapshot"]["elaborated"] is False    # still reported, just not blamed
