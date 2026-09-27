@@ -531,6 +531,17 @@ def cmd_block_done(args) -> int:
         return EXIT_PASS
     return EXIT_INFRA if res.get("tool_error") else EXIT_FAIL
 
+
+def cmd_schema(args) -> int:
+    """``coresmith schema <kind>`` -- the document shape ``register`` expects."""
+    from orchestrator.harness.tools.schema import SCHEMAS, schema
+    kind = getattr(args, "kind", "") or ""
+    if not kind:
+        _emit(args, {"kinds": sorted(SCHEMAS)}, "kinds: " + ", ".join(sorted(SCHEMAS)) + "\n(coresmith schema <kind>)")
+        return EXIT_PASS
+    _emit(args, {"kind": kind, "schema": schema(kind)}, schema(kind))
+    return EXIT_PASS if kind in SCHEMAS else EXIT_USAGE
+
 def cmd_blocks(args) -> int:
     """The block queue from the project database."""
     db = _state_db(args)
@@ -793,6 +804,8 @@ def _register_state(sub) -> None:
     bd.add_argument("block"); bd.add_argument("--target-clock-mhz", dest="target_clock_mhz", type=float, default=50.0)
     bd.add_argument("--seed", type=int); bd.add_argument("--actor", default="")
     _add_project_root(bd); _add_json(bd); bd.set_defaults(func=_run(cmd_block_done))
+    sc = sub.add_parser("schema", help="the document shape `register <kind>` expects (prd|sad|frd|ers|block_diagram|contracts|abi|uarch|arch_model)")
+    sc.add_argument("kind", nargs="?", default=""); _add_json(sc); sc.set_defaults(func=_run(cmd_schema))
     ls = sub.add_parser("leases", help="process leases held in the project database")
     _add_project_root(ls)
     _add_json(ls)

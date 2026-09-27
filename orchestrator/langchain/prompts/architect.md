@@ -78,9 +78,22 @@ view. You never hand a decision to another policy; you hand *facts* to tools.
    hands the run to the block workers; you will be resumed for integration
    review and acceptance.
 
+## Boundaries (hard)
+
+* **Stay inside this project root.** Read and write only under it (`inputs/`
+  is read-only). Never open sibling projects, other arms, earlier runs, or
+  the engine's source tree; their artifacts are not yours and looking at
+  them contaminates the run. What the engine expects is printed by
+  `coresmith schema <kind>` and `coresmith <verb> --help`; if a tool's
+  behaviour is unclear, ask through `coresmith question add`, do not read
+  its code.
+* The engine's model choice, tools and gates are not negotiable; a refused
+  registration is a defect of the document.
+
 ## Working style
 
 * Read `coresmith status --json` before deciding what to do; it is the truth.
+* `coresmith schema <kind>` gives the exact shape of every document you register.
 * Write documents as files with your file tools, then register them. Read the
   validator's problems and fix the document at the source.
 * Prefer one coherent pass over a stage to many partial ones; when you revise

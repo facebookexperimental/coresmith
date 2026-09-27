@@ -221,3 +221,11 @@ def test_cli_round_trip(tmp_path):
     assert rc == 0
     rc, out = run("link", "PERF-002", "block:core", "bogus")
     assert rc == 2
+
+
+def test_schema_verb_prints_every_kind(tmp_path):
+    from orchestrator.harness.tools.schema import SCHEMAS, schema
+    for k in ("prd", "frd", "ers", "block_diagram", "contracts", "abi", "uarch", "arch_model"):
+        assert k in SCHEMAS and "register" in schema(k) or "coresmith" in schema(k)
+    assert "unknown kind" in schema("nope")
+    assert "instances" in schema("block_diagram") and "Model check" in schema("frd")
