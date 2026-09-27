@@ -13,6 +13,10 @@ from dataclasses import asdict, dataclass, field
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 MASTER_PROTOCOLS = ("axi4",)
 SLAVE_PROTOCOLS = ("axi4", "axi_lite", "apb")
+# axi_xbar LatencyMode (axi_pkg::xbar_latency_e). cut_all_ports registers every
+# channel (AW/W/B/AR/R) at both crossbar sides; cut_all_ax leaves W/B/R
+# combinational end to end and misses timing on wide fabrics.
+LATENCY_MODES = {"cut_all_ports": "CUT_ALL_PORTS", "cut_all_ax": "CUT_ALL_AX"}
 
 
 def _int(v, default=None):
@@ -48,9 +52,11 @@ class FabricSpec:
     data_width: int = 32
     addr_width: int = 32
     user_width: int = 1
-    ordering: str = "per_id"      # per_id | none (an axi_cut per slave port)
+    ordering: str = "per_id"      # per_id | none (an axi_cut per axi4 slave port)
     err_slave: bool = True        # unmapped addresses answer DECERR
     max_outstanding: int = 4      # per slave port
+    latency_mode: str = "cut_all_ports"   # see LATENCY_MODES
+    slave_cut: bool = True        # an axi_cut on every slave port (before its AXI-Lite/APB converter)
 
     # ------------------------------------------------------------ helpers
     @property
@@ -83,6 +89,8 @@ class FabricSpec:
             errs.append(f"addr_width {self.addr_width} unusual")
         if self.ordering not in ("per_id", "none"):
             errs.append(f"ordering {self.ordering!r}")
+        if self.latency_mode not in LATENCY_MODES:
+            errs.append(f"latency_mode {self.latency_mode!r} not in {tuple(LATENCY_MODES)}")
         names: set[str] = set()
         for m in self.masters:
             if not _NAME.match(m.name or ""):
@@ -137,7 +145,9 @@ class FabricSpec:
                    data_width=_int(d.get("data_width"), 32), addr_width=_int(d.get("addr_width"), 32),
                    user_width=_int(d.get("user_width"), 1), ordering=str(d.get("ordering") or "per_id"),
                    err_slave=bool(d.get("err_slave", True)),
-                   max_outstanding=_int(d.get("max_outstanding"), 4))
+                   max_outstanding=_int(d.get("max_outstanding"), 4),
+                   latency_mode=str(d.get("latency_mode") or "cut_all_ports").lower(),
+                   slave_cut=bool(d.get("slave_cut", True)))
 
     def digest(self) -> str:
         return hashlib.sha256(json.dumps(self.to_json(), sort_keys=True).encode()).hexdigest()[:16]

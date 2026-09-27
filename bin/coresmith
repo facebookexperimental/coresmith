@@ -547,7 +547,8 @@ def main():
     _add_project_root(r1)
     r1.add_argument("--blocks-file", default="")
     r1.add_argument("--max-attempts", type=int, default=5)
-    r1.add_argument("--target-clock-mhz", type=float, default=50.0)
+    r1.add_argument("--target-clock-mhz", type=float, default=None,
+                    help="default: inputs/task.yaml target_clock_mhz, else 50")
     r1.add_argument("--force", action="store_true",
                     help="discard an existing run and start fresh (default: "
                          "refuse if a run already exists -- resume it instead)")

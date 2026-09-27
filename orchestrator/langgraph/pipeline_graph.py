@@ -94,6 +94,7 @@ from orchestrator.langgraph.pipeline_helpers import (
     generate_uarch_spec,
     lint_rtl,
     log,
+    resolve_run_clock_mhz,
     run_simulation,
     synthesize_block,
 )
@@ -2326,7 +2327,8 @@ def _primitive_spec_markdown(block_name: str, spec, art) -> str:
               "- INV-FABRIC-ORDER-002: responses to one master with the same id return in issue order.",
               "", "### 6a. Output Timing Contract", "",
               "All channels are AXI valid/ready; latency through the crossbar is 1 cycle per cut "
-              "(CUT_ALL_AX). The generated testbench measures throughput.", ""]
+              f"(latency_mode {spec.latency_mode}; slave_cut {spec.slave_cut}). The generated "
+              "testbench measures throughput.", ""]
     return "\n".join(lines)
 
 
@@ -4102,7 +4104,7 @@ async def synthesize_node(state: BlockState) -> dict:
             result = await asyncio.to_thread(
                 synthesize_block,
                 block, rtl_path,
-                target_clock_mhz=state.get("target_clock_mhz", 50.0),
+                target_clock_mhz=resolve_run_clock_mhz(state.get("target_clock_mhz"), _pr(state)),
                 attempt=state["attempt"],
             )
 
@@ -5059,7 +5061,7 @@ async def timing_fix_node(state: BlockState) -> dict:
         try:
             fix = await TimingClosureAgent().fix_timing(
                 block_name=block_name, rtl_source=rtl_src, sta_report=sta_report,
-                target_clock_mhz=float(state.get("target_clock_mhz", 50.0)),
+                target_clock_mhz=resolve_run_clock_mhz(state.get("target_clock_mhz"), _pr(state)),
                 worst_slack_ns=None,
             )
         except Exception as exc:  # noqa: BLE001 - the loop must not crash the block
@@ -6372,7 +6374,7 @@ async def process_cluster_node(state: OrchestratorState) -> dict:
     cluster = state["cluster"]
     names = [b["name"] for b in state.get("cluster_blocks") or []]
     write_graph_event(pr, "Cluster Worker", "graph_node_enter", {"cluster": cluster, "blocks": names})
-    sess = ClusterSession(pr, cluster, names, target_clock_mhz=float(state.get("target_clock_mhz") or 50.0),
+    sess = ClusterSession(pr, cluster, names, target_clock_mhz=resolve_run_clock_mhz(state.get("target_clock_mhz"), pr),
                           max_turns=int(os.environ.get("CORESMITH_CLUSTER_MAX_TURNS", "400") or 400),
                           max_sittings=int(os.environ.get("CORESMITH_CLUSTER_MAX_SITTINGS", "10") or 10))
     st = await asyncio.to_thread(sess.run)

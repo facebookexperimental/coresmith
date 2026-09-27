@@ -488,7 +488,7 @@ def _apply_run_env(where: str) -> list[str]:
 
 class StartRequest(BaseModel):
     max_attempts: int = 5
-    target_clock_mhz: float = 50.0
+    target_clock_mhz: float | None = None   # None: inputs/task.yaml target_clock_mhz, else 50
     blocks_file: str = ""
     force: bool = False
 
@@ -691,9 +691,10 @@ async def run_start(req: StartRequest):
     events_path.parent.mkdir(parents=True, exist_ok=True)
     events_path.write_text("")
 
+    from orchestrator.langgraph.pipeline_helpers import resolve_run_clock_mhz
     initial_state = {
         "project_root": _PROJECT_ROOT,
-        "target_clock_mhz": req.target_clock_mhz,
+        "target_clock_mhz": resolve_run_clock_mhz(req.target_clock_mhz, _PROJECT_ROOT),
         "max_attempts": req.max_attempts,
         "block_queue": block_queue,
         "tier_list": [],

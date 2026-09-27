@@ -60,6 +60,11 @@ Emit ONE block per bus, for example:
   disjoint. Unmapped addresses answer DECERR (`err_slave`).
 * All masters share one `id_width`; the fabric's slave-side ids are
   `id_width + log2(masters)` wide.
+* Timing knobs (omit for the defaults): `latency_mode` `"cut_all_ports"`
+  (default; every AXI channel registered at both crossbar sides) or
+  `"cut_all_ax"` (only AW/AR cut: W/B/R combinational, fails timing on wide
+  fabrics); `slave_cut` (default `true`) adds an `axi_cut` on every slave
+  port, in front of each AXI-Lite/APB converter.
 
 ## What stays custom
 Coherence (snooping/directory controllers, coherent caches) is a custom

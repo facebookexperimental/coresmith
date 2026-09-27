@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .amba import ports_for
-from .spec import FabricSpec
+from .spec import LATENCY_MODES, FabricSpec
 from .tb_template import render_testbench
 
 _HERE = Path(__file__).resolve().parent
@@ -85,6 +85,16 @@ def _flat_ports(spec: FabricSpec) -> list[dict]:
     return out
 
 
+def _emit_cut(L: list[str], j: int) -> tuple[str, str]:
+    """An axi_cut (spill register on all five channels) on crossbar master port j."""
+    L.append(f"  mst_req_t cut_req_{j}; mst_resp_t cut_rsp_{j};")
+    L.append(f"  axi_cut #(.Bypass(1'b0), .aw_chan_t(mst_aw_chan_t), .w_chan_t(mst_w_chan_t), "
+             f".b_chan_t(mst_b_chan_t), .ar_chan_t(mst_ar_chan_t), .r_chan_t(mst_r_chan_t), "
+             f".axi_req_t(mst_req_t), .axi_resp_t(mst_resp_t)) i_cut_{j} (.clk_i(clk), .rst_ni(rst_n), "
+             f".slv_req_i(mst_req[{j}]), .slv_resp_o(mst_rsp[{j}]), .mst_req_o(cut_req_{j}), .mst_resp_i(cut_rsp_{j}));")
+    return f"cut_req_{j}", f"cut_rsp_{j}"
+
+
 def render_wrapper_sv(spec: FabricSpec) -> str:
     errs = spec.validate()
     if errs:
@@ -96,6 +106,8 @@ def render_wrapper_sv(spec: FabricSpec) -> str:
     L: list[str] = []
     L.append(f"// {spec.module_name}: generated SoC fabric (B1). {NM} master(s) x {NS} slave(s),")
     L.append(f"// AXI4 {AW}-bit address / {DW}-bit data, master id width {IW}, slave-port id width {MIW}.")
+    L.append(f"// Crossbar latency {LATENCY_MODES[spec.latency_mode]}; per-slave-port axi_cut "
+             f"{'on' if spec.slave_cut else 'off'}.")
     L.append("// Rendered by orchestrator/fabric/generate.py over the vendored pulp-platform axi IP")
     L.append("// (SHL-0.51); elaborated to plain Verilog by yosys-slang. Do not edit.")
     L.append('`include "axi/typedef.svh"')
@@ -113,8 +125,8 @@ def render_wrapper_sv(spec: FabricSpec) -> str:
     L.append("  localparam axi_pkg::xbar_cfg_t Cfg = '{")
     L.append(f"    NoSlvPorts: {NM}, NoMstPorts: {NS}, MaxMstTrans: {spec.max_outstanding}, "
              f"MaxSlvTrans: {max(m.max_outstanding for m in spec.masters)}, FallThrough: 1'b0,")
-    L.append("    LatencyMode: axi_pkg::CUT_ALL_AX, PipelineStages: 0, AxiIdWidthSlvPorts: IW, "
-             "AxiIdUsedSlvPorts: IW,")
+    L.append(f"    LatencyMode: axi_pkg::{LATENCY_MODES[spec.latency_mode]}, PipelineStages: 0, "
+             "AxiIdWidthSlvPorts: IW, AxiIdUsedSlvPorts: IW,")
     L.append(f"    UniqueIds: 1'b0, AxiAddrWidth: AW, AxiDataWidth: DW, NoAddrRules: {NS} }};")
     rules = ", ".join(f"'{{idx: {i}, start_addr: {AW}'h{s.base:X}, end_addr: {AW}'h{s.base + s.size:X}}}"
                       for i, s in reversed(list(enumerate(spec.slaves))))
@@ -155,13 +167,8 @@ def render_wrapper_sv(spec: FabricSpec) -> str:
         if s.protocol == "axi4":
             src = f"mst_req[{j}]"
             rsp = f"mst_rsp[{j}]"
-            if spec.ordering == "none":
-                L.append(f"  mst_req_t cut_req_{j}; mst_resp_t cut_rsp_{j};")
-                L.append(f"  axi_cut #(.Bypass(1'b0), .aw_chan_t(mst_aw_chan_t), .w_chan_t(mst_w_chan_t), "
-                         f".b_chan_t(mst_b_chan_t), .ar_chan_t(mst_ar_chan_t), .r_chan_t(mst_r_chan_t), "
-                         f".axi_req_t(mst_req_t), .axi_resp_t(mst_resp_t)) i_cut_{j} (.clk_i(clk), .rst_ni(rst_n), "
-                         f".slv_req_i(mst_req[{j}]), .slv_resp_o(mst_rsp[{j}]), .mst_req_o(cut_req_{j}), .mst_resp_i(cut_rsp_{j}));")
-                src, rsp = f"cut_req_{j}", f"cut_rsp_{j}"
+            if spec.ordering == "none" or spec.slave_cut:
+                src, rsp = _emit_cut(L, j)
             L.append(f"  assign {p}awvalid = {src}.aw_valid; assign {rsp}.aw_ready = {p}awready;")
             L.append(f"  assign {p}awaddr = {src}.aw.addr; assign {p}awid = {src}.aw.id; assign {p}awlen = {src}.aw.len; "
                      f"assign {p}awsize = {src}.aw.size; assign {p}awburst = {src}.aw.burst; assign {p}awlock = {src}.aw.lock; "
@@ -179,12 +186,17 @@ def render_wrapper_sv(spec: FabricSpec) -> str:
             L.append(f"  assign {rsp}.r_valid = {p}rvalid; assign {p}rready = {src}.r_ready; "
                      f"assign {rsp}.r = '{{id: {p}rid, data: {p}rdata, resp: {p}rresp, last: {p}rlast, user: {p}ruser}};")
         else:
+            # slave_cut: a full register slice between the crossbar and the
+            # converter, so the converter's response logic does not chain
+            # combinationally into the crossbar's R/B muxes (axi4 ports get
+            # the same cut above).
+            src, rsp = _emit_cut(L, j) if spec.slave_cut else (f"mst_req[{j}]", f"mst_rsp[{j}]")
             L.append(f"  lite_req_t lite_req_{j}; lite_resp_t lite_rsp_{j};")
             L.append("  axi_to_axi_lite #(.AxiAddrWidth(AW), .AxiDataWidth(DW), .AxiIdWidth(MIW), .AxiUserWidth(UW),")
             L.append(f"    .AxiMaxWriteTxns({spec.max_outstanding}), .AxiMaxReadTxns({spec.max_outstanding}), .FallThrough(1'b0),")
             L.append("    .full_req_t(mst_req_t), .full_resp_t(mst_resp_t), .lite_req_t(lite_req_t), .lite_resp_t(lite_resp_t))")
-            L.append(f"    i_to_lite_{j} (.clk_i(clk), .rst_ni(rst_n), .test_i(1'b0), .slv_req_i(mst_req[{j}]), "
-                     f".slv_resp_o(mst_rsp[{j}]), .mst_req_o(lite_req_{j}), .mst_resp_i(lite_rsp_{j}));")
+            L.append(f"    i_to_lite_{j} (.clk_i(clk), .rst_ni(rst_n), .test_i(1'b0), .slv_req_i({src}), "
+                     f".slv_resp_o({rsp}), .mst_req_o(lite_req_{j}), .mst_resp_i(lite_rsp_{j}));")
             if s.protocol == "axi_lite":
                 L.append(f"  assign {p}awvalid = lite_req_{j}.aw_valid; assign lite_rsp_{j}.aw_ready = {p}awready; "
                          f"assign {p}awaddr = lite_req_{j}.aw.addr; assign {p}awprot = lite_req_{j}.aw.prot;")

@@ -540,7 +540,9 @@ def cmd_block_status(args) -> int:
 def cmd_block_done(args) -> int:
     from orchestrator.harness.tools.block import block_done
     db = _state_db(args)
-    res = block_done(db, db.root, args.block, target_clock_mhz=float(getattr(args, "target_clock_mhz", 50.0) or 50.0),
+    from orchestrator.langgraph.pipeline_helpers import resolve_run_clock_mhz
+    res = block_done(db, db.root, args.block,
+                     target_clock_mhz=resolve_run_clock_mhz(getattr(args, "target_clock_mhz", None), db.root),
                      seed=getattr(args, "seed", None), actor=getattr(args, "actor", "") or "cluster")
     lines = [f"block-done {args.block}: {'PUBLISHED' if res['ok'] else 'REFUSED'}" + (f" -- {res.get('reason')}" if res.get("reason") else "")]
     for k, v in (res.get("stages") or {}).items():
@@ -852,7 +854,7 @@ def _register_state(sub) -> None:
     bs = sub.add_parser("block-status", help="one block: paths, edges, VIPs, owned items, published pass")
     bs.add_argument("block"); _add_project_root(bs); _add_json(bs); bs.set_defaults(func=_run(cmd_block_status))
     bd = sub.add_parser("block-done", help="the block gate: conformance -> DV -> synth -> timing; publishes best on a pass")
-    bd.add_argument("block"); bd.add_argument("--target-clock-mhz", dest="target_clock_mhz", type=float, default=50.0)
+    bd.add_argument("block"); bd.add_argument("--target-clock-mhz", dest="target_clock_mhz", type=float, default=None)
     bd.add_argument("--seed", type=int); bd.add_argument("--actor", default="")
     _add_project_root(bd); _add_json(bd); bd.set_defaults(func=_run(cmd_block_done))
     sc = sub.add_parser("schema", help="the document shape `register <kind>` expects (prd|sad|frd|ers|block_diagram|contracts|abi|uarch|arch_model)")

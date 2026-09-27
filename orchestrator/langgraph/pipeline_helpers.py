@@ -2332,6 +2332,30 @@ def _clock_period_ns(target_clock_mhz: float) -> float:
     return 1000.0 / float(target_clock_mhz)
 
 
+def resolve_run_clock_mhz(state_mhz: float | None = None, project_root=None) -> float:
+    """The run's target clock (MHz) for block synth / STA gating.
+
+    ``CORESMITH_TARGET_CLOCK_MHZ`` (an operator override; the daemon re-reads
+    ``.coresmith/env`` on resume) wins over the value checkpointed at
+    ``run start``; without either, ``inputs/task.yaml: target_clock_mhz``,
+    then 50 MHz.
+    """
+    for v in (os.environ.get("CORESMITH_TARGET_CLOCK_MHZ"), state_mhz):
+        try:
+            if v not in (None, "") and float(v) > 0:
+                return float(v)
+        except (TypeError, ValueError):
+            pass
+    try:
+        ty = Path(project_root or PROJECT_ROOT) / "inputs" / "task.yaml"
+        v = (yaml.safe_load(ty.read_text()) or {}).get("target_clock_mhz") if ty.is_file() else None
+        if v is not None and float(v) > 0:
+            return float(v)
+    except Exception:  # noqa: BLE001 - a malformed task.yaml falls back to the default
+        pass
+    return 50.0
+
+
 def synth_abc_delay_target_enabled() -> bool:
     """``abc -D <period_ps>`` at block synth (CORESMITH_SYNTH_ABC_DELAY_TARGET, default on).
 

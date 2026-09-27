@@ -151,3 +151,30 @@ def test_wrapper_declares_apb_types_once_for_many_apb_slaves():
     sv = render_wrapper_sv(spec)
     assert sv.count("} apb_req_t;") == 1 and sv.count("} apb_resp_t;") == 1
     assert sv.count("axi_lite_to_apb #(") == 7
+
+
+def test_latency_mode_and_slave_cut_default_to_the_registered_fabric():
+    # a spec written before the knobs existed picks up the registered defaults
+    old = FabricSpec.from_json({k: v for k, v in _spec().to_json().items()
+                                if k not in ("latency_mode", "slave_cut")})
+    assert old.latency_mode == "cut_all_ports" and old.slave_cut is True
+    sv = render_wrapper_sv(old)
+    assert "LatencyMode: axi_pkg::CUT_ALL_PORTS" in sv and "CUT_ALL_AX" not in sv
+    # one cut per slave port: the axi4 ram port and in front of each AXI-Lite/APB converter
+    assert sv.count("axi_cut #(") == 3
+    assert "assign m_ram_awvalid = cut_req_0.aw_valid;" in sv
+    assert ".slv_req_i(cut_req_1)" in sv and ".slv_req_i(cut_req_2)" in sv
+
+
+def test_latency_mode_and_slave_cut_knobs():
+    s = _spec()
+    s.latency_mode, s.slave_cut = "cut_all_ax", False
+    sv = render_wrapper_sv(s)
+    assert "LatencyMode: axi_pkg::CUT_ALL_AX" in sv and "axi_cut #(" not in sv
+    assert ".slv_req_i(mst_req[1])" in sv and "assign m_ram_awvalid = mst_req[0].aw_valid;" in sv
+    # the knobs are part of the digest, so a cached elaboration is invalidated
+    assert s.digest() != _spec().digest()
+    rt = FabricSpec.from_json(json.loads(json.dumps(s.to_json())))
+    assert (rt.latency_mode, rt.slave_cut, rt.digest()) == ("cut_all_ax", False, s.digest())
+    s.latency_mode = "bogus"
+    assert any("latency_mode" in e for e in s.validate())
