@@ -56,7 +56,10 @@ class FabricSpec:
     err_slave: bool = True        # unmapped addresses answer DECERR
     max_outstanding: int = 4      # per slave port
     latency_mode: str = "cut_all_ports"   # see LATENCY_MODES
-    slave_cut: bool = True        # an axi_cut on every slave port (before its AXI-Lite/APB converter)
+    # slave_cut: an axi_cut on every slave port. For AXI-Lite/APB ports it registers
+    # both sides of the converter: a full-AXI axi_cut before axi_to_axi_lite, an
+    # AXI-Lite axi_cut after it, and axi_lite_to_apb's PipelineRequest/Response.
+    slave_cut: bool = True
 
     # ------------------------------------------------------------ helpers
     @property

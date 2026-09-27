@@ -85,14 +85,22 @@ def _flat_ports(spec: FabricSpec) -> list[dict]:
     return out
 
 
-def _emit_cut(L: list[str], j: int) -> tuple[str, str]:
-    """An axi_cut (spill register on all five channels) on crossbar master port j."""
-    L.append(f"  mst_req_t cut_req_{j}; mst_resp_t cut_rsp_{j};")
-    L.append(f"  axi_cut #(.Bypass(1'b0), .aw_chan_t(mst_aw_chan_t), .w_chan_t(mst_w_chan_t), "
-             f".b_chan_t(mst_b_chan_t), .ar_chan_t(mst_ar_chan_t), .r_chan_t(mst_r_chan_t), "
-             f".axi_req_t(mst_req_t), .axi_resp_t(mst_resp_t)) i_cut_{j} (.clk_i(clk), .rst_ni(rst_n), "
-             f".slv_req_i(mst_req[{j}]), .slv_resp_o(mst_rsp[{j}]), .mst_req_o(cut_req_{j}), .mst_resp_i(cut_rsp_{j}));")
-    return f"cut_req_{j}", f"cut_rsp_{j}"
+def _emit_cut(L: list[str], j: int, kind: str = "mst", src: str | None = None,
+              rsp: str | None = None) -> tuple[str, str]:
+    """An axi_cut (spill register on all five channels) on slave port j.
+
+    kind "mst" cuts the full-AXI crossbar master port; kind "lite" cuts the
+    AXI-Lite side of the port's protocol converter (axi_cut only touches the
+    *_valid/*_ready/channel fields, which the AXI-Lite structs share).
+    """
+    src, rsp = src or f"mst_req[{j}]", rsp or f"mst_rsp[{j}]"
+    sfx = "" if kind == "mst" else f"_{kind}"
+    L.append(f"  {kind}_req_t cut{sfx}_req_{j}; {kind}_resp_t cut{sfx}_rsp_{j};")
+    L.append(f"  axi_cut #(.Bypass(1'b0), .aw_chan_t({kind}_aw_chan_t), .w_chan_t({kind}_w_chan_t), "
+             f".b_chan_t({kind}_b_chan_t), .ar_chan_t({kind}_ar_chan_t), .r_chan_t({kind}_r_chan_t), "
+             f".axi_req_t({kind}_req_t), .axi_resp_t({kind}_resp_t)) i_cut{sfx}_{j} (.clk_i(clk), .rst_ni(rst_n), "
+             f".slv_req_i({src}), .slv_resp_o({rsp}), .mst_req_o(cut{sfx}_req_{j}), .mst_resp_i(cut{sfx}_rsp_{j}));")
+    return f"cut{sfx}_req_{j}", f"cut{sfx}_rsp_{j}"
 
 
 def render_wrapper_sv(spec: FabricSpec) -> str:
@@ -186,10 +194,13 @@ def render_wrapper_sv(spec: FabricSpec) -> str:
             L.append(f"  assign {rsp}.r_valid = {p}rvalid; assign {p}rready = {src}.r_ready; "
                      f"assign {rsp}.r = '{{id: {p}rid, data: {p}rdata, resp: {p}rresp, last: {p}rlast, user: {p}ruser}};")
         else:
-            # slave_cut: a full register slice between the crossbar and the
-            # converter, so the converter's response logic does not chain
-            # combinationally into the crossbar's R/B muxes (axi4 ports get
-            # the same cut above).
+            # slave_cut registers both sides of the protocol converters: a full
+            # register slice between the crossbar and axi_to_axi_lite (so the
+            # converter's response logic does not chain into the crossbar's R/B
+            # muxes; axi4 ports get the same cut above), an AXI-Lite slice on
+            # its other side (so the lite handshakes, e.g. bready, leave from a
+            # flop) and, for APB, axi_lite_to_apb's own request/response
+            # spill registers instead of its fall-through registers.
             src, rsp = _emit_cut(L, j) if spec.slave_cut else (f"mst_req[{j}]", f"mst_rsp[{j}]")
             L.append(f"  lite_req_t lite_req_{j}; lite_resp_t lite_rsp_{j};")
             L.append("  axi_to_axi_lite #(.AxiAddrWidth(AW), .AxiDataWidth(DW), .AxiIdWidth(MIW), .AxiUserWidth(UW),")
@@ -197,17 +208,19 @@ def render_wrapper_sv(spec: FabricSpec) -> str:
             L.append("    .full_req_t(mst_req_t), .full_resp_t(mst_resp_t), .lite_req_t(lite_req_t), .lite_resp_t(lite_resp_t))")
             L.append(f"    i_to_lite_{j} (.clk_i(clk), .rst_ni(rst_n), .test_i(1'b0), .slv_req_i({src}), "
                      f".slv_resp_o({rsp}), .mst_req_o(lite_req_{j}), .mst_resp_i(lite_rsp_{j}));")
+            lq, lr = (_emit_cut(L, j, "lite", f"lite_req_{j}", f"lite_rsp_{j}") if spec.slave_cut
+                      else (f"lite_req_{j}", f"lite_rsp_{j}"))
             if s.protocol == "axi_lite":
-                L.append(f"  assign {p}awvalid = lite_req_{j}.aw_valid; assign lite_rsp_{j}.aw_ready = {p}awready; "
-                         f"assign {p}awaddr = lite_req_{j}.aw.addr; assign {p}awprot = lite_req_{j}.aw.prot;")
-                L.append(f"  assign {p}wvalid = lite_req_{j}.w_valid; assign lite_rsp_{j}.w_ready = {p}wready; "
-                         f"assign {p}wdata = lite_req_{j}.w.data; assign {p}wstrb = lite_req_{j}.w.strb;")
-                L.append(f"  assign lite_rsp_{j}.b_valid = {p}bvalid; assign {p}bready = lite_req_{j}.b_ready; "
-                         f"assign lite_rsp_{j}.b = '{{resp: {p}bresp}};")
-                L.append(f"  assign {p}arvalid = lite_req_{j}.ar_valid; assign lite_rsp_{j}.ar_ready = {p}arready; "
-                         f"assign {p}araddr = lite_req_{j}.ar.addr; assign {p}arprot = lite_req_{j}.ar.prot;")
-                L.append(f"  assign lite_rsp_{j}.r_valid = {p}rvalid; assign {p}rready = lite_req_{j}.r_ready; "
-                         f"assign lite_rsp_{j}.r = '{{data: {p}rdata, resp: {p}rresp}};")
+                L.append(f"  assign {p}awvalid = {lq}.aw_valid; assign {lr}.aw_ready = {p}awready; "
+                         f"assign {p}awaddr = {lq}.aw.addr; assign {p}awprot = {lq}.aw.prot;")
+                L.append(f"  assign {p}wvalid = {lq}.w_valid; assign {lr}.w_ready = {p}wready; "
+                         f"assign {p}wdata = {lq}.w.data; assign {p}wstrb = {lq}.w.strb;")
+                L.append(f"  assign {lr}.b_valid = {p}bvalid; assign {p}bready = {lq}.b_ready; "
+                         f"assign {lr}.b = '{{resp: {p}bresp}};")
+                L.append(f"  assign {p}arvalid = {lq}.ar_valid; assign {lr}.ar_ready = {p}arready; "
+                         f"assign {p}araddr = {lq}.ar.addr; assign {p}arprot = {lq}.ar.prot;")
+                L.append(f"  assign {lr}.r_valid = {p}rvalid; assign {p}rready = {lq}.r_ready; "
+                         f"assign {lr}.r = '{{data: {p}rdata, resp: {p}rresp}};")
             else:  # apb
                 # The APB struct types are module-scoped: emit them once, at the
                 # first APB slave (a second typedef is a redefinition in Verilator).
@@ -215,14 +228,15 @@ def render_wrapper_sv(spec: FabricSpec) -> str:
                     L.append("  typedef struct packed { addr_t paddr; logic [2:0] pprot; logic psel; logic penable; "
                              "logic pwrite; data_t pwdata; strb_t pstrb; } apb_req_t;")
                     L.append("  typedef struct packed { logic pready; data_t prdata; logic pslverr; } apb_resp_t;")
+                pipe = "1'b1" if spec.slave_cut else "1'b0"
                 L.append(f"  apb_req_t apb_req_{j}; apb_resp_t apb_rsp_{j};")
                 L.append(f"  localparam rule_t [0:0] ApbMap_{j} = '{{ '{{idx: 0, start_addr: {AW}'h{s.base:X}, "
                          f"end_addr: {AW}'h{s.base + s.size:X}}} }};")
                 L.append("  axi_lite_to_apb #(.NoApbSlaves(1), .NoRules(1), .AddrWidth(AW), .DataWidth(DW), "
-                         ".PipelineRequest(1'b0), .PipelineResponse(1'b0), .axi_lite_req_t(lite_req_t), "
+                         f".PipelineRequest({pipe}), .PipelineResponse({pipe}), .axi_lite_req_t(lite_req_t), "
                          ".axi_lite_resp_t(lite_resp_t), .apb_req_t(apb_req_t), .apb_resp_t(apb_resp_t), .rule_t(rule_t))")
-                L.append(f"    i_to_apb_{j} (.clk_i(clk), .rst_ni(rst_n), .axi_lite_req_i(lite_req_{j}), "
-                         f".axi_lite_resp_o(lite_rsp_{j}), .apb_req_o(apb_req_{j}), .apb_resp_i(apb_rsp_{j}), .addr_map_i(ApbMap_{j}));")
+                L.append(f"    i_to_apb_{j} (.clk_i(clk), .rst_ni(rst_n), .axi_lite_req_i({lq}), "
+                         f".axi_lite_resp_o({lr}), .apb_req_o(apb_req_{j}), .apb_resp_i(apb_rsp_{j}), .addr_map_i(ApbMap_{j}));")
                 L.append(f"  assign {p}psel = apb_req_{j}.psel; assign {p}penable = apb_req_{j}.penable; "
                          f"assign {p}pwrite = apb_req_{j}.pwrite; assign {p}paddr = apb_req_{j}.paddr; "
                          f"assign {p}pprot = apb_req_{j}.pprot; assign {p}pwdata = apb_req_{j}.pwdata; assign {p}pstrb = apb_req_{j}.pstrb;")

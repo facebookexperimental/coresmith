@@ -160,10 +160,32 @@ def test_latency_mode_and_slave_cut_default_to_the_registered_fabric():
     assert old.latency_mode == "cut_all_ports" and old.slave_cut is True
     sv = render_wrapper_sv(old)
     assert "LatencyMode: axi_pkg::CUT_ALL_PORTS" in sv and "CUT_ALL_AX" not in sv
-    # one cut per slave port: the axi4 ram port and in front of each AXI-Lite/APB converter
-    assert sv.count("axi_cut #(") == 3
+    # one cut per slave port (the axi4 ram port and in front of each AXI-Lite/APB
+    # converter) plus an AXI-Lite cut behind each converter
+    assert sv.count("axi_cut #(") == 5
     assert "assign m_ram_awvalid = cut_req_0.aw_valid;" in sv
     assert ".slv_req_i(cut_req_1)" in sv and ".slv_req_i(cut_req_2)" in sv
+
+
+def test_slave_cut_registers_both_sides_of_each_protocol_converter():
+    sv = render_wrapper_sv(_spec())
+    # uart (1, apb) and gpu_regs (2, axi_lite): full cut -> axi_to_axi_lite -> lite cut
+    for j in (1, 2):
+        assert f".slv_req_i(cut_req_{j}), .slv_resp_o(cut_rsp_{j}), .mst_req_o(lite_req_{j})" in sv
+        assert (f"i_cut_lite_{j} (.clk_i(clk), .rst_ni(rst_n), .slv_req_i(lite_req_{j}), "
+                f".slv_resp_o(lite_rsp_{j}), .mst_req_o(cut_lite_req_{j})") in sv
+    assert ".aw_chan_t(lite_aw_chan_t)" in sv and ".axi_req_t(lite_req_t)" in sv
+    # the lite pins and the APB converter only see the lite cut's outputs
+    assert "assign m_gpu_regs_bready = cut_lite_req_2.b_ready;" in sv
+    assert "assign cut_lite_rsp_2.b_valid = m_gpu_regs_bvalid;" in sv
+    assert ".axi_lite_req_i(cut_lite_req_1), .axi_lite_resp_o(cut_lite_rsp_1)" in sv
+    assert ".PipelineRequest(1'b1), .PipelineResponse(1'b1)" in sv
+    assert "PipelineRequest(1'b0)" not in sv
+    s = _spec()
+    s.slave_cut = False
+    sv = render_wrapper_sv(s)
+    assert "cut_lite" not in sv and ".PipelineRequest(1'b0), .PipelineResponse(1'b0)" in sv
+    assert "assign m_gpu_regs_bready = lite_req_2.b_ready;" in sv
 
 
 def test_latency_mode_and_slave_cut_knobs():

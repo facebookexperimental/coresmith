@@ -64,7 +64,8 @@ Emit ONE block per bus, for example:
   (default; every AXI channel registered at both crossbar sides) or
   `"cut_all_ax"` (only AW/AR cut: W/B/R combinational, fails timing on wide
   fabrics); `slave_cut` (default `true`) adds an `axi_cut` on every slave
-  port, in front of each AXI-Lite/APB converter.
+  port and registers both sides of each AXI-Lite/APB converter (full-AXI cut
+  before `axi_to_axi_lite`, AXI-Lite cut after it, pipelined `axi_lite_to_apb`).
 
 ## What stays custom
 Coherence (snooping/directory controllers, coherent caches) is a custom

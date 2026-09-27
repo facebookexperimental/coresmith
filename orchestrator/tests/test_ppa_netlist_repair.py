@@ -285,3 +285,20 @@ def test_repair_does_not_delete_its_input(repair_request, monkeypatch):
     result = dep.tool('repair_netlist').run(req)
     assert not result.ok
     assert req.inputs['netlist'].read_text() == 'input must survive'
+
+
+def test_prelayout_repair_buffers_but_never_sizes(repair_request, monkeypatch):
+    # common/physical/METHODOLOGY.md labels prelayout results as the synth.tcl
+    # netlist; gate sizing (repair_timing) exists only after CTS in pnr.tcl.
+    # The block gate must not claim a sized netlist as a prelayout verdict.
+    dep, req = repair_request
+    monkeypatch.setattr(dep, 'resolve_openroad_bin', lambda: 'openroad')
+
+    def run(cmd, **kwargs):
+        script = Path(cmd[-1]).read_text()
+        assert 'repair_design' in script and 'repair_timing' not in script
+        (req.out_dir / 'repaired.v').write_text('fresh')
+        return 0, 'CORESMITH_REPAIR_DONE', '', ''
+
+    monkeypatch.setattr(sky130, '_run_cmd', run)
+    assert dep.tool('repair_netlist').run(req).ok
