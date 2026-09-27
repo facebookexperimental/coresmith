@@ -75,6 +75,40 @@ class TestMaterialize:
             row = conn.execute("SELECT spec_contract_version FROM blocks WHERE name='fabric'").fetchone()
         assert row is not None and row["spec_contract_version"] is not None
 
+    def test_renders_the_fabric_registered_now_not_the_checkpointed_one(self, tmp_path, monkeypatch):
+        """restart-node / resume replay the run-start current_block from the
+        checkpoint; a fabric re-registered since then must be the one rendered."""
+        import orchestrator.fabric as fabric
+        seen = []
+
+        def fake_generate(spec, out_dir, tb_dir=None, **kw):
+            seen.append(spec)
+            out = Path(out_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            (out / f"{spec.module_name}.v").write_text(f"module {spec.module_name}(); endmodule\n")
+            (out / "tb.py").write_text("# tb\n")
+            return SimpleNamespace(module=spec.module_name, rtl_path=str(out / f"{spec.module_name}.v"),
+                                   tb_path=str(out / "tb.py"), cached=False, ports=[])
+        monkeypatch.setattr(fabric, "generate_fabric", fake_generate)
+        db = open_project(tmp_path)
+        db.import_block_diagram({"blocks": [_BLOCK], "connections": []})
+        checkpointed = {**_BLOCK, "fabric": {**_FAB, "max_outstanding": 8,
+                                             "masters": [{"name": "hart0", "id_width": 2}]}}
+        live = {**_FAB, "max_outstanding": 4, "masters": [{"name": "hart0", "id_width": 1}],
+                "slaves": _FAB["slaves"] + [{"name": "uart", "protocol": "apb", "base": 0x10000000,
+                                             "size": 0x1000, "max_outstanding": 2}]}
+        db.import_block_diagram({"blocks": [{**_BLOCK, "fabric": live}], "connections": []})
+        out = asyncio.run(pg.materialize_primitive_node({"project_root": str(tmp_path),
+                                                         "current_block": checkpointed, "attempt": 2}))
+        assert out["lint_clean"] and len(seen) == 1
+        spec = seen[0]
+        assert (spec.max_outstanding, spec.masters[0].id_width) == (4, 1)
+        assert spec.slaves[-1].max_outstanding == 2
+        assert out["current_block"]["fabric"] == live           # downstream nodes see it too
+        assert out["current_block"]["rtl_target"] == _BLOCK["rtl_target"]
+        # no DB entry for the block: the checkpointed spec is used as before
+        assert pg._live_fabric(str(tmp_path), {**checkpointed, "name": "other"})["fabric"] == checkpointed["fabric"]
+
     def test_invalid_spec_escalates(self, tmp_path):
         bad = {**_BLOCK, "fabric": {**_FAB, "slaves": []}}
         out = asyncio.run(pg.materialize_primitive_node({"project_root": str(tmp_path), "current_block": bad,

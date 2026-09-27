@@ -204,7 +204,8 @@ def render_wrapper_sv(spec: FabricSpec) -> str:
             src, rsp = _emit_cut(L, j) if spec.slave_cut else (f"mst_req[{j}]", f"mst_rsp[{j}]")
             L.append(f"  lite_req_t lite_req_{j}; lite_resp_t lite_rsp_{j};")
             L.append("  axi_to_axi_lite #(.AxiAddrWidth(AW), .AxiDataWidth(DW), .AxiIdWidth(MIW), .AxiUserWidth(UW),")
-            L.append(f"    .AxiMaxWriteTxns({spec.max_outstanding}), .AxiMaxReadTxns({spec.max_outstanding}), .FallThrough(1'b0),")
+            txns = s.max_outstanding or spec.max_outstanding
+            L.append(f"    .AxiMaxWriteTxns({txns}), .AxiMaxReadTxns({txns}), .FallThrough(1'b0),")
             L.append("    .full_req_t(mst_req_t), .full_resp_t(mst_resp_t), .lite_req_t(lite_req_t), .lite_resp_t(lite_resp_t))")
             L.append(f"    i_to_lite_{j} (.clk_i(clk), .rst_ni(rst_n), .test_i(1'b0), .slv_req_i({src}), "
                      f".slv_resp_o({rsp}), .mst_req_o(lite_req_{j}), .mst_resp_i(lite_rsp_{j}));")

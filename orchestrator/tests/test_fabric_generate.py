@@ -217,3 +217,26 @@ def test_pipeline_stages_and_unique_ids_knobs_are_digest_stable_at_defaults():
     assert (rt.pipeline_stages, rt.unique_ids, rt.digest()) == (2, True, s.digest())
     s.pipeline_stages = 5
     assert any("pipeline_stages" in e for e in s.validate())
+
+
+def test_slave_max_outstanding_sizes_its_converter_and_defaults_to_the_fabric():
+    base = _spec()
+    base.max_outstanding = 8
+    # unset: every converter takes the fabric's max_outstanding, digest unchanged
+    assert all("max_outstanding" not in s for s in base.to_json()["slaves"])
+    sv = render_wrapper_sv(base)
+    assert sv.count(".AxiMaxWriteTxns(8), .AxiMaxReadTxns(8)") == 2
+    s = FabricSpec.from_json(base.to_json())
+    s.slaves[1].max_outstanding = 2                       # uart (apb) only
+    sv = render_wrapper_sv(s)
+    assert sv.count(".AxiMaxWriteTxns(2), .AxiMaxReadTxns(2)") == 1
+    assert sv.count(".AxiMaxWriteTxns(8), .AxiMaxReadTxns(8)") == 1
+    assert "MaxMstTrans: 8," in sv and s.validate() == []
+    assert s.digest() != base.digest()
+    rt = FabricSpec.from_json(json.loads(json.dumps(s.to_json())))
+    assert (rt.slaves[1].max_outstanding, rt.digest()) == (2, s.digest())
+    s.slaves[0].max_outstanding = 2                       # axi4 port: no converter
+    s.slaves[2].max_outstanding = 0
+    errs = s.validate()
+    assert any("ram" in e and "axi_lite/apb" in e for e in errs)
+    assert any("gpu_regs" in e and "1..64" in e for e in errs)

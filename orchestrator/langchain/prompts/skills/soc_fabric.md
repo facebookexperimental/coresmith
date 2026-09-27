@@ -74,6 +74,14 @@ Emit ONE block per bus, for example:
   crossbar demuxes' `MaxMstTrans` and each `axi_to_axi_lite` / burst
   splitter). These counters set the fabric's critical path. A master's
   `max_outstanding` only sizes the crossbar mux W FIFOs (`MaxSlvTrans`).
+* An AXI-Lite/APB **slave** may set its own `max_outstanding` (e.g.
+  `{"name": "uart", "protocol": "apb", ..., "max_outstanding": 2}`): that
+  port's `axi_to_axi_lite` `AxiMaxWriteTxns`/`AxiMaxReadTxns` (burst splitter
+  and ATOP filter counters, ID-reflect FIFO depth). Omitted: the top-level
+  `max_outstanding`. Not allowed on `axi4` slaves.
+* The fabric is rendered from the spec registered **now**: a re-registered
+  block diagram takes effect at the block's next materialization
+  (`restart-node process_block`, or a fix_rtl retry), not only on a new run.
 
 ## What stays custom
 Coherence (snooping/directory controllers, coherent caches) is a custom

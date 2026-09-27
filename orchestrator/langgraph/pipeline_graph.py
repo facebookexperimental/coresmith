@@ -2256,6 +2256,26 @@ def _is_primitive(block: dict) -> bool:
     return str((block or {}).get("kind") or "").lower() == "primitive"
 
 
+def _live_fabric(pr: str, block: dict) -> dict:
+    """``block`` with its ``fabric`` spec re-read from the project DB.
+
+    The block dicts in the run state (``block_queue``, and the ``current_block``
+    each Send copies from it) are captured once, at run start, and live in the
+    LangGraph checkpoint; restart-node / resume replay them unchanged. A fabric
+    the architect re-registered afterwards must still be the one rendered, so
+    consumers of the spec read it here at node time. Only ``fabric`` is taken
+    from the DB; the rest of the checkpointed block is kept as is.
+    """
+    name = (block or {}).get("name")
+    try:
+        for b in _db(pr).block_specs():
+            if b.get("name") == name and isinstance(b.get("fabric"), dict):
+                return {**block, "fabric": b["fabric"]}
+    except Exception:  # noqa: BLE001 - DB unreadable: fall back to the checkpointed spec
+        pass
+    return block
+
+
 async def materialize_primitive_node(state: BlockState) -> dict:
     """B1: a primitive block (the SoC fabric) is generated, not authored.
 
@@ -2263,9 +2283,9 @@ async def materialize_primitive_node(state: BlockState) -> dict:
     IP), its cocotb testbench and a short generated uArch spec, then hands
     the block to the ordinary DV/synth chain with the testbench preserved.
     """
-    block = state["current_block"]
-    block_name = block["name"]
     pr = Path(_pr(state))
+    block = _live_fabric(str(pr), state["current_block"])
+    block_name = block["name"]
     write_graph_event(str(pr), "Materialize Primitive", "graph_node_enter", {"block": block_name})
     block_dir = pr / ".coresmith" / "blocks" / block_name
     block_dir.mkdir(parents=True, exist_ok=True)
@@ -2302,7 +2322,8 @@ async def materialize_primitive_node(state: BlockState) -> dict:
         f"({'cached' if art.cached else 'elaborated'}); {len(art.ports)} ports", GREEN)
     write_graph_event(str(pr), "Materialize Primitive", "graph_node_exit",
                       {"block": block_name, "ok": True, "module": art.module, "cached": art.cached})
-    return {"rtl_path": str(rtl_target), "tb_path": str(tb_target), "phase": "lint",
+    return {"current_block": block,
+            "rtl_path": str(rtl_target), "tb_path": str(tb_target), "phase": "lint",
             "lint_clean": True, "uarch_approved": True, "preserve_testbench": True,
             "force_regen_tb": False, "assertion_ok": True}
 
@@ -5939,7 +5960,7 @@ async def _uarch_phase_models(pr: str, blocks: list[dict]) -> dict:
         if _is_primitive(b):
             try:
                 from orchestrator.fabric import FabricSpec
-                h, c = render_fabric_model(name, FabricSpec.from_json(b.get("fabric") or {}), edges)
+                h, c = render_fabric_model(name, FabricSpec.from_json(_live_fabric(pr, b).get("fabric") or {}), edges)
                 hp.write_text(h)
                 cp.write_text(c)
                 rec["blocks"][name] = {"source": "generated", "written": True}

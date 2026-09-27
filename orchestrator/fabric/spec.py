@@ -42,6 +42,11 @@ class FabricSlave:
     base: int = 0
     size: int = 0x1000            # bytes; power of two
     data_width: int | None = None  # defaults to the fabric's
+    # max_outstanding (AXI-Lite/APB ports only): AxiMaxWriteTxns/AxiMaxReadTxns of this
+    # port's axi_to_axi_lite, i.e. its burst splitter / ATOP filter in-flight counters
+    # and ID-reflect FIFO depth. None = the fabric's top-level max_outstanding
+    # (the pre-knob behaviour); omitted from to_json when None (digest-stable).
+    max_outstanding: int | None = None
 
 
 @dataclass
@@ -54,7 +59,10 @@ class FabricSpec:
     user_width: int = 1
     ordering: str = "per_id"      # per_id | none (an axi_cut per axi4 slave port)
     err_slave: bool = True        # unmapped addresses answer DECERR
-    max_outstanding: int = 4      # per slave port
+    # max_outstanding: axi_xbar MaxMstTrans (per-ID in-flight counters of each crossbar
+    # demux) and the default AxiMax{Write,Read}Txns of every protocol converter
+    # (FabricSlave.max_outstanding overrides it per AXI-Lite/APB port).
+    max_outstanding: int = 4
     latency_mode: str = "cut_all_ports"   # see LATENCY_MODES
     # slave_cut: an axi_cut on every slave port. For AXI-Lite/APB ports it registers
     # both sides of the converter: a full-AXI axi_cut before axi_to_axi_lite, an
@@ -129,6 +137,12 @@ class FabricSpec:
                 errs.append(f"slave {s.name}: size {s.size:#x} must be a power of two")
             if s.base % max(1, s.size):
                 errs.append(f"slave {s.name}: base {s.base:#x} not aligned to its size")
+            if s.max_outstanding is not None:
+                if s.protocol == "axi4":
+                    errs.append(f"slave {s.name}: max_outstanding applies to axi_lite/apb converter "
+                                "ports only (axi4 ports use the fabric's max_outstanding)")
+                elif not 1 <= int(s.max_outstanding) <= 64:
+                    errs.append(f"slave {s.name}: max_outstanding {s.max_outstanding} not in 1..64")
             if s.data_width not in (None, self.data_width):
                 errs.append(f"slave {s.name}: data-width conversion is not generated yet")
             spans.append((s.base, s.base + s.size, s.name))
@@ -144,6 +158,9 @@ class FabricSpec:
         for k, default in _OPTIONAL_DEFAULTS.items():
             if d.get(k) == default:
                 d.pop(k)
+        for s in d["slaves"]:
+            if s.get("max_outstanding") is None:
+                s.pop("max_outstanding", None)
         return d
 
     @classmethod
@@ -155,7 +172,8 @@ class FabricSpec:
                    for m in (d.get("masters") or [])]
         slaves = [FabricSlave(name=str(s.get("name")), protocol=str(s.get("protocol") or "axi4"),
                               base=_int(s.get("base"), 0), size=_int(s.get("size"), 0x1000),
-                              data_width=_int(s.get("data_width"), None))
+                              data_width=_int(s.get("data_width"), None),
+                              max_outstanding=_int(s.get("max_outstanding"), None))
                   for s in (d.get("slaves") or [])]
         return cls(name=str(d.get("name") or "soc"), masters=masters, slaves=slaves,
                    data_width=_int(d.get("data_width"), 32), addr_width=_int(d.get("addr_width"), 32),
