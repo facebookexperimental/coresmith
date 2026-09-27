@@ -24,6 +24,7 @@ test asserting langgraph is not imported by importing this module).
 from __future__ import annotations
 
 import json
+import time
 import sys
 
 # Exit codes (single source of truth).
@@ -475,6 +476,32 @@ def cmd_fabric(args) -> int:
     _emit(args, res, "\n".join(lines))
     return EXIT_PASS
 
+
+def cmd_architect(args) -> int:
+    """``coresmith architect start|status|stop`` -- the one long-lived architect session."""
+    from orchestrator.architect import ArchitectSession
+    root = _bootstrap(args)
+    verb = getattr(args, "verb", "status")
+    sess = ArchitectSession(root, model=getattr(args, "model", None) or None,
+                            max_turns=int(getattr(args, "max_turns", 300) or 300),
+                            max_sittings=int(getattr(args, "max_sittings", 12) or 12))
+    if verb == "start":
+        stop = sess.dir / "STOP"
+        if stop.exists():
+            stop.unlink()
+        st = sess.run()
+        _emit(args, st, f"architect {st.get('state')} at stage {st.get('stage')} after {st.get('sittings')} sitting(s)"
+              + (f" (${float(st.get('cost_usd') or 0):.2f})" if st.get("cost_usd") else "")
+              + (f": {st.get('stop_reason')}" if st.get("stop_reason") else ""))
+        return EXIT_PASS if st.get("state") == "done" else EXIT_FAIL
+    if verb == "stop":
+        (sess.dir / "STOP").write_text(str(time.time()))
+        _emit(args, {"stop_requested": True}, "stop requested (takes effect between sittings)")
+        return EXIT_PASS
+    st = sess.status()
+    _emit(args, st, json.dumps(st, indent=2, default=str))
+    return EXIT_PASS
+
 def cmd_blocks(args) -> int:
     """The block queue from the project database."""
     db = _state_db(args)
@@ -723,6 +750,14 @@ def _register_state(sub) -> None:
     fd = fsub.add_parser("derive"); fd.add_argument("--name"); fd.add_argument("--headroom", type=float, default=2.0)
     fd.add_argument("--dry-run", dest="dry_run", action="store_true")
     _add_project_root(fd); _add_json(fd); fd.set_defaults(func=_run(cmd_fabric), verb="derive")
+    ap = sub.add_parser("architect", help="the architect sitting: start | status | stop")
+    asb = ap.add_subparsers(dest="verb")
+    a1 = asb.add_parser("start", help="run sittings until the run enters the blocks stage (foreground)")
+    a1.add_argument("--model"); a1.add_argument("--max-turns", dest="max_turns", type=int, default=300)
+    a1.add_argument("--max-sittings", dest="max_sittings", type=int, default=12)
+    _add_project_root(a1); _add_json(a1); a1.set_defaults(func=_run(cmd_architect), verb="start")
+    a2 = asb.add_parser("status"); _add_project_root(a2); _add_json(a2); a2.set_defaults(func=_run(cmd_architect), verb="status")
+    a3 = asb.add_parser("stop"); _add_project_root(a3); _add_json(a3); a3.set_defaults(func=_run(cmd_architect), verb="stop")
     ls = sub.add_parser("leases", help="process leases held in the project database")
     _add_project_root(ls)
     _add_json(ls)

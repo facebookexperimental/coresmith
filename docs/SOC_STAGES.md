@@ -84,3 +84,16 @@ eval --arch` has the harness agent write the mission scenario
 link with headroom, outstanding depth) -- the fabric is an output of analysis.
 The `arch_model` stage cannot be left until every must-have FRD item has a
 model_eval verdict.
+
+### Step 3: the architect sitting (`coresmith architect start|status|stop`)
+
+`orchestrator/architect/session.py` runs ONE `claude -p` session in the project
+root (file tools + Bash, stream-json, `--max-turns` per sitting) with the
+system prompt `langchain/prompts/architect.md` (the stage contract) plus the
+specialist prompts as a reference appendix. Between sittings the runner reads
+`coresmith stage status`; it resumes the same session id (`--resume`, cache
+warm) with the exact blockers until the run enters `blocks`, is stopped
+(`.coresmith/architect/STOP`) or hits `--max-sittings`. Transcripts, prompts
+and `status.json` live under `.coresmith/architect/`. With
+`CORESMITH_ARCHITECT_SITTING=1` the pipeline's `init_tier` parks
+(`architect_stage_pending`) until the stage machine has reached `blocks`.

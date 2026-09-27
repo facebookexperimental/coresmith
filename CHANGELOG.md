@@ -16,6 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Shell integration: the chip top is assembled from the contracts before the
   first tier and after every tier; the final top is the same assembly.
 - uArch phase delivers a SystemC TLM-2.0 loosely-timed SoC model.
+- Architect sitting step 3: `coresmith architect start` runs one long-lived claude
+  session (resumed between sittings with the current blockers) that advances the run
+  only through the CLI state machine; `init_tier` parks until stage `blocks` when
+  CORESMITH_ARCHITECT_SITTING=1.
 - Architect sitting step 2: the executable SAD -- an abstract SystemC performance
   model built from `model/arch/arch_model.json` (`coresmith model init|build|run|eval
   --arch`), FRD verdicts recorded as `model_eval` checks, and `coresmith fabric derive`

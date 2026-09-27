@@ -6189,9 +6189,30 @@ async def shell_integration_update_node(state: OrchestratorState) -> dict:
     return out
 
 
+def architect_sitting_enabled() -> bool:
+    """CORESMITH_ARCHITECT_SITTING=1: the architecture is produced by the
+    architect sitting through the CLI state machine; the tier loop refuses to
+    fan out before the run has entered the ``blocks`` stage."""
+    return (os.environ.get("CORESMITH_ARCHITECT_SITTING", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 async def init_tier_node(state: OrchestratorState) -> dict:
     """Compute the tier list (once) and log the current tier."""
     pr = state.get("project_root", str(PROJECT_ROOT))
+    if architect_sitting_enabled() and not state.get("completed_blocks"):
+        try:
+            from orchestrator.state_store import stages as _st
+            _cur = _st.current(_db(pr))
+        except Exception:  # noqa: BLE001
+            _cur = "?"
+        if _cur not in ("blocks", "integration", "acceptance", "backend"):
+            _blk = _st.entry(_db(pr), pr, _cur) if _cur != "?" else []
+            log(f"  [ARCHITECT] the run is at stage '{_cur}'; block fan-out waits for `coresmith stage next` into 'blocks'", YELLOW)
+            _park({"type": "architect_stage_pending", "stage": _cur, "blocked_by": _blk,
+                   "supported_actions": ["retry", "abort"],
+                   "outer_agent_guidance": f"The architect sitting has not finished (stage {_cur}); run "
+                                           "`coresmith architect start` / resolve the blockers, then retry."},
+                  node="init_tier")
 
     # A declared pin map REPLACES the pad-adapter block, so the flow must not
     # ask for it. Done here -- the head of the dispatch path, before tier_list
