@@ -5480,6 +5480,7 @@ def route_decision(state: BlockState) -> str:
 
 
 route_decision.__edge_labels__ = {
+    "materialize_primitive": "RE-MATERIALIZE",
     "generate_rtl": "RETRY RTL",
     "generate_testbench": "RETRY TB",
     "synthesize": "RETRY SYNTH",
@@ -5509,6 +5510,7 @@ def route_after_human(state: BlockState) -> str:
 
 route_after_human.__edge_labels__ = {
     "synthesize": "RETRY SYNTH",
+    "materialize_primitive": "RE-MATERIALIZE",
     "generate_rtl": "RETRY / FIX RTL",
     "generate_testbench": "FIX TB",
     "block_done": "SKIP / ABORT",
