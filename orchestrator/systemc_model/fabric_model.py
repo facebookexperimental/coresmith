@@ -28,15 +28,18 @@ def render_fabric_model(block: str, spec: FabricSpec, edges: list[dict]) -> tupl
         H.append(f"  tlm_utils::simple_target_socket_tagged_optional<{mn}> s_{m};")
     for s in slaves:
         H.append(f"  tlm_utils::simple_initiator_socket_optional<{mn}> m_{s.name};")
+    # The FRD evaluation harness drives the SoC through this extra master port.
+    H.append(f"  tlm_utils::simple_target_socket_tagged_optional<{mn}> s_cs_tester;")
     H += ["  sc_core::sc_in<bool> clk;", "  sc_core::sc_in<bool> rst_n;", "  unsigned long long routed = 0, decerr = 0;",
           f"  SC_CTOR({mn});", "  void reset();", "  void dump_state(std::ostream& os) const;",
           "  void b_transport(int id, tlm::tlm_generic_payload& t, sc_core::sc_time& d);", "};"]
     C = [f'#include "{mn}.h"', f"{mn}::{mn}(sc_core::sc_module_name n) : sc_module(n)"]
-    inits = [f's_{m}("s_{m}")' for m in masters] + [f'm_{s.name}("m_{s.name}")' for s in slaves]
+    inits = [f's_{m}("s_{m}")' for m in masters] + ['s_cs_tester("s_cs_tester")'] + [f'm_{s.name}("m_{s.name}")' for s in slaves]
     C.append("  , " + ", ".join(inits))
     C.append("{")
     for i, m in enumerate(masters):
         C.append(f"  s_{m}.register_b_transport(this, &{mn}::b_transport, {i});")
+    C.append(f"  s_cs_tester.register_b_transport(this, &{mn}::b_transport, {len(masters)});")
     C.append("}")
     C.append(f"void {mn}::reset() {{ routed = 0; decerr = 0; }}")
     C.append(f'void {mn}::dump_state(std::ostream& os) const {{ os << "routed=" << routed << "\\n" << "decerr=" << decerr << "\\n"; }}')

@@ -18,13 +18,14 @@ Public API:
   * ``render_soc_model(blocks, edges, ...)`` -- soc_model.cpp source
   * ``write_build(project_root, blocks)`` -- Makefile + sources
   * ``build(model_dir)`` / ``smoke(model_dir)`` -- compile and run
+  * ``frd_eval`` -- the FRD evaluated on the model (requirements, harness build/run, verdicts)
   * ``detect()`` -- toolchain availability
 """
 from __future__ import annotations
 
-from .assemble import render_soc_model, write_build
+from .assemble import render_soc_model, render_soc_top_header, write_build
 from .conventions import channel_binding, render_block_skeleton
 from .toolchain import build, detect, smoke
 
-__all__ = ["channel_binding", "render_block_skeleton", "render_soc_model", "write_build",
+__all__ = ["channel_binding", "render_block_skeleton", "render_soc_model", "render_soc_top_header", "write_build",
            "build", "smoke", "detect"]

@@ -127,6 +127,8 @@ def render_block_skeleton(block: str, edges: list[dict], *, clock_period_ns: flo
 COMMON_HEADER = '''// cs_model_common.h -- shared by every generated SystemC block model (B2).
 #pragma once
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -154,6 +156,15 @@ struct cs_mem {
     void read(uint64_t addr, uint8_t* p, unsigned n) const {
         for (unsigned i = 0; i < n; ++i) { auto it = bytes.find(addr + i); p[i] = it == bytes.end() ? 0 : it->second; }
     }
+    // Load a raw binary image (firmware, stimulus) at ``base``; returns bytes loaded (0 = missing file).
+    size_t load_bin(const std::string& path, uint64_t base) {
+        FILE* f = std::fopen(path.c_str(), "rb"); if (!f) return 0;
+        uint8_t buf[4096]; size_t n, total = 0;
+        while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) { write(base + total, buf, (unsigned)n); total += n; }
+        std::fclose(f); return total;
+    }
+    size_t size() const { return bytes.size(); }
+    uint64_t checksum() const { uint64_t h = 1469598103934665603ULL; for (auto& kv : bytes) { h ^= kv.second; h *= 1099511628211ULL; } return h; }
 };
 
 // Issue one generic-payload transaction on an initiator socket (LT).

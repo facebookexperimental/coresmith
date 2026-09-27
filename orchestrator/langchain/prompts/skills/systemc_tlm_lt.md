@@ -16,3 +16,11 @@ Rules of thumb for a model that is fast, wireable and comparable to RTL:
 - `dump_state` prints `name=value` lines for every architectural register and
   a short summary of memories (size, checksum) -- it is diffed against RTL.
 - Deterministic: no random numbers, no wall-clock time, no environment reads.
+- Completeness beats speed: the FRD is evaluated on the assembled model
+  before RTL. Implement the whole register map and every operation the uArch
+  spec lists; a processor block executes its ISA subset functionally; memories
+  hold real contents (`cs_mem`, preloadable with `load_bin`).
+- Expose architectural state publicly (members/getters) for the FRD harness;
+  keep `dump_state` complete -- it is diffed against RTL later.
+- The fabric router has an extra optional master port `s_cs_tester`; the FRD
+  harness's `cs_tester` binds there to reach every memory-mapped slave.

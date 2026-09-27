@@ -4,6 +4,30 @@ engine assembles into a whole-SoC model: firmware and stimulus run on it at
 native speed before any RTL exists, and it is the integration golden the RTL
 is later compared against at transaction boundaries.
 
+# Why the model must be complete
+The assembled model is what the FRD is evaluated on BEFORE any RTL is
+lowered (the FRD evaluation harness boots the mission firmware on it, drives
+every memory-mapped interface through the fabric and checks every FRD
+requirement). A model that stubs behaviour -- returns constants, ignores
+writes, "TODO"s a mode, skips an instruction class, approximates a register
+-- silently turns that evaluation into a false pass or a false fail. Treat
+the uArch spec as the behavioural contract and implement ALL of it:
+* every register in the block's map, at the spec's address, with the spec's
+  reset value, read/write semantics, side effects and status bits;
+* every operation / command / instruction class the spec lists -- for a
+  processor block that means functionally executing the ISA subset the spec
+  assigns to it (fetch/decode/execute/CSR/traps/interrupts as specified),
+  not a placeholder that returns from `run()`;
+* every memory and FIFO with real contents (use `cs_mem`; `load_bin` lets
+  the harness preload images), every arbitration/ordering rule, every
+  error/fault path and its reporting field;
+* every cross-block invariant the spec's §4a states, observable through
+  `dump_state`.
+If the spec is silent on something the model needs, choose the simplest
+behaviour consistent with the FRD and say so in `notes` -- never leave it
+unimplemented. Performance counters and cycle accounting the FRD names must
+be modelled (LT estimates are fine; label them).
+
 # Your task
 Implement ONE block's model: write `model/<block>_model.cpp` that completes the
 GENERATED header `model/<block>_model.h`. Read the header first: every member
@@ -31,6 +55,9 @@ below the generated members (keep the generated members intact).
   per line -- the engine diffs it against the RTL at checkpoints.
 * No global state, no `sc_main`, no `sc_stop()` unless the spec says the block
   ends the mission; no dynamic threads beyond `run()`.
+* Public observability: besides `dump_state`, expose the block's
+  architecturally visible registers/memories as PUBLIC members (or public
+  getters) so the FRD harness can check them without poking privates.
 
 # Inputs
 * uArch spec: `arch/uarch_specs/<block>.md` (§2 interface, §3 datapath/control,

@@ -16,6 +16,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Shell integration: the chip top is assembled from the contracts before the
   first tier and after every tier; the final top is the same assembly.
 - uArch phase delivers a SystemC TLM-2.0 loosely-timed SoC model.
+- The FRD is evaluated on that model before any RTL is lowered: an agent-authored
+  SystemC harness answers every FRD requirement id (pass / fail / not_testable with
+  reason); the uArch phase gate (default on) parks on build, smoke or FRD failure.
+  The model prompts demand behaviourally complete models (full register maps, ISA
+  execution for processor blocks, real memory contents).
 - Assertion stage: spec invariants must exist as assertions; phantom claims
   are rejected.
 - Timing false pass closed: `best` means sim AND synth AND timing; `abc -D`;

@@ -16,6 +16,7 @@ from orchestrator.systemc_model import (
     detect,
     render_block_skeleton,
     render_soc_model,
+    render_soc_top_header,
     smoke,
     write_build,
 )
@@ -90,17 +91,19 @@ class TestConventions:
         assert "sc_in<cs_word_t> s_led" in render_block_skeleton("pads", _EDGES)
 
     def test_soc_model_binds_every_edge(self):
-        src = render_soc_model(_BLOCKS, _EDGES, top_name="tiny")
-        assert "u_req.m_q.bind(u_rsp.s_q)" in src
+        src = render_soc_top_header(_BLOCKS, _EDGES, top_name="tiny")
+        assert "SC_MODULE(soc_model_top)" in src and "u_req.m_q.bind(u_rsp.s_q)" in src
         assert "sc_fifo<cs_beat_t> f_0" in src and "u_sink.s_axis_o(f_0)" in src
         assert "sc_signal<cs_word_t> s_0" in src and "u_pads.s_led(s_0)" in src
-        assert "SOC_MODEL_SMOKE_OK" in src
+        assert "reset_all()" in src and "dump_all(std::ostream& os)" in src
+        drv = render_soc_model(_BLOCKS, _EDGES, top_name="tiny")
+        assert '#include "soc_model_top.h"' in drv and "SOC_MODEL_SMOKE_OK" in drv
 
     def test_static_fan_out_shares_one_signal(self):
         # An sc_out binds exactly once: two consumers of the same static
         # producer port must share the signal (E109 on the first SoC run).
         fan = {**_E3, "edge_id": "sink__m_led__to__req__s_led", "consumer_block": "req", "consumer_port": "s_led"}
-        src = render_soc_model(_BLOCKS, _EDGES + [fan], top_name="tiny")
+        src = render_soc_top_header(_BLOCKS, _EDGES + [fan], top_name="tiny")
         assert src.count("u_sink.m_led(") == 1
         assert "u_pads.s_led(s_0)" in src and "u_req.s_led(s_0)" in src and "s_1" not in src
 
@@ -136,6 +139,7 @@ def test_generated_fabric_router_routes_and_decerrs(tmp_path):
     md = write_build(tmp_path, blocks, edges, top_name="fab")
     h, c = render_fabric_model("fabric", spec, edges)
     assert "simple_target_socket_tagged_optional" in h and "simple_initiator_socket_optional" in h
+    assert "s_cs_tester" in h and "s_cs_tester.register_b_transport" in c
     assert ".size() == 0" in c
     (md / "fabric_model.h").write_text(h)
     (md / "fabric_model.cpp").write_text(c)

@@ -5960,6 +5960,8 @@ async def _uarch_phase_models(pr: str, blocks: list[dict]) -> dict:
         sm = await asyncio.to_thread(smoke, md)
         rec["smoke_ok"] = bool(sm["ok"])
         rec["smoke_log"] = sm["log"][-2000:]
+        if rec["smoke_ok"] and frd_eval_enabled():
+            rec["frd_eval"] = await _frd_evaluation(pr, md, names)
     import hashlib
     for name in names:
         cp = md / f"{model_name(name)}.cpp"
@@ -5970,6 +5972,70 @@ async def _uarch_phase_models(pr: str, blocks: list[dict]) -> dict:
                             build_ok=rec["build_ok"], smoke_ok=rec.get("smoke_ok"))
         except Exception:  # noqa: BLE001
             pass
+    return rec
+
+
+def frd_eval_enabled() -> bool:
+    """B2: evaluate the FRD on the SystemC SoC model before RTL (CORESMITH_FRD_EVAL, default on)."""
+    return (os.environ.get("CORESMITH_FRD_EVAL", "1") or "1").strip().lower() \
+        not in {"0", "false", "no", "off", ""}
+
+
+async def _frd_evaluation(pr: str, md, names: list[str]) -> dict:
+    """The FRD evaluated on the assembled model: requirement list -> agent-
+    authored harness (``model/frd_eval/*.cpp``) -> build -> run -> verdicts.
+    Repairs are bounded (CORESMITH_FRD_EVAL_REPAIRS, default 3) and only for
+    harness defects (compile error, crash, hang, missing DONE); a ``fail``
+    verdict is the finding. Never raises; returns the record the gate reads."""
+    from orchestrator.systemc_model import frd_eval as fe
+    rec: dict = {"enabled": True, "gate_ok": None}
+    frd = Path(pr) / "arch" / "frd_spec.md"
+    if not frd.exists():
+        rec["skipped"] = "no arch/frd_spec.md"
+        return rec
+    reqs = fe.extract_requirements(frd.read_text(encoding="utf-8", errors="replace"))
+    fe.write_requirements(md, reqs)
+    rec["requirements"] = len(reqs)
+    if not reqs:
+        rec["skipped"] = "the FRD has no identified requirements (**ID**: XXX-NNN blocks)"
+        return rec
+    timeout_s = int(os.environ.get("CORESMITH_FRD_EVAL_TIMEOUT_S", "1800") or 1800)
+    repairs = max(0, int(os.environ.get("CORESMITH_FRD_EVAL_REPAIRS", "3") or 3))
+    from orchestrator.langchain.agents.frd_eval_generator import FRDEvalGenerator
+    agent = FRDEvalGenerator()
+    compiler_log, run_log, summary, run = "", "", None, None
+    for attempt in range(1, repairs + 2):
+        if not (attempt == 1 and fe.harness_sources(md)):   # reuse an existing harness first
+            try:
+                await agent.generate(project_root=pr, blocks=names, attempt=attempt,
+                                     compiler_log=compiler_log, run_log=run_log, summary=summary)
+            except Exception as exc:  # noqa: BLE001
+                rec["error"] = f"harness author failed: {str(exc)[:300]}"
+                log(f"  [FRD-EVAL] {rec['error']}", RED)
+                break
+        b = await asyncio.to_thread(fe.build_harness, md)
+        rec["built"] = bool(b["ok"])
+        if not b["ok"]:
+            compiler_log, run_log = b["log"], ""
+            log(f"  [FRD-EVAL] harness build failed (attempt {attempt})", YELLOW)
+            continue
+        run = await asyncio.to_thread(fe.run_harness, md, timeout_s=timeout_s)
+        summary = fe.summarize(reqs, run["results"])
+        rec.update({"done": run["done"], "rc": run.get("rc"), "summary": summary})
+        if run["done"]:
+            break
+        compiler_log, run_log = "", run["log"]
+        log(f"  [FRD-EVAL] harness did not run to completion (attempt {attempt})", YELLOW)
+    if run is not None:
+        rec["report"] = str(fe.write_report(pr, md, reqs, run, summary))
+    rec["gate_ok"] = bool(run and run["done"] and summary and summary["gate_ok"])
+    if summary:
+        c = summary["counts"]
+        log(f"  [FRD-EVAL] {len(reqs)} requirement(s): pass={c['pass']} fail={c['fail']} "
+            f"not_testable={c['not_testable']} skipped={c['skipped']} unanswered_must={len(summary['unanswered_must'])}"
+            f" -> gate_ok={rec['gate_ok']}", GREEN if rec["gate_ok"] else RED)
+        if summary["failed"]:
+            log(f"  [FRD-EVAL] failing: {', '.join(summary['failed'][:12])}", RED)
     return rec
 
 
@@ -5988,7 +6054,8 @@ async def uarch_phase_node(state: OrchestratorState) -> dict:
     for the rest); (3) the SoC model is assembled, built (with a bounded
     compiler-repair loop) and smoked. Results go to ``models`` and
     ``.coresmith/system_model.json``. A missing toolchain is recorded, not
-    fatal; a failed model build or smoke parks (CORESMITH_UARCH_PHASE_GATE,
+    fatal; (4) the FRD is evaluated on the model (``_frd_evaluation``). A
+    failed build, smoke or FRD evaluation parks (CORESMITH_UARCH_PHASE_GATE,
     default on; ``0`` records the failure and lowers to RTL anyway).
     """
     pr = _pr(state)
@@ -6025,12 +6092,19 @@ async def uarch_phase_node(state: OrchestratorState) -> dict:
     # smoke: the chip is "booted" in the model before any RTL is lowered.
     # A missing toolchain is recorded (parked_reason), never a park.
     sm = result["system_model"]
-    failed = sm.get("enabled") and (sm.get("build_ok") is False or sm.get("smoke_ok") is False)
+    frd = sm.get("frd_eval") or {}
+    failed = sm.get("enabled") and (sm.get("build_ok") is False or sm.get("smoke_ok") is False
+                                    or frd.get("gate_ok") is False)
     if uarch_phase_gate_enabled() and failed:
+        why = ("the FRD evaluation on the model failed (model/frd_eval/REPORT.md, .coresmith/frd_eval.json): "
+               f"failing={((frd.get('summary') or {}).get('failed') or [])[:8]} "
+               f"unanswered_must={((frd.get('summary') or {}).get('unanswered_must') or [])[:8]}"
+               if frd.get("gate_ok") is False else
+               "the SystemC SoC model did not build or its smoke run failed (model/build.log, model/smoke.log)")
         _park({"type": "uarch_phase_failed", "system_model": sm,
                "supported_actions": ["retry", "skip", "abort"],
-               "outer_agent_guidance": "The SystemC SoC model did not build or its smoke run failed "
-                                       "(model/build.log, model/smoke.log); fix model/ and retry, or skip."},
+               "outer_agent_guidance": f"uArch phase exit criterion not met: {why}. Fix model/ (block models "
+                                       "or the harness) and retry, or skip to lower to RTL anyway."},
               node="uarch_phase")
     return {"uarch_phase": result}
 
