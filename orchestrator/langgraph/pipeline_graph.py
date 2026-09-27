@@ -3348,10 +3348,15 @@ def _evaluate_ppa_gate(
 
     sta: dict = {}
     _sta_dir = Path(project_root) / "syn" / "output" / block_name
+    # B2 ENGINE_ISSUES #8: STA must link the module the netlist DECLARES, which is
+    # not the block name for externally-mandated tops (the generated fabric is
+    # `cs_fabric_soc` for block `soc_fabric`); yosys/cocotb already resolve it so.
+    from orchestrator.langgraph.pipeline_helpers import rtl_module_name as _rtl_module_name
+    _sta_top = _rtl_module_name(rtl_path, block_name) if Path(rtl_path).exists() else block_name
     if synth_result:
         sta = run_pre_layout_sta(
             synth_result.get("netlist_path", ""), synth_result.get("sdc_path", ""),
-            synth_result.get("liberty_path", ""), block_name,
+            synth_result.get("liberty_path", ""), _sta_top,
             report_path=str(_sta_dir / f"{block_name}_sta.rpt"),
         ) or {}
         _meta["sta_report_path"] = str(_sta_dir / f"{block_name}_sta.rpt")
@@ -3413,7 +3418,7 @@ def _evaluate_ppa_gate(
             _clk = "clk"
         _mf_period = _period_ns if (_period_ns and _period_ns > 0) else 20.0
         mf = run_maxfanout_buffered_sta(
-            rtl_path, _liberty_p, block_name, _mf_period, _clk,
+            rtl_path, _liberty_p, _sta_top, _mf_period, _clk,
             timeout_s=_synth_timeout, extra_sources=_mem_lib_srcs,
             report_dir=_sta_dir, project_root=project_root,
             mapped_netlist=(synth_result or {}).get("netlist_path"),
