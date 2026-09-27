@@ -46,3 +46,24 @@ testbench (decode, DECERR, bursts, backpressure, fairness). Re-vendor with
 - SystemC model as the block golden (transaction server bridge) and
   RTL-vs-model checkpoint comparison in acceptance.
 - FlooNoC for many-cluster designs; data-width converters in the fabric.
+
+## Architect sitting, step 1: the ontology and the state machine (CLI)
+
+The architecture graph's deterministic work is also available as tools the
+architect (one long-lived session) drives through the `coresmith` CLI; the
+graph nodes call the same functions (`harness/tools/`), so both flows populate
+the same tables (`state_store/ontology.py`: `artifacts`, `items`, `item_links`,
+`checks`, `questions`, `stages`).
+
+| verb | does |
+|---|---|
+| `coresmith register <kind> <path> [--block b]` | parse + validate + record a PRD/SAD/FRD/ERS/block_diagram/contracts/abi/uarch/arch_model/harness; refuses (exit 1) with stable problem codes (`BD_INSTANCE_UNSPECIFIED`, `BD_REVERSED_DUP`, `CT_WIDTH_MISMATCH`, `CT_FABRIC_PORT_UNREACHED`, `CT_BUS_PHANTOM_FIELD`, ...) |
+| `coresmith item list|show|status` | the identified requirements (`PERF-001`, `FR-CPU-2`, `KPI-ISA-1`, `INV-003`, `VAL-007`, `ERS-<block>-n`) with links and checks |
+| `coresmith link <from> <to> <rel>` | `derives_from` / `owned_by` / `verified_by` / `cites` / `covers` |
+| `coresmith check add <item> <kind> <status>` | a tool verdict (pass / fail / not_testable / skipped / tool_error), hash-bound |
+| `coresmith question add|answer|list` | item-scoped questions; `answer --ruling` records a ruling |
+| `coresmith stage status|next` | the state machine: `requirements -> arch_model -> decomposition -> interfaces -> uarch -> model_eval -> blocks -> ...`; `next` refuses with the exact missing item ids |
+| `coresmith status` | one screen |
+
+Every verb takes `--json`. Registration is content-hashed (`artifacts.version`
+bumps on change) and never edits the document.

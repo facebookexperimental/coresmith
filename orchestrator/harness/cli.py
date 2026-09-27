@@ -257,6 +257,156 @@ def _state_db(args):
     return open_project(_bootstrap(args))
 
 
+
+# ---------------------------------------------------------------------------
+# Architect sitting (step 1): register / item / link / check / question / stage / status.
+# The architect can only advance a run through these; they are the old graph
+# nodes as deterministic tools.
+
+def _problems_lines(problems):
+    return [f"  [{q.get('severity','error')[:4]}] {q.get('code')} {q.get('where')}: {q.get('text')}" for q in problems]
+
+
+def cmd_register(args) -> int:
+    """``coresmith register <kind> <path> [--block b]`` -- parse, validate, record an artifact."""
+    from orchestrator.harness.tools.register import register
+    db = _state_db(args)
+    res = register(db, db.root, args.kind, args.path, block=getattr(args, "block", "") or "", actor="cli")
+    lines = [f"register {args.kind}: {'OK' if res.get('ok') else 'REFUSED'}"]
+    if res.get("ok"):
+        lines.append(f"  artifact {res['artifact']['kind']} v{res['artifact']['version']} sha {res['artifact']['sha']}; "
+                     f"items {res.get('items')}; links {res.get('links')}")
+    lines += _problems_lines(res.get("problems") or [])
+    _emit(args, res, "\n".join(lines))
+    return EXIT_PASS if res.get("ok") else EXIT_FAIL
+
+
+def cmd_item(args) -> int:
+    db = _state_db(args)
+    verb = getattr(args, "verb", "list")
+    if verb == "show":
+        it = db.item(args.id)
+        if not it:
+            _emit(args, {"error": "no such item"}, f"no item {args.id}")
+            return EXIT_USAGE
+        payload = {"item": it, "links_out": db.links(from_id=args.id), "links_in": db.links(to_id=args.id),
+                   "checks": db.checks(args.id)}
+        lines = [f"{it['id']} [{it['kind']}] {it['status']} prio={it['priority'] or '-'}", f"  {it['text'][:300]}",
+                 f"  acceptance: {it['acceptance'][:200] or '-'}", f"  model check: {it['model_check'][:200] or '-'}"]
+        lines += [f"  -> {l['rel']} {l['to_id']}" for l in payload["links_out"]]
+        lines += [f"  <- {l['rel']} {l['from_id']}" for l in payload["links_in"]]
+        lines += [f"  check {c['kind']}: {c['status']} {c['evidence'][:120]}" for c in payload["checks"]]
+        _emit(args, payload, "\n".join(lines))
+        return EXIT_PASS
+    if verb == "status":
+        db.set_item_status(args.id, args.status)
+        _emit(args, {"id": args.id, "status": args.status}, f"{args.id} -> {args.status}")
+        return EXIT_PASS
+    rows = db.items(kind=getattr(args, "kind", None) or None, artifact=getattr(args, "artifact", None) or None,
+                    status=getattr(args, "status", None) or None, must_have=bool(getattr(args, "must", False)))
+    lines = [f"{r['id']:<18} {r['kind']:<5} {r['status']:<12} {r['priority'] or '-':<12} {r['text'][:80]}" for r in rows] or ["(no items)"]
+    _emit(args, {"items": rows}, "\n".join(lines))
+    return EXIT_PASS
+
+
+def cmd_link(args) -> int:
+    db = _state_db(args)
+    try:
+        db.link_items(args.from_id, args.to_id, args.rel, source="cli")
+    except ValueError as exc:
+        _emit(args, {"error": str(exc)}, f"error: {exc}")
+        return EXIT_USAGE
+    _emit(args, {"from": args.from_id, "to": args.to_id, "rel": args.rel}, f"{args.from_id} -{args.rel}-> {args.to_id}")
+    return EXIT_PASS
+
+
+def cmd_check(args) -> int:
+    db = _state_db(args)
+    verb = getattr(args, "verb", "list")
+    if verb == "add":
+        try:
+            cid = db.add_check(args.item, args.kind, args.status, evidence=args.evidence or "", sha=args.sha or "",
+                               run_id=args.run_id or "", actor=args.actor or "cli")
+        except ValueError as exc:
+            _emit(args, {"error": str(exc)}, f"error: {exc}")
+            return EXIT_USAGE
+        _emit(args, {"id": cid}, f"check #{cid}: {args.item} {args.kind} {args.status}")
+        return EXIT_PASS
+    rows = db.checks(getattr(args, "item", None) or None, kind=getattr(args, "kind", None) or None,
+                     latest=bool(getattr(args, "latest", False)))
+    lines = [f"{c['item_id']:<18} {c['kind']:<14} {c['status']:<13} {c['sha'] or '-':<10} {(c['evidence'] or '')[:80]}" for c in rows] or ["(no checks)"]
+    _emit(args, {"checks": rows}, "\n".join(lines))
+    return EXIT_PASS
+
+
+def cmd_question(args) -> int:
+    db = _state_db(args)
+    verb = getattr(args, "verb", "list")
+    if verb == "add":
+        qid = db.add_question(args.text, item_id=args.item or "", must_answer=not args.optional, asked_by=args.by or "architect")
+        _emit(args, {"id": qid}, f"question Q{qid} recorded ({'must answer' if not args.optional else 'optional'})")
+        return EXIT_PASS
+    if verb == "answer":
+        rid = None
+        if args.ruling:
+            rid = db.add_ruling("global", args.ruling, rationale=f"answers Q{args.id}", source=args.by or "human",
+                                question_ref=f"question:{args.id}")
+            db.export_rulings_view()
+        ok = db.answer_question(int(args.id), args.ruling or args.answer or "", ruling_id=rid)
+        _emit(args, {"id": int(args.id), "answered": ok, "ruling_id": rid},
+              f"Q{args.id} {'answered' if ok else 'not open'}" + (f" by ruling R{rid}" if rid else ""))
+        return EXIT_PASS if ok else EXIT_USAGE
+    rows = db.questions(open_only=not getattr(args, "all", False))
+    lines = [f"Q{q['id']:<4} {q['status']:<9} {'MUST' if q['must_answer'] else 'opt ':<5} {q['item_id'] or '-':<12} {q['text'][:90]}" for q in rows] or ["(no open questions)"]
+    _emit(args, {"questions": rows}, "\n".join(lines))
+    return EXIT_PASS
+
+
+def cmd_stage(args) -> int:
+    from orchestrator.state_store import stages as st
+    db = _state_db(args)
+    verb = getattr(args, "verb", "status")
+    if verb == "next":
+        res = st.advance(db, db.root, actor="cli")
+        if res["advanced"]:
+            lines = [f"stage {res['done']} DONE -> now {res['stage']}"]
+        else:
+            lines = [f"stage {res['stage']} BLOCKED:"]
+        for b in res["blocked_by"]:
+            lines.append(f"  {b['code']}: {b['text']}" + (f" [{b['count']}] {', '.join(b['ids'][:12])}" if b['ids'] else ""))
+        _emit(args, res, "\n".join(lines))
+        return EXIT_PASS if res["advanced"] else EXIT_FAIL
+    res = st.status(db, db.root)
+    lines = [f"stage {res['stage']} ({res['index'] + 1}/{len(res['stages'])}); done: {', '.join(res['done']) or '-'}",
+             "can advance" if res["can_advance"] else "blocked by:"]
+    for b in res["blocked_by"]:
+        lines.append(f"  {b['code']}: {b['text']}" + (f" [{b['count']}] {', '.join(b['ids'][:12])}" if b['ids'] else ""))
+    _emit(args, res, "\n".join(lines))
+    return EXIT_PASS
+
+
+def cmd_status(args) -> int:
+    """One screen: stage, artifacts, item coverage, open questions, blockers."""
+    from orchestrator.state_store import stages as st
+    db = _state_db(args)
+    s = st.status(db, db.root)
+    arts = db.artifacts()
+    items = db.items()
+    by_status = {}
+    for i in items:
+        by_status[i["status"]] = by_status.get(i["status"], 0) + 1
+    qs = db.questions(open_only=True)
+    payload = {"stage": s, "artifacts": arts, "items": {"total": len(items), "by_status": by_status},
+               "open_questions": len(qs), "blocks": [b["name"] for b in db.block_specs()]}
+    lines = [f"stage: {s['stage']}  (done: {', '.join(s['done']) or '-'})",
+             "artifacts: " + (", ".join(f"{a['kind']}@v{a['version']}" for a in arts) or "-"),
+             f"items: {len(items)} {by_status}", f"open questions: {len(qs)}  blocks: {len(payload['blocks'])}",
+             "blockers:" if s["blocked_by"] else "ready: coresmith stage next"]
+    for b in s["blocked_by"]:
+        lines.append(f"  {b['code']}: {b['text']}" + (f" [{b['count']}] {', '.join(b['ids'][:12])}" if b['ids'] else ""))
+    _emit(args, payload, "\n".join(lines))
+    return EXIT_PASS
+
 def cmd_blocks(args) -> int:
     """The block queue from the project database."""
     db = _state_db(args)
@@ -456,6 +606,39 @@ def _register_state(sub) -> None:
     it.add_argument("--feedback", default=None)
     it.add_argument("--rationale", default=None)
     it.set_defaults(func=_run(cmd_interrupts))
+
+    # --- architect sitting tools -------------------------------------------
+    rg = sub.add_parser("register", help="register an artifact (prd|sad|frd|ers|block_diagram|contracts|abi|uarch|arch_model|harness)")
+    rg.add_argument("kind"); rg.add_argument("path"); rg.add_argument("--block", default="")
+    _add_project_root(rg); _add_json(rg); rg.set_defaults(func=_run(cmd_register))
+    ip = sub.add_parser("item", help="ontology items: list | show | status")
+    isub = ip.add_subparsers(dest="verb")
+    il = isub.add_parser("list"); il.add_argument("--kind"); il.add_argument("--artifact"); il.add_argument("--status"); il.add_argument("--must", action="store_true")
+    _add_project_root(il); _add_json(il); il.set_defaults(func=_run(cmd_item), verb="list")
+    ish = isub.add_parser("show"); ish.add_argument("id"); _add_project_root(ish); _add_json(ish); ish.set_defaults(func=_run(cmd_item), verb="show")
+    ist = isub.add_parser("status"); ist.add_argument("id"); ist.add_argument("status"); _add_project_root(ist); _add_json(ist); ist.set_defaults(func=_run(cmd_item), verb="status")
+    lk = sub.add_parser("link", help="link two items: <from> <to> <rel> (derives_from|owned_by|verified_by|cites|covers)")
+    lk.add_argument("from_id"); lk.add_argument("to_id"); lk.add_argument("rel"); _add_project_root(lk); _add_json(lk); lk.set_defaults(func=_run(cmd_link))
+    ck = sub.add_parser("check", help="tool verdicts about items: add | list")
+    csub = ck.add_subparsers(dest="verb")
+    ca = csub.add_parser("add"); ca.add_argument("item"); ca.add_argument("kind"); ca.add_argument("status")
+    ca.add_argument("--evidence", default=""); ca.add_argument("--sha", default=""); ca.add_argument("--run-id", dest="run_id", default=""); ca.add_argument("--actor", default="")
+    _add_project_root(ca); _add_json(ca); ca.set_defaults(func=_run(cmd_check), verb="add")
+    cl = csub.add_parser("list"); cl.add_argument("--item"); cl.add_argument("--kind"); cl.add_argument("--latest", action="store_true")
+    _add_project_root(cl); _add_json(cl); cl.set_defaults(func=_run(cmd_check), verb="list")
+    qp = sub.add_parser("question", help="item-scoped questions: add | answer | list")
+    qsub = qp.add_subparsers(dest="verb")
+    qa = qsub.add_parser("add"); qa.add_argument("text"); qa.add_argument("--item", default=""); qa.add_argument("--optional", action="store_true"); qa.add_argument("--by", default="")
+    _add_project_root(qa); _add_json(qa); qa.set_defaults(func=_run(cmd_question), verb="add")
+    qn = qsub.add_parser("answer"); qn.add_argument("id"); qn.add_argument("--ruling", default=""); qn.add_argument("--answer", default=""); qn.add_argument("--by", default="")
+    _add_project_root(qn); _add_json(qn); qn.set_defaults(func=_run(cmd_question), verb="answer")
+    ql = qsub.add_parser("list"); ql.add_argument("--all", action="store_true"); _add_project_root(ql); _add_json(ql); ql.set_defaults(func=_run(cmd_question), verb="list")
+    sp = sub.add_parser("stage", help="the run's state machine: status | next")
+    ssub = sp.add_subparsers(dest="verb")
+    ss = ssub.add_parser("status"); _add_project_root(ss); _add_json(ss); ss.set_defaults(func=_run(cmd_stage), verb="status")
+    sn = ssub.add_parser("next"); _add_project_root(sn); _add_json(sn); sn.set_defaults(func=_run(cmd_stage), verb="next")
+    stp = sub.add_parser("status", help="one-screen run status (stage, artifacts, items, questions, blockers)")
+    _add_project_root(stp); _add_json(stp); stp.set_defaults(func=_run(cmd_status))
     ls = sub.add_parser("leases", help="process leases held in the project database")
     _add_project_root(ls)
     _add_json(ls)

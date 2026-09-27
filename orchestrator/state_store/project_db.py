@@ -45,6 +45,7 @@ from typing import Any
 
 from orchestrator.state_store.interrupts import InterruptMixin
 from orchestrator.state_store.leases import LeaseMixin
+from orchestrator.state_store.ontology import ONTOLOGY_SCHEMA, OntologyMixin
 from orchestrator.state_store.rulings import RulingMixin
 from orchestrator.state_store.store import _SCHEMA as _SCOREBOARD_SCHEMA
 
@@ -302,7 +303,7 @@ def _float(v: Any) -> float | None:
         return None
 
 
-class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin):
+class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin):
     """The project database. Construct with :func:`open_project` in most code."""
 
     def __init__(self, project_root: str | Path):
@@ -315,6 +316,7 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin):
         with self._conn() as db:
             db.executescript(_SCHEMA)
             db.executescript(_SCOREBOARD_SCHEMA)
+            db.executescript(ONTOLOGY_SCHEMA)
             for table in ("attempts", "diagnoses"):
                 cols = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
                 if "round" not in cols:

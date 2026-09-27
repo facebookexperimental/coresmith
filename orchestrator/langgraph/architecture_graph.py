@@ -227,6 +227,27 @@ class ArchGraphState(TypedDict):
 # Per-document persistence helpers
 # ---------------------------------------------------------------------------
 
+
+def _register_best_effort(project_root: str, kind: str, rel_path: str) -> None:
+    """Architect-sitting step 1: the graph nodes also feed the ontology so
+    ``coresmith status`` / ``stage`` describe a graph-driven run. Problems are
+    logged, never raised -- the graph's own gates stay authoritative here."""
+    import logging
+    _lg = logging.getLogger(__name__)
+    try:
+        from orchestrator.harness.tools.register import register
+        from orchestrator.state_store.project_db import open_project
+        res = register(open_project(project_root), project_root, kind, rel_path, actor="graph")
+        errs = [q for q in (res.get("problems") or []) if q.get("severity") == "error"]
+        if not res.get("ok"):
+            _lg.warning("[ONTOLOGY] %s: not registered (%d problem(s)): %s", kind, len(errs),
+                        "; ".join(f"{q['code']} {q['where']}" for q in errs[:4]))
+        else:
+            _lg.info("[ONTOLOGY] %s registered v%s (%s items)", kind, res["artifact"]["version"], res.get("items"))
+    except Exception as exc:  # noqa: BLE001
+        _lg.warning("[ONTOLOGY] %s: registration skipped: %s", kind, exc)
+
+
 def _persist_prd(
     project_root: str,
     prd_result: dict,
@@ -480,6 +501,7 @@ def _persist_ers(project_root: str, ers_result: dict) -> None:
     from orchestrator.utils import atomic_write
 
     atomic_write(coresmith_dir / "ers_spec.json", json.dumps(ers_result, indent=2, default=str))
+    _register_best_effort(project_root, "ers", ".coresmith/ers_spec.json")
 
     ers = ers_result.get("ers", {})
     md_lines = [
@@ -776,6 +798,7 @@ async def gather_requirements_node(state: ArchGraphState) -> dict:
             update["requirements"] = enriched_requirements
 
             _persist_prd(state["project_root"], result, previous_questions, user_answers)
+            _register_best_effort(state["project_root"], "prd", ".coresmith/prd_spec.json")
 
             _event(state, "Gather Requirements", "graph_node_exit", {
                 "round": state["round"],
@@ -859,6 +882,7 @@ async def functional_requirements_node(state: ArchGraphState) -> dict:
         span.set_attribute("frd_text_len", len(frd_text))
 
         _persist_frd(state["project_root"], result)
+        _register_best_effort(state["project_root"], "frd", "arch/frd_spec.md")
 
         _event(state, "Functional Requirements", "graph_node_exit", {
             "round": state["round"],
@@ -956,6 +980,7 @@ async def block_diagram_node(state: ArchGraphState) -> dict:
         }
         _persist_intermediate_state(state, update)
         _persist_block_diagram(state["project_root"], result)
+        _register_best_effort(state["project_root"], "block_diagram", ".coresmith/block_diagram.json")
         return update
 
 
