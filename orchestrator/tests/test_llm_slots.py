@@ -58,7 +58,10 @@ def test_two_workers_serialize_on_one_slot(tmp_path, monkeypatch):
     time.sleep(0.05)
     ts[1].start()
     [t.join() for t in ts]
-    assert order == ["a-in", "a-out", "b-in", "b-out"]
+    # Which worker wins the slot is scheduler-dependent; what matters is that
+    # the two calls never overlap (every "-in" is followed by its own "-out").
+    assert len(order) == 4 and order[0][0] == order[1][0] and order[2][0] == order[3][0]
+    assert order[0].endswith("-in") and order[1].endswith("-out") and order[3].endswith("-out")
 
 
 def test_two_slots_run_in_parallel(tmp_path, monkeypatch):

@@ -116,3 +116,45 @@ def test_phase_builds_and_smokes_the_soc_model(tmp_path, monkeypatch):
     rows = {m["block"]: m for m in db.models()}
     assert set(rows) == set(_BLOCKS) and all(r["build_ok"] == 1 and r["smoke_ok"] == 1 for r in rows.values())
     assert "reads=4" in sm["smoke_log"]
+
+
+def _gate_run(tmp_path, monkeypatch, sm):
+    monkeypatch.setenv("CORESMITH_UARCH_PHASE", "1")
+    monkeypatch.setenv("CORESMITH_SYSTEM_MODEL", "1")
+    _project(tmp_path)
+    parked = []
+
+    async def _specs(pr, blocks):
+        return {"written": [], "missing": []}
+
+    async def _models(pr, blocks):
+        return dict(sm, enabled=True)
+    monkeypatch.setattr(pg, "_uarch_phase_specs", _specs)
+    monkeypatch.setattr(pg, "_uarch_phase_models", _models)
+    monkeypatch.setattr(pg, "_park", lambda payload, **k: parked.append((payload, k)))
+    asyncio.run(pg.uarch_phase_node(_state(tmp_path)))
+    return parked
+
+
+def test_gate_parks_when_the_model_smoke_fails(tmp_path, monkeypatch):
+    monkeypatch.delenv("CORESMITH_UARCH_PHASE_GATE", raising=False)   # default on
+    parked = _gate_run(tmp_path, monkeypatch, {"build_ok": True, "smoke_ok": False})
+    assert len(parked) == 1 and parked[0][0]["type"] == "uarch_phase_failed"
+    assert parked[0][1]["node"] == "uarch_phase" and "retry" in parked[0][0]["supported_actions"]
+
+
+def test_gate_parks_when_the_model_does_not_build(tmp_path, monkeypatch):
+    monkeypatch.setenv("CORESMITH_UARCH_PHASE_GATE", "1")
+    assert len(_gate_run(tmp_path, monkeypatch, {"build_ok": False, "smoke_ok": None})) == 1
+
+
+def test_gate_off_records_and_continues(tmp_path, monkeypatch):
+    monkeypatch.setenv("CORESMITH_UARCH_PHASE_GATE", "0")
+    assert _gate_run(tmp_path, monkeypatch, {"build_ok": True, "smoke_ok": False}) == []
+
+
+def test_gate_ignores_a_missing_toolchain_and_a_passing_model(tmp_path, monkeypatch):
+    monkeypatch.delenv("CORESMITH_UARCH_PHASE_GATE", raising=False)
+    assert _gate_run(tmp_path, monkeypatch, {"build_ok": None, "smoke_ok": None,
+                                             "parked_reason": "system_model_toolchain_missing"}) == []
+    assert _gate_run(tmp_path, monkeypatch, {"build_ok": True, "smoke_ok": True}) == []

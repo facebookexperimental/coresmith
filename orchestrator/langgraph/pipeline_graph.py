@@ -5963,6 +5963,12 @@ async def _uarch_phase_models(pr: str, blocks: list[dict]) -> dict:
     return rec
 
 
+def uarch_phase_gate_enabled() -> bool:
+    """B2: park the run when the SoC model does not build or smoke (default on)."""
+    return (os.environ.get("CORESMITH_UARCH_PHASE_GATE", "1") or "1").strip().lower() \
+        not in {"0", "false", "no", "off", ""}
+
+
 async def uarch_phase_node(state: OrchestratorState) -> dict:
     """B2: the uArch stage as a chip-level phase.
 
@@ -5972,7 +5978,8 @@ async def uarch_phase_node(state: OrchestratorState) -> dict:
     for the rest); (3) the SoC model is assembled, built (with a bounded
     compiler-repair loop) and smoked. Results go to ``models`` and
     ``.coresmith/system_model.json``. A missing toolchain is recorded, not
-    fatal; CORESMITH_UARCH_PHASE_GATE=1 makes a failed model build park.
+    fatal; a failed model build or smoke parks (CORESMITH_UARCH_PHASE_GATE,
+    default on; ``0`` records the failure and lowers to RTL anyway).
     """
     pr = _pr(state)
     if not uarch_phase_enabled():
@@ -6004,11 +6011,16 @@ async def uarch_phase_node(state: OrchestratorState) -> dict:
         "specs_written": len(result["specs"].get("written") or []),
         "model_build_ok": result["system_model"].get("build_ok"),
         "model_smoke_ok": result["system_model"].get("smoke_ok")})
-    gate = (os.environ.get("CORESMITH_UARCH_PHASE_GATE", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
-    if gate and result["system_model"].get("enabled") and result["system_model"].get("build_ok") is False:
-        _park({"type": "uarch_phase_failed", "system_model": result["system_model"],
+    # The phase's exit criterion is an SoC model that builds AND runs its
+    # smoke: the chip is "booted" in the model before any RTL is lowered.
+    # A missing toolchain is recorded (parked_reason), never a park.
+    sm = result["system_model"]
+    failed = sm.get("enabled") and (sm.get("build_ok") is False or sm.get("smoke_ok") is False)
+    if uarch_phase_gate_enabled() and failed:
+        _park({"type": "uarch_phase_failed", "system_model": sm,
                "supported_actions": ["retry", "skip", "abort"],
-               "outer_agent_guidance": "The SystemC SoC model did not build; fix model/ or skip."},
+               "outer_agent_guidance": "The SystemC SoC model did not build or its smoke run failed "
+                                       "(model/build.log, model/smoke.log); fix model/ and retry, or skip."},
               node="uarch_phase")
     return {"uarch_phase": result}
 
