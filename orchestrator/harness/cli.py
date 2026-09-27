@@ -415,8 +415,28 @@ def cmd_model(args) -> int:
     db = _state_db(args)
     verb = getattr(args, "verb", "build")
     if not getattr(args, "arch", False):
-        _emit(args, {"error": "only --arch is implemented in step 2 (per-block refine comes with the uArch stage)"},
-              "error: pass --arch")
+        from orchestrator.harness.tools import integrate as it
+        if verb == "refine":
+            blocks = [getattr(args, "block", "")] if getattr(args, "block", "") else None
+            res = it.model_refine(db, db.root, blocks=blocks)
+            fe = res.get("frd_eval") or {}
+            lines = [f"model refine: {'OK' if res['ok'] else 'NOT PASSING'} build={res.get('build_ok')} smoke={res.get('smoke_ok')} "
+                     f"frd_eval gate_ok={fe.get('gate_ok')}" + (f" missing={res.get('missing_models')}" if res.get("missing_models") else "")]
+            if fe.get("summary"):
+                lines.append(f"  {fe['summary'].get('counts')} failed={fe['summary'].get('failed', [])[:8]}")
+            if not res.get("build_ok") and res.get("build_log"):
+                lines.append(res["build_log"][-800:])
+            _emit(args, res, "\n".join(lines))
+            return EXIT_PASS if res["ok"] else EXIT_FAIL
+        if verb == "eval":
+            res = it.model_eval(db, db.root)
+            s = res.get("summary") or {}
+            lines = [f"FRD evaluation on the SoC model: {'PASS' if res.get('gate_ok') else 'NOT PASSING'}" + (f" ({res['error']})" if res.get("error") else "")]
+            if s:
+                lines.append(f"  {s['counts']} failed={s['failed'][:10]} unanswered_must={s['unanswered_must'][:10]}")
+            _emit(args, res, "\n".join(lines))
+            return EXIT_PASS if res.get("gate_ok") else EXIT_FAIL
+        _emit(args, {"error": f"model {verb} needs --arch"}, f"error: model {verb} needs --arch (refine/eval work on the SoC model)")
         return EXIT_USAGE
     if verb == "init":
         res = mt.arch_init(db.root)
@@ -541,6 +561,34 @@ def cmd_schema(args) -> int:
         return EXIT_PASS
     _emit(args, {"kind": kind, "schema": schema(kind)}, schema(kind))
     return EXIT_PASS if kind in SCHEMAS else EXIT_USAGE
+
+
+def cmd_vip(args) -> int:
+    from orchestrator.harness.tools import integrate as it
+    db = _state_db(args)
+    res = it.vip_generate(db, db.root)
+    lines = [f"vip generate: {'OK' if res.get('ok') else 'FAILED'} {res.get('vips', 0)} VIP(s), {res.get('contract_slices', 0)} contract slice(s)"
+             + (f" -- {res['error']}" if res.get("error") else "")]
+    lines += [f"  {k}: {v}" for k, v in (res.get("errors") or {}).items()][:12]
+    _emit(args, res, "\n".join(lines))
+    return EXIT_PASS if res.get("ok") else EXIT_FAIL
+
+
+def cmd_shell(args) -> int:
+    from orchestrator.harness.tools import integrate as it
+    db = _state_db(args)
+    res = it.shell_assemble(db, db.root, tier=getattr(args, "tier", None), all_real=bool(getattr(args, "all_real", False)))
+    if res.get("error"):
+        _emit(args, res, f"shell assemble: {res['error']}")
+        return EXIT_FAIL
+    lines = [f"shell assemble: {'OK' if res['ok'] else 'NOT CLEAN'} top={res['top']} real={len(res['real'])} stubs={len(res['stubs'])} "
+             f"wires={res['wires']} boundary_ports={res['boundary_ports']} elaborated={res['elaborated']}"]
+    lines += [f"  wiring: {w}" for w in res.get("wiring_errors") or []][:10]
+    lines += [f"  elab: {e}" for e in res.get("elab_errors") or []][:10]
+    if res.get("hint"):
+        lines.append("  " + res["hint"])
+    _emit(args, res, "\n".join(lines))
+    return EXIT_PASS if res["ok"] else EXIT_FAIL
 
 def cmd_blocks(args) -> int:
     """The block queue from the project database."""
@@ -777,9 +825,12 @@ def _register_state(sub) -> None:
     mp = sub.add_parser("model", help="executable models: init | build | run | eval | register (--arch)")
     msub = mp.add_subparsers(dest="verb")
     for v, h in (("init", "write a template model/arch/arch_model.json"), ("build", "generate + compile"),
-                 ("run", "run the smoke scenario; writes stats.json"), ("eval", "FRD evaluation (agent-authored harness)"),
-                 ("register", "register the arch_model artifact")):
+                 ("run", "run the smoke scenario; writes stats.json"), ("eval", "FRD evaluation (agent-authored harness; --arch or the SoC model)"),
+                 ("register", "register the arch_model artifact"),
+                 ("refine", "per-block SystemC models + assembly + build + smoke + FRD eval (--block b re-authors one)")):
         mv = msub.add_parser(v, help=h); mv.add_argument("--arch", action="store_true")
+        if v == "refine":
+            mv.add_argument("--block", default=""); mv.add_argument("--all", action="store_true")
         if v == "run":
             mv.add_argument("--ns", type=int, default=10000)
         if v == "eval":
@@ -806,6 +857,13 @@ def _register_state(sub) -> None:
     _add_project_root(bd); _add_json(bd); bd.set_defaults(func=_run(cmd_block_done))
     sc = sub.add_parser("schema", help="the document shape `register <kind>` expects (prd|sad|frd|ers|block_diagram|contracts|abi|uarch|arch_model)")
     sc.add_argument("kind", nargs="?", default=""); _add_json(sc); sc.set_defaults(func=_run(cmd_schema))
+    vp = sub.add_parser("vip", help="interface VIPs: generate (from the registered contracts)")
+    vsub = vp.add_subparsers(dest="verb")
+    vg = vsub.add_parser("generate"); _add_project_root(vg); _add_json(vg); vg.set_defaults(func=_run(cmd_vip), verb="generate")
+    shp = sub.add_parser("shell", help="chip shell: assemble (real RTL for published blocks, stubs for the rest; elaborate)")
+    shsub = shp.add_subparsers(dest="verb")
+    sha = shsub.add_parser("assemble"); sha.add_argument("--tier"); sha.add_argument("--all-real", dest="all_real", action="store_true")
+    _add_project_root(sha); _add_json(sha); sha.set_defaults(func=_run(cmd_shell), verb="assemble")
     ls = sub.add_parser("leases", help="process leases held in the project database")
     _add_project_root(ls)
     _add_json(ls)

@@ -127,3 +127,21 @@ def test_cluster_session_prompts_and_done(tmp_path, monkeypatch):
     assert s.done()
     sp = build_cluster_prompt()
     assert "coresmith block-done" in sp and "## rtl_generator.md" in sp and "## testbench_generator.md" in sp
+
+
+def test_integrate_tools_wrap_the_graph_functions(tmp_path, monkeypatch):
+    from orchestrator.harness.tools import integrate as it
+    db = open_project(tmp_path)
+    assert it.vip_generate(db, tmp_path)["ok"] is False           # no contracts
+    db.import_block_diagram({"blocks": [{"name": "req", "tier": 1}, {"name": "rsp", "tier": 1}], "connections": []})
+    db.import_contracts({"contracts": [{"edge_id": "req__m_q__to__rsp__s_q", "producer_block": "req", "producer_port": "m_q",
+                                        "consumer_block": "rsp", "consumer_port": "s_q", "handshake_protocol": "req_resp",
+                                        "data_width_bits": 8, "timing": {"req_to_rsp_cycles": {"exact": 1}}}]})
+    r = it.vip_generate(db, tmp_path)
+    assert r["ok"] and r["vips"] == 1 and (tmp_path / ".coresmith" / "vip_index.json").exists()
+    assert (tmp_path / ".coresmith" / "blocks" / "req" / "contract_slice.json").exists()
+    (tmp_path / "inputs").mkdir(); (tmp_path / "inputs" / "task.yaml").write_text("top: tiny\n")
+    monkeypatch.setenv("CORESMITH_DETERMINISTIC_TOP", "1")
+    s = it.shell_assemble(db, tmp_path)
+    assert s["stubs"] == ["req", "rsp"] and s["real"] == [] and "boundary_ports" in s
+    assert it.model_eval(db, tmp_path)["ok"] is False and "not assembled" in it.model_eval(db, tmp_path)["error"]
