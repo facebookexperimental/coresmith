@@ -7,6 +7,13 @@ port spelling, asserting the contract's timing."""
 from __future__ import annotations
 
 import json
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
 
 from orchestrator.langgraph import vip_lib as V
 
@@ -98,6 +105,38 @@ class TestCodegen:
         assert "$past((s_l1d_req_req_valid && s_l1d_req_req_gnt), 3) |-> (s_l1d_req_rsp_valid || $past(s_l1d_req_rsp_valid, 1) || $past(s_l1d_req_rsp_valid, 2))" in sv
         sv = V.render_sva_bind(_valid_only(), "tre", "consumer")
         assert "a_reset_idle" in sv and "a_latency" not in sv
+
+
+def _verilator():
+    return shutil.which("verilator") or next(
+        (str(p) for p in [Path(sys.executable).parent / "verilator"] if p.exists()), None)
+
+
+class TestSvaCoverageOff:
+    """verilator 5.051 ``--coverage`` + ``$past`` in a bound checker hits
+    V3Localize.cpp:203 'AstVarRef not under function'; checkers are rendered
+    inside a coverage_off/coverage_on pair so DUT coverage keeps working."""
+
+    def test_checker_module_is_wrapped_in_coverage_off(self):
+        for edge in (_req_resp(), _stream(), _valid_only()):
+            sv = V.render_sva_bind(edge, "dut", "consumer")
+            off, mod, end = (sv.index("/* verilator coverage_off */"), sv.index("\nmodule "),
+                             sv.index("endmodule"))
+            on = sv.index("/* verilator coverage_on */")
+            assert off < mod < end < on < sv.index("\nbind ")
+
+    @pytest.mark.skipif(_verilator() is None, reason="verilator not installed")
+    @pytest.mark.parametrize("edge", [_req_resp(), _stream()], ids=["req_resp", "axi_stream"])
+    def test_checker_compiles_with_assert_and_coverage(self, tmp_path, edge):
+        sv = V.render_sva_bind(edge, "dut", "consumer")
+        ports = re.search(r"module \w+ \((.*?)\);", sv, re.S).group(1)
+        (tmp_path / "dut.sv").write_text(f"module dut ({ports});\nendmodule\n")
+        (tmp_path / "chk.sv").write_text(sv)
+        p = subprocess.run([_verilator(), "-cc", "--assert", "--coverage", "-Wno-fatal",
+                            "--top-module", "dut", "-Mdir", str(tmp_path / "obj"),
+                            str(tmp_path / "dut.sv"), str(tmp_path / "chk.sv")],
+                           capture_output=True, text=True, timeout=300)
+        assert p.returncode == 0, p.stdout + p.stderr
 
 
 class TestFilesAndIndex:

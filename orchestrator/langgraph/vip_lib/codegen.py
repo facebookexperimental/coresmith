@@ -709,12 +709,15 @@ def render_sva_bind(edge: dict, dut_module: str, role: str) -> str:
         "// Rendered from the frozen contract's timing object; do not edit.",
         "// $past-based (no cycle-delay operators): compiles under `verilator --assert` without --timing.",
         "`ifndef SYNTHESIS",
+        "// coverage_off: verilator 5.051 --coverage crashes on $past in bound checkers",
+        "// (V3Localize.cpp:203 'AstVarRef not under function'); DUT coverage is unaffected.",
+        "/* verilator coverage_off */",
         f"module {name} (",
         "  " + ",\n  ".join(uports),
         ");",
     ]
     lines += props or ["  // no bindable rules for this family/timing"]
-    lines += ["endmodule", ""]
+    lines += ["endmodule", "/* verilator coverage_on */", ""]
     bind_ports = ", ".join(f".{p.split()[-1]}({p.split()[-1]})" for p in uports)
     lines += [f"bind {dut_module} {name} u_{name} ({bind_ports});", "`endif", ""]
     return "\n".join(lines)
