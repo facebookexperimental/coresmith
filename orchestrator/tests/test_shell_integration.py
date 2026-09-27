@@ -110,3 +110,15 @@ def test_assembly_elaborates_with_verilator(tmp_path):
     asm2 = SI.assemble_top(tmp_path, top_name="chip_top", blocks=["req", "rsp"], edges=[_EDGE],
                            rtl_paths={}, out_dir=tmp_path / "shell2")   # all stubs
     assert SI.elaborate(asm2)["ok"] and asm2.stubs == ["req", "rsp"]
+
+
+def test_fan_out_from_one_output_is_not_a_hazard(tmp_path):
+    fan = {**_PIN_EDGE, "edge_id": "rsp__m_led__to__other__s_led", "consumer_block": "other"}
+    asm = SI.assemble_top(tmp_path, top_name="chip_top", blocks=["req", "rsp", "pads", "other"],
+                          edges=[_EDGE, _PIN_EDGE, fan], rtl_paths={}, out_dir=tmp_path / "shell")
+    assert asm.wiring_errors == []
+    assert asm.verilog.count("w_rsp__m_led__to__pads__s_led__on") == 4   # decl + producer + 2 consumers, one net
+    two_drivers = {**_PIN_EDGE, "edge_id": "x__m_led__to__pads__s_led", "producer_block": "x", "producer_port": "m_led"}
+    asm = SI.assemble_top(tmp_path, top_name="chip_top", blocks=["req", "rsp", "pads", "x"],
+                          edges=[_EDGE, _PIN_EDGE, two_drivers], rtl_paths={}, out_dir=tmp_path / "shell2")
+    assert any("driven from two edges" in e for e in asm.wiring_errors)

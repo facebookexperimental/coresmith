@@ -232,10 +232,16 @@ def assemble_top(project_root, *, top_name: str, blocks: list[str], edges: list[
             if pp.width != cp_.width:
                 errors.append(f"edge {eid}: width mismatch {pb}.{pport}[{pp.width}] vs {cb}.{cport}[{cp_.width}]")
                 continue
-            net = f"w_{eid}__{s['name']}"
-            for key in ((pb, pport), (cb, cport)):
-                if key in net_of and net_of[key] != net:
-                    errors.append(f"{key[0]}.{key[1]} driven on two edges ({net_of[key]}, {net})")
+            # A producer output legitimately fans out to several consumers: the
+            # first edge names the net, later edges join it. Two different
+            # drivers on one consumer input is the real hazard.
+            net = net_of.get((pb, pport)) or f"w_{eid}__{s['name']}"
+            if pp.dir == "output" and (cb, cport) in net_of and net_of[(cb, cport)] != net:
+                errors.append(f"{cb}.{cport} driven from two edges ({net_of[(cb, cport)]}, {net})")
+                continue
+            if cp_.dir == "output" and (pb, pport) in net_of and net_of[(pb, pport)] != net:
+                errors.append(f"{pb}.{pport} driven from two edges ({net_of[(pb, pport)]}, {net})")
+                continue
             net_of[(pb, pport)] = net
             net_of[(cb, cport)] = net
             wires[net] = pp.width
