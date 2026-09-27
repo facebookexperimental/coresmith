@@ -5481,7 +5481,17 @@ def route_decision(state: BlockState) -> str:
         "ask_human": "ask_human",
         "escalate": "block_done",
     }
-    return mapping.get(action, _rtl_node(state))
+    target = mapping.get(action, _rtl_node(state))
+    if _is_primitive(state.get("current_block") or {}):
+        # A primitive block is generated, never authored: RTL/TB retries
+        # re-materialize it, and a timing miss cannot be repaired by an LLM
+        # editing 18 MB of elaborated IP -- park it so the generator
+        # configuration can change and the block re-materialize (B2 #5/#10).
+        if target in ("generate_rtl", "generate_testbench"):
+            return "materialize_primitive"
+        if target == "timing_fix":
+            return "ask_human"
+    return target
 
 
 route_decision.__edge_labels__ = {
