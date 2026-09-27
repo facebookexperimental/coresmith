@@ -5375,6 +5375,13 @@ async def block_done_node(state: BlockState) -> dict:
 # Block-level routing functions
 # ---------------------------------------------------------------------------
 
+def _rtl_node(state: BlockState) -> str:
+    """B1: a primitive's RTL is generated, never authored -- every route that
+    would re-enter ``generate_rtl`` re-materializes it instead (a retry after
+    a conformance/lint failure used to hand the fabric to the LLM)."""
+    return "materialize_primitive" if _is_primitive(state.get("current_block") or {}) else "generate_rtl"
+
+
 def route_after_uarch_review(state: BlockState) -> str:
     """Route after uarch spec review.
 
@@ -5392,7 +5399,7 @@ def route_after_uarch_review(state: BlockState) -> str:
         return "generate_uarch_spec"
     if action == "skip":
         return "block_done"
-    return "generate_rtl"
+    return _rtl_node(state)
 
 
 route_after_uarch_review.__edge_labels__ = {
@@ -5461,7 +5468,7 @@ def route_decision(state: BlockState) -> str:
     """Route after decide: directly to generate_rtl, generate_testbench, etc."""
     action = state.get("debug_action", "retry_rtl")
     mapping = {
-        "retry_rtl": "generate_rtl",
+        "retry_rtl": _rtl_node(state),
         "retry_tb": "generate_testbench",
         "retry_synth": "synthesize",
         "retry_sim": "simulate",
@@ -5469,7 +5476,7 @@ def route_decision(state: BlockState) -> str:
         "ask_human": "ask_human",
         "escalate": "block_done",
     }
-    return mapping.get(action, "generate_rtl")
+    return mapping.get(action, _rtl_node(state))
 
 
 route_decision.__edge_labels__ = {
@@ -5488,15 +5495,16 @@ def route_after_human(state: BlockState) -> str:
     action = (state.get("human_response") or {}).get("action", "retry")
     if action == "retry" and state.get("phase") == "synth":
         return "synthesize"
+    rtl = _rtl_node(state)
     mapping = {
-        "retry": "generate_rtl",
-        "fix_rtl": "generate_rtl",
+        "retry": rtl,
+        "fix_rtl": rtl,
         "fix_tb": "generate_testbench",
-        "add_constraint": "generate_rtl",
+        "add_constraint": rtl,
         "skip": "block_done",
         "abort": "block_done",
     }
-    return mapping.get(action, "generate_rtl")
+    return mapping.get(action, rtl)
 
 
 route_after_human.__edge_labels__ = {

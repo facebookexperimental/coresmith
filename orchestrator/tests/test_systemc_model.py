@@ -135,6 +135,8 @@ def test_generated_fabric_router_routes_and_decerrs(tmp_path):
     blocks = ["hart0", "fabric", "ram"]
     md = write_build(tmp_path, blocks, edges, top_name="fab")
     h, c = render_fabric_model("fabric", spec, edges)
+    assert "simple_target_socket_tagged_optional" in h and "simple_initiator_socket_optional" in h
+    assert ".size() == 0" in c
     (md / "fabric_model.h").write_text(h)
     (md / "fabric_model.cpp").write_text(c)
     (md / "hart0_model.h").write_text(render_block_skeleton("hart0", edges).replace(

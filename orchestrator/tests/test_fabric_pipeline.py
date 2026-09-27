@@ -117,3 +117,23 @@ class TestBusFamilies:
         c = [{**self._EDGE, "fields": [], "timing": {}}]
         v, _ = _validate_contracts({"contracts": c}, [{"from": "hart0", "to": "fabric"}])
         assert v["contract_violations"] == []
+
+
+def test_signal_specs_ignore_a_generic_payload_field_on_a_bus_edge():
+    from orchestrator.langgraph import contract_conformance as cc
+    edge = {"edge_id": "a__m_fabric__to__f__s_a", "producer_block": "a", "producer_port": "m_fabric",
+            "consumer_block": "f", "consumer_port": "s_a", "handshake_protocol": "axi4",
+            "data_width_bits": 64, "fields": [{"name": "data", "width": 64}]}
+    names = {s["name"] for s in cc.signal_specs(edge)}
+    assert "data" not in names and {"awvalid", "wdata", "rready"} <= names
+
+
+def test_primitive_retries_rematerialize_instead_of_calling_the_llm():
+    prim = {"current_block": {"name": "soc_fabric", "kind": "primitive", "primitive": "cs_fabric"}}
+    soft = {"current_block": {"name": "alu"}}
+    assert pg.route_decision({**prim, "debug_action": "retry_rtl"}) == "materialize_primitive"
+    assert pg.route_decision({**soft, "debug_action": "retry_rtl"}) == "generate_rtl"
+    for act in ("retry", "fix_rtl", "add_constraint"):
+        assert pg.route_after_human({**prim, "human_response": {"action": act}}) == "materialize_primitive"
+    assert pg.route_after_human({**soft, "human_response": {"action": "retry"}}) == "generate_rtl"
+    assert pg.route_after_human({**prim, "human_response": {"action": "skip"}}) == "block_done"
