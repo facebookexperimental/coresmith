@@ -66,6 +66,14 @@ Emit ONE block per bus, for example:
   fabrics); `slave_cut` (default `true`) adds an `axi_cut` on every slave
   port and registers both sides of each AXI-Lite/APB converter (full-AXI cut
   before `axi_to_axi_lite`, AXI-Lite cut after it, pipelined `axi_lite_to_apb`).
+  `pipeline_stages` (default 0, max 4) is axi_xbar `PipelineStages`: register
+  slices between every crossbar demux/mux pair (area grows fast: +46 % at 1).
+  `unique_ids` (default `false`) is axi_xbar `UniqueIds`: only if the masters
+  guarantee that in-flight transactions sharing an ID all target one slave.
+* The top-level `max_outstanding` sizes the per-ID in-flight counters (the
+  crossbar demuxes' `MaxMstTrans` and each `axi_to_axi_lite` / burst
+  splitter). These counters set the fabric's critical path. A master's
+  `max_outstanding` only sizes the crossbar mux W FIFOs (`MaxSlvTrans`).
 
 ## What stays custom
 Coherence (snooping/directory controllers, coherent caches) is a custom

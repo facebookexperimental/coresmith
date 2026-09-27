@@ -133,9 +133,9 @@ def render_wrapper_sv(spec: FabricSpec) -> str:
     L.append("  localparam axi_pkg::xbar_cfg_t Cfg = '{")
     L.append(f"    NoSlvPorts: {NM}, NoMstPorts: {NS}, MaxMstTrans: {spec.max_outstanding}, "
              f"MaxSlvTrans: {max(m.max_outstanding for m in spec.masters)}, FallThrough: 1'b0,")
-    L.append(f"    LatencyMode: axi_pkg::{LATENCY_MODES[spec.latency_mode]}, PipelineStages: 0, "
+    L.append(f"    LatencyMode: axi_pkg::{LATENCY_MODES[spec.latency_mode]}, PipelineStages: {int(spec.pipeline_stages)}, "
              "AxiIdWidthSlvPorts: IW, AxiIdUsedSlvPorts: IW,")
-    L.append(f"    UniqueIds: 1'b0, AxiAddrWidth: AW, AxiDataWidth: DW, NoAddrRules: {NS} }};")
+    L.append(f"    UniqueIds: 1'b{int(bool(spec.unique_ids))}, AxiAddrWidth: AW, AxiDataWidth: DW, NoAddrRules: {NS} }};")
     rules = ", ".join(f"'{{idx: {i}, start_addr: {AW}'h{s.base:X}, end_addr: {AW}'h{s.base + s.size:X}}}"
                       for i, s in reversed(list(enumerate(spec.slaves))))
     L.append(f"  localparam rule_t [{NS - 1}:0] AddrMap = '{{ {rules} }};")

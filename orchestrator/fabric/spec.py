@@ -60,6 +60,13 @@ class FabricSpec:
     # both sides of the converter: a full-AXI axi_cut before axi_to_axi_lite, an
     # AXI-Lite axi_cut after it, and axi_lite_to_apb's PipelineRequest/Response.
     slave_cut: bool = True
+    # pipeline_stages: axi_xbar Cfg.PipelineStages, axi_multicut stages between each
+    # demux/mux pair inside the crossbar (0 = none). unique_ids: axi_xbar Cfg.UniqueIds,
+    # the masters guarantee that in-flight transactions with one ID all target one
+    # slave, so the demuxes drop their per-ID in-flight counters. Both are omitted
+    # from to_json at their defaults, so existing spec digests do not change.
+    pipeline_stages: int = 0
+    unique_ids: bool = False
 
     # ------------------------------------------------------------ helpers
     @property
@@ -94,6 +101,8 @@ class FabricSpec:
             errs.append(f"ordering {self.ordering!r}")
         if self.latency_mode not in LATENCY_MODES:
             errs.append(f"latency_mode {self.latency_mode!r} not in {tuple(LATENCY_MODES)}")
+        if not 0 <= int(self.pipeline_stages) <= 4:
+            errs.append(f"pipeline_stages {self.pipeline_stages} not in 0..4")
         names: set[str] = set()
         for m in self.masters:
             if not _NAME.match(m.name or ""):
@@ -131,7 +140,11 @@ class FabricSpec:
 
     # ------------------------------------------------------------ (de)serialisation
     def to_json(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        for k, default in _OPTIONAL_DEFAULTS.items():
+            if d.get(k) == default:
+                d.pop(k)
+        return d
 
     @classmethod
     def from_json(cls, d: dict) -> "FabricSpec":
@@ -150,7 +163,13 @@ class FabricSpec:
                    err_slave=bool(d.get("err_slave", True)),
                    max_outstanding=_int(d.get("max_outstanding"), 4),
                    latency_mode=str(d.get("latency_mode") or "cut_all_ports").lower(),
-                   slave_cut=bool(d.get("slave_cut", True)))
+                   slave_cut=bool(d.get("slave_cut", True)),
+                   pipeline_stages=_int(d.get("pipeline_stages"), 0),
+                   unique_ids=bool(d.get("unique_ids", False)))
 
     def digest(self) -> str:
         return hashlib.sha256(json.dumps(self.to_json(), sort_keys=True).encode()).hexdigest()[:16]
+
+
+# Knobs serialised only when set away from their default (digest-stable).
+_OPTIONAL_DEFAULTS = {"pipeline_stages": 0, "unique_ids": False}

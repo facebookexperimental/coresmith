@@ -200,3 +200,20 @@ def test_latency_mode_and_slave_cut_knobs():
     assert (rt.latency_mode, rt.slave_cut, rt.digest()) == ("cut_all_ax", False, s.digest())
     s.latency_mode = "bogus"
     assert any("latency_mode" in e for e in s.validate())
+
+
+def test_pipeline_stages_and_unique_ids_knobs_are_digest_stable_at_defaults():
+    base = _spec()
+    # defaults render the pre-knob Cfg and stay out of to_json, so existing digests hold
+    assert "pipeline_stages" not in base.to_json() and "unique_ids" not in base.to_json()
+    sv = render_wrapper_sv(base)
+    assert "PipelineStages: 0," in sv and "UniqueIds: 1'b0," in sv
+    s = _spec()
+    s.pipeline_stages, s.unique_ids = 2, True
+    sv = render_wrapper_sv(s)
+    assert "PipelineStages: 2," in sv and "UniqueIds: 1'b1," in sv
+    assert s.digest() != base.digest()
+    rt = FabricSpec.from_json(json.loads(json.dumps(s.to_json())))
+    assert (rt.pipeline_stages, rt.unique_ids, rt.digest()) == (2, True, s.digest())
+    s.pipeline_stages = 5
+    assert any("pipeline_stages" in e for e in s.validate())
