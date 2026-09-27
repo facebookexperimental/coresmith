@@ -113,3 +113,13 @@ with the cluster prompt `cluster_worker.md` + the RTL/TB/timing guidance as
 appendix) instead of one subgraph per block; primitives still materialize on
 the block path. `block_specs()` now carries `subsystem`, `cluster`,
 `instances` and `owns`.
+
+### Step 5: chip lead = the architect resumed
+
+With `CORESMITH_ARCHITECT_SITTING=1`, `_resolve_interrupt` first resumes the
+architect session (`architect/consult.py`: the interrupt payload + prior
+decisions, answered in the chip-lead decision schema, `--resume` of the
+recorded session id) and only falls back to the fresh chip-lead agent when
+there is no session or the answer is malformed; action validation, decision
+ledger and budgets are unchanged. Consult prompts/decisions are kept under
+`.coresmith/architect/consult-N.*`.

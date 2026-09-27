@@ -23,9 +23,9 @@ DIAGRAM = {
 }
 SPECS = [
     {"name": "ctrl", "tier": "1", "python_source": "", "rtl_target": "rtl/ctrl.v",
-     "testbench": "tb/test_ctrl.py", "description": "control"},
+     "testbench": "tb/test_ctrl.py", "description": "control", "subsystem": "top"},
     {"name": "dsp", "tier": "2", "python_source": "golden.py:dsp", "rtl_target": "rtl/dsp.v",
-     "testbench": "tb/test_dsp.py", "description": "math"},
+     "testbench": "tb/test_dsp.py", "description": "math", "subsystem": "dp"},
 ]
 CONTRACTS = {
     "design_summary": "demo",

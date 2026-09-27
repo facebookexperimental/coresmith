@@ -1009,11 +1009,24 @@ async def _resolve_interrupt(payload: dict) -> dict:
         _trip_chip_lead("decision budget exhausted")
         return _park(payload)
 
+    decision = None
+    if architect_sitting_enabled():
+        # Step 5: the chip lead is the architect resumed (same session, cache
+        # warm); a missing session or a malformed answer falls back below.
+        try:
+            from orchestrator.architect.consult import consult as _consult
+            decision = await asyncio.to_thread(_consult, pr, payload, prior_lines)
+            if decision:
+                log(f"  [ARCHITECT] decided {payload.get('type')}: {decision.get('action')}", CYAN)
+        except Exception as exc:  # noqa: BLE001
+            log(f"  [ARCHITECT] consult failed ({exc}) -- falling back to the chip lead", YELLOW)
+            decision = None
     try:
         from orchestrator.langchain.agents.chip_lead_agent import ChipLeadAgent
-        decision = await ChipLeadAgent().decide(
-            payload=payload, prior_decisions=prior_lines,
-        )
+        if decision is None:
+            decision = await ChipLeadAgent().decide(
+                payload=payload, prior_decisions=prior_lines,
+            )
     except Exception as exc:  # noqa: BLE001
         # Arm-F live finding: a single provider hard-timeout tripped the
         # fail-safe, and un-tripping needs a daemon restart. One fresh

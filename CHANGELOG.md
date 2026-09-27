@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Shell integration: the chip top is assembled from the contracts before the
   first tier and after every tier; the final top is the same assembly.
 - uArch phase delivers a SystemC TLM-2.0 loosely-timed SoC model.
+- Architect sitting step 5: chip-lead decisions are made by the resumed architect
+  session (fallback: the chip-lead agent).
 - Architect sitting step 4: `coresmith block-done` is the block gate (conformance ->
   DV -> synth -> timing publishes `best`); `CORESMITH_FANOUT=cluster` sends one
   long-lived cluster worker per subsystem instead of a subgraph per block.
