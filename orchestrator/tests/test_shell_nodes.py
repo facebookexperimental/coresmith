@@ -116,3 +116,25 @@ def test_engine_primitive_modmissing_does_not_requeue_blocks(tmp_path, monkeypat
     out = asyncio.run(pg.shell_integration_update_node(_state(tmp_path)))
     assert "integration_contract_failures" not in out
     assert out["shell_snapshot"]["elaborated"] is False    # still reported, just not blamed
+
+
+def test_primitive_fabric_rtl_joins_the_shell(tmp_path, monkeypatch):
+    """A materialized fabric lives at rtl/interconnect/cs_fabric_<name>.v with a
+    non-ANSI header; the shell used to look for rtl/<block>.v and stub it."""
+    monkeypatch.setenv("CORESMITH_SHELL_INTEGRATION", "1")
+    monkeypatch.delenv("CORESMITH_TOP_MODULE", raising=False)
+    db = _project(tmp_path)
+    (tmp_path / "rtl" / "interconnect").mkdir(parents=True)
+    (tmp_path / "rtl" / "interconnect" / "cs_fabric_x.v").write_text(
+        "module cs_fabric_x(clk, rst_n, s_q_addr, s_q_req_valid, s_q_req_gnt, s_q_rsp_valid, s_q_rdata);\n"
+        "  input clk;\n  input rst_n;\n  input [7:0] s_q_addr;\n  input s_q_req_valid;\n"
+        "  output s_q_req_gnt;\n  output s_q_rsp_valid;\n  output [7:0] s_q_rdata;\n"
+        "  assign s_q_req_gnt = 1'b1;\n  assign s_q_rsp_valid = s_q_req_valid;\n  assign s_q_rdata = s_q_addr;\n"
+        "endmodule\n")
+    db.set_result("rsp", "best", {"sim_passed": True, "done": True})
+    queue = [_QUEUE[0], {"name": "rsp", "tier": 0, "kind": "primitive", "rtl_target": "", "fabric": {"name": "x"}}]
+    assert pg._block_rtl_target(str(tmp_path), queue[1]) == tmp_path / "rtl" / "interconnect" / "cs_fabric_x.v"
+    asm, elab, snap = pg._shell_assemble(str(tmp_path), queue, tier=0)
+    assert snap["real_blocks"] == ["rsp"] and asm.wiring_errors == [] and asm.wires == 5
+    assert "cs_fabric_x u_rsp (" in asm.verilog
+    assert elab.get("ok") is not False, elab

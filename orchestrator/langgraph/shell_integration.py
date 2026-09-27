@@ -138,6 +138,16 @@ def _rtl_ports(rtl_text: str, module: str | None = None) -> dict[str, PortSpec]:
     return out
 
 
+def _non_ansi_ports(path, module: str) -> dict[str, PortSpec]:
+    """Ports of a non-ANSI header (e.g. the generated fabric primitive)."""
+    from orchestrator.langgraph.integration_helpers import parse_verilog_ports
+    try:
+        vm = parse_verilog_ports(str(path), module)
+    except Exception:  # noqa: BLE001 - reported as an unparsable header
+        return {}
+    return {p.name: PortSpec(p.name, p.direction, p.width) for p in vm.ports}
+
+
 def _module_name(rtl_text: str) -> str | None:
     m = re.search(r"\bmodule\s+(\w+)", strip_preprocessor(rtl_text or "", defines=()))
     return m.group(1) if m else None
@@ -180,7 +190,7 @@ def assemble_top(project_root, *, top_name: str, blocks: list[str], edges: list[
         if path and Path(path).exists():
             text = Path(path).read_text(errors="replace")
             mod = _module_name(text) or b
-            rp = _rtl_ports(text, mod)
+            rp = _rtl_ports(text, mod) or _non_ansi_ports(path, mod)
             if not rp:
                 errors.append(f"{b}: could not parse the module header of {path}")
                 rp = {}
