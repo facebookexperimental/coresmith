@@ -56,6 +56,18 @@ def test_block_done_publishes_best_only_on_a_full_pass(tmp_path, monkeypatch):
     res = bt.block_done(db, tmp_path, "ctl")
     assert not res["ok"] and "timing" in res["reason"] and db.result("ctl", "best") is None
     assert db.result("ctl", "dv_best")["sim_passed"]
+    # unmeasured timing (STA crashed on an SRAM black box) is a tool error, never a pass
+    monkeypatch.setattr(pg, "_evaluate_ppa_gate", lambda pr, n, rtl, res, require_gate_flag=True: (None, [], {"wns_ns": None}))
+    res = bt.block_done(db, tmp_path, "ctl")
+    assert not res["ok"] and res["tool_error"] and "not measured" in res["reason"] and db.result("ctl", "best") is None
+    monkeypatch.setenv("CORESMITH_BLOCK_DONE_ALLOW_UNMEASURED_TIMING", "1")
+    assert bt.block_done(db, tmp_path, "ctl")["ok"] and db.result("ctl", "best")["timing_ok"] is None
+    monkeypatch.delenv("CORESMITH_BLOCK_DONE_ALLOW_UNMEASURED_TIMING")
+    db.clear_result("ctl", "best")
+    # negative TNS with a non-negative WNS is still a fail
+    monkeypatch.setattr(pg, "_evaluate_ppa_gate", lambda pr, n, rtl, res, require_gate_flag=True: (True, [], {"wns_ns": 0.0, "tns_ns": -54366.0}))
+    res = bt.block_done(db, tmp_path, "ctl")
+    assert not res["ok"] and "timing violated" in res["reason"]
     # DV tool error is typed, never a design failure
     monkeypatch.setattr(V, "verify_rtl", lambda pr, spec, **k: _R(False, "verilator missing", infra=True))
     res = bt.block_done(db, tmp_path, "ctl")

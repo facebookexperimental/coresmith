@@ -6211,6 +6211,17 @@ async def shell_integration_update_node(state: OrchestratorState) -> dict:
     write_graph_event(pr, "Shell Integration", "graph_node_exit", {
         "phase": "update", "tier": tier, "ok": ok, "real": real, "stubs": asm.stubs,
         "failures": failures[:8]})
+    # Step 6 gate (post-mortem lesson #1): with the architect sitting on, a
+    # tier whose assembled top does not elaborate does not advance -- the run
+    # parks with the errors so the cause is fixed first (coresmith3: MODMISSING
+    # cs_sram_1rw1r for 40+ min while tiers kept advancing).
+    if architect_sitting_enabled() and (elab.get("ok") is False or asm.wiring_errors):
+        _park({"type": "shell_not_elaborated", "tier": tier,
+               "wiring_errors": list(asm.wiring_errors)[:20], "elab_errors": list(elab.get("errors") or [])[:20],
+               "supported_actions": ["retry", "skip", "abort"],
+               "outer_agent_guidance": "The chip top assembled from the published blocks does not elaborate; "
+                                       "fix the cause (missing library/wrapper, port mismatch) and retry."},
+              node="shell_update")
     out: dict = {"shell_snapshot": snap}
     if failures:
         out["integration_contract_failures"] = failures

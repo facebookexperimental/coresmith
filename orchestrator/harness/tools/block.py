@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from pathlib import Path
 
@@ -136,11 +137,31 @@ def block_done(db, pr, name: str, *, target_clock_mhz: float = 50.0, seed: int |
         out["reason"] = "timing tooling failed"
         return out
     timing_ok = _timing_ok_from_ppa_meta(meta)
-    out["stages"]["timing"] = {"ok": timing_ok, "wns_ns": meta.get("wns_ns"), "tns_ns": meta.get("tns_ns"),
+    wns, tns = meta.get("wns_ns"), meta.get("tns_ns")
+    # A block is published on a MEASURED timing pass only: no WNS (the STA
+    # crashed on an SRAM black box, or was never run) is "not measured", a
+    # negative WNS or TNS is a fail -- never a pass (coresmith3: rv_l1i0/1 were
+    # published at WNS -68 ns and gpu_mem at TNS -54 us because the verdict was
+    # None; the workers refused to accept it, the tool did not).
+    measured = wns is not None
+    try:
+        neg = (wns is not None and float(wns) < 0) or (tns is not None and float(tns) < 0)
+    except (TypeError, ValueError):
+        neg = False
+    if neg:
+        timing_ok = False
+    elif not measured:
+        timing_ok = None
+    out["stages"]["timing"] = {"ok": timing_ok, "measured": measured, "wns_ns": wns, "tns_ns": tns,
                                "sta_report": meta.get("sta_report_path", ""), "ppa_ok": ppa_ok,
                                "violations": [str(v)[:160] for v in (violations or [])[:8]]}
     if timing_ok is False:
-        out["reason"] = f"timing violated (WNS {meta.get('wns_ns')} ns)"
+        out["reason"] = f"timing violated (WNS {wns} ns, TNS {tns} ns)"
+        return out
+    if not measured and not os.environ.get("CORESMITH_BLOCK_DONE_ALLOW_UNMEASURED_TIMING", "").strip().lower() in ("1", "true", "yes"):
+        out["tool_error"] = True
+        out["reason"] = ("timing not measured (no WNS: the STA did not run or crashed, e.g. on an SRAM black box) -- "
+                         "characterise the macro or provide its liberty; CORESMITH_BLOCK_DONE_ALLOW_UNMEASURED_TIMING=1 waives")
         return out
     if ppa_ok is False:
         out["reason"] = "PPA budget violated: " + "; ".join(str(v)[:100] for v in (violations or [])[:3])
