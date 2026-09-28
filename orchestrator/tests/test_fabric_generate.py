@@ -349,7 +349,8 @@ def test_shared_apb_bridge_renders_one_bridge_with_a_psel_decoder():
         assert f"assign apb_rsp_1[{k}] = '{{pready: m_{name}_pready, prdata: m_{name}_prdata, pslverr: m_{name}_pslverr}};" in sv
     base = FabricSpec.from_json(dict(s.to_json(), shared_apb_bridge=False))
     import re
-    hdr = lambda t: re.search(r"module cs_fabric_soc \((.*?)\);", t, re.S).group(1)
+    def hdr(t):
+        return re.search(r"module cs_fabric_soc \((.*?)\);", t, re.S).group(1)
     assert hdr(sv) == hdr(render_wrapper_sv(base))
     tb = render_testbench(s)
     assert "test_apb_shared_decode" in tb and "APB_HOLES = [0xffff000, 0x10001000, 0x10003000, 0x10005000]" in tb

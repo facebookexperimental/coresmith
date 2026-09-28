@@ -204,13 +204,14 @@ def test_synthesis_branches_are_blanked_line_for_line():
             '`ifdef X\nxx\n`elsif SYNTHESIS\ns\n`else\nsim2\n`endif\nb\n')
     out = strip(text)
     assert out.count("\n") == text.count("\n")
-    assert [l for l in out.splitlines() if l] == ["a", "`ifdef X", "xx", "`else", "`endif", "b"]
+    assert [ln for ln in out.splitlines() if ln] == ["a", "`ifdef X", "xx", "`else", "`endif", "b"]
 
 
 def test_hierarchy_timeout_is_configurable(tmp_path, monkeypatch):
     # Q26(c): the full SoC needs ~259 s; the budget is env/multiplier driven,
     # and a timeout is an explicit infrastructure failure, never a skip.
     import subprocess
+
     from orchestrator.harness import hierarchy
     monkeypatch.delenv(hierarchy.TIMEOUT_ENV, raising=False)
     monkeypatch.delenv("CORESMITH_TIMEOUT_MULTIPLIER", raising=False)
