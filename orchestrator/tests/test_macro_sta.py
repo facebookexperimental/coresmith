@@ -31,7 +31,9 @@ def _fake_registry(tmp_path):
                   "input clk1; input csb1; input [8:0] addr1; output [31:0] dout1;\nendmodule\n")
     lib = tmp_path / "sky130_sram_2kbyte_1rw1r_32x512_8_TT_1p8V_25C.lib"
     lib.write_text("library(x){}\n")
-    m32x512 = SimpleNamespace(name="sky130_sram_2kbyte_1rw1r_32x512_8", verilog=str(mv), lib=str(lib), ports="1rw1r")
+    lef = tmp_path / "sky130_sram_2kbyte_1rw1r_32x512_8.lef"
+    lef.write_text("MACRO x\n")
+    m32x512 = SimpleNamespace(name="sky130_sram_2kbyte_1rw1r_32x512_8", verilog=str(mv), lib=str(lib), lef=str(lef), ports="1rw1r")
     mv8 = tmp_path / "sky130_sram_1kbyte_1rw1r_8x1024_8.v"
     mv8.write_text("module sky130_sram_1kbyte_1rw1r_8x1024_8(clk0,csb0,web0,addr0,din0,dout0,clk1,csb1,addr1,dout1);\n"
                    "input clk0; input csb0; input web0; input [9:0] addr0; input [7:0] din0; output [7:0] dout0;\n"
@@ -57,7 +59,7 @@ def test_find_instances_parses_yosys_and_plain_parameters():
 def test_bind_rewrites_instances_and_emits_structural_wrappers(tmp_path, monkeypatch):
     _patch_registry(monkeypatch, _fake_registry(tmp_path))
     b = ms.bind_netlist_macros(_NETLIST)
-    assert b.ok and b.instances == 3 and len(b.libs) == 2
+    assert b.ok and b.instances == 3 and len(b.libs) == 2 and len(b.lefs) == 1
     assert "cs_sram_1rw1r__w32_d512 u_data_w0_hi (" in b.netlist and "cs_sram_1rw1r__w32_d512 u_data_w0_lo (" in b.netlist
     assert "cs_sram_1rw__w8_d1024 u_tag (" in b.netlist and "#(" not in b.netlist.split("u_data_w0_hi")[0].split("wire _00004_;")[1]
     assert "module cs_sram_1rw1r__w32_d512 (" in b.wrappers and "sky130_sram_2kbyte_1rw1r_32x512_8 u_macro (" in b.wrappers

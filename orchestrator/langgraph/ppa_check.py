@@ -1735,6 +1735,7 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
     # $mem_v2 cells removes real read muxes and write fanout and can turn the
     # critical path into an optimistic measurement of a different circuit.
     macro_libs: list[str] = []
+    macro_lefs: list[str] = []
     if mapped_netlist:
         try:
             shutil.copy2(mapped_netlist, netlist)
@@ -1748,6 +1749,7 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
                                   + _macro_sta.describe_unresolved(binding))
                 netlist.write_text(binding.wrappers + strip_instance_parameters(binding.netlist))
                 macro_libs = list(binding.libs)
+                macro_lefs = list(binding.lefs)
     else:
         ys = wd / "syn.ys"
         ys.write_text(_maxfanout_synth_script(sources, lib, netlist, top, buffered,
@@ -1777,7 +1779,7 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
         repaired = repair_tool.run(ToolRequest(
             verb="repair_netlist", design=top,
             inputs={"netlist": netlist, "liberty": Path(lib)},
-            params={"clock_ns": period_ns, "clock_port": clk_port, "extra_liberty": macro_libs},
+            params={"clock_ns": period_ns, "clock_port": clk_port, "extra_liberty": macro_libs, "extra_lef": macro_lefs},
             out_dir=wd / "repair", timeout_s=timeout_s))
         candidate = repaired.artifacts.get("netlist")
         if repaired.ok and candidate and Path(candidate).is_file():

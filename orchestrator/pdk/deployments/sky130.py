@@ -1135,7 +1135,8 @@ class RepairNetlistOpenroad(EdaTool):
             "set_thread_count 1\n"
             f"read_lef {q(dep.tech_lef.resolve())}\n"
             f"read_lef {q(dep.cell_lef.resolve())}\n"
-            f"read_liberty {q(liberty.resolve())}\n"
+            + "".join(f"read_lef {q(Path(l).resolve())}\n" for l in (req.params.get("extra_lef") or []) if Path(l).is_file())
+            + f"read_liberty {q(liberty.resolve())}\n"
             + "".join(f"read_liberty {q(Path(ml).resolve())}\n" for ml in (req.params.get("extra_liberty") or []))
             + f"read_verilog {q(netlist.resolve())}\n"
             f"link_design {q(req.design)}\n"

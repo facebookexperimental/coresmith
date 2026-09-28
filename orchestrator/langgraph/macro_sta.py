@@ -64,6 +64,7 @@ class MacroBinding:
     netlist: str
     wrappers: str = ""
     libs: list = field(default_factory=list)
+    lefs: list = field(default_factory=list)
     bound: list = field(default_factory=list)       # (kind, width, depth, macro_name)
     unresolved: list = field(default_factory=list)  # (kind, width, depth)
     instances: int = 0
@@ -157,6 +158,9 @@ def bind_netlist_macros(netlist: str, *, registry=None, allow_generate: bool = F
         res.bound.append((kind, w, d, m.name))
         if m.lib not in res.libs:
             res.libs.append(m.lib)
+        lef = getattr(m, "lef", "") or ""
+        if lef and lef not in res.lefs:
+            res.lefs.append(lef)
     res.unresolved = sorted(set(res.unresolved))
     # rewrite from the end so offsets stay valid
     text = netlist
