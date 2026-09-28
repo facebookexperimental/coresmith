@@ -71,6 +71,7 @@ class TestEdaStepTimeouts:
 
     def test_eda_timeout_env_override(self, monkeypatch):
         from orchestrator.langgraph.backend_graph import _eda_timeout
+        monkeypatch.delenv("CORESMITH_TIMEOUT_MULTIPLIER", raising=False)
         monkeypatch.delenv("CORESMITH_DRC_TIMEOUT", raising=False)
         assert _eda_timeout("CORESMITH_DRC_TIMEOUT", 2400) == 2400
         monkeypatch.setenv("CORESMITH_DRC_TIMEOUT", "5400")
