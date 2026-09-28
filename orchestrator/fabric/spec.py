@@ -75,6 +75,16 @@ class FabricSpec:
     # from to_json at their defaults, so existing spec digests do not change.
     pipeline_stages: int = 0
     unique_ids: bool = False
+    # shared_apb_bridge: route every APB slave through ONE crossbar master port
+    # (one rule per APB window, so non-contiguous windows are fine and the gaps
+    # still answer DECERR from the crossbar), one axi_to_axi_lite and one
+    # axi_lite_to_apb with NoApbSlaves = #APB slaves, whose addr_decode asserts
+    # psel for exactly the addressed slave and muxes pready/prdata/pslverr back.
+    # Cuts (slave_cut) and INV-FABRIC-APB-ADDR-003 are as for per-slave bridges;
+    # the external m_<apb>_* ports are unchanged. The shared converter's
+    # AxiMax*Txns is the largest max_outstanding set on an APB slave, else the
+    # fabric's. Omitted from to_json when false (digest-stable).
+    shared_apb_bridge: bool = False
 
     # ------------------------------------------------------------ helpers
     @property
@@ -86,6 +96,20 @@ class FabricSpec:
         """Slave-port ID width: master id width + log2(masters)."""
         n = max(1, len(self.masters))
         return max(m.id_width for m in self.masters) + max(0, (n - 1).bit_length())
+
+    def xbar_ports(self) -> list[list[int]]:
+        """Crossbar master ports as lists of slave indices: one port per slave,
+        except that with shared_apb_bridge all APB slaves share the port at the
+        position of the first APB slave."""
+        apb = [i for i, s in enumerate(self.slaves) if s.protocol == "apb"]
+        out: list[list[int]] = []
+        for i, s in enumerate(self.slaves):
+            if self.shared_apb_bridge and s.protocol == "apb":
+                if i == apb[0]:
+                    out.append(apb)
+            else:
+                out.append([i])
+        return out
 
     def slave_index(self, name: str) -> int:
         for i, s in enumerate(self.slaves):
@@ -183,11 +207,12 @@ class FabricSpec:
                    latency_mode=str(d.get("latency_mode") or "cut_all_ports").lower(),
                    slave_cut=bool(d.get("slave_cut", True)),
                    pipeline_stages=_int(d.get("pipeline_stages"), 0),
-                   unique_ids=bool(d.get("unique_ids", False)))
+                   unique_ids=bool(d.get("unique_ids", False)),
+                   shared_apb_bridge=bool(d.get("shared_apb_bridge", False)))
 
     def digest(self) -> str:
         return hashlib.sha256(json.dumps(self.to_json(), sort_keys=True).encode()).hexdigest()[:16]
 
 
 # Knobs serialised only when set away from their default (digest-stable).
-_OPTIONAL_DEFAULTS = {"pipeline_stages": 0, "unique_ids": False}
+_OPTIONAL_DEFAULTS = {"pipeline_stages": 0, "unique_ids": False, "shared_apb_bridge": False}

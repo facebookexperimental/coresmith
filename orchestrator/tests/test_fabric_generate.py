@@ -288,3 +288,87 @@ def test_generated_testbench_passes_on_a_64bit_fabric_with_apb_subword_access(tm
     res = ph.run_simulation({"name": "cs_fabric_soc"}, art.rtl_path, art.tb_path,
                             project_root=str(tmp_path))
     assert res["passed"], res.get("log", "")[-4000:]
+
+
+# The renderings of _spec()/_spec64() before shared_apb_bridge existed (4aedaf6):
+# the knob at its default must not change a byte of the wrapper or the TB.
+_PRE_KNOB_SHA256 = {
+    "_spec": ("7edeb1b5086d47412a13d6666d83cd330e4fb05ae95fe37d4f03c602ae6e5f42",
+              "afd1b0d532ba9594a12d94aa016eb60f19babdf1402538ebc7a1fd39b488919b"),
+    "_spec64": ("54c85881931b39143531c6e2ee7054793f588c5f27b2fd2143ad49119868a5fd",
+                "74ec932c02fd933d382e9bc9f60558df999931322b2dc8a47dc08e5b86ca2f9d"),
+}
+
+
+def test_shared_apb_bridge_default_renders_byte_identically():
+    import hashlib
+    for mk in (_spec, _spec64):
+        s = mk()
+        assert s.shared_apb_bridge is False and "shared_apb_bridge" not in s.to_json()
+        explicit = FabricSpec.from_json(dict(s.to_json(), shared_apb_bridge=False))
+        assert explicit.digest() == s.digest()
+        sv, tb = render_wrapper_sv(explicit), render_testbench(explicit)
+        assert (hashlib.sha256(sv.encode()).hexdigest(),
+                hashlib.sha256(tb.encode()).hexdigest()) == _PRE_KNOB_SHA256[mk.__name__]
+        assert "test_apb_shared_decode" not in tb
+    # a single APB slave: the shared bridge is the per-slave bridge
+    one = _spec()
+    shared = FabricSpec.from_json(dict(one.to_json(), shared_apb_bridge=True))
+    assert shared.digest() != one.digest()
+    assert [x for x in render_wrapper_sv(shared).splitlines() if not x.startswith("// shared_apb_bridge")] \
+        == render_wrapper_sv(one).splitlines()
+
+
+def _spec_shared():
+    # 2 APB slaves in non-contiguous windows with an AXI-Lite slave between them
+    s = _spec64()
+    s.slaves[3].base = 0x1000_4000       # gin; gpu_regs stays at 0x1000_2000
+    s.shared_apb_bridge = True
+    return s
+
+
+def test_shared_apb_bridge_renders_one_bridge_with_a_psel_decoder():
+    s = _spec_shared()
+    assert s.validate() == [] and s.to_json()["shared_apb_bridge"] is True
+    assert FabricSpec.from_json(s.to_json()).digest() == s.digest()
+    assert s.xbar_ports() == [[0], [1, 3], [2]]
+    sv = render_wrapper_sv(s)
+    # 3 crossbar ports for 4 slaves; one address rule per slave, both APB windows -> port 1
+    assert "NoMstPorts: 3," in sv and "NoAddrRules: 4 }" in sv
+    assert "'{idx: 1, start_addr: 32'h10004000, end_addr: 32'h10005000}" in sv
+    assert "'{idx: 1, start_addr: 32'h10000000, end_addr: 32'h10001000}" in sv
+    assert "'{idx: 2, start_addr: 32'h10002000, end_addr: 32'h10003000}" in sv
+    assert sv.count("axi_to_axi_lite #(") == 2 and sv.count("axi_lite_to_apb #(") == 1
+    assert ".NoApbSlaves(2), .NoRules(2), .AddrWidth(AW+APB_SHIFT)" in sv
+    assert "localparam apb_rule_t [1:0] ApbMap_1 = '{ '{idx: 1, start_addr: 33'h20008000, end_addr: 33'h2000A000}, " \
+           "'{idx: 0, start_addr: 33'h20000000, end_addr: 33'h20002000} };" in sv
+    # per-slave psel/response, the same external ports and the Q37 paddr slice
+    for k, name in ((0, "uart"), (1, "gin")):
+        assert f"assign m_{name}_psel = apb_req_1[{k}].psel;" in sv
+        assert f"assign m_{name}_paddr = apb_req_1[{k}].paddr[AW+APB_SHIFT-1:APB_SHIFT];" in sv
+        assert f"assign apb_rsp_1[{k}] = '{{pready: m_{name}_pready, prdata: m_{name}_prdata, pslverr: m_{name}_pslverr}};" in sv
+    base = FabricSpec.from_json(dict(s.to_json(), shared_apb_bridge=False))
+    import re
+    hdr = lambda t: re.search(r"module cs_fabric_soc \((.*?)\);", t, re.S).group(1)
+    assert hdr(sv) == hdr(render_wrapper_sv(base))
+    tb = render_testbench(s)
+    assert "test_apb_shared_decode" in tb and "APB_HOLES = [0xffff000, 0x10001000, 0x10003000, 0x10005000]" in tb
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not (_HAVE_SLANG and _HAVE_SIM), reason="yosys-slang/verilator/cocotb not available")
+def test_generated_testbench_passes_with_a_shared_apb_bridge(tmp_path, monkeypatch):
+    # decode to each APB slave (psel on exactly that one), DECERR in the holes
+    # around/between the APB windows, the AXI-Lite slave between them, and
+    # test_apb_subword_address through the shared bridge
+    import orchestrator.langgraph.pipeline_helpers as ph
+    monkeypatch.setattr(ph, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "0")
+    monkeypatch.setenv("CORESMITH_COVERAGE", "0")
+    monkeypatch.setenv("CORESMITH_INTERFACE_VIP", "0")
+    monkeypatch.setattr(ph, "create_golden_model_wrapper", lambda *a, **k: None)
+    art = generate_fabric(_spec_shared(), tmp_path / "rtl", tb_dir=tmp_path / "tb")
+    assert "test_apb_shared_decode" in Path(art.tb_path).read_text()
+    res = ph.run_simulation({"name": "cs_fabric_soc"}, art.rtl_path, art.tb_path,
+                            project_root=str(tmp_path))
+    assert res["passed"], res.get("log", "")[-4000:]

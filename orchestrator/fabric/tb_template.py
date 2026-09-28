@@ -241,6 +241,55 @@ async def test_apb_subword_address(dut):
 '''
 
 
+# Appended only for shared_apb_bridge (the default TB renders unchanged).
+_TB_SHARED_APB = '''
+
+APB_HOLES = {holes}       # unmapped addresses next to the APB windows
+
+
+@cocotb.test()
+async def test_apb_shared_decode(dut):
+    """shared_apb_bridge: psel reaches exactly the addressed APB slave; holes
+    next to the APB windows answer DECERR and select no APB slave."""
+    env = Env(dut)
+    await env.reset()
+    m = env.masters[MASTERS[0]]
+    apb = [s for s, (proto, _, _) in SLAVES.items() if proto == "apb"]
+    for s in apb:
+        proto, base, size = SLAVES[s]
+        for addr in (base, base + size - DW // 8):
+            for o in apb:
+                env.slaves[o].log.clear()
+            data = _word(("shared", s, addr))
+            wr = await m.write(addr, data)
+            assert wr.resp == AxiResp.OKAY, f"{{s}} @{{addr:#x}}: write resp {{wr.resp}}"
+            rd = await m.read(addr, len(data))
+            assert rd.resp == AxiResp.OKAY and bytes(rd.data) == data, f"{{s}} @{{addr:#x}}: read {{rd.resp}}"
+            seen = {{o: len(env.slaves[o].log) for o in apb}}
+            assert seen == {{o: (2 if o == s else 0) for o in apb}}, f"{{s}} @{{addr:#x}}: psel seen {{seen}}"
+    for addr in APB_HOLES:
+        for o in apb:
+            env.slaves[o].log.clear()
+        rd = await m.read(addr, DW // 8)
+        assert rd.resp == AxiResp.DECERR, f"hole {{addr:#x}}: read resp {{rd.resp}}"
+        wr = await m.write(addr, bytes(DW // 8))
+        assert wr.resp == AxiResp.DECERR, f"hole {{addr:#x}}: write resp {{wr.resp}}"
+        assert not any(env.slaves[o].log for o in apb), f"hole {{addr:#x}} selected an APB slave"
+'''
+
+
+def _apb_holes(spec: FabricSpec) -> list[int]:
+    """Unmapped 4 KiB-aligned addresses just below/above each APB window."""
+    out: set[int] = set()
+    for s in spec.slaves:
+        if s.protocol != "apb":
+            continue
+        for a in (s.base - 0x1000, s.base + s.size):
+            if 0 <= a < (1 << spec.addr_width) and not any(x.base <= a < x.base + x.size for x in spec.slaves):
+                out.add(a)
+    return sorted(out)[:8]
+
+
 def render_testbench(spec: FabricSpec) -> str:
     slaves = {s.name: (s.protocol, s.base, s.size) for s in spec.slaves}
     top = max(s.base + s.size for s in spec.slaves)
@@ -248,5 +297,8 @@ def render_testbench(spec: FabricSpec) -> str:
     # pick an unmapped address not inside any slave
     while any(s.base <= unmapped < s.base + s.size for s in spec.slaves):
         unmapped += 0x1000
-    return _TB.format(module=spec.module_name, masters=json.dumps([m.name for m in spec.masters]),
-                      slaves=repr(slaves), dw=spec.data_width, unmapped=hex(unmapped))
+    tb = _TB.format(module=spec.module_name, masters=json.dumps([m.name for m in spec.masters]),
+                    slaves=repr(slaves), dw=spec.data_width, unmapped=hex(unmapped))
+    if spec.shared_apb_bridge:
+        tb += _TB_SHARED_APB.format(holes="[" + ", ".join(hex(a) for a in _apb_holes(spec)) + "]")
+    return tb

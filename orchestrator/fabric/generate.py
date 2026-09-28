@@ -110,12 +110,19 @@ def render_wrapper_sv(spec: FabricSpec) -> str:
     AW, DW, UW = spec.addr_width, spec.data_width, spec.user_width
     IW, MIW = max(m.id_width for m in spec.masters), spec.mst_id_width
     NM, NS = len(spec.masters), len(spec.slaves)
+    # crossbar master ports; NX == NS and xport[i] == i unless shared_apb_bridge
+    xports = spec.xbar_ports()
+    NX = len(xports)
+    xport = {i: j for j, grp in enumerate(xports) for i in grp}
     ports = _flat_ports(spec)
     L: list[str] = []
     L.append(f"// {spec.module_name}: generated SoC fabric (B1). {NM} master(s) x {NS} slave(s),")
     L.append(f"// AXI4 {AW}-bit address / {DW}-bit data, master id width {IW}, slave-port id width {MIW}.")
     L.append(f"// Crossbar latency {LATENCY_MODES[spec.latency_mode]}; per-slave-port axi_cut "
              f"{'on' if spec.slave_cut else 'off'}.")
+    if spec.shared_apb_bridge:
+        L.append(f"// shared_apb_bridge: all APB slaves behind one crossbar port and one axi_lite_to_apb "
+                 f"(psel decoded per slave); {NX} crossbar master ports.")
     L.append("// Rendered by orchestrator/fabric/generate.py over the vendored pulp-platform axi IP")
     L.append("// (SHL-0.51); elaborated to plain Verilog by yosys-slang. Do not edit.")
     L.append('`include "axi/typedef.svh"')
@@ -131,16 +138,16 @@ def render_wrapper_sv(spec: FabricSpec) -> str:
     L.append("  `AXI_LITE_TYPEDEF_ALL(lite, addr_t, data_t, strb_t)")
     L.append("  typedef struct packed { int unsigned idx; addr_t start_addr; addr_t end_addr; } rule_t;")
     L.append("  localparam axi_pkg::xbar_cfg_t Cfg = '{")
-    L.append(f"    NoSlvPorts: {NM}, NoMstPorts: {NS}, MaxMstTrans: {spec.max_outstanding}, "
+    L.append(f"    NoSlvPorts: {NM}, NoMstPorts: {NX}, MaxMstTrans: {spec.max_outstanding}, "
              f"MaxSlvTrans: {max(m.max_outstanding for m in spec.masters)}, FallThrough: 1'b0,")
     L.append(f"    LatencyMode: axi_pkg::{LATENCY_MODES[spec.latency_mode]}, PipelineStages: {int(spec.pipeline_stages)}, "
              "AxiIdWidthSlvPorts: IW, AxiIdUsedSlvPorts: IW,")
     L.append(f"    UniqueIds: 1'b{int(bool(spec.unique_ids))}, AxiAddrWidth: AW, AxiDataWidth: DW, NoAddrRules: {NS} }};")
-    rules = ", ".join(f"'{{idx: {i}, start_addr: {AW}'h{s.base:X}, end_addr: {AW}'h{s.base + s.size:X}}}"
+    rules = ", ".join(f"'{{idx: {xport[i]}, start_addr: {AW}'h{s.base:X}, end_addr: {AW}'h{s.base + s.size:X}}}"
                       for i, s in reversed(list(enumerate(spec.slaves))))
     L.append(f"  localparam rule_t [{NS - 1}:0] AddrMap = '{{ {rules} }};")
     L.append(f"  slv_req_t  [{NM - 1}:0] slv_req;  slv_resp_t [{NM - 1}:0] slv_rsp;")
-    L.append(f"  mst_req_t  [{NS - 1}:0] mst_req;  mst_resp_t [{NS - 1}:0] mst_rsp;")
+    L.append(f"  mst_req_t  [{NX - 1}:0] mst_req;  mst_resp_t [{NX - 1}:0] mst_rsp;")
     # master ports -> structs
     for i, m in enumerate(spec.masters):
         p = f"s_{m.name}_"
@@ -168,10 +175,16 @@ def render_wrapper_sv(spec: FabricSpec) -> str:
     L.append("    .clk_i(clk), .rst_ni(rst_n), .test_i(1'b0), .slv_ports_req_i(slv_req), .slv_ports_resp_o(slv_rsp),")
     L.append("    .mst_ports_req_o(mst_req), .mst_ports_resp_i(mst_rsp), .addr_map_i(AddrMap),")
     L.append("    .en_default_mst_port_i('0), .default_mst_port_i('0));")
-    # slave ports
-    for j, s in enumerate(spec.slaves):
+    # slave ports: crossbar master port j serves the slaves in xports[j]
+    apb_types = False
+    for j, grp in enumerate(xports):
+        s = spec.slaves[grp[0]]
         p = f"m_{s.name}_"
-        L.append(f"  // slave port {s.name} ({s.protocol}) @ {s.base:#x} +{s.size:#x}")
+        if len(grp) == 1:
+            L.append(f"  // slave port {s.name} ({s.protocol}) @ {s.base:#x} +{s.size:#x}")
+        else:
+            L.append(f"  // crossbar port {j}: shared APB bridge for " + ", ".join(
+                f"{spec.slaves[i].name} @ {spec.slaves[i].base:#x} +{spec.slaves[i].size:#x}" for i in grp))
         if s.protocol == "axi4":
             src = f"mst_req[{j}]"
             rsp = f"mst_rsp[{j}]"
@@ -204,7 +217,7 @@ def render_wrapper_sv(spec: FabricSpec) -> str:
             src, rsp = _emit_cut(L, j) if spec.slave_cut else (f"mst_req[{j}]", f"mst_rsp[{j}]")
             L.append(f"  lite_req_t lite_req_{j}; lite_resp_t lite_rsp_{j};")
             L.append("  axi_to_axi_lite #(.AxiAddrWidth(AW), .AxiDataWidth(DW), .AxiIdWidth(MIW), .AxiUserWidth(UW),")
-            txns = s.max_outstanding or spec.max_outstanding
+            txns = max((spec.slaves[i].max_outstanding or 0) for i in grp) or spec.max_outstanding
             L.append(f"    .AxiMaxWriteTxns({txns}), .AxiMaxReadTxns({txns}), .FallThrough(1'b0),")
             L.append("    .full_req_t(mst_req_t), .full_resp_t(mst_resp_t), .lite_req_t(lite_req_t), .lite_resp_t(lite_resp_t))")
             L.append(f"    i_to_lite_{j} (.clk_i(clk), .rst_ni(rst_n), .test_i(1'b0), .slv_req_i({src}), "
@@ -236,7 +249,8 @@ def render_wrapper_sv(spec: FabricSpec) -> str:
                 areq, arule = ("apb_lite_req_t", "apb_rule_t") if sh else ("lite_req_t", "rule_t")
                 # The APB struct types are module-scoped: emit them once, at the
                 # first APB slave (a second typedef is a redefinition in Verilator).
-                if j == spec.slave_index(next(x.name for x in spec.slaves if x.protocol == "apb")):
+                if not apb_types:
+                    apb_types = True
                     if sh:
                         L.append(f"  localparam int unsigned APB_SHIFT = {sh}; typedef logic [AW+APB_SHIFT-1:0] apb_addr_t;")
                         L.append("  `AXI_LITE_TYPEDEF_AW_CHAN_T(apb_lite_aw_chan_t, apb_addr_t)")
@@ -247,28 +261,41 @@ def render_wrapper_sv(spec: FabricSpec) -> str:
                              "logic psel; logic penable; logic pwrite; data_t pwdata; strb_t pstrb; } apb_req_t;")
                     L.append("  typedef struct packed { logic pready; data_t prdata; logic pslverr; } apb_resp_t;")
                 pipe = "1'b1" if spec.slave_cut else "1'b0"
-                L.append(f"  apb_req_t apb_req_{j}; apb_resp_t apb_rsp_{j};")
+                # One bridge per crossbar port; a shared port (shared_apb_bridge)
+                # has one APB rule and one psel per slave. The bridge's
+                # addr_decode drives psel of exactly the addressed slave (the
+                # others see '0) and returns that slave's pready/prdata/pslverr.
+                n = len(grp)
+                dim = f"[{n - 1}:0] " if n > 1 else ""
+                L.append(f"  apb_req_t {dim}apb_req_{j}; apb_resp_t {dim}apb_rsp_{j};")
                 aw_ = f"{AW + sh}"
-                L.append(f"  localparam {arule} [0:0] ApbMap_{j} = '{{ '{{idx: 0, start_addr: {aw_}'h{s.base << sh:X}, "
-                         f"end_addr: {aw_}'h{(s.base + s.size) << sh:X}}} }};")
+                amap = ", ".join(f"'{{idx: {k}, start_addr: {aw_}'h{spec.slaves[i].base << sh:X}, "
+                                 f"end_addr: {aw_}'h{(spec.slaves[i].base + spec.slaves[i].size) << sh:X}}}"
+                                 for k, i in reversed(list(enumerate(grp))))
+                L.append(f"  localparam {arule} [{n - 1}:0] ApbMap_{j} = '{{ {amap} }};")
                 if sh:
                     L.append(f"  apb_lite_req_t apb_lite_req_{j};")
                     L.append(f"  assign apb_lite_req_{j} = '{{aw: '{{addr: {{{lq}.aw.addr, {sh}'b0}}, prot: {lq}.aw.prot}}, "
                              f"aw_valid: {lq}.aw_valid, w: {lq}.w, w_valid: {lq}.w_valid, b_ready: {lq}.b_ready, "
                              f"ar: '{{addr: {{{lq}.ar.addr, {sh}'b0}}, prot: {lq}.ar.prot}}, ar_valid: {lq}.ar_valid, "
                              f"r_ready: {lq}.r_ready}};")
-                    breq, paddr = f"apb_lite_req_{j}", f"apb_req_{j}.paddr[AW+APB_SHIFT-1:APB_SHIFT]"
+                    breq = f"apb_lite_req_{j}"
                 else:
-                    breq, paddr = lq, f"apb_req_{j}.paddr"
-                L.append(f"  axi_lite_to_apb #(.NoApbSlaves(1), .NoRules(1), .AddrWidth(AW{'+APB_SHIFT' if sh else ''}), "
+                    breq = lq
+                L.append(f"  axi_lite_to_apb #(.NoApbSlaves({n}), .NoRules({n}), .AddrWidth(AW{'+APB_SHIFT' if sh else ''}), "
                          f".DataWidth(DW), .PipelineRequest({pipe}), .PipelineResponse({pipe}), .axi_lite_req_t({areq}), "
                          f".axi_lite_resp_t(lite_resp_t), .apb_req_t(apb_req_t), .apb_resp_t(apb_resp_t), .rule_t({arule}))")
                 L.append(f"    i_to_apb_{j} (.clk_i(clk), .rst_ni(rst_n), .axi_lite_req_i({breq}), "
                          f".axi_lite_resp_o({lr}), .apb_req_o(apb_req_{j}), .apb_resp_i(apb_rsp_{j}), .addr_map_i(ApbMap_{j}));")
-                L.append(f"  assign {p}psel = apb_req_{j}.psel; assign {p}penable = apb_req_{j}.penable; "
-                         f"assign {p}pwrite = apb_req_{j}.pwrite; assign {p}paddr = {paddr}; "
-                         f"assign {p}pprot = apb_req_{j}.pprot; assign {p}pwdata = apb_req_{j}.pwdata; assign {p}pstrb = apb_req_{j}.pstrb;")
-                L.append(f"  assign apb_rsp_{j} = '{{pready: {p}pready, prdata: {p}prdata, pslverr: {p}pslverr}};")
+                for k, i in enumerate(grp):
+                    p = f"m_{spec.slaves[i].name}_"
+                    q = f"apb_req_{j}[{k}]" if n > 1 else f"apb_req_{j}"
+                    r = f"apb_rsp_{j}[{k}]" if n > 1 else f"apb_rsp_{j}"
+                    paddr = f"{q}.paddr[AW+APB_SHIFT-1:APB_SHIFT]" if sh else f"{q}.paddr"
+                    L.append(f"  assign {p}psel = {q}.psel; assign {p}penable = {q}.penable; "
+                             f"assign {p}pwrite = {q}.pwrite; assign {p}paddr = {paddr}; "
+                             f"assign {p}pprot = {q}.pprot; assign {p}pwdata = {q}.pwdata; assign {p}pstrb = {q}.pstrb;")
+                    L.append(f"  assign {r} = '{{pready: {p}pready, prdata: {p}prdata, pslverr: {p}pslverr}};")
     L.append("endmodule")
     return "\n".join(x for x in L if x is not None) + "\n"
 

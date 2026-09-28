@@ -74,6 +74,17 @@ Emit ONE block per bus, for example:
   slices between every crossbar demux/mux pair (area grows fast: +46 % at 1).
   `unique_ids` (default `false`) is axi_xbar `UniqueIds`: only if the masters
   guarantee that in-flight transactions sharing an ID all target one slave.
+* `shared_apb_bridge` (default `false`): all APB slaves share ONE crossbar
+  port (one address rule per APB window, so the windows need not be
+  contiguous and the gaps still answer DECERR), one `axi_to_axi_lite` and one
+  `axi_lite_to_apb` whose decoder asserts `psel` for exactly the addressed
+  slave and returns its `pready`/`prdata`/`pslverr`. The `m_<apb>_*` ports are
+  unchanged (same names, widths, `paddr[2]` lane select;
+  INV-FABRIC-APB-ADDR-003 still holds) and `slave_cut` cuts it as before. It
+  removes one converter chain per extra APB slave and narrows the crossbar
+  (the D-31 fabric: 7 -> 4 ports, -42 % cells, closes 64 MHz). APB accesses
+  are then serialised across the APB slaves; the shared converter uses the
+  largest `max_outstanding` set on an APB slave.
 * The top-level `max_outstanding` sizes the per-ID in-flight counters (the
   crossbar demuxes' `MaxMstTrans` and each `axi_to_axi_lite` / burst
   splitter). These counters set the fabric's critical path. A master's

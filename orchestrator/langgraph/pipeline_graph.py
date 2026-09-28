@@ -2353,6 +2353,10 @@ def _primitive_spec_markdown(block_name: str, spec, art) -> str:
               "All channels are AXI valid/ready; latency through the crossbar is 1 cycle per cut "
               f"(latency_mode {spec.latency_mode}; slave_cut {spec.slave_cut}). The generated "
               "testbench measures throughput.", ""]
+    if spec.shared_apb_bridge:
+        lines += ["shared_apb_bridge: all APB slaves share one crossbar port and one axi_lite_to_apb, "
+                  "whose decoder asserts psel for exactly the addressed APB slave (one APB access at a "
+                  "time across them); the m_<apb>_* ports and INV-FABRIC-APB-ADDR-003 are unchanged.", ""]
     return "\n".join(lines)
 
 
