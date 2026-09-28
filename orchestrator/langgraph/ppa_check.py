@@ -33,6 +33,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+
+from orchestrator.langgraph import macro_sta as _macro_sta
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -908,6 +910,17 @@ def parse_sta_report(report_text: str) -> dict[str, float | None]:
         )
         if m:
             out[key] = float(m.group(1))
+    # ``report_wns`` prints 0.00 for a design that MEETS timing, so a passing
+    # block used to record "WNS 0.0" -- indistinguishable from a path with no
+    # margin, or from a black-boxed macro nobody timed. The worst slack of the
+    # reported paths is the honest number: keep it, and report it as the WNS
+    # when the clamp hid a positive margin.
+    slacks = [float(v) for v in re.findall(r"^\s*(-?\d+(?:\.\d+)?)\s+slack \((?:MET|VIOLATED)\)",
+                                           report_text or "", re.M)]
+    if slacks:
+        out["worst_slack_ns"] = min(slacks)
+        if out["wns_ns"] is not None and out["wns_ns"] == 0.0 and min(slacks) > 0:
+            out["wns_ns"] = min(slacks)
     return out
 
 
@@ -1516,6 +1529,23 @@ def run_pre_layout_sta(
         raw_netlist = Path(netlist_path).read_text()
     except OSError as e:
         return _fail(f"cannot read netlist {netlist_path}: {e}")
+    # Memory wrappers: bind every cs_sram geometry to its macro so STA times
+    # the paths through it (macro_sta). An unresolved geometry is a loud
+    # non-measurement, not a black box that silently passes.
+    extra_libs: list[str] = []
+    extra_verilog = ""
+    macro_note = ""
+    if _macro_sta.enabled():
+        binding = _macro_sta.bind_netlist_macros(raw_netlist)
+        if binding.instances:
+            if not binding.ok:
+                return _fail("SRAM macro geometry unresolved for STA: "
+                             + _macro_sta.describe_unresolved(binding)
+                             + " (no macro in the registry; characterise or tile it)")
+            raw_netlist = binding.netlist
+            extra_libs = list(binding.libs)
+            extra_verilog = binding.wrappers
+            macro_note = "; ".join(f"{k} {w}x{d} -> {n}" for k, w, d, n in binding.bound)
     sta_netlist = strip_signed_declaration_qualifiers(
         strip_instance_parameters(raw_netlist)
     )
@@ -1526,11 +1556,12 @@ def run_pre_layout_sta(
         with tempfile.NamedTemporaryFile(
             "w", suffix="_sta.v", delete=False
         ) as nf:
-            nf.write(sta_netlist)
+            nf.write(extra_verilog + sta_netlist)
             sta_nl = nf.name
         script = (
             f"read_liberty {liberty_path}\n"
-            f"read_verilog {sta_nl}\n"
+            + "".join(f"read_liberty {lib}\n" for lib in extra_libs)
+            + f"read_verilog {sta_nl}\n"
             f"link_design {top_module}\n"
             f"read_sdc {sdc_path}\n"
             f"report_checks -path_delay max -group_count 10 -format full_clock_expanded\n"
@@ -1551,7 +1582,8 @@ def run_pre_layout_sta(
                 Path(report_path).write_text(
                     f"# OpenSTA pre-layout report for {top_module}\n"
                     f"# netlist: {netlist_path}\n# sdc: {sdc_path}\n# liberty: {liberty_path}\n"
-                    f"# rc: {result.returncode}\n\n{result.stdout}\n"
+                    + (f"# macro liberty: {', '.join(extra_libs)}\n# macros: {macro_note}\n" if extra_libs else "")
+                    + f"# rc: {result.returncode}\n\n{result.stdout}\n"
                     + (f"\n=== STDERR ===\n{result.stderr[-4000:]}\n" if result.stderr else ""),
                     encoding="utf-8")
             except OSError:
@@ -1702,11 +1734,20 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
     # Keep inferred/flop memory in the measured circuit. Blackboxing all
     # $mem_v2 cells removes real read muxes and write fanout and can turn the
     # critical path into an optimistic measurement of a different circuit.
+    macro_libs: list[str] = []
     if mapped_netlist:
         try:
             shutil.copy2(mapped_netlist, netlist)
         except OSError as exc:
             return None, f"mapped netlist unavailable: {exc}"
+        if _macro_sta.enabled():
+            binding = _macro_sta.bind_netlist_macros(netlist.read_text())
+            if binding.instances:
+                if not binding.ok:
+                    return None, ("SRAM macro geometry unresolved for STA: "
+                                  + _macro_sta.describe_unresolved(binding))
+                netlist.write_text(binding.wrappers + strip_instance_parameters(binding.netlist))
+                macro_libs = list(binding.libs)
     else:
         ys = wd / "syn.ys"
         ys.write_text(_maxfanout_synth_script(sources, lib, netlist, top, buffered,
@@ -1736,7 +1777,7 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
         repaired = repair_tool.run(ToolRequest(
             verb="repair_netlist", design=top,
             inputs={"netlist": netlist, "liberty": Path(lib)},
-            params={"clock_ns": period_ns, "clock_port": clk_port},
+            params={"clock_ns": period_ns, "clock_port": clk_port, "extra_liberty": macro_libs},
             out_dir=wd / "repair", timeout_s=timeout_s))
         candidate = repaired.artifacts.get("netlist")
         if repaired.ok and candidate and Path(candidate).is_file():
@@ -1761,7 +1802,8 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
         constraints = f"read_sdc {{{wd / 'constraints.sdc'}}}\n"
     tcl.write_text(
         f"read_liberty {lib}\n"
-        f"read_verilog {netlist}\n"
+        + "".join(f"read_liberty {ml}\n" for ml in macro_libs)
+        + f"read_verilog {netlist}\n"
         f"link_design {top}\n"
         f"{constraints}"
         f"report_checks -path_delay max -group_count 5 -format full_clock_expanded\n"
@@ -1812,7 +1854,9 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
 
         stats_script = wd / "stat.ys"
         stats_script.write_text(
-            f'read_liberty -lib "{lib}"\nread_verilog "{netlist}"\n'
+            f'read_liberty -lib "{lib}"\n'
+            + "".join(f'read_liberty -lib "{ml}"\n' for ml in macro_libs)
+            + f'read_verilog "{netlist}"\n'
             f'hierarchy -check -top {top}\nstat -liberty "{lib}"\n')
         try:
             stats_run = subprocess.run([yosys_bin, "-Q", "-T", str(stats_script)],

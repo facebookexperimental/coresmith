@@ -16,6 +16,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Shell integration: the chip top is assembled from the contracts before the
   first tier and after every tier; the final top is the same assembly.
 - uArch phase delivers a SystemC TLM-2.0 loosely-timed SoC model.
+- Pre-layout STA binds cs_sram instances to their concrete macros and links the macro
+  liberty, so paths through memories are timed instead of black-boxed; a met design
+  reports its real worst slack instead of report_wns's clamped 0.00.
 - Architect sitting step 5: chip-lead decisions are made by the resumed architect
   session (fallback: the chip-lead agent).
 - Architect sitting step 4: `coresmith block-done` is the block gate (conformance ->
