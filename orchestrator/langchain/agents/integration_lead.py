@@ -305,6 +305,7 @@ def assert_blocks_instantiated(
         elaborate_hierarchy,
         missing_blocks,
     )
+    from orchestrator.harness.top_module import CandidateError, candidate_sources
 
     if not chip_top_verilog and not expected_block_names:
         return None
@@ -315,7 +316,13 @@ def assert_blocks_instantiated(
                 path = Path(td) / f"source_{i}.v"
                 path.write_text(code)
                 source_paths.append(str(path))
-        cells = elaborate_hierarchy(source_paths, top_module, defines=defines,
+        try:
+            paths = list(source_paths)
+            # Use the same dependency closure as candidate adoption and DV.
+            paths = candidate_sources(project_root or td, paths[0] if paths else "", paths[1:])
+        except (CandidateError, OSError) as exc:
+            return HierarchyFailure(str(exc), getattr(exc, "kind", "infrastructure_error"))
+        cells = elaborate_hierarchy(paths, top_module, defines=defines,
                                     parameters=parameters, project_root=project_root)
     if isinstance(cells, HierarchyFailure):
         return HierarchyFailure(f"{cells}; expected blocks: {sorted(expected_block_names)}", cells.kind)
