@@ -154,7 +154,11 @@ def test_legacy_discovery_resolves_the_primitive_like_the_shell(tmp_path):
     """Q25: the Integration Check resolved by rtl_target / <block>.v only, so the
     fabric at rtl/interconnect/cs_fabric_<name>.v was 'NO RTL FOUND' and
     integration ended fail-closed, while the shell had it as real RTL."""
-    from orchestrator.langgraph.integration_helpers import discover_block_rtl, merge_block_specs, missing_from
+    from orchestrator.langgraph.integration_helpers import (
+        discover_block_rtl,
+        merge_block_specs,
+        missing_from,
+    )
     (tmp_path / "rtl" / "interconnect").mkdir(parents=True)
     fabric = tmp_path / "rtl" / "interconnect" / "cs_fabric_x.v"
     fabric.write_text(_FABRIC_X)

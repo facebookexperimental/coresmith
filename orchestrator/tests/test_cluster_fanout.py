@@ -1,10 +1,10 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Architect sitting step 4: the block gate as a tool and cluster fan-out."""
 import asyncio
-import json
-import stat
 from pathlib import Path
-
-import pytest
 
 from orchestrator.harness.tools import block as bt
 from orchestrator.langgraph import pipeline_graph as pg
@@ -152,7 +152,8 @@ def test_integrate_tools_wrap_the_graph_functions(tmp_path, monkeypatch):
     r = it.vip_generate(db, tmp_path)
     assert r["ok"] and r["vips"] == 1 and (tmp_path / ".coresmith" / "vip_index.json").exists()
     assert (tmp_path / ".coresmith" / "blocks" / "req" / "contract_slice.json").exists()
-    (tmp_path / "inputs").mkdir(); (tmp_path / "inputs" / "task.yaml").write_text("top: tiny\n")
+    (tmp_path / "inputs").mkdir()
+    (tmp_path / "inputs" / "task.yaml").write_text("top: tiny\n")
     monkeypatch.setenv("CORESMITH_DETERMINISTIC_TOP", "1")
     s = it.shell_assemble(db, tmp_path)
     assert s["stubs"] == ["req", "rsp"] and s["real"] == [] and "boundary_ports" in s

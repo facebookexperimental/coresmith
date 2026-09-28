@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
 """vip2 fixture testbench: drives the responder ONLY through the generated VIP."""
 import cocotb
 from cocotb.clock import Clock

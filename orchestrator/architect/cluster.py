@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-from pathlib import Path
 
 from .session import PROMPT_DIR, ArchitectSession, _read, _strip_format_fields
 

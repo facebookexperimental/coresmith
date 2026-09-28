@@ -33,11 +33,11 @@ import re
 import shutil
 import subprocess
 import tempfile
-
-from orchestrator.langgraph import macro_sta as _macro_sta
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from orchestrator.langgraph import macro_sta as _macro_sta
 
 logger = logging.getLogger(__name__)
 

@@ -136,15 +136,15 @@ class ArchSpec:
         if not targets:
             errs.append("no target component")
         known = set(names)
-        for l in self.links:
-            if l.get("from") not in known or l.get("to") not in known:
-                errs.append(f"link {l.get('from')}->{l.get('to')}: unknown component")
+        for lk in self.links:
+            if lk.get("from") not in known or lk.get("to") not in known:
+                errs.append(f"link {lk.get('from')}->{lk.get('to')}: unknown component")
         return errs
 
     def link_params(self, src: str, dst: str) -> tuple[int, int]:
-        for l in self.links:
-            if l.get("from") == src and l.get("to") == dst:
-                return _int(l.get("latency_cycles"), self.fabric_latency_cycles), _int(l.get("bytes_per_cycle"), self.fabric_bytes_per_cycle)
+        for lk in self.links:
+            if lk.get("from") == src and lk.get("to") == dst:
+                return _int(lk.get("latency_cycles"), self.fabric_latency_cycles), _int(lk.get("bytes_per_cycle"), self.fabric_bytes_per_cycle)
         return self.fabric_latency_cycles, self.fabric_bytes_per_cycle
 
 
@@ -306,9 +306,9 @@ def render_arch_top(spec: ArchSpec) -> str:
         L.append(f"      u->clk(clk); u->rst_n(rst_n); int k = fabric.add_initiator(\"{c.name}\" + std::string(i ? std::to_string(i) : \"\"));")
         L.append(f"      u->m.bind(*fabric.s.back()); iidx[\"{c.name}\" + std::to_string(i)] = k; u_{c.name}.push_back(u);")
         L.append("    }")
-    for l in spec.links:
-        lat, bpc = spec.link_params(str(l.get("from")), str(l.get("to")))
-        L.append(f"    for (auto& kv : iidx) if (kv.first.rfind(\"{l.get('from')}\", 0) == 0) fabric.set_link(kv.second, tidx[\"{l.get('to')}\"], {lat}, {bpc});")
+    for lk in spec.links:
+        lat, bpc = spec.link_params(str(lk.get("from")), str(lk.get("to")))
+        L.append(f"    for (auto& kv : iidx) if (kv.first.rfind(\"{lk.get('from')}\", 0) == 0) fabric.set_link(kv.second, tidx[\"{lk.get('to')}\"], {lat}, {bpc});")
     L += ["  }", "", "  bool all_done() const {"]
     for c in inits:
         L.append(f"    for (auto* u : u_{c.name}) if (!u->done) return false;")
@@ -462,9 +462,9 @@ def derive_fabric(spec: ArchSpec, stats: dict, *, name: str | None = None, min_d
     width = the smallest power of two that carries the busiest link's
     bytes/cycle with ``headroom``, outstanding depth = max observed (>= 2)."""
     links = stats.get("links") or []
-    busiest = max((float(l.get("bytes_per_cycle") or 0) for l in links), default=0.0)
+    busiest = max((float(lk.get("bytes_per_cycle") or 0) for lk in links), default=0.0)
     width_bits = _pow2_at_least(int(busiest * headroom * 8 + 0.999), min_data_width, max_data_width)
-    max_out = max((int(l.get("max_outstanding") or 0) for l in links), default=1)
+    max_out = max((int(lk.get("max_outstanding") or 0) for lk in links), default=1)
     masters = []
     for c in spec.components:
         if c.is_initiator:
@@ -474,8 +474,8 @@ def derive_fabric(spec: ArchSpec, stats: dict, *, name: str | None = None, min_d
     # a 'both' component's window is its register slave: <name>_regs (its initiator keeps the name)
     slaves = [{"name": c.name + ("_regs" if c.is_initiator else ""), "protocol": c.protocol,
                "base": f"0x{c.base:X}", "size": f"0x{c.size:X}"} for c in spec.components if c.is_target]
-    per_link = [{"from": l.get("from"), "to": l.get("to"), "bytes_per_cycle": l.get("bytes_per_cycle"),
-                 "utilization": l.get("utilization"), "max_outstanding": l.get("max_outstanding")} for l in links]
+    per_link = [{"from": lk.get("from"), "to": lk.get("to"), "bytes_per_cycle": lk.get("bytes_per_cycle"),
+                 "utilization": lk.get("utilization"), "max_outstanding": lk.get("max_outstanding")} for lk in links]
     return {"name": name or spec.name, "masters": masters, "slaves": slaves, "data_width": width_bits,
             "addr_width": spec.addr_width, "max_outstanding": max(2, min(16, max_out)),
             "derived_from": {"busiest_link_bytes_per_cycle": busiest, "headroom": headroom, "total_cycles": stats.get("total_cycles"),

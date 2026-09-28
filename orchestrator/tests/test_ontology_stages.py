@@ -1,10 +1,12 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Architect sitting step 1: ontology, extractors, validators, register, state machine, CLI."""
 import json
 import subprocess
 import sys
 from pathlib import Path
-
-import pytest
 
 from orchestrator.harness.tools import extract, validate
 from orchestrator.harness.tools.register import register

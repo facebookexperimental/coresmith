@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
 """The Block Diagram system prompt goes through ``str.format`` (block_diagram.py);
 a literal ``{...}`` in the prompt text raised IndexError on every run of the
 SoC-stages branch (found on the first benchmark run). Guard the fields."""

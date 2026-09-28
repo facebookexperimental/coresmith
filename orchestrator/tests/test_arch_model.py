@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Architect sitting step 2: the executable SAD (abstract SystemC performance model) and fabric derivation."""
 import json
 from pathlib import Path
@@ -137,7 +141,7 @@ def test_arch_model_builds_runs_evaluates_and_derives_a_fabric(tmp_path):
     ev = mt.arch_eval(db, tmp_path, agent=_FakeAgent(), repairs=0)
     assert ev["ok"], ev
     st = am.read_stats(tmp_path / "model" / "arch")
-    links = {(l["from"], l["to"]): l for l in st["links"]}
+    links = {(lk["from"], lk["to"]): lk for lk in st["links"]}
     assert links[("dma", "ram")]["bytes"] == 200 * 64 and links[("cpu", "ram")]["txns"] == 200
     assert st["decerr"] == 1 and st["energy_pj"] > 0
     assert db.item("PERF-001") is None                       # FRD not registered here: checks still recorded

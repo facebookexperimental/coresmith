@@ -193,7 +193,7 @@ def write_report(project_root, model_dir, reqs: list[dict], run: dict, summary: 
 
 def _log(msg: str) -> None:
     try:
-        from orchestrator.langgraph.pipeline_helpers import GREEN, RED, YELLOW, log   # noqa: F401
+        from orchestrator.langgraph.pipeline_helpers import GREEN, RED, YELLOW, log  # noqa: F401
     except Exception:  # noqa: BLE001
         print(msg)
         return

@@ -194,11 +194,14 @@ class OntologyMixin:
               must_have: bool = False) -> list[dict]:
         q, args = "SELECT * FROM items WHERE 1=1", []
         if kind:
-            q += " AND kind=?"; args.append(kind)
+            q += " AND kind=?"
+            args.append(kind)
         if artifact:
-            q += " AND artifact=?"; args.append(artifact)
+            q += " AND artifact=?"
+            args.append(artifact)
         if status:
-            q += " AND status=?"; args.append(status)
+            q += " AND status=?"
+            args.append(status)
         else:
             q += " AND status!='retired'"
         with self._conn() as db:
@@ -228,7 +231,8 @@ class OntologyMixin:
         q, args = "SELECT * FROM item_links WHERE 1=1", []
         for col, v in (("from_id", from_id), ("to_id", to_id), ("rel", rel)):
             if v:
-                q += f" AND {col}=?"; args.append(v)
+                q += f" AND {col}=?"
+                args.append(v)
         with self._conn() as db:
             return [dict(r) for r in db.execute(q + " ORDER BY ts", args).fetchall()]
 
@@ -248,9 +252,11 @@ class OntologyMixin:
     def checks(self, item_id: str | None = None, *, kind: str | None = None, latest: bool = False) -> list[dict]:
         q, args = "SELECT * FROM checks WHERE 1=1", []
         if item_id:
-            q += " AND item_id=?"; args.append(item_id)
+            q += " AND item_id=?"
+            args.append(item_id)
         if kind:
-            q += " AND kind=?"; args.append(kind)
+            q += " AND kind=?"
+            args.append(kind)
         with self._conn() as db:
             rows = [dict(r) for r in db.execute(q + " ORDER BY ts", args).fetchall()]
         if latest:
@@ -282,7 +288,8 @@ class OntologyMixin:
         if open_only:
             q += " AND status='open'"
         if must_answer is not None:
-            q += " AND must_answer=?"; args.append(int(must_answer))
+            q += " AND must_answer=?"
+            args.append(int(must_answer))
         with self._conn() as db:
             return [dict(r) for r in db.execute(q + " ORDER BY id", args).fetchall()]
 

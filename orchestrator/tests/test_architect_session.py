@@ -1,6 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Architect sitting step 3: the session runner against a fake `claude` binary."""
 import json
-import os
 import stat
 import subprocess
 import sys
@@ -10,7 +13,7 @@ import pytest
 
 from orchestrator.architect import ArchitectSession, build_system_prompt
 from orchestrator.state_store.project_db import open_project
-from orchestrator.tests.test_ontology_stages import _FRD, _PRD, _write
+from orchestrator.tests.test_ontology_stages import _PRD, _write
 
 ROOT = Path(__file__).resolve().parents[2]
 

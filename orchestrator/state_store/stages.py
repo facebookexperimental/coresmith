@@ -38,7 +38,7 @@ def _entry_requirements(db, pr: Path) -> list[dict]:
         return out
     frd_items = [i for i in db.items(artifact="frd")]
     kpis = db.items(kind="KPI", artifact="prd")
-    covered = {l["to_id"] for l in db.links(rel="derives_from")} | {l["to_id"] for l in db.links(rel="covers")}
+    covered = {lk["to_id"] for lk in db.links(rel="derives_from")} | {lk["to_id"] for lk in db.links(rel="covers")}
     missing = [k["id"] for k in kpis if k["id"] not in covered]
     if missing:
         out.append(_b("KPI_UNCOVERED", "every PRD validation KPI needs an FRD item that derives from it "
@@ -84,14 +84,13 @@ def _entry_decomposition(db, pr: Path) -> list[dict]:
     if not db.artifact("block_diagram"):
         return [_b("MISSING_ARTIFACT", "register the block diagram: coresmith register block_diagram <json>")]
     blocks = {b["name"] for b in db.block_specs()} if hasattr(db, "block_specs") else set()
-    owned = {l["from_id"] for l in db.links(rel="owned_by")}
+    owned = {lk["from_id"] for lk in db.links(rel="owned_by")}
     musts = [i["id"] for i in db.items(artifact="frd") if item_must_have(i) and i["kind"] not in ("PHYS", "MPW")]
     unowned = [i for i in musts if i not in owned]
     if unowned:
         out.append(_b("REQ_UNOWNED", "must-have FRD items no block owns (add 'owns': [ids] to blocks or link: "
                       "coresmith link <item> block:<name> owned_by)", unowned))
     fabric = [b for b in (db.block_specs() if hasattr(db, "block_specs") else []) if b.get("fabric") or b.get("primitive")]
-    initiators = sum(1 for b in (db.block_specs() if hasattr(db, "block_specs") else []) if "master" in json.dumps(b.get("extra") or b).lower())
     if not fabric and len(blocks) >= 4:
         out.append(_b("NO_FABRIC", "no fabric primitive in the diagram (derive it from the arch model: coresmith fabric derive)", []))
     if not db.artifact("ers"):
@@ -124,7 +123,7 @@ def _entry_uarch(db, pr: Path) -> list[dict]:
     if missing:
         out.append(_b("UARCH_MISSING", "register a uArch spec per block: coresmith register uarch --block <b> <md>", missing))
     perf = {i["id"] for i in db.items(kind="PERF", artifact="frd") if item_must_have(i)}
-    cited = {l["to_id"] for l in db.links(rel="cites")}
+    cited = {lk["to_id"] for lk in db.links(rel="cites")}
     uncited = sorted(perf - cited)
     if perf and uncited and not missing:
         out.append(_b("PERF_UNCITED", "must-have PERF items no uArch spec cites in its §6.1 budget", uncited))

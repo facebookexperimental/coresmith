@@ -159,7 +159,7 @@ class ArchitectSession:
     # -- one sitting -----------------------------------------------------------
     def sit(self, prompt: str, *, resume: str = "", index: int = 1) -> dict:
         system = build_system_prompt()
-        (self.dir / f"system.md").write_text(system)
+        (self.dir / "system.md").write_text(system)
         (self.dir / f"prompt-{index}.md").write_text(prompt)
         cmd = [self.claude_path, "-p", "--output-format", "stream-json", "--verbose", "--model", self.model,
                "--max-turns", str(self.max_turns), "--permission-mode", "auto",

@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
 """B2: the FRD evaluated on the SystemC SoC model before RTL."""
 import asyncio
 import json
@@ -211,10 +215,10 @@ int sc_main(int, char**) {
 @pytest.mark.skipif(not __import__("orchestrator.systemc_model", fromlist=["detect"]).detect()["ok"],
                     reason="SystemC toolchain not available")
 def test_tiny_harness_builds_and_runs_against_the_fixture_soc(tmp_path):
-    from orchestrator.tests.test_systemc_model import _BLOCKS, _EDGES, _extra_members
-    from orchestrator.tests.test_uarch_phase import _BODIES
     from orchestrator.systemc_model import build, render_block_skeleton, smoke
     from orchestrator.systemc_model.conventions import model_name
+    from orchestrator.tests.test_systemc_model import _BLOCKS, _EDGES, _extra_members
+    from orchestrator.tests.test_uarch_phase import _BODIES
     md = write_build(tmp_path, _BLOCKS, _EDGES, top_name="tiny")
     for b in _BLOCKS:
         h = render_block_skeleton(b, _EDGES).replace("  void run();", _extra_members(b) + "  void run();")

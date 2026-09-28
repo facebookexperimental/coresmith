@@ -108,7 +108,7 @@ def _wrapper_module(kind: str, width: int, depth: int, macro) -> str:
     have = macro_ports(getattr(macro, "verilog", "") or "")
     nport = _WRAPPERS[kind]
     if nport == 2:
-        ports = [f"input clk", "input ce0", "input we0", f"input [{aw - 1}:0] addr0", f"input [{width - 1}:0] wdata0",
+        ports = ["input clk", "input ce0", "input we0", f"input [{aw - 1}:0] addr0", f"input [{width - 1}:0] wdata0",
                  f"input [{nb - 1}:0] wmask0", f"output [{width - 1}:0] rdata0", "input ce1",
                  f"input [{aw - 1}:0] addr1", f"output [{width - 1}:0] rdata1"]
         conns = [("clk0", "clk"), ("csb0", "ce0"), ("web0", "we0"), ("addr0", "addr0"), ("din0", "wdata0"),

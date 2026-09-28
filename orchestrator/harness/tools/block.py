@@ -17,7 +17,6 @@ failure.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import time
 from pathlib import Path
@@ -39,8 +38,8 @@ def block_status(db, pr, name: str) -> dict:
     rtl, tb = _paths(pr, spec)
     best = db.result(name, "best")
     dv = db.result(name, "dv_best")
-    owned = [l["from_id"] for l in db.links(to_id=f"block:{name}", rel="owned_by")]
-    cites = [l["to_id"] for l in db.links(from_id=f"block:{name}", rel="cites")]
+    owned = [lk["from_id"] for lk in db.links(to_id=f"block:{name}", rel="owned_by")]
+    cites = [lk["to_id"] for lk in db.links(from_id=f"block:{name}", rel="cites")]
     edges = []
     try:
         for c in (db.contracts() or {}).get("contracts") or []:
@@ -114,7 +113,10 @@ def block_done(db, pr, name: str, *, target_clock_mhz: float = 50.0, seed: int |
     if spec.get("golden_exempt") is None:
         pass
     try:
-        from orchestrator.langgraph.pipeline_graph import _evaluate_ppa_gate, _timing_ok_from_ppa_meta
+        from orchestrator.langgraph.pipeline_graph import (
+            _evaluate_ppa_gate,
+            _timing_ok_from_ppa_meta,
+        )
         from orchestrator.langgraph.pipeline_helpers import synthesize_block
     except Exception as exc:  # noqa: BLE001
         out["stages"]["synth"] = {"ok": None, "tool_error": str(exc)[:300]}
@@ -158,7 +160,7 @@ def block_done(db, pr, name: str, *, target_clock_mhz: float = 50.0, seed: int |
     if timing_ok is False:
         out["reason"] = f"timing violated (WNS {wns} ns, TNS {tns} ns)"
         return out
-    if not measured and not os.environ.get("CORESMITH_BLOCK_DONE_ALLOW_UNMEASURED_TIMING", "").strip().lower() in ("1", "true", "yes"):
+    if not measured and os.environ.get("CORESMITH_BLOCK_DONE_ALLOW_UNMEASURED_TIMING", "").strip().lower() not in ("1", "true", "yes"):
         out["tool_error"] = True
         out["reason"] = ("timing not measured (no WNS: the STA did not run or crashed, e.g. on an SRAM black box) -- "
                          "characterise the macro or provide its liberty; CORESMITH_BLOCK_DONE_ALLOW_UNMEASURED_TIMING=1 waives")
@@ -172,7 +174,7 @@ def block_done(db, pr, name: str, *, target_clock_mhz: float = 50.0, seed: int |
             "gate_count": res.get("gate_count"), "ff_count": res.get("ff_count"), "wns_ns": meta.get("wns_ns"),
             "attempt": attempt, "done": True, "published_by": actor}
     db.set_result(name, "best", best)
-    for iid in [l["from_id"] for l in db.links(to_id=f"block:{name}", rel="owned_by")]:
+    for iid in [lk["from_id"] for lk in db.links(to_id=f"block:{name}", rel="owned_by")]:
         try:
             db.add_check(iid, "block_dv", "pass", evidence=f"{name} passed conformance+DV+synth+timing (WNS {meta.get('wns_ns')})",
                          sha=rtl_sha, actor=actor)
