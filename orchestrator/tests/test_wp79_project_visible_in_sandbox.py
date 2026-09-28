@@ -44,7 +44,11 @@ def test_no_project_root_keeps_the_old_argv(tmp_path, monkeypatch):
     work.mkdir()
     argv = ta._sandbox_argv(["/bin/true"], work)
     assert "--ro-bind" in argv and _idx(argv, "--bind", str(work))
-    assert argv.count("--ro-bind") == 1   # only the root filesystem
+    # only the root filesystem (plus the engine's own checkout when it lives
+    # under /tmp, which the sandbox tmpfs would otherwise mask)
+    engine = str(Path(ta.__file__).resolve().parents[2])
+    binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--ro-bind"]
+    assert [b for b in binds if b != engine] == ["/"]
 
 
 def test_a_project_under_tmp_can_still_be_read(tmp_path, monkeypatch):
