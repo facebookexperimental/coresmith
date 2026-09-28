@@ -11,7 +11,7 @@ pytest-asyncio>=0.23.0
 # orchestrator/langchain/agents/coresmith_llm.py. langgraph pulls in
 # langchain-core transitively.)
 langgraph>=0.4.0
-langgraph-checkpoint-sqlite>=2.0.0
+langgraph-checkpoint-sqlite>=3.1.1
 
 # Orchestrator -- telemetry
 opentelemetry-sdk>=1.20.0
