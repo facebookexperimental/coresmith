@@ -223,23 +223,50 @@ def render_wrapper_sv(spec: FabricSpec) -> str:
                 L.append(f"  assign {lr}.r_valid = {p}rvalid; assign {p}rready = {lq}.r_ready; "
                          f"assign {lr}.r = '{{data: {p}rdata, resp: {p}rresp}};")
             else:  # apb
+                # INV-FABRIC-APB-ADDR-003: paddr[AW-1:2] == AxADDR[AW-1:2].
+                # axi_lite_to_apb aligns paddr to the full APB data width
+                # (axi_lite_to_apb.sv:305/333), which on a 64-bit bus drops
+                # AxADDR[2], the lane select of 32-bit registers (D-29). With
+                # APB_SHIFT = log2(DW/8) - 2 > 0, the bridge sees the address
+                # shifted up by APB_SHIFT bits (its map shifted alike), so its
+                # alignment clears only the original [1:0]; the port takes
+                # paddr[AW+APB_SHIFT-1:APB_SHIFT]. Wiring only: data, strobes
+                # and the bridge's pipelining are unchanged.
+                sh = max(0, (DW // 8).bit_length() - 1 - 2)
+                areq, arule = ("apb_lite_req_t", "apb_rule_t") if sh else ("lite_req_t", "rule_t")
                 # The APB struct types are module-scoped: emit them once, at the
                 # first APB slave (a second typedef is a redefinition in Verilator).
                 if j == spec.slave_index(next(x.name for x in spec.slaves if x.protocol == "apb")):
-                    L.append("  typedef struct packed { addr_t paddr; logic [2:0] pprot; logic psel; logic penable; "
-                             "logic pwrite; data_t pwdata; strb_t pstrb; } apb_req_t;")
+                    if sh:
+                        L.append(f"  localparam int unsigned APB_SHIFT = {sh}; typedef logic [AW+APB_SHIFT-1:0] apb_addr_t;")
+                        L.append("  `AXI_LITE_TYPEDEF_AW_CHAN_T(apb_lite_aw_chan_t, apb_addr_t)")
+                        L.append("  `AXI_LITE_TYPEDEF_AR_CHAN_T(apb_lite_ar_chan_t, apb_addr_t)")
+                        L.append("  `AXI_LITE_TYPEDEF_REQ_T(apb_lite_req_t, apb_lite_aw_chan_t, lite_w_chan_t, apb_lite_ar_chan_t)")
+                        L.append("  typedef struct packed { int unsigned idx; apb_addr_t start_addr; apb_addr_t end_addr; } apb_rule_t;")
+                    L.append("  typedef struct packed { " + ("apb_addr_t" if sh else "addr_t") + " paddr; logic [2:0] pprot; "
+                             "logic psel; logic penable; logic pwrite; data_t pwdata; strb_t pstrb; } apb_req_t;")
                     L.append("  typedef struct packed { logic pready; data_t prdata; logic pslverr; } apb_resp_t;")
                 pipe = "1'b1" if spec.slave_cut else "1'b0"
                 L.append(f"  apb_req_t apb_req_{j}; apb_resp_t apb_rsp_{j};")
-                L.append(f"  localparam rule_t [0:0] ApbMap_{j} = '{{ '{{idx: 0, start_addr: {AW}'h{s.base:X}, "
-                         f"end_addr: {AW}'h{s.base + s.size:X}}} }};")
-                L.append("  axi_lite_to_apb #(.NoApbSlaves(1), .NoRules(1), .AddrWidth(AW), .DataWidth(DW), "
-                         f".PipelineRequest({pipe}), .PipelineResponse({pipe}), .axi_lite_req_t(lite_req_t), "
-                         ".axi_lite_resp_t(lite_resp_t), .apb_req_t(apb_req_t), .apb_resp_t(apb_resp_t), .rule_t(rule_t))")
-                L.append(f"    i_to_apb_{j} (.clk_i(clk), .rst_ni(rst_n), .axi_lite_req_i({lq}), "
+                aw_ = f"{AW + sh}"
+                L.append(f"  localparam {arule} [0:0] ApbMap_{j} = '{{ '{{idx: 0, start_addr: {aw_}'h{s.base << sh:X}, "
+                         f"end_addr: {aw_}'h{(s.base + s.size) << sh:X}}} }};")
+                if sh:
+                    L.append(f"  apb_lite_req_t apb_lite_req_{j};")
+                    L.append(f"  assign apb_lite_req_{j} = '{{aw: '{{addr: {{{lq}.aw.addr, {sh}'b0}}, prot: {lq}.aw.prot}}, "
+                             f"aw_valid: {lq}.aw_valid, w: {lq}.w, w_valid: {lq}.w_valid, b_ready: {lq}.b_ready, "
+                             f"ar: '{{addr: {{{lq}.ar.addr, {sh}'b0}}, prot: {lq}.ar.prot}}, ar_valid: {lq}.ar_valid, "
+                             f"r_ready: {lq}.r_ready}};")
+                    breq, paddr = f"apb_lite_req_{j}", f"apb_req_{j}.paddr[AW+APB_SHIFT-1:APB_SHIFT]"
+                else:
+                    breq, paddr = lq, f"apb_req_{j}.paddr"
+                L.append(f"  axi_lite_to_apb #(.NoApbSlaves(1), .NoRules(1), .AddrWidth(AW{'+APB_SHIFT' if sh else ''}), "
+                         f".DataWidth(DW), .PipelineRequest({pipe}), .PipelineResponse({pipe}), .axi_lite_req_t({areq}), "
+                         f".axi_lite_resp_t(lite_resp_t), .apb_req_t(apb_req_t), .apb_resp_t(apb_resp_t), .rule_t({arule}))")
+                L.append(f"    i_to_apb_{j} (.clk_i(clk), .rst_ni(rst_n), .axi_lite_req_i({breq}), "
                          f".axi_lite_resp_o({lr}), .apb_req_o(apb_req_{j}), .apb_resp_i(apb_rsp_{j}), .addr_map_i(ApbMap_{j}));")
                 L.append(f"  assign {p}psel = apb_req_{j}.psel; assign {p}penable = apb_req_{j}.penable; "
-                         f"assign {p}pwrite = apb_req_{j}.pwrite; assign {p}paddr = apb_req_{j}.paddr; "
+                         f"assign {p}pwrite = apb_req_{j}.pwrite; assign {p}paddr = {paddr}; "
                          f"assign {p}pprot = apb_req_{j}.pprot; assign {p}pwdata = apb_req_{j}.pwdata; assign {p}pstrb = apb_req_{j}.pstrb;")
                 L.append(f"  assign apb_rsp_{j} = '{{pready: {p}pready, prdata: {p}prdata, pslverr: {p}pslverr}};")
     L.append("endmodule")

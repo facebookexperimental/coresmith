@@ -240,3 +240,51 @@ def test_slave_max_outstanding_sizes_its_converter_and_defaults_to_the_fabric():
     errs = s.validate()
     assert any("ram" in e and "axi_lite/apb" in e for e in errs)
     assert any("gpu_regs" in e and "1..64" in e for e in errs)
+
+
+def _spec64():
+    s = FabricSpec.from_json(_spec().to_json())
+    s.data_width = 64
+    s.slaves.append(FabricSlave("gin", "apb", 0x1000_1000, 0x1000))
+    return s
+
+
+def test_apb_paddr_keeps_the_32bit_lane_on_a_64bit_fabric():
+    # INV-FABRIC-APB-ADDR-003: axi_lite_to_apb aligns paddr to DW/8; on a
+    # 64-bit fabric the bridge sees the address one bit up and the port takes
+    # it back, so paddr[2] survives and only paddr[1:0] is cleared.
+    s = _spec64()
+    assert s.validate() == []
+    sv = render_wrapper_sv(s)
+    assert sv.count("localparam int unsigned APB_SHIFT = 1;") == 1
+    assert sv.count("} apb_req_t;") == 1 and "apb_addr_t paddr;" in sv
+    for j, name, base in ((1, "uart", 0x1000_0000), (3, "gin", 0x1000_1000)):
+        assert f"assign m_{name}_paddr = apb_req_{j}.paddr[AW+APB_SHIFT-1:APB_SHIFT];" in sv
+        assert f"start_addr: 33'h{base << 1:X}, end_addr: 33'h{(base + 0x1000) << 1:X}" in sv
+        assert f"aw: '{{addr: {{cut_lite_req_{j}.aw.addr, 1'b0}}" in sv
+        assert f"ar: '{{addr: {{cut_lite_req_{j}.ar.addr, 1'b0}}" in sv
+        assert f".axi_lite_req_i(apb_lite_req_{j}), .axi_lite_resp_o(cut_lite_rsp_{j})" in sv
+    assert sv.count(".AddrWidth(AW+APB_SHIFT), .DataWidth(DW), .PipelineRequest(1'b1), .PipelineResponse(1'b1)") == 2
+    # the AXI-Lite port is untouched
+    assert "assign m_gpu_regs_awaddr = cut_lite_req_2.aw.addr;" in sv
+    # a 32-bit fabric already keeps paddr[2]: no shift, the pre-fix rendering
+    sv32 = render_wrapper_sv(_spec())
+    assert "APB_SHIFT" not in sv32 and "assign m_uart_paddr = apb_req_1.paddr;" in sv32
+    assert "test_apb_subword_address" in render_testbench(s)
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not (_HAVE_SLANG and _HAVE_SIM), reason="yosys-slang/verilator/cocotb not available")
+def test_generated_testbench_passes_on_a_64bit_fabric_with_apb_subword_access(tmp_path, monkeypatch):
+    # the generated TB's test_apb_subword_address: 32-bit write to +0xC
+    # (wstrb 0xF0) -> paddr[3:0] 0xC, read of +0x4 -> paddr[2] 1, +0x0/+0x4 distinct
+    import orchestrator.langgraph.pipeline_helpers as ph
+    monkeypatch.setattr(ph, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "0")
+    monkeypatch.setenv("CORESMITH_COVERAGE", "0")
+    monkeypatch.setenv("CORESMITH_INTERFACE_VIP", "0")
+    monkeypatch.setattr(ph, "create_golden_model_wrapper", lambda *a, **k: None)
+    art = generate_fabric(_spec64(), tmp_path / "rtl", tb_dir=tmp_path / "tb")
+    res = ph.run_simulation({"name": "cs_fabric_soc"}, art.rtl_path, art.tb_path,
+                            project_root=str(tmp_path))
+    assert res["passed"], res.get("log", "")[-4000:]

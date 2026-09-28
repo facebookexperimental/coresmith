@@ -14,7 +14,8 @@ _TB = '''"""Generated fabric testbench for {module} (B1) -- do not edit.
 Drives every master port with a cocotbext-axi AxiMaster, models every slave
 (AxiRam / AxiLiteRam / a small APB memory) and checks: address decode,
 decode errors on unmapped addresses, bursts, per-master ordering, random
-backpressure and fairness under contention.
+backpressure, fairness under contention and the APB sub-word address
+(INV-FABRIC-APB-ADDR-003).
 """
 import random
 
@@ -31,11 +32,14 @@ UNMAPPED = {unmapped}
 
 
 class ApbMem:
-    """A tiny APB completer: one-cycle pready, byte-addressed memory."""
+    """A tiny APB completer: one-cycle pready, byte-addressed memory. The data
+    bus carries the whole DW-aligned word (lane select by paddr, D-29); every
+    access is logged as (pwrite, paddr, pstrb)."""
 
     def __init__(self, dut, prefix, size):
         self.dut, self.p, self.size = dut, prefix, size
         self.mem = bytearray(size)
+        self.log = []
 
     def _s(self, n):
         return getattr(self.dut, f"{{self.p}}_{{n}}")
@@ -50,7 +54,9 @@ class ApbMem:
             sel = int(self._s("psel").value) and int(self._s("penable").value)
             await Timer(1, "step")
             if sel:
-                addr = int(self._s("paddr").value) % self.size
+                paddr = int(self._s("paddr").value)
+                addr = (paddr - paddr % (DW // 8)) % self.size
+                self.log.append((int(self._s("pwrite").value), paddr, int(self._s("pstrb").value)))
                 if int(self._s("pwrite").value):
                     data = int(self._s("pwdata").value)
                     strb = int(self._s("pstrb").value)
@@ -203,6 +209,35 @@ async def test_fairness(dut):
     for t in tasks:
         done.append(await t)
     assert sorted(done) == list(range(len(MASTERS)))
+
+
+@cocotb.test()
+async def test_apb_subword_address(dut):
+    """INV-FABRIC-APB-ADDR-003: an APB port presents paddr[11:2] == AxADDR[11:2]."""
+    env = Env(dut)
+    await env.reset()
+    m = env.masters[MASTERS[0]]
+    for s, (proto, base, size) in SLAVES.items():
+        if proto != "apb" or size < 16:
+            continue
+        mem = env.slaves[s]
+        words = {{off: _word(("apb", s, off))[:4] for off in (0x0, 0x4, 0x8, 0xC)}}
+        for off, w in words.items():
+            mem.log.clear()
+            wr = await m.write(base + off, w, size=2)
+            assert wr.resp == AxiResp.OKAY, f"{{s}} +{{off:#x}}: write resp {{wr.resp}}"
+            (pw, paddr, pstrb), = mem.log
+            want_strb = 0xF << (off % (DW // 8))
+            assert pw == 1 and (paddr >> 2) & 0x3FF == ((base + off) >> 2) & 0x3FF and paddr & 3 == 0, \
+                f"{{s}} write +{{off:#x}}: paddr {{paddr:#x}}"
+            assert pstrb == want_strb, f"{{s}} write +{{off:#x}}: pstrb {{pstrb:#x}} != {{want_strb:#x}}"
+        for off, w in words.items():
+            mem.log.clear()
+            rd = await m.read(base + off, 4, size=2)
+            (pw, paddr, pstrb), = mem.log
+            assert pw == 0 and (paddr >> 2) & 0x3FF == ((base + off) >> 2) & 0x3FF and paddr & 3 == 0, \
+                f"{{s}} read +{{off:#x}}: paddr {{paddr:#x}}"
+            assert bytes(rd.data) == w, f"{{s}} read +{{off:#x}}: {{bytes(rd.data).hex()}} != {{w.hex()}}"
 '''
 
 

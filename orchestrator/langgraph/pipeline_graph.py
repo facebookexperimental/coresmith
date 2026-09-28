@@ -2347,6 +2347,8 @@ def _primitive_spec_markdown(block_name: str, spec, art) -> str:
               "- INV-FABRIC-DECODE-001: every transaction is delivered to exactly the slave whose "
               "range contains its address; unmapped addresses return DECERR.",
               "- INV-FABRIC-ORDER-002: responses to one master with the same id return in issue order.",
+              "- INV-FABRIC-APB-ADDR-003: every APB access presents paddr[11:2] == AxADDR[11:2] "
+              "(paddr[1:0] = 0); pwdata/prdata/pstrb span the full data width, lane selected by paddr.",
               "", "### 6a. Output Timing Contract", "",
               "All channels are AXI valid/ready; latency through the crossbar is 1 cycle per cut "
               f"(latency_mode {spec.latency_mode}; slave_cut {spec.slave_cut}). The generated "

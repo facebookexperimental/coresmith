@@ -56,6 +56,10 @@ Emit ONE block per bus, for example:
   `wdata`, `wstrb`, `wlast`, `bresp`, `arvalid`, `rdata`, `rlast`, ...; APB:
   `psel`, `penable`, `pwrite`, `paddr`, `pwdata`, `pstrb`, `pready`,
   `prdata`, `pslverr`). Ports are `<prefix>_<signal>`.
+* APB ports carry the full fabric data width. `paddr` is the AXI address
+  aligned to 4 bytes only (INV-FABRIC-APB-ADDR-003: `paddr[11:2] ==
+  AxADDR[11:2]`). On a 64-bit fabric `paddr[2]` selects the 32-bit lane of
+  `pwdata`/`prdata`/`pstrb`, for reads (`pstrb` = 0) as well as writes.
 * Slave sizes are powers of two, bases aligned to their size, regions
   disjoint. Unmapped addresses answer DECERR (`err_slave`).
 * All masters share one `id_width`; the fabric's slave-side ids are
