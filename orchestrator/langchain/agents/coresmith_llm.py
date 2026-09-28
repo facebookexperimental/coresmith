@@ -130,12 +130,71 @@ def _unregister_process() -> None:
         _active_processes.pop(threading.get_ident(), None)
 
 
+def _worker_failure_evidence(project_root: str, pid: int, stdout: str,
+                             stderr: str, reason: str, call_id: str) -> str:
+    """Keep this call's transcript; never infer ownership from recent files."""
+    try:
+        folder = Path(project_root).resolve() / ".coresmith" / "worker_failures"
+        folder.mkdir(parents=True, exist_ok=True)
+        raw = folder / f"{call_id}.jsonl"
+        raw.write_text(stdout)
+        path = folder / f"{call_id}.json"
+        path.write_text(_json.dumps({
+            "reason": reason, "pid": pid, "call_id": call_id,
+            "recorded_at": _time_mod.time(),
+            "run_name": (_call_site_context.get(None) or {}).get("run_name", ""),
+            "trajectory_path": str(raw), "stdout_tail": stdout[-16000:],
+            "stderr_tail": stderr[-8000:],
+        }, indent=2))
+        return str(path)
+    except OSError:
+        logger.exception("Could not preserve worker failure evidence")
+        return ""
+
+
 def _killpg_safe(pgid: int, sig: int) -> None:
     """os.killpg swallowing the benign 'group already gone' errors."""
     try:
         os.killpg(pgid, sig)
     except (ProcessLookupError, PermissionError, OSError):
         pass
+
+
+_PROCESS_SCOPE_ENV = "CORESMITH_CALL_PROCESS_SCOPE"
+
+
+def _signal_scoped_processes(scope: str, sig: int) -> int:
+    """Signal Linux descendants that escaped the CLI's process group.
+
+    Tool runners may start a new session, then orphan a scratch simulator.
+    A unique per-call inherited environment marker preserves ownership after
+    reparenting. Never match by command, working directory, or user alone.
+    pidfds pin the inspected process so PID reuse cannot target another job.
+    Environments are compared in memory and never logged.
+    """
+    if not isinstance(scope, str) or not scope or not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        return 0
+    needle = f"{_PROCESS_SCOPE_ENV}={scope}".encode()
+    count = 0
+    try:
+        entries = list(Path("/proc").iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        descriptor = None
+        try:
+            descriptor = os.pidfd_open(int(entry.name), 0)
+            if needle in (entry / "environ").read_bytes().split(b"\0"):
+                signal.pidfd_send_signal(descriptor, sig)
+                count += 1
+        except (OSError, ValueError):
+            continue
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+    return count
 
 
 def _reap_process_group(
@@ -155,6 +214,8 @@ def _reap_process_group(
     ``pgid`` at spawn (rather than re-deriving via ``os.getpgid`` after the
     child may already be reaped) avoids the pid-reuse race.
     """
+    scope = getattr(process, "_coresmith_process_scope", "")
+    _signal_scoped_processes(scope, signal.SIGTERM)
     # Graceful: let the whole group wind down. If only the (already-exited)
     # leader remains, this is a no-op ESRCH.
     _killpg_safe(pgid, signal.SIGTERM)
@@ -175,42 +236,19 @@ def _reap_process_group(
         pass
     # Hard-kill any grandchild that ignored SIGTERM and is still holding pipes.
     _killpg_safe(pgid, signal.SIGKILL)
+    _signal_scoped_processes(scope, signal.SIGKILL)
 
 
 def kill_active_cli_processes() -> int:
-    """Kill all active Claude CLI subprocesses.
-
-    Called by the MCP server's pause_* handlers to terminate hung CLI
-    processes that ``asyncio.Task.cancel()`` cannot reach (because the
-    blocking ``Popen.communicate()`` runs in a thread executor).
-
-    Returns the number of processes killed.
-    """
-    killed = 0
-    with _active_processes_lock:
-        for tid, proc in list(_active_processes.items()):
-            try:
-                if proc.poll() is None:
-                    proc.kill()
-                    killed += 1
-                    logger.warning("Killed stuck Claude CLI process pid=%d (thread %d)", proc.pid, tid)
-            except Exception:
-                pass
-        _active_processes.clear()
-    return killed
+    """Cancel workers through the same descendant cleanup as the watchdog."""
+    return reap_active_cli_processes()
 
 
 def reap_active_cli_processes(grace_s: float = 10.0) -> int:
     """Reap the whole process GROUP of every active CLI subprocess.
 
-    Unlike ``kill_active_cli_processes`` -- a shallow ``proc.kill()`` on the
-    direct child only -- this runs the SAME process-group reap the watchdog
-    finally-path uses (``_reap_process_group``): SIGTERM the child's group,
-    grace-wait the direct child, then SIGKILL any group survivors. That is what
-    a *pause* needs: an in-flight ``codex``/``claude`` call spawns tool/sim
-    grandchildren that share the child's process group; a bare child kill
-    orphans them and they keep running (observed live -- an orphaned codex kept
-    burning tokens after a run pause). Reaping the group stops the whole tree.
+    Used by both cancellation entry points and the watchdog: terminate the
+    owned process group and detached descendants, then reap the direct child.
 
     Each ``Popen`` was launched with ``start_new_session=True`` so it is its own
     session/group leader (``pgid == pid`` at spawn); we use that captured pid as
@@ -231,7 +269,7 @@ def reap_active_cli_processes(grace_s: float = 10.0) -> int:
     reaped = 0
     for tid, proc in procs:
         try:
-            if proc.poll() is None:
+            if proc.poll() is None or getattr(proc, "_coresmith_process_scope", ""):
                 logger.warning(
                     "Reaping in-flight CLI process group pid=%d (thread %d) on pause",
                     proc.pid, tid,
@@ -1770,12 +1808,15 @@ class ClaudeLLM:
         if _claude_effort:
             cmd.extend(["--effort", _claude_effort])
 
+        # Interactive scheduling tools can outlive a completed worker result.
+        disallowed_tools = "Monitor,ScheduleWakeup"
         if self.disable_tools:
-            cmd.extend([
-                "--disallowedTools",
+            disallowed_tools += (
+                ","
                 "Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch,"
-                "Task,NotebookEdit,EnterPlanMode",
-            ])
+                "Task,NotebookEdit,EnterPlanMode"
+            )
+        cmd.extend(["--disallowedTools", disallowed_tools])
 
         if system_prompt:
             cmd.extend(_claude_system_prompt_args(system_prompt, _llm_log_root()))
@@ -1790,107 +1831,94 @@ class ClaudeLLM:
 
         t0 = _time_mod.monotonic()
         span_start_ns = _time_mod.time_ns()
-        max_retries = 3
-
         # ``_generate_via_cli`` is itself dispatched via
         # ``loop.run_in_executor`` in ``call()``, so this whole function
         # already runs off the asyncio event loop.  Each LangGraph
         # ``Send()`` fan-out lands in its own executor thread, which is
         # what makes per-tier block fan-out actually concurrent.
         usage: dict = {}
-        for attempt in range(max_retries):
-            try:
-                output, stderr_text, returncode, elapsed, timed_out, stalled, usage = (
-                    self._run_cli_with_watchdog(
-                        cmd, user_prompt, project_root, resolved_model, t0,
-                    )
+        try:
+            output, stderr_text, returncode, elapsed, timed_out, stalled, usage = (
+                self._run_cli_with_watchdog(
+                    cmd, user_prompt, project_root, resolved_model, t0,
                 )
-            except FileNotFoundError:
-                elapsed = _time_mod.monotonic() - t0
-                logger.error("Claude CLI binary not found")
-                error_msg = "claude CLI binary not found"
-                output = (
-                    "[ClaudeLLM error: claude CLI binary not found. "
-                    "Install: npm install -g @anthropic-ai/claude-code]"
-                )
-                _log_llm_call(
-                    model=resolved_model,
-                    provider="claude_cli",
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    response=output,
-                    duration_s=elapsed,
-                    timeout=self.timeout,
-                    error=error_msg,
-                    start_ts_ns=span_start_ns,
-                )
-                return output
-
-            # --- Handle timeout / stall with full diagnostic output ---
-            if timed_out or stalled:
-                reason = "stalled" if stalled else "timed out"
-                error_msg = f"claude CLI {reason} after {elapsed:.0f}s"
-                if stderr_text:
-                    error_msg += f" | stderr: {stderr_text[:300]}"
-                if output:
-                    error_msg += f" | partial stdout: {output[:300]}"
-                full_output = f"[ClaudeLLM error: {error_msg}]"
-                logger.error("Claude CLI %s: %s", reason, error_msg)
-                _log_llm_call(
-                    model=resolved_model,
-                    provider="claude_cli",
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    response=full_output,
-                    duration_s=elapsed,
-                    timeout=self.timeout,
-                    error=error_msg,
-                    timed_out=True,
-                    usage=usage,
-                    start_ts_ns=span_start_ns,
-                )
-                self._write_llm_event(project_root, f"llm_{reason}", {
-                    "model": resolved_model,
-                    "elapsed_s": round(elapsed, 1),
-                    "partial_stdout_len": len(output),
-                    "stderr": stderr_text[:500],
-                    "partial_stdout": output[:500],
-                })
-                return full_output
-
-            # --- Normal completion ---
-            logger.debug(
-                f"Claude CLI attempt={attempt+1}, retcode={returncode}, "
-                f"stdout_len={len(output)}, first100={output[:100]!r}"
             )
-
-            # Max-turns exhaustion. Under --output-format stream-json the CLI
-            # no longer prints the legacy plain-text "Error: Reached max turns"
-            # sentinel: the terminating result event carries
-            # subtype=error_max_turns and no result text, so the parsed output
-            # is the model's partial prose. Key the retry on the event itself
-            # (the old sentinel is still honoured for plain-text CLIs).
-            hit_max_turns = (
-                usage.get("result_subtype") == "error_max_turns"
-                or output.startswith("Error: Reached max turns")
+        except FileNotFoundError:
+            elapsed = _time_mod.monotonic() - t0
+            logger.error("Claude CLI binary not found")
+            error_msg = "claude CLI binary not found"
+            output = (
+                "[ClaudeLLM error: claude CLI binary not found. "
+                "Install: npm install -g @anthropic-ai/claude-code]"
             )
-            if hit_max_turns and attempt < max_retries - 1:
-                wait = 5 * (attempt + 1)
-                logger.warning(
-                    f"Claude CLI hit --max-turns {self.max_turns}, retrying in "
-                    f"{wait}s (attempt {attempt+1}/{max_retries})"
-                )
-                _time_mod.sleep(wait)
-                t0 = _time_mod.monotonic()
-                span_start_ns = _time_mod.time_ns()
-                continue
-            if hit_max_turns:
-                logger.error(
-                    "Claude CLI hit --max-turns %d on every attempt; returning "
-                    "the truncated response (%d chars)",
-                    self.max_turns, len(output),
-                )
-            break
+            _log_llm_call(
+                model=resolved_model,
+                provider="claude_cli",
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response=output,
+                duration_s=elapsed,
+                timeout=self.timeout,
+                error=error_msg,
+                start_ts_ns=span_start_ns,
+            )
+            return output
+
+        # --- Handle timeout / stall with full diagnostic output ---
+        if timed_out or stalled:
+            reason = "stalled" if stalled else "timed out"
+            error_msg = f"claude CLI {reason} after {elapsed:.0f}s"
+            if stderr_text:
+                error_msg += f" | stderr: {stderr_text[:300]}"
+            if output:
+                error_msg += f" | partial stdout: {output[:300]}"
+            full_output = f"[ClaudeLLM error: {error_msg}]"
+            logger.error("Claude CLI %s: %s", reason, error_msg)
+            _log_llm_call(
+                model=resolved_model,
+                provider="claude_cli",
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response=full_output,
+                duration_s=elapsed,
+                timeout=self.timeout,
+                error=error_msg,
+                timed_out=True,
+                usage=usage,
+                start_ts_ns=span_start_ns,
+            )
+            self._write_llm_event(project_root, f"llm_{reason}", {
+                "model": resolved_model,
+                "elapsed_s": round(elapsed, 1),
+                "partial_stdout_len": len(output),
+                "stderr": stderr_text[:500],
+                "partial_stdout": output[:500],
+            })
+            return full_output
+
+        # --- Normal completion ---
+        logger.debug(
+            f"Claude CLI retcode={returncode}, "
+            f"stdout_len={len(output)}, first100={output[:100]!r}"
+        )
+
+        # Max-turns exhaustion. Under --output-format stream-json the CLI
+        # no longer prints the legacy plain-text "Error: Reached max turns"
+        # sentinel: the terminating result event carries
+        # subtype=error_max_turns and no result text, so the parsed output
+        # is the model's partial prose. Detect exhaustion from the event itself
+        # (the old sentinel is still honoured for plain-text CLIs).
+        hit_max_turns = (
+            usage.get("result_subtype") == "error_max_turns"
+            or output.startswith("Error: Reached max turns")
+        )
+        if hit_max_turns:
+            output = (
+                "[ClaudeLLM error: generation budget exhausted (max turns). "
+                "Keep files already written. Reduce planning, write an initial "
+                "implementation, and test incrementally; do not repeat the "
+                "same request unchanged.]\n" + output
+            )
 
         elapsed = _time_mod.monotonic() - t0
 
@@ -2422,6 +2450,9 @@ class ClaudeLLM:
         t0: float,
     ) -> tuple[str, str, int, float, bool, bool, dict]:
         """Run one Kimi ACP session and capture its JSON-RPC transcript."""
+        import uuid
+        child_env = os.environ.copy()
+        child_env[_PROCESS_SCOPE_ENV] = uuid.uuid4().hex
         process = subprocess.Popen(
             [self.kimi_path, "acp"],
             stdin=subprocess.PIPE,
@@ -2429,12 +2460,14 @@ class ClaudeLLM:
             stderr=subprocess.PIPE,
             text=True,
             cwd=workdir,
+            env=child_env,
             bufsize=1,
             # Own session/group so the whole tree (the ACP server plus any
             # tool/sim grandchildren) can be reaped as a group -- the registry
             # invariant reap_active_cli_processes relies on (pgid == pid).
             start_new_session=True,
         )
+        process._coresmith_process_scope = child_env[_PROCESS_SCOPE_ENV]
         _register_process(process)
         # Captured while the child is guaranteed alive and the group leader;
         # re-deriving via os.getpgid() later would race a pid reuse.
@@ -3061,9 +3094,16 @@ class ClaudeLLM:
         # child environment copy: concurrent workers get independent deadlines
         # and the daemon's os.environ is never mutated.
         child_env = dict(process_env) if process_env is not None else os.environ.copy()
+        if self._provider == "claude_cli":
+            # A worker returns one result to the graph. Later background-task
+            # notifications can keep the CLI alive and replace that result.
+            child_env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
+            child_env["CLAUDE_CODE_DISABLE_CRON"] = "1"
         child_env["CORESMITH_WORKER_DEADLINE_EPOCH"] = str(
             _time_mod.time() + self.timeout
         )
+        import uuid
+        child_env[_PROCESS_SCOPE_ENV] = uuid.uuid4().hex
         process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -3078,6 +3118,7 @@ class ClaudeLLM:
             # signal the daemon/pytest process itself.
             start_new_session=True,
         )
+        process._coresmith_process_scope = child_env[_PROCESS_SCOPE_ENV]
         _register_process(process)
         # Capture the child's process-group id now, while it is guaranteed
         # alive and the group leader (pgid == pid). Re-deriving it later via
@@ -3314,6 +3355,14 @@ class ClaudeLLM:
             # stdout (may be empty / a CLI error string) so downstream
             # error messages still have something to print.
             response_text = stdout_text
+
+        if timed_out or stalled or usage.get("result_subtype") == "error_max_turns":
+            reason = "stalled" if stalled else "timeout" if timed_out else "error_max_turns"
+            evidence = _worker_failure_evidence(
+                project_root, process.pid, stdout_text, stderr_text,
+                reason, process._coresmith_process_scope)
+            if evidence:
+                response_text = f"Worker failure evidence: {evidence}\n" + response_text
 
         return response_text, stderr_text, returncode, elapsed, timed_out, stalled, usage
 

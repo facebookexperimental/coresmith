@@ -18,7 +18,7 @@ Reply with ONLY one JSON object, no prose around it:
 ```json
 {"action": "<one of the payload's supported_actions>",
  "reasoning": "<1-3 sentences: the evidence and why this action>",
- "feedback": "<only for revise-type actions: concrete guidance>",
+ "feedback": "<for retry or revise: concrete guidance that changes the next attempt>",
  "block_actions": {"<block>": "retry"},
  "rtl_fix_description": "<only with fix_rtl: what you changed>"}
 ```
@@ -81,11 +81,13 @@ Omit fields you don't need. `action` MUST be one of the payload's
   decisions), either fix the RTL/TB yourself on disk and answer `fix_rtl` /
   `fix_tb` (ONLY if you actually edited and saved the file), or `skip` the
   block. `abort` only for unrecoverable infrastructure failure.
-  INFRASTRUCTURE attempts DO NOT COUNT: when the error / diagnosis says
-  the LLM itself failed (`[ClaudeLLM error:`, usage limit, rate limit,
-  timed out, empty response, "Agent did not write RTL" with such a
-  response tail), the block was never actually attempted -- answer
-  `retry`, never `skip`, regardless of how many such attempts repeated.
+  A transient transport/rate-limit failure is not an RTL verdict: preserve
+  artifacts and retry within the recovery budget. Generation/turn-limit
+  exhaustion needs a different approach, not an identical replay. Keep any
+  files written; use `feedback` to ask the worker to shorten planning, write a small initial
+  implementation, then test incrementally. After two unchanged failures,
+  change the request or report the blocker. A worker timeout may include a
+  hung simulator: inspect its failure evidence before deciding what to retry.
 - `integration_check`: `accept` when the assembled chip_top lints clean and
   wiring matches the block diagram; lint-clean is NOT functionally-correct,
   so never claim more than acceptance to proceed to DV.
