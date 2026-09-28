@@ -24,6 +24,7 @@ the ``sky130A`` / ``sky130B`` variant that exists on disk.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import shutil
@@ -1095,6 +1096,75 @@ exit
         )
 
 
+def _tcl_word(value: object) -> str:
+    """Quote a single Tcl argument without variable/command substitution."""
+    text = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return '"' + text.replace("$", "\\$").replace("[", "\\[").replace("\n", "\\n") + '"'
+
+
+class RepairNetlistOpenroad(EdaTool):
+    """Optional pre-placement repair; no routing or signoff claim."""
+
+    verb: ClassVar[str] = "repair_netlist"
+
+    def run(self, req: ToolRequest) -> ToolResult:
+        dep, pdk = self.deployment, self.deployment.pdk
+        netlist, liberty = req.input("netlist"), req.input("liberty")
+        files = (netlist, liberty, dep.tech_lef, dep.cell_lef)
+        missing = [str(p) for p in files if p is None or not p.is_file()]
+        period = float(req.params.get("clock_ns", 0))
+        if missing or not pdk.site_name or not math.isfinite(period) or period <= 0:
+            return ToolResult.from_checks(
+                tool_ok=False, verb=self.verb, design=req.design,
+                checks=[CheckResult("inputs", "not_run", details=
+                    f"repair requires netlist, Liberty, LEFs, site and positive clock period; missing={missing}")])
+        out = Path(req.out_dir or (PROJECT_ROOT / "syn" / "output" / req.design / "repair")).resolve()
+        out.mkdir(parents=True, exist_ok=True)
+        repaired = out / "repaired.v"
+        if repaired == netlist.resolve():
+            return ToolResult.from_checks(
+                tool_ok=False, verb=self.verb, design=req.design,
+                checks=[CheckResult("inputs", "not_run",
+                                    details="repair output must differ from its input netlist")])
+        # A prior output must never make a failed invocation look successful.
+        repaired.unlink(missing_ok=True)
+        script, log = out / "repair.tcl", out / "repair.log"
+        q = _tcl_word
+        dont_use = " ".join(q(cell) for cell in pdk.cells.dont_use)
+        script.write_text(
+            "set_thread_count 1\n"
+            f"read_lef {q(dep.tech_lef.resolve())}\n"
+            f"read_lef {q(dep.cell_lef.resolve())}\n"
+            f"read_liberty {q(liberty.resolve())}\n"
+            f"read_verilog {q(netlist.resolve())}\n"
+            f"link_design {q(req.design)}\n"
+            f"create_clock -name clk -period {period} [get_ports {q(req.params.get('clock_port', 'clk'))}]\n"
+            f"initialize_floorplan -utilization 35 -aspect_ratio 1 -core_space 10 -site {q(pdk.site_name)}\n"
+            + (f"set_wire_rc -signal -layer {q(pdk.pnr.wire_rc_signal_layer)}\n"
+               if pdk.pnr.wire_rc_signal_layer else "")
+            + (f"set_wire_rc -clock -layer {q(pdk.pnr.wire_rc_clock_layer)}\n"
+               if pdk.pnr.wire_rc_clock_layer else "")
+            + (f"set_dont_use [list {dont_use}]\n" if dont_use else "")
+            + f"set_max_fanout {pdk.pnr.max_fanout} [current_design]\n"
+            "repair_design -pre_placement\n"
+            f"write_verilog {q(repaired)}\n"
+            'puts "CORESMITH_REPAIR_DONE"\nexit\n')
+        rc, stdout, stderr, infra = _run_cmd(
+            [dep.resolve_openroad_bin(), "-exit", str(script)],
+            timeout=req.timeout_s or 300, cwd=str(out))
+        log.write_text(stdout + "\n" + stderr + "\n" + infra)
+        complete = rc == 0 and not infra and "CORESMITH_REPAIR_DONE" in stdout
+        fresh = repaired.is_file() and repaired.stat().st_size > 0
+        return ToolResult.from_checks(
+            tool_ok=rc == 0 and not infra, verb=self.verb, design=req.design,
+            checks=[CheckResult("netlist_repair", "pass" if complete and fresh else "not_run",
+                                details=infra or (stderr or stdout)[-500:])],
+            artifacts={"script": script, "report": log,
+                       **({"netlist": repaired} if complete and fresh else {})},
+            log_path=log,
+            extra_metrics={"pre_placement": True, "max_fanout": pdk.pnr.max_fanout})
+
+
 class RunStaOpenroad(EdaTool):
     verb: ClassVar[str] = "run_sta"
 
@@ -1480,6 +1550,7 @@ class Sky130Deployment(Deployment):
             "run_synth": RunSynthYosys(self),
             "run_pnr": RunPnrOpenroad(self),
             "run_sta": RunStaOpenroad(self),
+            "repair_netlist": RepairNetlistOpenroad(self),
             "run_drc": RunDrcMagic(self),
             "run_lvs": RunLvsNetgen(self),
             "run_lint": RunLintVerilator(self),

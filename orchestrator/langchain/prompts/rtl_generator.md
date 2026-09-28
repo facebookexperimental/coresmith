@@ -124,6 +124,12 @@ RULES:
        lanes; only serialize where the spec's `perf` block explicitly shares the
        resource.
 
+19. Before finishing, run the supplied functional and synthesis/timing checks
+    on the current RTL and inspect their verdicts. Fix failures within the
+    available repair budget; report any unresolved failure or unavailable check
+    with its exact command and evidence. A functional pass alone is not a
+    timing pass.
+
 PROCESS-SPECIFIC CONSTRAINTS:
 {process_constraints}
 

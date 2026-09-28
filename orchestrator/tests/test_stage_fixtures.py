@@ -151,6 +151,9 @@ def synth_env(monkeypatch):
     from orchestrator.testing.eda_stubs import stub_eda
     from orchestrator.testing.faults import FaultSchedule
     stub_eda(monkeypatch)
+    from orchestrator.langgraph import ppa_check
+    monkeypatch.setattr(ppa_check, "run_pre_layout_sta", lambda *a, **k: {"wns_ns": 0.0})
+    monkeypatch.setattr(ppa_check, "sta_maxfanout_enabled", lambda: False)
     b = fp.get_backend()
     b.reset()
     b.set_schedule(FaultSchedule([]))  # no faults -> canned success artifacts
