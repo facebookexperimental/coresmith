@@ -3030,6 +3030,20 @@ def _eligible_blocks(completed_blocks: list[dict]) -> list[tuple[str, dict]]:
     return out
 
 
+def primitive_rtl_target(project_root, block: dict) -> Path | None:
+    """Where an engine primitive's generated RTL lives, or None for an
+    authored block: a fabric primitive is materialized to
+    ``rtl/interconnect/<FabricSpec.module_name>.v``. The one answer for the
+    materializer, the shell and the integration check."""
+    if not isinstance(block.get("fabric"), dict):
+        return None
+    try:
+        from orchestrator.fabric import FabricSpec
+        return Path(project_root) / "rtl" / "interconnect" / f"{FabricSpec.from_json(block['fabric']).module_name}.v"
+    except Exception:  # noqa: BLE001 - unreadable spec: the name convention
+        return None
+
+
 def discover_block_rtl(
     project_root: str,
     completed_blocks: list[dict],
@@ -3037,7 +3051,8 @@ def discover_block_rtl(
     """Discover RTL file paths for all completed blocks.
 
     Resolution order: the block result's own ``rtl_path``, then the block
-    spec's ``rtl_target``, then filename convention.
+    spec's ``rtl_target``, then an engine primitive's materialized RTL
+    (:func:`primitive_rtl_target`), then filename convention.
 
     ``rtl_target`` is NOT optional politeness -- it is the only correct answer
     whenever a block's Verilog file is not named after the block, which is
@@ -3077,6 +3092,13 @@ def discover_block_rtl(
                     break
             if name in rtl_paths:
                 continue
+
+        # A primitive (the SoC fabric) is generated, not authored, and is not
+        # named after its block; a checkpointed spec may carry no rtl_target.
+        prim = primitive_rtl_target(root, block)
+        if prim is not None and prim.is_file():
+            rtl_paths[name] = str(prim)
+            continue
 
         # Convention-based discovery
         candidates = [

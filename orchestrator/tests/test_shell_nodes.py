@@ -138,3 +138,64 @@ def test_primitive_fabric_rtl_joins_the_shell(tmp_path, monkeypatch):
     assert snap["real_blocks"] == ["rsp"] and asm.wiring_errors == [] and asm.wires == 5
     assert "cs_fabric_x u_rsp (" in asm.verilog
     assert elab.get("ok") is not False, elab
+
+
+_FABRIC_X = ("module cs_fabric_x(clk, rst_n, s_q_addr, s_q_req_valid, s_q_req_gnt, s_q_rsp_valid, s_q_rdata);\n"
+             "  input clk;\n  input rst_n;\n  input [7:0] s_q_addr;\n  input s_q_req_valid;\n"
+             "  output s_q_req_gnt;\n  output s_q_rsp_valid;\n  output [7:0] s_q_rdata;\n"
+             "  assign s_q_req_gnt = 1'b1;\n  assign s_q_rsp_valid = s_q_req_valid;\n  assign s_q_rdata = s_q_addr;\n"
+             "endmodule\n")
+# the checkpointed queue of the live run: the fabric spec carries no rtl_target
+_PRIM_QUEUE = [{"name": "req", "tier": 1, "rtl_target": ""},
+               {"name": "rsp", "tier": 0, "kind": "primitive", "rtl_target": "", "fabric": {"name": "x"}}]
+
+
+def test_legacy_discovery_resolves_the_primitive_like_the_shell(tmp_path):
+    """Q25: the Integration Check resolved by rtl_target / <block>.v only, so the
+    fabric at rtl/interconnect/cs_fabric_<name>.v was 'NO RTL FOUND' and
+    integration ended fail-closed, while the shell had it as real RTL."""
+    from orchestrator.langgraph.integration_helpers import discover_block_rtl, merge_block_specs, missing_from
+    (tmp_path / "rtl" / "interconnect").mkdir(parents=True)
+    fabric = tmp_path / "rtl" / "interconnect" / "cs_fabric_x.v"
+    fabric.write_text(_FABRIC_X)
+    (tmp_path / "rtl" / "req.v").write_text("module req(input wire clk);\nendmodule\n")
+    passed = merge_block_specs([{"name": "req", "success": True}, {"name": "rsp", "success": True}], _PRIM_QUEUE)
+    rtl = discover_block_rtl(str(tmp_path), passed)
+    assert rtl == {"req": str(tmp_path / "rtl" / "req.v"), "rsp": str(fabric)}
+    assert missing_from(rtl, passed) == []
+    assert rtl["rsp"] == str(pg._block_rtl_target(str(tmp_path), _PRIM_QUEUE[1]))
+    fabric.unlink()      # not materialized: still unresolved (fail-closed), never a guess
+    assert missing_from(discover_block_rtl(str(tmp_path), passed), passed) == ["rsp"]
+
+
+def test_integration_check_adopts_the_shell_with_primitive_and_top_named_block(tmp_path, monkeypatch):
+    """Q25, node level: the deterministic final top is the shell. A block named
+    like the declared top is instantiated as its renamed <top>_core copy and the
+    fabric as its generated module; adoption must list those files (not the
+    block's own `module <top>`) and expect those module names."""
+    import json
+    import shutil
+
+    import pytest
+    if not (shutil.which("verilator") and shutil.which("yosys")):
+        pytest.skip("verilator/yosys not on PATH")
+    monkeypatch.setenv("CORESMITH_DETERMINISTIC_TOP", "1")
+    monkeypatch.setenv("CORESMITH_TOP_MODULE", "req")      # the pad-adapter shape: block req is the boundary
+    _project(tmp_path)
+    (tmp_path / "rtl" / "interconnect").mkdir(parents=True)
+    fabric = tmp_path / "rtl" / "interconnect" / "cs_fabric_x.v"
+    fabric.write_text(_FABRIC_X)
+    (tmp_path / "rtl" / "req.v").write_text(
+        "module req(input wire clk, input wire rst_n, output wire [7:0] m_q_addr, "
+        "output wire m_q_req_valid, input wire m_q_req_gnt, input wire m_q_rsp_valid, "
+        "input wire [7:0] m_q_rdata);\n  assign m_q_addr = 0; assign m_q_req_valid = 0;\nendmodule\n")
+    state = {"project_root": str(tmp_path), "block_queue": _PRIM_QUEUE,
+             "completed_blocks": [{"name": "req", "success": True}, {"name": "rsp", "success": True}]}
+    res = asyncio.run(pg._prepare_integration_check(state))["integration_result"]
+    assert res.get("deterministic_top_assembled"), res
+    assert res["top_module"] == "req" and res["design_name"] == "req"
+    core = tmp_path / ".coresmith" / "shell" / "req_core.v"
+    assert res["block_rtl_paths"] == {"req": str(core), "rsp": str(fabric)}
+    rec = json.loads((tmp_path / ".coresmith" / "candidate.json").read_text())
+    assert rec["top_module"] == "req" and {"req_core", "cs_fabric_x"} <= set(rec["elaborated_cells"])
+    assert str((tmp_path / "rtl" / "req.v").resolve()) not in rec["sources"]

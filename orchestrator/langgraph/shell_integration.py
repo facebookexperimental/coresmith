@@ -164,6 +164,10 @@ class Assembly:
     wiring_errors: list[str]
     wires: int
     sources: list[str]
+    # per block: the file and module actually instantiated (a boundary block
+    # is its renamed ``<top>_core`` copy, a primitive its generated module)
+    block_sources: dict[str, str] = field(default_factory=dict)
+    block_modules: dict[str, str] = field(default_factory=dict)
 
 
 def assemble_top(project_root, *, top_name: str, blocks: list[str], edges: list[dict],
@@ -181,6 +185,7 @@ def assemble_top(project_root, *, top_name: str, blocks: list[str], edges: list[
     stub_dir.mkdir(exist_ok=True)
     errors: list[str] = []
     sources: list[str] = []
+    block_sources: dict[str, str] = {}
     stubs: list[str] = []
     ports_by_block: dict[str, dict[str, PortSpec]] = {}
     inst_module: dict[str, str] = {}
@@ -203,16 +208,19 @@ def assemble_top(project_root, *, top_name: str, blocks: list[str], edges: list[
                 renamed = out / f"{mod}_core.v"
                 renamed.write_text(re.sub(rf"\bmodule\s+{re.escape(mod)}\b", f"module {mod}_core", text, count=1))
                 sources.append(str(renamed))
+                block_sources[b] = str(renamed)
                 inst_module[b] = f"{mod}_core"
                 boundary_block = boundary_block or b
             else:
                 sources.append(str(path))
+                block_sources[b] = str(path)
                 inst_module[b] = mod
             ports_by_block[b] = rp
         else:
             sp = stub_dir / f"{b}.v"
             sp.write_text(stub_module(b, cp, clk=clk, rst=rst))
             sources.append(str(sp))
+            block_sources[b] = str(sp)
             stubs.append(b)
             inst_module[b] = b
             ports_by_block[b] = dict(cp.ports)
@@ -304,7 +312,8 @@ def assemble_top(project_root, *, top_name: str, blocks: list[str], edges: list[
     rtl_path.write_text(verilog)
     return Assembly(verilog=verilog, module_name=top_name, rtl_path=str(rtl_path),
                     instantiated=list(blocks), stubs=stubs, boundary_ports=boundary,
-                    wiring_errors=errors, wires=len(wires), sources=sources)
+                    wiring_errors=errors, wires=len(wires), sources=sources,
+                    block_sources=block_sources, block_modules=dict(inst_module))
 
 
 def elaborate(assembly: Assembly, *, timeout_s: int = 600) -> dict:
