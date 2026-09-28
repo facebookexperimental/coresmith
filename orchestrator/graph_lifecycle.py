@@ -466,6 +466,31 @@ class GraphLifecycle:
             self.task = asyncio.create_task(self.run_task(resume_input, config))
         self._arm_watchdog()
 
+    async def restart_with_update(self, update, as_node: str) -> dict:
+        """Apply ``update(values) -> dict`` to the latest checkpoint as the
+        output of ``as_node`` and continue along that node's own edges.
+
+        The operator counterpart of a node decision (e.g. an integration-review
+        ``revise``) on a run that is not parked at that node's interrupt.
+        Requires the graph to be idle.
+        """
+        if self.task is not None and not self.task.done():
+            return {"error": "graph is already running -- pause first"}
+        await self.ensure_graph()
+        config = {"configurable": {"thread_id": self.thread_id}}
+        snap = await self.graph.aget_state(config)
+        if not snap.values:
+            return {"error": "no checkpoint to update -- start the run first"}
+        try:
+            values = update(dict(snap.values))
+        except ValueError as exc:
+            return {"error": str(exc)}
+        new = await self.graph.aupdate_state(config, values, as_node=as_node)
+        await self.safe_start(None, new)
+        return {"restarted": True, "as_node": as_node,
+                "checkpoint_id": new["configurable"].get("checkpoint_id"),
+                "update": dict(values)}
+
     async def restart_from_node(self, node_name: str) -> dict:
         """Re-run the graph from the checkpoint where ``node_name`` is next.
 

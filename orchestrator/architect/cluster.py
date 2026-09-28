@@ -85,6 +85,20 @@ class ClusterSession(ArchitectSession):
         st = st or self.stage_status()
         return not st.get("pending")
 
+    def feedback_lines(self, sts: dict) -> list[str]:
+        """Pending revision feedback (``gate_feedback.txt``: integration review,
+        operator ``run revise-blocks``) for blocks without a published pass."""
+        lines = []
+        for b in self.blocks:
+            fb = self.root / ".coresmith" / "blocks" / b / "gate_feedback.txt"
+            if sts.get(b, {}).get("done") or not fb.is_file():
+                continue
+            text = fb.read_text(encoding="utf-8", errors="replace").strip()
+            if text:
+                lines += ["", f"## MANDATORY revision feedback for {b} (`{fb.relative_to(self.root)}`)",
+                          "", text[-6000:]]
+        return lines
+
     def opening_prompt(self) -> str:
         sts = self.block_statuses()
         lines = [f"You are the cluster worker for cluster `{self.cluster}` in this project. Work in this directory.",
@@ -102,7 +116,7 @@ class ClusterSession(ArchitectSession):
                   "`coresmith verify rtl <b> --lint-only` -> assertions -> testbench -> `coresmith verify rtl <b>` -> "
                   "`coresmith verify synth <b> --full` -> `coresmith block-done <b>`. After every published block run "
                   "`coresmith shell assemble` and report the cluster's cycles/frame estimate in notes/CLUSTER_<cluster>.md."]
-        return "\n".join(lines)
+        return "\n".join(lines + self.feedback_lines(sts))
 
     def resume_prompt(self, st: dict, sitting: int) -> str:
         lines = [f"Sitting {sitting}: continue. Blocks without a published pass: {', '.join(st.get('pending') or []) or 'none'}."]
@@ -110,4 +124,4 @@ class ClusterSession(ArchitectSession):
             lines.append(f"- {b}: {'DONE' if s.get('done') else 'pending'}; rtl {'present' if s.get('rtl_exists') else 'MISSING'}, "
                          f"tb {'present' if s.get('tb_exists') else 'MISSING'}, attempts {s.get('attempts')}")
         lines.append("Finish every pending block through `coresmith block-done <b>`; read its stage report when it refuses.")
-        return "\n".join(lines)
+        return "\n".join(lines + self.feedback_lines(st.get("blocks") or {}))

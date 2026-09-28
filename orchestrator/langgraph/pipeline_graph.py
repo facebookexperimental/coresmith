@@ -6569,6 +6569,9 @@ def _plan_targeted_revise(
     failed_blocks: list[str],
     review_summary: str,
     tier: int,
+    *,
+    keep_spec: bool = False,
+    heading: str = "INTEGRATION REVIEW REVISION",
 ) -> dict:
     """Turn a chip-level ``revise`` into a per-block plan ``{block: reuse_spec}``.
 
@@ -6607,15 +6610,45 @@ def _plan_targeted_revise(
             try:
                 with (bdir / "gate_feedback.txt").open("a", encoding="utf-8") as fh:
                     fh.write(
-                        f"\n\n## INTEGRATION REVIEW REVISION (tier {tier}; MANDATORY)\n\n"
+                        f"\n\n## {heading} (tier {tier}; MANDATORY)\n\n"
                         f"{feedback}\n"
                     )
             except OSError:
                 pass
-        plan[name] = bool(canonical.exists()) and not needs_respec and name not in adopt_failed
+        plan[name] = (bool(canonical.exists()) and (keep_spec or not needs_respec)
+                      and name not in adopt_failed)
         _db(pr).clear_result(name, "best")
         _db(pr).clear_result(name, "dv_best")
     return plan
+
+
+def operator_revise_update(pr: str, values: dict, blocks: list[str], feedback: str = "") -> dict:
+    """State update for an operator-triggered targeted revise of published blocks.
+
+    The same plan an integration-review ``revise`` produces
+    (``_plan_targeted_revise``): each named block gets ``feedback`` (else its
+    human constraint-ledger rules) as ``gate_feedback.txt``, loses ``best`` /
+    ``dv_best``, and keeps its spec (``reuse_spec=True``). Applied as the
+    integration_review node's output, so ``route_after_integration_review``
+    re-enters ``init_tier`` and only these blocks are redone; every other block
+    keeps its completed result.
+    """
+    queue = {b.get("name"): b for b in values.get("block_queue") or []}
+    unknown = [b for b in blocks if b not in queue]
+    if not blocks or unknown:
+        raise ValueError(f"not in the run's block_queue: {unknown or '(no blocks named)'}")
+    plan: dict[str, bool] = {}
+    for name in blocks:
+        text = feedback.strip() or "\n".join(
+            f"- {r.get('rule')}" for r in _db(pr).constraints(name) if r.get("source") == "human")
+        if not text:
+            raise ValueError(f"{name}: no --feedback and no human constraint in its ledger")
+        plan.update(_plan_targeted_revise(
+            pr, {"block_actions": {name: "revise"}, "feedback": text}, [name], [], {}, [], "",
+            queue[name].get("tier", 1), keep_spec=True, heading="OPERATOR REVISION"))
+    return {"integration_review_action": "revise", "integration_review_failed": False,
+            "integration_approved_specs": None, "revise_blocks": plan,
+            "current_tier_index": 0, "pipeline_done": False, "pipeline_aborted": False}
 
 
 async def integration_review_prepare_node(state: OrchestratorState) -> dict:

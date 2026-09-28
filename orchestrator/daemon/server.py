@@ -531,6 +531,11 @@ class RestartNodeRequest(BaseModel):
     refresh_sidecars: bool = False
 
 
+class ReviseBlocksRequest(BaseModel):
+    blocks: list[str]
+    feedback: str = ""
+
+
 class ArchStartRequest(BaseModel):
     requirements: str = ""
     requirements_file: str = ""
@@ -1092,6 +1097,31 @@ async def run_restart_node(req: RestartNodeRequest):
     if result.get("error"):
         raise HTTPException(400, result["error"] + (
             " -- " + result["hint"] if result.get("hint") else ""))
+    result["status"] = _pipeline.status
+    return result
+
+
+@app.post("/run/revise-blocks")
+async def run_revise_blocks(req: ReviseBlocksRequest):
+    """Operator-triggered targeted revise of named published blocks.
+
+    Writes the integration-review revise plan ({block: reuse_spec=True}, the
+    feedback -- else the block's human constraints -- as gate_feedback.txt,
+    best/dv_best dropped for those blocks only) onto the latest checkpoint and
+    re-enters the tier loop at init_tier. Other blocks are not redone.
+    Requires the pipeline to be idle (pause first).
+    """
+    if _pipeline.task is not None and not _pipeline.task.done():
+        raise HTTPException(409, "pipeline already running -- pause first")
+    env_updated = _apply_run_env("run/revise-blocks")
+    from orchestrator.langgraph.pipeline_graph import operator_revise_update
+    result = await _pipeline.restart_with_update(
+        lambda values: operator_revise_update(str(_PROJECT_ROOT), values, req.blocks, req.feedback),
+        "integration_review")
+    if result.get("error"):
+        raise HTTPException(400, result["error"])
+    if env_updated:
+        result["env_updated"] = env_updated
     result["status"] = _pipeline.status
     return result
 
