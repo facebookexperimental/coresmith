@@ -42,10 +42,56 @@ def _reachable_hierarchy(design: dict, top_module: str) -> set[str]:
     return instantiated
 
 
-def _stage_sources(paths, stage: Path, project_root=None):
+_CONDITIONAL = re.compile(r"^[ \t]*`(ifdef|ifndef|elsif|else|endif)\b[ \t]*([A-Za-z_][A-Za-z0-9_]*)?")
+
+
+def _without_synthesis_branches(text: str) -> str:
+    """Blank every branch that depends on SYNTHESIS (either polarity).
+
+    Hierarchy evidence is then only the structure simulation and synthesis
+    share: a block under `ifdef SYNTHESIS is not counted (the define-free
+    candidate never simulates it), a block under `ifndef SYNTHESIS is not
+    counted (silicon never has it), and simulation-only constructs such as
+    `final` never reach the Yosys parser. Line numbers are preserved.
+    """
+    out, stack = [], []  # per conditional: [whole chain on SYNTHESIS, rest of chain dropped]
+    for line in text.splitlines(keepends=True):
+        m = _CONDITIONAL.match(line)
+        kw, name = (m.group(1), m.group(2)) if m else ("", "")
+        if kw in ("ifdef", "ifndef"):
+            keep = not any(f[1] for f in stack) and name != "SYNTHESIS"
+            stack.append([name == "SYNTHESIS"] * 2)
+        elif kw in ("elsif", "else") and stack:
+            keep = not any(f[1] for f in stack)
+            if keep and kw == "elsif" and name == "SYNTHESIS":
+                stack[-1][1] = True  # every remaining branch depends on SYNTHESIS
+                line = line[:m.start(1)] + "else\n"
+        elif kw == "endif" and stack:
+            frame = stack.pop()
+            keep = not any(f[1] for f in stack) and not frame[0]
+        else:
+            keep = not any(f[1] for f in stack)
+        out.append(line if keep else "\n" * line.endswith("\n"))
+    return "".join(out)
+
+
+def _stage_sources(paths, stage: Path, project_root=None, *, defines=()):
     """Stage the same include/data literals that candidate adoption binds."""
     from orchestrator.harness.readmem_assets import bind_assets
-    return bind_assets(paths, project_root or paths[0].parent).stage(paths, stage)
+    staged = bind_assets(paths, project_root or paths[0].parent).stage(paths, stage)
+    if "SYNTHESIS" not in {d.split("=", 1)[0] for d in defines}:
+        for path in stage.glob("input_*.v"):
+            path.write_text(_without_synthesis_branches(path.read_text()))
+    return staged
+
+
+TIMEOUT_ENV = "CORESMITH_HIERARCHY_CHECK_TIMEOUT_S"
+
+
+def hierarchy_timeout_s() -> int:
+    """Yosys budget; a full SoC with a flattened fabric needs minutes, not 60 s."""
+    from orchestrator._timeouts import scaled
+    return max(1, scaled(900, env=TIMEOUT_ENV))
 
 
 def elaborate_hierarchy(source_paths, top_module: str, *, defines=(), parameters=None,
@@ -76,20 +122,23 @@ def elaborate_hierarchy(source_paths, top_module: str, *, defines=(), parameters
                 include_dirs.append(str(Path(project_root).resolve() / "inputs"))
             opts = " ".join([*("-D" + d for d in defines),
                              *("-I" + json.dumps(d) for d in include_dirs)])
-            staged = _stage_sources(paths, Path(td), project_root)
+            staged = _stage_sources(paths, Path(td), project_root, defines=defines)
             commands = [f"read_verilog -sv -nosynthesis {opts} " + " ".join(json.dumps(str(p)) for p in staged)]
             for key, value in sorted(parameters.items()):
                 commands.append(f"chparam -set {key} {value} {top_module}")
             commands += [f"hierarchy -check -top {top_module}", "proc", f"write_json {json.dumps(str(output))}"]
             script.write_text("\n".join(commands) + "\n")
             result = subprocess.run([yosys, "-Q", "-T", "-s", str(script)],
-                                    capture_output=True, text=True, timeout=60,
+                                    capture_output=True, text=True, timeout=hierarchy_timeout_s(),
                                     cwd=str(project_root or paths[0].parent))
             if result.returncode:
                 return HierarchyFailure("Integration postcondition failed: elaboration rejected candidate: "
                                         + (result.stderr or result.stdout)[-2000:])
             return _reachable_hierarchy(json.loads(output.read_text()), top_module)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except subprocess.TimeoutExpired as exc:
+        return HierarchyFailure(f"Hierarchy elaboration unavailable: {exc} (raise {TIMEOUT_ENV} or "
+                                "CORESMITH_TIMEOUT_MULTIPLIER)", "infrastructure_error")
+    except OSError as exc:
         return HierarchyFailure(f"Hierarchy elaboration unavailable: {exc}", "infrastructure_error")
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         return HierarchyFailure(f"Invalid elaborator evidence: {exc}", "infrastructure_error")

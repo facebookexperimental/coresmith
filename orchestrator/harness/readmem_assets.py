@@ -187,6 +187,40 @@ class Assets:
         return [staged[p] for p in paths]
 
 
+def _engine_supplied(mod: Module, root: Path) -> bool:
+    """Module text the engine wrote: its SRAM library or a snapshot of it."""
+    from orchestrator.langgraph.sram_wrapper import wrapper_lib_path
+    path = mod.body[0].path
+    return path == Path(wrapper_lib_path()).resolve() or (
+        path.parent == root / '.coresmith/candidate-library'
+        and path.name.split('-', 1)[0] == mod.name)
+
+
+def _forwarded(value: list[Token], parent: Module) -> str | None:
+    """The parent's own public parameter when ``value`` is exactly its name."""
+    if len(value) == 1 and value[0].text in parent.parameters and value[0].text not in parent.private_parameters:
+        return value[0].text
+    return None
+
+
+def _instantiations(parent: Module, targets: dict):
+    """(target parameters, override values) per resolvable target instance."""
+    for i, token in enumerate(parent.body):
+        if token.text not in targets or (i and parent.body[i - 1].text == 'module'):
+            continue
+        mod, params = targets[token.text]
+        if i + 1 < len(parent.body) and parent.body[i + 1].text == '#':
+            try:
+                parts = split(group(parent.body, i + 2)[0])
+                if parts and parts[0] and parts[0][0].text == '.':
+                    values = {p[1].text: group(p, 2)[0] for p in parts if len(p) >= 4 and p[2].text == '('}
+                else:
+                    values = dict(zip(mod.parameters, parts))
+            except (ValueError, IndexError):
+                continue  # the binding loop reports the malformed override
+            yield params, values
+
+
 def bind_assets(paths, project_root, *, top_module="", parameters=None, texts=None) -> Assets:
     from orchestrator.harness.top_module import CandidateError
     assets = Assets(Path(project_root).resolve(), texts=dict(texts or {}))
@@ -218,6 +252,25 @@ def bind_assets(paths, project_root, *, top_module="", parameters=None, texts=No
                 else:
                     assets.literal(value, site + ', parameter/expression ' + ''.join(t.text for t in value)
                                    + ', instantiation <default>')
+        # An engine-supplied wrapper (e.g. cs_sram_1rw1r) forwards its own
+        # public parameter by name to a readmem target. The forward is engine
+        # text, not candidate content: the wrapper becomes a target for that
+        # parameter, so its default and every candidate instantiation are bound
+        # by the same literal rules. Candidate-authored forwards stay unresolved.
+        forwards = set()
+        while True:
+            added = {(parent.name, param) for parent in mods if _engine_supplied(parent, assets.root)
+                     for inst_params, values in _instantiations(parent, targets)
+                     for target_param in inst_params & values.keys()
+                     if (param := _forwarded(values[target_param], parent)) is not None} - forwards
+            if not added:
+                break
+            forwards |= added
+            for name, param in added:
+                mod = next(m for m in mods if m.name == name)
+                assets.literal(mod.parameters[param], f'module {name} in {mod.body[0].path}, '
+                               f'parameter {param}, default instantiation')
+                targets.setdefault(name, (mod, set()))[1].add(param)
         for token in ts:
             if token.text.startswith('$readmem') and token not in covered:
                 raise CandidateError(f'Readmem outside a resolvable module in {token.path}')
@@ -289,7 +342,8 @@ def bind_assets(paths, project_root, *, top_module="", parameters=None, texts=No
                             raise ValueError('unresolved positional override')
                         values = dict(zip(mod.parameters, parts))
                     for param in params & values.keys():
-                        assets.literal(values[param], site)
+                        if (parent.name, _forwarded(values[param], parent)) not in forwards:
+                            assets.literal(values[param], site)
                 except CandidateError:
                     raise
                 except (ValueError, IndexError) as exc:

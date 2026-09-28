@@ -264,3 +264,55 @@ def test_generate_local_parameter_is_not_a_module_asset_parameter(tmp_path, tool
     with pytest.raises(tm.CandidateError) as error:
         adopt(tmp_path, top, memory)
     assert 'memory' in str(error.value) and 'INIT_FILE' in str(error.value)
+
+
+def engine_wrapper_design(root, override=''):
+    (root / 'inputs').mkdir(exist_ok=True)
+    top = root / 'top.v'
+    top.write_text('module chip_top(input clk, output [7:0] y); parameter OTHER="rom.hex";\n'
+        f'cs_sram_1rw1r #(.WIDTH(8), .DEPTH(2){override}) u_mem(.clk(clk), .ce0(1\'b0), '
+        '.we0(1\'b0), .addr0(1\'b0), .wdata0(8\'b0), .wmask0(1\'b0), .rdata0(y), .ce1(1\'b0), '
+        '.addr1(1\'b0), .rdata1()); endmodule\n')
+    return top
+
+
+def test_engine_wrapper_forwards_init_file_without_binding_an_asset(tmp_path, monkeypatch):
+    # Q26(a): the engine's cs_sram_1rw1r forwards .INIT_FILE(INIT_FILE) to
+    # cs_mem_1rw1r. That engine text is not a candidate asset; with no
+    # candidate init file nothing is bound and adoption succeeds.
+    monkeypatch.delenv('CORESMITH_TOP_MODULE', raising=False)
+    monkeypatch.setattr('orchestrator.harness.hierarchy.elaborate_hierarchy',
+                        lambda *a, **k: {'cs_sram_1rw1r', 'cs_mem_1rw1r'})
+    rec = tm.write_candidate_receipt(tmp_path, 'chip_top', str(engine_wrapper_design(tmp_path)), {})
+    assert rec['dependencies'] == []
+    assert any('/.coresmith/candidate-library/cs_sram_1rw1r-' in p for p in rec['sources'])
+    assert tm.validated_candidate(tmp_path)['candidate_sha'] == rec['candidate_sha']
+
+
+def test_engine_wrapper_still_binds_or_rejects_candidate_init_files(tmp_path, monkeypatch):
+    monkeypatch.delenv('CORESMITH_TOP_MODULE', raising=False)
+    monkeypatch.setattr('orchestrator.harness.hierarchy.elaborate_hierarchy',
+                        lambda *a, **k: {'cs_sram_1rw1r', 'cs_mem_1rw1r'})
+    asset = tmp_path / 'inputs/rom.hex'
+    top = engine_wrapper_design(tmp_path, ', .INIT_FILE("rom.hex")')
+    asset.write_text('12\n')
+    rec = tm.write_candidate_receipt(tmp_path, 'chip_top', str(top), {})
+    assert rec['dependencies'] == [str(asset)]
+    asset.write_text('34\n')
+    assert not tm.receipt_is_current(rec)
+    engine_wrapper_design(tmp_path, ', .INIT_FILE(OTHER)')
+    with pytest.raises(tm.CandidateError) as error:
+        tm.write_candidate_receipt(tmp_path, 'chip_top', str(top), {})
+    assert all(name in str(error.value) for name in ('cs_sram_1rw1r', 'INIT_FILE', 'u_mem'))
+
+
+def test_candidate_authored_forward_stays_unresolved(tmp_path, tool_free):
+    # Only engine-written wrapper text may forward; the same shape in candidate
+    # RTL is still an unresolved override (as '#(.INIT_FILE(OTHER))' above).
+    top, memory = design(tmp_path)
+    top.write_text('module chip_top(output [7:0] y); wrapper u_wrapper(y); endmodule\n'
+        'module wrapper #(parameter INIT_FILE="")(output [7:0] y);\n'
+        'memory #(.INIT_FILE(INIT_FILE)) u_rom(.y(y)); endmodule\n')
+    with pytest.raises(tm.CandidateError) as error:
+        adopt(tmp_path, top, memory)
+    assert all(name in str(error.value) for name in ('memory', 'INIT_FILE', 'u_rom'))

@@ -8077,12 +8077,17 @@ async def _prepare_integration_check(state: OrchestratorState) -> dict:
                             "success": True, "top_module": _asm.module_name,
                             "block_count": len(_asm.instantiated), "wire_count": _asm.wires,
                             "lint_clean": True, "deterministic_top_assembled": True})
+                        from orchestrator.harness.hierarchy import hierarchy_timeout_s
                         from orchestrator.harness.top_module import write_candidate_receipt
+                        log(f"  [INTEGRATION] adopting candidate {_asm.module_name} (hierarchy "
+                            f"elaboration, timeout {hierarchy_timeout_s()} s)", CYAN)
                         try:
-                            write_candidate_receipt(pr, _asm.module_name, _asm.rtl_path, _blocks_paths,
-                                                    note="deterministic shell assembly",
-                                                    expected_blocks=set(_asm.block_modules.values()),
-                                                    integration_result=integration_result)
+                            # Minutes of Yosys on a full SoC: keep the daemon loop responsive.
+                            await asyncio.to_thread(
+                                write_candidate_receipt, pr, _asm.module_name, _asm.rtl_path, _blocks_paths,
+                                note="deterministic shell assembly",
+                                expected_blocks=set(_asm.block_modules.values()),
+                                integration_result=integration_result)
                         except (ValueError, OSError) as _exc:
                             log(f"  [INTEGRATION] candidate receipt failed ({_exc}); "
                                 "falling back to the Integration Lead", YELLOW)
