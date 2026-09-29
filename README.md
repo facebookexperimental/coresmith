@@ -1,20 +1,12 @@
 # CoreSmith
-
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/facebookexperimental/coresmith)
-
 Coresmith converts prompts to silicon. It uses LangGraph to drive the full RTL-to-GDS flow: architecture specification, RTL generation, verification, synthesis, and physical design. You start Coresmith through your agent (Claude or Codex), and it works as a daemon that spawns subagents for you until the GDS is created or your input is required. 
-
-> **Try it:** click the Codespaces badge above for a pre-built sandbox with the full EDA toolchain (Yosys, OpenROAD, Magic, Sky130 PDK) and Claude CLI ready to go. Note that it takes up to ten minutes to boot. Once it boots, launch Claude or Codex in the terminal. You will need to log in to your Claude or Codex account within the codespace.  For your first time, keep it simple: ask for a 32 bit adder.
-
-> \[!NOTE]
-> Agentic silicon design is expensive. Every agent needs to reference the full chip specification to accurately architect, implement, and verify their block. Codex Pro (100$/month) or Claude Max (100$/month) is the recommended minimum viable inference provider. Enthusiasts can try using local LLMs (unquantized only) to reduce cost, with severely degraded performance: https://coresmith.ai/blog/qwen-vs-gemma
 
 
 ## What It Does
 
 You provide Coresmith with a specification of the ASIC you want, ideally including a software model for some parts of the design. Coresmith will then decompose your requirements into an ASIC architecture and autonomously drive execution into a GDS. 
 
-1. **Architecture**: Generates a Product Requirements Document (PRD), functional requirements document and system architecture using proxy metrics
+1. **Architecture**: Generates a Product Requirements Document (PRD), functional requirements document and system architecture 
 2. **Microarchitecture**: Decomposes your requirements and software model into microarchitecture specifications and byte-exact software models using heuristics for data movement and locality
 3. **RTL Generation**: An LLM agent converts specifications for every block into synthesizable Verilog
 4. **Verification**: Another LLM agent generates cocotb testbenches; Verilator lints and simulates
@@ -42,67 +34,26 @@ Post-synthesis, LLM agents drive place-and-route, DRC, GDS export, and LVS — e
 
 ![Backend pipeline](docs/images/backend-pnr.gif)
 
-## What's New
+## Design Philosophy
+**Fewer agents, sharper tactics.** When CoreSmith was written in March 2026, frontier models did not have long horizon capability at chip design. To bridge this gap, we originally split the chip design process into dozens of policies: every chip design deliverable (like a floorplan or block diagram) had its own LangGraph agent. Modern models can run the entire chip design process autonomously, so we are *minimizing the number of agents* in the LangGraph pipeline and *sharpening the tactics*. 
 
-**Architecture → micro-architecture stage.** The architecture graph decomposes a
-design into per-block *micro-architecture* specs before any RTL is written: each
-block gets its own uArch spec (interfaces, latency/throughput intent, and a
-byte-exact reference model) that the frontend pipeline then implements and verifies
-block-by-block. A block's declared reference slice, when the task supplies one, is the
-transcription target its uArch spec and RTL are written against.
+For example, instead of a discrete LangGraph fabric design agent that writes a fabric to disk, we expose fabric creation as a tool action taken through the CoreSmith CLI by the monolithic architect agent.
 
-**Complexity-aware decomposition into memory vs compute.** A deterministic,
-AST-based pass scores each block's reference slice on four axes (flop count, latency,
-data-locality, modeling complexity) and min-cut partitions an over-budget block along
-function boundaries -- separating storage-heavy sub-blocks from compute so each stays
-inside its per-block area / FF / SRAM budget. Storage that should be a macro is
-mapped to an **SRAM macro** (with LEF/GDS/lib injection) rather than synthesized as a
-flop array.
+This has two benefits:
 
-**Coverage driven verification.** DV is functional and coverage driven. The DV agents verify targets specified in the functional requirements document and attempt to hit 90% line coverage before proceeding to chip integration.
+1. A single architect agent stores SoC design state in context and explores constraints in latent space, instead of persisting state to disk and relying on separate review agents to reconstruct the state in every LangGraph node
 
-## PPABench Results
-PPABench is a chip design benchmark (github.com/facebookresearch/ppabench).
+2. It exposes chip architecture mutations as crisp tactics that can be directly correlated to power, performance and area outcomes.
 
-Five designs were driven from architecture through backend signoff on the SkyWater
-Sky130 130nm PDK. **Four of five signed off** (DRC 0, LVS benign-tie match, timing
-MET at 50 MHz); one (JPEG) is backend-blocked. Timing is post-route STA setup slack
-at the 50 MHz target.
+We still retain adversarial review for design verification, chip integration, and chip validation because we believe black-box testing is able to find more bugs from an unbiased policy. 
 
-| Design | Coverage | DRC | LVS | Area (util) | Power | Timing @50 MHz |
-|--------|----------|-----|-----|-------------|-------|----------------|
-| GEMM   | 94.2%      | 0        | match       | 1.06 mm² (41%) | 12.9 mW       | +5.52 ns MET |
-| AES    | 98-99% ¹   | 0 †      | match ‡     | 0.31 mm² (26%) | 16.6 mW       | +11.32 ns MET |
-| Raster | 96.6%      | 0 †      | match ‡     | 2.32 mm² (39%) | *invalid* §   | +6.42 ns MET |
-| FFT    | 95.7%      | 0        | match ‡     | 1.37 mm² (30%) | 31.4 mW       | +7.23 ns MET |
-| JPEG   | 84.6% (min)| *blocked*| *not proven*| —              | —             | routed 50 MHz only |
-
-- **¹** AES functional cores are 98-99% (round-core 98.35%, QSPI frontend 98.99%); the small structural wrapper block is 86.7%. FFT aggregate 95.7% (min applicable 90.9%); GEMM/JPEG shown as minimum applicable coverage.
-- **†** DRC 0 after documented macro-interior exclusion -- raw Magic tiles fall inside a signed-off standard-cell / SRAM-macro interior.
-- **‡** LVS match under benign-tie classification -- constant-tie / replicated top-pins plus zero-transistor tap/fill/decap device-count deltas, each explicitly identified (no unexplained residue).
-- **§** Raster power is invalid: an OpenRAM macro-power table returned a nonphysical value; the finite non-macro + leakage subtotal is ~2.26 mW.
-
-CoreSmith can now generate intermediate-complexity out-of-order cores, like intra video encoders or decoders (e.g. Theora) that are byte-exact and decodable by a software oracle. 
-
-| Design | Functional | DRC | LVS | Area (util) | Power | Timing @50 MHz |
-|--------|------------|-----|-----|-------------|-------|----------------|
-| Theora encoder | byte-exact (15,637/15,637 B) | 0 † | match ‡ | 4.44 mm² (43%) | *invalid* ※ | MET |
-| Theora decoder | byte-exact (161,280/161,280 B, 35 frames) | 0 † | match ‡ | 7.18 mm² (32%) | 6.25 mW | MET |
-
-![A 640×480 photo round-tripped through the CoreSmith Theora codec](docs/images/codec/roundtrip_hero.png)
-
-![Rate–distortion vs libtheora at 640×480](docs/images/codec/rd_curve.png)
-
-Quality scales monotonically with qi:
-
-![Quality ladder, qi 16 → 52](docs/images/codec/quality_ladder.png)
-
+We hope this pivot to a tactic-based CLI positions CoreSmith as an example IR for SoC design. 
 
 ## LLM Providers
 For the best experience: 
 
-* Claude Code Max (minimum 100$/month, ideally 200$/month): use Fable as outer agent, Opus for inner agents
-* OpenAI Codex Pro (minimum 100$/month, ideally 200$/month): use Sol-5.6 xhigh for outer agent
+* Claude Code Max (minimum $100/month, ideally $200/month): use Opus 5.5 as outer agent, Opus 5.5 for inner agents
+* OpenAI Codex Pro (minimum $100/month, ideally $200/month): use Astra as outer agent, GPT 5.6 as inner agent
 
 For research purposes:
 
@@ -116,9 +67,9 @@ Using API rates, budget about 3$-5$ for a simple 3-stage MCU.
 Three install paths -- see **[SETUP.md](SETUP.md)** for the full commands and a
 reproducible Ubuntu 22.04 reference setup:
 
-- **Option A -- Docker / RunPod / Codespace** (recommended for first-time users): a
+- **Option A -- Docker / RunPod ** (recommended for first-time users): a
   pre-built image with the full EDA toolchain (Yosys, OpenROAD, Magic, Sky130 PDK) +
-  the Claude/Codex CLI. Click the Codespaces badge above, or pull the container.
+  the Claude/Codex CLI. 
 - **Option B -- Local install (Nix-based backend)**: `nix develop` pins every EDA
   tool; run the MCP server or the `coresmithd` daemon + `bin/coresmith` CLI.
 - **Option C -- Linux without Nix or Docker (OSS-CAD-Suite)**: install the frontend
