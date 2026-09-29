@@ -2382,7 +2382,7 @@ _DONT_USE_CACHE: dict = {}
 
 
 def synth_dont_use_flags(liberty: str) -> str:
-    """B2 ENGINE_ISSUES #9: ``-dont_use`` flags for dfflibmap/abc, mirroring the
+    """``-dont_use`` flags for dfflibmap/abc, mirroring the
     frozen chip flow (common/physical/synth.tcl): the PDK's OpenLane
     ``no_synth.cells`` list plus every lpflow_/probe/spare/delay cell in the
     liberty. Without them ABC mapped the SoC fabric into 1,100+ lpflow

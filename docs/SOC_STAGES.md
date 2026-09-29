@@ -1,6 +1,6 @@
-# SoC-grade stages (feat/soc-stages)
+# SoC-grade stages
 
-What the 2026-09-25 SoC benchmark showed, and what changed in the engine.
+What a two-core RISC-V + GPU SoC benchmark showed, and what changed in the engine.
 
 ## Evidence
 All 25 CoreSmith blocks passed block DV, but the chip was never assembled;

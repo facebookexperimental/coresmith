@@ -1,4 +1,4 @@
-# Migrating a project to the arm-e pipeline
+# Migrating a project to the declarative task contract
 
 This release removes several architecture stages, makes acceptance the task's own
 responsibility, and replaces a set of heuristics with explicit declarations. A project

@@ -282,16 +282,12 @@ async def _run_llm_eda_step(
         ClaudeLLM,
         is_llm_error_response,
     )
-    from orchestrator.langgraph.eda_prompts import (
-        merged_prompt_context,
-        resolve_prompt_path,
-    )
+    from orchestrator.langgraph.eda_prompts import merged_prompt_context
 
     # Merge in the active deployment's PDK/tool context ({pdk_summary},
-    # {tool_notes}, ...); the caller's context keys win on collision. The
-    # rollback flag (CORESMITH_TOOL_CLI_PROMPTS=0) selects a .legacy.md sibling.
+    # {tool_notes}, ...); the caller's context keys win on collision.
     context = merged_prompt_context(prompt_file, context)
-    prompt_path = resolve_prompt_path(_PROMPT_DIR, prompt_file)
+    prompt_path = _PROMPT_DIR / prompt_file
     system_prompt = _safe_format(prompt_path.read_text(), context)
 
     user_message = (

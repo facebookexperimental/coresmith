@@ -61,7 +61,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   candidate manifest that every consumer reads.
 - The oracle integrity baseline moved outside the project, by default under
   `~/.coresmith/trust/`; task adapters run inside a bubblewrap boundary.
-- See [docs/migration-arm-e.md](docs/migration-arm-e.md) for migrating an
+- See [docs/migration.md](docs/migration.md) for migrating an
   existing project.
 
 ### Added

@@ -3391,7 +3391,7 @@ def _evaluate_ppa_gate(
 
     sta: dict = {}
     _sta_dir = Path(project_root) / "syn" / "output" / block_name
-    # B2 ENGINE_ISSUES #8: STA must link the module the netlist DECLARES, which is
+    # STA must link the module the netlist DECLARES, which is
     # not the block name for externally-mandated tops (the generated fabric is
     # `cs_fabric_soc` for block `soc_fabric`); yosys/cocotb already resolve it so.
     from orchestrator.langgraph.pipeline_helpers import rtl_module_name as _rtl_module_name

@@ -142,9 +142,9 @@ def block_done(db, pr, name: str, *, target_clock_mhz: float = 50.0, seed: int |
     wns, tns = meta.get("wns_ns"), meta.get("tns_ns")
     # A block is published on a MEASURED timing pass only: no WNS (the STA
     # crashed on an SRAM black box, or was never run) is "not measured", a
-    # negative WNS or TNS is a fail -- never a pass (coresmith3: rv_l1i0/1 were
-    # published at WNS -68 ns and gpu_mem at TNS -54 us because the verdict was
-    # None; the workers refused to accept it, the tool did not).
+    # negative WNS or TNS is a fail -- never a pass (blocks used to be published
+    # at WNS -68 ns and TNS -54 us because the verdict was None; the workers
+    # refused to accept it, the tool did not).
     measured = wns is not None
     try:
         neg = (wns is not None and float(wns) < 0) or (tns is not None and float(tns) < 0)

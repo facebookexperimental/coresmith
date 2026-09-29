@@ -2,7 +2,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Deployment-fed prompt context + rollback-flag prompt selection (PR4).
+"""Deployment-fed prompt context for the autonomous-EDA nodes.
 
 The autonomous-EDA nodes (``backend_graph._run_llm_eda_step`` and
 ``tapeout_graph._run_tapeout_llm_step``) hand a ``*_llm.md`` / ``tapeout_wrapper_*.md``
@@ -14,19 +14,13 @@ prompt to a Bash-capable LLM. Post-migration those prompts:
   :class:`~orchestrator.pdk.base.Deployment` (``{tool_notes}`` / ``{pdk_summary}``)
   rather than a hardcoded Sky130 block.
 
-This module owns the two seams that make that work for BOTH graphs:
-
-1. :func:`deployment_prompt_context` -- the fields to MERGE into a node's
-   context dict (the caller's keys win on collision), including a verb-specific
-   ``tool_notes`` resolved from that verb's :meth:`EdaTool.prompt_notes`.
-2. :func:`resolve_prompt_path` -- honours ``CORESMITH_TOOL_CLI_PROMPTS``
-   (default ON): when OFF, a ``<name>.legacy.md`` sibling (the pre-migration
-   text) is selected instead, so an in-flight run can be rolled back mid-flight.
+This module owns the seam that makes that work for BOTH graphs:
+:func:`deployment_prompt_context` -- the fields to MERGE into a node's context
+dict (the caller's keys win on collision), including a verb-specific
+``tool_notes`` resolved from that verb's :meth:`EdaTool.prompt_notes`.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 # Which verb's prompt_notes() each migrated prompt should receive as
 # ``{tool_notes}``. Prompts absent here (e.g. backend_wrapper_llm.md, which only
@@ -41,34 +35,6 @@ _PROMPT_VERB: dict[str, str] = {
     "tapeout_wrapper_drc.md": "run_drc",
     "tapeout_wrapper_lvs.md": "run_lvs",
 }
-
-
-def tool_cli_prompts_enabled() -> bool:
-    """Are the CLI-based (migrated) prompts active? Default ON.
-
-    Set ``CORESMITH_TOOL_CLI_PROMPTS=0`` to fall back to the pre-migration
-    ``.legacy.md`` prompt text (cheap, honest rollback for a release cycle).
-    """
-    try:
-        from orchestrator.profile import ensure_applied, flag_enabled
-        ensure_applied()
-        return flag_enabled("CORESMITH_TOOL_CLI_PROMPTS", default=True)
-    except Exception:  # noqa: BLE001 - a profile hiccup must not break the node
-        return True
-
-
-def resolve_prompt_path(prompt_dir: Path, prompt_file: str) -> Path:
-    """Return the prompt file to use, honoring the rollback flag.
-
-    When ``CORESMITH_TOOL_CLI_PROMPTS`` is OFF and a ``<stem>.legacy.md`` sibling
-    exists, that pre-migration copy is used; otherwise the (migrated) prompt.
-    """
-    prompt_dir = Path(prompt_dir)
-    if not tool_cli_prompts_enabled():
-        legacy = prompt_dir / f"{Path(prompt_file).stem}.legacy.md"
-        if legacy.is_file():
-            return legacy
-    return prompt_dir / prompt_file
 
 
 def deployment_prompt_context(prompt_file: str) -> dict[str, str]:
