@@ -104,6 +104,16 @@ class GraphLifecycle:
 
     def _foreign_live_daemon_owns_project(self) -> bool:
         """Whether another live daemon owns lifecycle recovery for this run."""
+        # C1: the daemon holds a ``daemon`` lease in the project database;
+        # daemon.json is a view of it (kept for older clients and tests).
+        try:
+            from orchestrator.state_store.project_db import open_project
+            lease = open_project(self.project_root).lease("daemon")
+        except Exception:  # noqa: BLE001 - fall through to the file
+            lease = None
+        if lease is not None and not lease.get("expired"):
+            pid = int(lease.get("holder_pid") or 0)
+            return pid != os.getpid() and self._pid_is_alive(pid)
         daemon_path = os.path.join(
             self.project_root, ".coresmith", "daemon.json"
         )
@@ -245,6 +255,21 @@ class GraphLifecycle:
         try:
             self.status = "running"
             await self.graph.ainvoke(initial_input, config)
+            # C1-3 boundary applier: answers queued in the interrupts table
+            # for branches that parked during this step are applied now, one
+            # targeted Command(resume={lg_id: ...}) per pass, until nothing
+            # queued remains. Un-answered branches re-raise and stay parked.
+            for _ in range(64):
+                state = await self.graph.aget_state(config)
+                pending = [(i.id, i.value) for t in (state.tasks if state else ())
+                           for i in t.interrupts]
+                if not pending:
+                    break
+                queued = self._queued_resolutions(pending)
+                if not queued:
+                    break
+                from langgraph.types import Command
+                await self.graph.ainvoke(Command(resume=queued), config)
             state = await self.graph.aget_state(config)
             if state and state.tasks:
                 for t in state.tasks:
@@ -262,6 +287,28 @@ class GraphLifecycle:
         except Exception:
             self.status = "error"
             self.error_message = traceback.format_exc()[:10000]
+
+    def _queued_resolutions(self, pending: list[tuple[str, Any]]) -> dict[str, Any]:
+        """``{lg_interrupt_id: resolution}`` for parked branches whose row in
+        the interrupts table is ``resolved``; those rows become ``consumed``."""
+        try:
+            from orchestrator.state_store.project_db import open_project
+            db = open_project(self.project_root)
+        except Exception:  # noqa: BLE001
+            return {}
+        out: dict[str, Any] = {}
+        for lg_id, value in pending:
+            cid = value.get("interrupt_id") if isinstance(value, dict) else None
+            if not cid:
+                continue
+            try:
+                db.bind_lg_id(cid, lg_id)
+                res = db.consume_interrupt(cid)
+            except Exception:  # noqa: BLE001
+                continue
+            if res is not None:
+                out[lg_id] = res
+        return out
 
     # -- Wedge watchdog [dv-hardening-17] ------------------------------------
     #
@@ -418,6 +465,31 @@ class GraphLifecycle:
             self._last_config = config
             self.task = asyncio.create_task(self.run_task(resume_input, config))
         self._arm_watchdog()
+
+    async def restart_with_update(self, update, as_node: str) -> dict:
+        """Apply ``update(values) -> dict`` to the latest checkpoint as the
+        output of ``as_node`` and continue along that node's own edges.
+
+        The operator counterpart of a node decision (e.g. an integration-review
+        ``revise``) on a run that is not parked at that node's interrupt.
+        Requires the graph to be idle.
+        """
+        if self.task is not None and not self.task.done():
+            return {"error": "graph is already running -- pause first"}
+        await self.ensure_graph()
+        config = {"configurable": {"thread_id": self.thread_id}}
+        snap = await self.graph.aget_state(config)
+        if not snap.values:
+            return {"error": "no checkpoint to update -- start the run first"}
+        try:
+            values = update(dict(snap.values))
+        except ValueError as exc:
+            return {"error": str(exc)}
+        new = await self.graph.aupdate_state(config, values, as_node=as_node)
+        await self.safe_start(None, new)
+        return {"restarted": True, "as_node": as_node,
+                "checkpoint_id": new["configurable"].get("checkpoint_id"),
+                "update": dict(values)}
 
     async def restart_from_node(self, node_name: str) -> dict:
         """Re-run the graph from the checkpoint where ``node_name`` is next.

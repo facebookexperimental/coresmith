@@ -4,7 +4,7 @@ fail on console / page errors.
 
 Usage:
     python3 scripts/screenshot_views.py --url http://127.0.0.1:3000 \
-        --out /tmp/shots --prefix h264-arm-e [--block cavlc_macroblock_encoder]
+        --out /tmp/shots --prefix h264 [--block cavlc_macroblock_encoder]
 
 Requires the Python ``playwright`` package with a Chromium build installed.
 """

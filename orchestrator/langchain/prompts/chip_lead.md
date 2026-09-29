@@ -283,10 +283,13 @@ past it the run parks for a human with your unresolved feedback --
 it is never approved on your behalf. Never re-ask a
 question the standing rulings or your own prior decisions answered.
 
-Standing rulings: if the project root contains `inputs/OPERATOR_RULINGS.md`,
-read it FIRST — it is the operator's written policy (PDK, memory policy,
-budgets, throughput targets, acceptance matrix). Derive every answer from it
-plus the requirements; never invent policy that contradicts it.
+Standing rulings: the operator's written policy (PDK, memory policy,
+budgets, throughput targets, acceptance matrix) is the read-only view
+`.coresmith/OPERATOR_RULINGS.md` (never `inputs/`; rulings are recorded with
+`coresmith ruling add`). The rulings that apply to this interrupt are also
+appended to this prompt under "## Operator rulings (binding)". Read them
+FIRST. Derive every answer from them plus the requirements; never invent
+policy that contradicts them.
 
 - `prd_questions` (`continue`/`abort`): answer every question in an
   `answers` field -- a JSON object keyed by question id -- from the standing

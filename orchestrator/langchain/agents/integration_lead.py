@@ -243,6 +243,8 @@ class IntegrationLeadAgent:
             f"\nGenerate the integration analysis and top-level Verilog "
             f"for module '{design_name}'.{out_instr} Respond with JSON only."
         )
+        from orchestrator.state_store.rulings import rulings_section_env
+        parts.append(rulings_section_env(consumer="integration_lead", arch=True))
 
         return "\n".join(parts)
 

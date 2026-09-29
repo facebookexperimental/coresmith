@@ -410,6 +410,28 @@ def signal_specs(edge: dict) -> list[dict]:
     # the gate then rejects the very ports the contract-port check demands
     # (Arm E2, 2026-09-06: three blocks parked on "undeclared port *_srdy").
     proto = str(edge.get("handshake_protocol") or "").strip().lower()
+    # B1: a memory-mapped bus edge (axi4 / axi_lite / apb) implies the whole
+    # canonical AMBA channel set; the contract need not (and should not) list
+    # it signal by signal. Widths come from data_width_bits + bus_params.
+    if proto in ("axi4", "axi_lite", "apb"):
+        try:
+            from orchestrator.fabric.amba import CHANNELS, width_bits
+            bp = edge.get("bus_params") if isinstance(edge.get("bus_params"), dict) else {}
+            dims = {"AW": int(bp.get("addr_width") or 32), "DW": int(edge.get("data_width_bits") or bp.get("data_width") or 32),
+                    "IW": int(bp.get("id_width") or 4), "UW": int(bp.get("user_width") or 1)}
+            # The channel set IS the port set: a generic payload entry the
+            # contract author added on top (e.g. ``data``) is not a port of an
+            # AXI/APB interface and must not be demanded of the RTL.
+            canonical = {sig for sig, _d, _w in CHANNELS[proto]}
+            out = [o for o in out if o["name"] in canonical]
+            present = {str(o["name"]) for o in out}
+            for sig, d, w in CHANNELS[proto]:
+                if sig not in present:
+                    out.append({"name": sig, "width": str(width_bits(w, **dims)),
+                                "dir": "producer->consumer" if d == "m2s" else "consumer->producer",
+                                "kind": "handshake" if sig.endswith(("valid", "ready")) or sig in ("psel", "penable", "pready") else "field"})
+        except Exception:  # noqa: BLE001 - fall back to whatever the contract listed
+            pass
     # WP-21: valid_only edges are payload + a single `valid` strobe (the
     # interface-definition prompt says so); contracts list it inconsistently
     # (F-1: 15/15 edges, AX25: 0/10), and the gate parked a correct block.

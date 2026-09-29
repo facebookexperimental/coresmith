@@ -23,9 +23,9 @@ DIAGRAM = {
 }
 SPECS = [
     {"name": "ctrl", "tier": "1", "python_source": "", "rtl_target": "rtl/ctrl.v",
-     "testbench": "tb/test_ctrl.py", "description": "control"},
+     "testbench": "tb/test_ctrl.py", "description": "control", "subsystem": "top"},
     {"name": "dsp", "tier": "2", "python_source": "golden.py:dsp", "rtl_target": "rtl/dsp.v",
-     "testbench": "tb/test_dsp.py", "description": "math"},
+     "testbench": "tb/test_dsp.py", "description": "math", "subsystem": "dp"},
 ]
 CONTRACTS = {
     "design_summary": "demo",
@@ -125,7 +125,9 @@ def test_legacy_import_once(tmp_path):
     assert db.contracts_version() == 1
     assert db.attempt_history("ctrl")[0]["category"] == "X"
     assert db.constraints("ctrl")[0]["rule"] == "r"
-    assert db.result("ctrl", "best") == {"sim_passed": True}
+    # A1: a pre-gate ``best`` (no ``done`` flag) is only a DV pass -> ``dv_best``.
+    assert db.result("ctrl", "best") is None
+    assert db.result("ctrl", "dv_best") == {"sim_passed": True}
     # second open does not re-import (would duplicate attempts)
     db2 = open_project(tmp_path)
     assert len(db2.attempt_history("ctrl")) == 1

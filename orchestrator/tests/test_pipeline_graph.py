@@ -116,6 +116,13 @@ def _initial_state(blocks: list[dict] | None = None, project_root: str = "/tmp/t
     }
 
 
+@pytest.fixture(autouse=True)
+def _legacy_uarch_gate_off(monkeypatch):
+    # These end-to-end fakes never build a SystemC model; the B2 phase gate
+    # (default on) would park them before the interrupts they exercise.
+    monkeypatch.setenv("CORESMITH_UARCH_PHASE_GATE", "0")
+
+
 def _setup_disk_fixtures(tmp_path, blocks: list[dict]) -> None:
     """Create the on-disk fixtures (rtl, tb, .coresmith/blocks/<name>/...)
     expected by the disk-first pipeline nodes for the given blocks.

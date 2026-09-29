@@ -43,6 +43,13 @@ mapbox-earcut>=1.0.0
 # Cocotb (RTL simulation)
 cocotb>=2.0
 cocotb-bus>=0.3.0
+cocotbext-axi>=0.1.24   # generated fabric testbenches
+# Optional: the SoC fabric primitive (orchestrator/langgraph/rtl_lib/fabric) vendors
+# RTL from pulp-platform/axi v0.39.9 and pulp-platform/common_cells v1.37.0 under the
+# Solderpad Hardware License v0.51 (SHL-0.51). It is only elaborated when a design
+# declares a fabric block. SHL-0.51 requires attribution: keep the LICENSE files
+# vendored next to the sources and the copyright notices inside them intact
+# (see rtl_lib/fabric/sv/MANIFEST.json for the pinned commits).
 wavekit>=0.5.6
 
 # Security floors for transitive deps (GitHub Dependabot 2026-05)

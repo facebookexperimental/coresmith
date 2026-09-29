@@ -477,6 +477,18 @@ class TestEdaTimeout:
     large-design PnR/signoff runs don't get the OpenROAD child killed
     mid-route, while small designs keep the snappy default."""
 
+    @pytest.fixture(autouse=True)
+    def _no_multiplier(self, monkeypatch):
+        monkeypatch.delenv("CORESMITH_TIMEOUT_MULTIPLIER", raising=False)
+
+    def test_multiplier_scales_default_and_override(self, monkeypatch):
+        from orchestrator.langgraph.backend_graph import _eda_timeout
+        monkeypatch.setenv("CORESMITH_TIMEOUT_MULTIPLIER", "6")
+        monkeypatch.delenv("CORESMITH_FLAT_SYNTH_TIMEOUT", raising=False)
+        assert _eda_timeout("CORESMITH_FLAT_SYNTH_TIMEOUT", 3600) == 21600
+        monkeypatch.setenv("CORESMITH_FLAT_SYNTH_TIMEOUT", "100")
+        assert _eda_timeout("CORESMITH_FLAT_SYNTH_TIMEOUT", 3600) == 600
+
     def test_default_when_unset(self, monkeypatch):
         from orchestrator.langgraph.backend_graph import _eda_timeout
         monkeypatch.delenv("CORESMITH_PNR_TIMEOUT", raising=False)
@@ -696,6 +708,64 @@ class TestSafeFormat:
 # the LLM step faked. The bug was that a driver-internal retry left no trace, so
 # a test that exercised the collector alone would have proved nothing about the
 # artifact a later reader actually opens.
+
+class TestFlatSynthDriverTimeout:
+    """The flat-synth driver timeout was hard-coded to 1200s and killed a
+    legitimately running yosys on a ~600k-cell soc_top (worker failures
+    41633a85..., 6ed036c6...). It must come from _eda_timeout."""
+
+    @pytest.mark.asyncio
+    async def test_env_override_reaches_driver_call(self, tmp_path, monkeypatch):
+        from orchestrator.langgraph import backend_graph as bg
+
+        t = TestFlatSynthAttemptHistoryWiring()
+        d = t._syn_dir(tmp_path)
+        net = d / "chip_top_netlist.v"
+        net.write_text("module chip_top(); endmodule\n")
+        seen = {}
+
+        async def _fake_llm(**kwargs):
+            seen.update(kwargs)
+            return {"success": True, "netlist_path": str(net)}
+
+        monkeypatch.setattr(bg, "_run_llm_eda_step", _fake_llm)
+        monkeypatch.setattr(bg, "_bind_macro_shells_for_backend",
+                            lambda _n: ([], ""))
+        monkeypatch.setattr(bg, "_run_chip_top_gate_sim",
+                            lambda _s, _n: (None, "not_run", ""))
+        monkeypatch.setenv("CORESMITH_FLAT_SYNTH_TIMEOUT", "4000")
+        monkeypatch.setenv("CORESMITH_TIMEOUT_MULTIPLIER", "6")
+
+        await bg.flat_top_synthesis_node(t._state(tmp_path))
+        assert seen["timeout"] == 24000
+
+    @pytest.mark.asyncio
+    async def test_driver_passes_timeout_to_claude_llm(self, tmp_path, monkeypatch):
+        from orchestrator.langchain.agents import coresmith_llm
+        from orchestrator.langgraph import backend_graph as bg
+
+        timeouts = []
+        result_path = tmp_path / "result.json"
+
+        async def _call(self, *_a, **_k):
+            timeouts.append(self.timeout)
+            result_path.write_text('{"success": true}')
+            return "done"
+
+        monkeypatch.setattr(coresmith_llm.ClaudeLLM, "call", _call)
+        ctx = {
+            "design_name": "top", "target_clock_mhz": 50, "period_ns": 20,
+            "liberty_path": "cells.lib", "output_dir": str(tmp_path),
+            "input_files": "top.v", "input_delay_ns": 4, "output_delay_ns": 4,
+            "attempt": 1, "prior_failure": "none", "constraints": "none",
+            "result_json_path": str(result_path),
+            "sram_macro_directive": "none", "sram_wrapper_lib": "none",
+            "constant_mapping_command": "hilomap",
+        }
+        await bg._run_llm_eda_step("t", "backend_synth_llm.md", ctx,
+                                   str(result_path), timeout=21600)
+        assert timeouts == [21600]
+
 
 class TestFlatSynthAttemptHistoryWiring:
     def _state(self, tmp_path, **kw):

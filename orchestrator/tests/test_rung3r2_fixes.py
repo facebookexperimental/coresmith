@@ -218,7 +218,7 @@ class TestCleanReemitClearsStaleInterfaceResult:
 
         state_after = _base_state(tmp_path, constraint_result=stale)
         state_after.update(out)
-        assert ag.route_after_interface_definition(state_after) == "Engineering Requirements"
+        assert ag.route_after_interface_definition(state_after) == "Interface VIP"
 
     def test_clean_reemit_preserves_other_source_violations(
         self, monkeypatch, tmp_path
@@ -242,7 +242,7 @@ class TestCleanReemitClearsStaleInterfaceResult:
         state_after = _base_state(tmp_path, constraint_result=other)
         state_after.update(out)
         # interface router only diverts on source==interface_definition
-        assert ag.route_after_interface_definition(state_after) == "Engineering Requirements"
+        assert ag.route_after_interface_definition(state_after) == "Interface VIP"
         # the other-source violations are still in state for the downstream gate
         assert state_after["constraint_result"]["source"] == "constraint_check"
         assert len(state_after["constraint_result"]["violations"]) == 1

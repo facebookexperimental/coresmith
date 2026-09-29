@@ -1858,6 +1858,18 @@ def run_simulation(block: dict, rtl_path, tb_path: str, attempt: int = 1,
     _cov_line = ""
     if _cov.coverage_enabled() or _cov.line_cov_gate_enabled():
         _cov_line = "EXTRA_ARGS += --coverage\n"
+    # A2: the block's generated interface-VIP SVA binds run under --assert.
+    # The Python assertions() coroutine in the VIP stays the oracle; the bind
+    # is the same rule expressed for the simulator's checker.
+    try:
+        from orchestrator.langgraph.vip_lib.codegen import sva_bind_enabled, vips_for_block
+        _sva = [r["sva"] for r in vips_for_block(root, block_name)
+                if r.get("sva") and Path(r["sva"]).exists()] if sva_bind_enabled() else []
+        if _sva:
+            _verilog_sources = " ".join([_verilog_sources] + _sva)
+            _cov_line += "EXTRA_ARGS += --assert\n"
+    except Exception:  # noqa: BLE001 - VIP binds are an add-on to the build
+        pass
 
     # Branch-parity: force the DESIGN onto its synth-side `ifdef world (e.g.
     # -DSYNTHESIS) while the cs_* wrapper stays behavioral (it selects its body
@@ -1915,7 +1927,9 @@ EXTRA_ARGS += -Wno-fatal
     venv_bin = str(Path(sys.prefix) / "bin")
     env["PATH"] = f"{venv_bin}:{env.get('PATH', '/usr/bin:/bin')}"
     env["SHELL"] = shutil.which("bash") or "/bin/bash"
-    env["PYTHONPATH"] = f"{sim_dir}:{root}:{env.get('PYTHONPATH', '')}"
+    # ``.coresmith`` on the path makes ``from vip.<edge> import ...`` resolve
+    # to the generated interface VIPs (A2).
+    env["PYTHONPATH"] = f"{sim_dir}:{root}:{Path(root) / '.coresmith'}:{env.get('PYTHONPATH', '')}"
 
     # ANTI-MEMORIZATION DV SEED (engine fix, 2026-06-21).
     # Per-block DV stimulus must be UNPREDICTABLE at RTL-generation time, so a
@@ -2313,6 +2327,90 @@ def _sdc_reset_false_path_enabled() -> bool:
     ).strip().lower() not in {"0", "false", "no", "off", ""}
 
 
+def _clock_period_ns(target_clock_mhz: float) -> float:
+    """THE clock period used by the SDC and by the synth delay target."""
+    return 1000.0 / float(target_clock_mhz)
+
+
+def resolve_run_clock_mhz(state_mhz: float | None = None, project_root=None) -> float:
+    """The run's target clock (MHz) for block synth / STA gating.
+
+    ``CORESMITH_TARGET_CLOCK_MHZ`` (an operator override; the daemon re-reads
+    ``.coresmith/env`` on resume) wins over the value checkpointed at
+    ``run start``; without either, ``inputs/task.yaml: target_clock_mhz``,
+    then 50 MHz.
+    """
+    for v in (os.environ.get("CORESMITH_TARGET_CLOCK_MHZ"), state_mhz):
+        try:
+            if v not in (None, "") and float(v) > 0:
+                return float(v)
+        except (TypeError, ValueError):
+            pass
+    try:
+        ty = Path(project_root or PROJECT_ROOT) / "inputs" / "task.yaml"
+        v = (yaml.safe_load(ty.read_text()) or {}).get("target_clock_mhz") if ty.is_file() else None
+        if v is not None and float(v) > 0:
+            return float(v)
+    except Exception:  # noqa: BLE001 - a malformed task.yaml falls back to the default
+        pass
+    return 50.0
+
+
+def synth_abc_delay_target_enabled() -> bool:
+    """``abc -D <period_ps>`` at block synth (CORESMITH_SYNTH_ABC_DELAY_TARGET, default on).
+
+    Without a delay target ABC maps for area only, so the block-level WNS is
+    partly a mapping artifact: the SoC benchmark's rv64_core came back at
+    -27.6 ns with three unbuffered high-fanout gates and a re-rippled adder on
+    the worst path. The same period the SDC constrains is handed to ABC so the
+    number STA reports is a property of the RTL, not of an unconstrained map.
+    """
+    return os.environ.get(
+        "CORESMITH_SYNTH_ABC_DELAY_TARGET", "1"
+    ).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def abc_liberty_cmd(liberty: str, target_clock_mhz: float | None) -> str:
+    """The ``abc -liberty`` line for a timing-aware block synth."""
+    cmd = f"abc -liberty {liberty}"
+    if target_clock_mhz and synth_abc_delay_target_enabled():
+        cmd += f" -D {int(round(_clock_period_ns(target_clock_mhz) * 1000))}"
+    return cmd + synth_dont_use_flags(liberty)
+
+
+_DONT_USE_CACHE: dict = {}
+
+
+def synth_dont_use_flags(liberty: str) -> str:
+    """``-dont_use`` flags for dfflibmap/abc, mirroring the
+    frozen chip flow (common/physical/synth.tcl): the PDK's OpenLane
+    ``no_synth.cells`` list plus every lpflow_/probe/spare/delay cell in the
+    liberty. Without them ABC mapped the SoC fabric into 1,100+ lpflow
+    isolation cells (4.6 ns each) and pre-layout STA reported -29 ns of pure
+    mapping artefact. Off with CORESMITH_SYNTH_DONT_USE=0; "" when nothing found."""
+    if (os.environ.get("CORESMITH_SYNTH_DONT_USE", "1") or "1").strip().lower() in {"0", "false", "no", "off"}:
+        return ""
+    lib = str(liberty or "")
+    if lib in _DONT_USE_CACHE:
+        return _DONT_USE_CACHE[lib]
+    cells: list[str] = []
+    try:
+        lp = Path(lib)
+        m = re.search(r"^(.*)/libs\.ref/([^/]+)/lib/", lib)
+        if m:
+            ns = Path(m.group(1)) / "libs.tech" / "openlane" / m.group(2) / "no_synth.cells"
+            if ns.is_file():
+                cells += [c.strip() for c in ns.read_text().splitlines() if c.strip()]
+        if lp.is_file():
+            txt = lp.read_text(errors="ignore")
+            cells += re.findall(r'cell\s*\(\s*"?((?:[a-z0-9]+_+)+(?:lpflow_|probe|macro_sparecell|clkdlybuf|dlygate)[a-z0-9_]*)"?\s*\)', txt)
+    except Exception:  # noqa: BLE001 - best effort; no flags rather than a broken script
+        cells = []
+    flags = "".join(f" -dont_use {c}" for c in sorted(set(cells)))
+    _DONT_USE_CACHE[lib] = flags
+    return flags
+
+
 def _build_sdc_content(rtl_source: str, target_clock_mhz: float) -> str:
     """THE single SDC generator.
 
@@ -2322,7 +2420,7 @@ def _build_sdc_content(rtl_source: str, target_clock_mhz: float) -> str:
     exempts the reset tree from timing with a guarded ``set_false_path`` so the
     unbuffered pre-layout reset net can't masquerade as the block WNS.
     """
-    period_ns = 1000.0 / target_clock_mhz
+    period_ns = _clock_period_ns(target_clock_mhz)
     # Empty (no clock port at all) selects the virtual-clock branch below.
     clock_port = _detect_clock_port_or_empty(rtl_source)
 
@@ -2508,8 +2606,8 @@ synth -run begin:fine
 memory_bram
 memory_map
 synth -run fine:
-dfflibmap -liberty {liberty}
-abc -liberty {liberty}
+dfflibmap -liberty {liberty}{synth_dont_use_flags(liberty)}
+{abc_liberty_cmd(liberty, target_clock_mhz)}
 opt_clean
 stat -liberty {liberty}
 write_verilog -noattr {netlist_path}
@@ -2656,6 +2754,8 @@ async def fix_lint_errors(
         f"Read the lint errors, then use the Edit tool to fix the RTL file "
         f"in-place. Do NOT rewrite the entire file -- make targeted fixes."
     )
+    from orchestrator.state_store.rulings import rulings_section_env
+    user_message += rulings_section_env(consumer="fix_lint", block=block_name)
 
     block_title = block_name.replace("_", " ").title()
     llm = ClaudeLLM(
@@ -2741,6 +2841,8 @@ async def fix_synth_errors(
         f"Read previous_error.txt and the synthesis errors, then fix the RTL. "
         f"{edit_instr}"
     )
+    from orchestrator.state_store.rulings import rulings_section_env
+    user_message += rulings_section_env(consumer="fix_synth", block=block_name)
 
     block_title = block_name.replace("_", " ").title()
     llm = ClaudeLLM(
@@ -2821,6 +2923,8 @@ async def fix_testbench_errors(
         f"Read the simulation log to understand the failure, then read the "
         f"testbench and RTL. Fix the testbench in-place using the Edit tool."
     )
+    from orchestrator.state_store.rulings import rulings_section_env
+    user_message += rulings_section_env(consumer="fix_testbench", block=block_name)
 
     block_title = block_name.replace("_", " ").title()
     # 600s default; bump via CORESMITH_TB_FIX_TIMEOUT for complex blocks

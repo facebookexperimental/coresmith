@@ -516,7 +516,15 @@ class TestRunPreLayoutStaLoud:
     ``sta_error`` + WARNING), not a silent ``None``, when STA was actually
     attempted for a block that has a netlist. A genuinely absent ``sta`` binary
     or a missing input still returns ``None`` (STA could not be attempted).
+
+    These exercise the STA plumbing with a placeholder memory instance; macro
+    binding (which would refuse the unknown geometry) is covered separately in
+    test_macro_sta.py and is switched off here.
     """
+
+    @pytest.fixture(autouse=True)
+    def _no_macro_binding(self, monkeypatch):
+        monkeypatch.setenv("CORESMITH_STA_BIND_MACROS", "0")
 
     def _inputs(self, tmp_path):
         nl = tmp_path / "n.v"

@@ -515,6 +515,7 @@ class TestIntegrationCheckNode:
         # asserted error/warning counts. Its own behaviour is covered in
         # test_integration_compat_wiring.py, so disable it here.
         monkeypatch.setenv("CORESMITH_DETERMINISTIC_INTEGRATION_CHECK", "0")
+        monkeypatch.setenv("CORESMITH_DETERMINISTIC_TOP", "0")   # A4: these test the LLM lead path
         monkeypatch.setattr("orchestrator.harness.top_module.write_candidate_receipt", lambda *a, **k: {})
         # These routing tests mock file IO; elaboration is covered with real
         # sources and fake tool receipts in test_wp59_elaborated_hierarchy.
@@ -1082,6 +1083,7 @@ class TestIntegrationCheckWarningTriage:
         # error-severity findings on the degenerate fixtures and change the
         # interrupt path. Covered separately in test_integration_compat_wiring.py.
         monkeypatch.setenv("CORESMITH_DETERMINISTIC_INTEGRATION_CHECK", "0")
+        monkeypatch.setenv("CORESMITH_DETERMINISTIC_TOP", "0")   # A4: these test the LLM lead path
         monkeypatch.setattr("orchestrator.harness.top_module.write_candidate_receipt", lambda *a, **k: {})
         # These routing tests mock file IO; elaboration is covered with real
         # sources and fake tool receipts in test_wp59_elaborated_hierarchy.

@@ -166,15 +166,12 @@ async def _run_tapeout_llm_step(
 ) -> dict:
     """Run an LLM-driven EDA step for the tapeout pipeline."""
     from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
-    from orchestrator.langgraph.eda_prompts import (
-        merged_prompt_context,
-        resolve_prompt_path,
-    )
+    from orchestrator.langgraph.eda_prompts import merged_prompt_context
 
     # Merge in the deployment's PDK/tool context ({pdk_summary}/{tool_notes});
-    # caller keys win. Rollback flag selects the .legacy.md sibling when OFF.
+    # caller keys win.
     context = merged_prompt_context(prompt_file, context)
-    prompt_path = resolve_prompt_path(_PROMPT_DIR, prompt_file)
+    prompt_path = _PROMPT_DIR / prompt_file
     system_prompt = prompt_path.read_text().format(**context)
     user_message = (
         f"Execute the {step_name} step as described in the system prompt.\n"

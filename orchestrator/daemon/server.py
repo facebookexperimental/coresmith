@@ -63,6 +63,7 @@ init_telemetry(_PROJECT_ROOT)
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from orchestrator.graph_lifecycle import GraphLifecycle
@@ -190,6 +191,21 @@ def _consumed_now() -> set[str]:
     return set(_consumed_interrupt_ids)
 
 
+def _bind_interrupt_rows(pairs) -> None:
+    """Bind LangGraph ``Interrupt.id`` to the coresmith row it belongs to
+    (the payload carries ``interrupt_id`` when the park went through the
+    interrupts table)."""
+    try:
+        db = _project_db()
+    except Exception:  # noqa: BLE001
+        return
+    for lg_id, value in pairs:
+        cid = value.get("interrupt_id") if isinstance(value, dict) else None
+        if cid:
+            with contextlib.suppress(Exception):
+                db.bind_lg_id(cid, lg_id)
+
+
 async def _count_pending_interrupts() -> int | None:
     """Count parked interrupts. ``None`` means COULD NOT DETERMINE, not zero.
 
@@ -213,12 +229,15 @@ async def _count_pending_interrupts() -> int | None:
         consumed = _consumed_now()
         n = 0
         ids: set[str] = set()
+        pairs = []
         if snap and snap.tasks:
             for t in snap.tasks:
                 for i in t.interrupts:
                     ids.add(i.id)
+                    pairs.append((i.id, i.value))
                     if i.id not in consumed:
                         n += 1
+        _bind_interrupt_rows(pairs)
         # Stamp first-seen here too: this poll runs every _STALL_POLL_S whether
         # or not anyone calls /run/state, so an unattended run still learns when
         # its interrupt was raised.
@@ -265,18 +284,24 @@ async def _driver_liveness_watch() -> None:
                         "be dead -- resume or restart it.",
                         pending, idle / 60.0, _PROJECT_ROOT,
                     )
+                    _stall = {
+                        "pending_interrupt_count": pending,
+                        "idle_seconds": round(idle),
+                        "interrupt_raised_ts": oldest,
+                        "last_resume_ts": _last_resume_ts,
+                        "noted_at": now,
+                    }
+                    # C1: the fact lives in run_flags; the marker file is a view.
+                    with contextlib.suppress(Exception):
+                        _project_db().set_flag("stalled_interrupt", _stall)
                     try:
-                        marker.write_text(json.dumps({
-                            "pending_interrupt_count": pending,
-                            "idle_seconds": round(idle),
-                            "interrupt_raised_ts": oldest,
-                            "last_resume_ts": _last_resume_ts,
-                            "noted_at": now,
-                        }, indent=2))
+                        marker.write_text(json.dumps(_stall, indent=2))
                     except OSError:
                         pass
             else:
                 # cleared -> remove any stale marker
+                with contextlib.suppress(Exception):
+                    _project_db().clear_flag("stalled_interrupt")
                 with contextlib.suppress(OSError):
                     if marker.exists():
                         marker.unlink()
@@ -463,7 +488,7 @@ def _apply_run_env(where: str) -> list[str]:
 
 class StartRequest(BaseModel):
     max_attempts: int = 5
-    target_clock_mhz: float = 50.0
+    target_clock_mhz: float | None = None   # None: inputs/task.yaml target_clock_mhz, else 50
     blocks_file: str = ""
     force: bool = False
 
@@ -474,6 +499,24 @@ class ResumeRequest(BaseModel):
     rtl_fix_description: str = ""
     block_actions: dict | None = None
     rationale: str = ""
+    # C1-3: answer ONE parked branch (coresmith ``interrupt_id`` from
+    # /run/interrupts or the interrupt payload). While the runner is in
+    # flight the answer is queued in the interrupts table and applied at the
+    # next superstep boundary (202) instead of being rejected (409).
+    interrupt_id: str | None = None
+
+
+class RulingRequest(BaseModel):
+    scope: str
+    text: str
+    rationale: str = ""
+    source: str = "human"
+    question_ref: str | None = None
+    supersedes_id: int | None = None
+
+
+class RevokeRulingRequest(BaseModel):
+    reason: str = ""
 
 
 class RestartBlockRequest(BaseModel):
@@ -486,6 +529,11 @@ class RestartBlockRequest(BaseModel):
 class RestartNodeRequest(BaseModel):
     node: str
     refresh_sidecars: bool = False
+
+
+class ReviseBlocksRequest(BaseModel):
+    blocks: list[str]
+    feedback: str = ""
 
 
 class ArchStartRequest(BaseModel):
@@ -538,10 +586,11 @@ async def _lifespan(_app: FastAPI):
     _watch_task = asyncio.create_task(_driver_liveness_watch())
     # Frontend -> backend handoff. Returns immediately when the opt-in is off.
     _auto_backend_task = asyncio.create_task(_auto_backend_watch())
+    _lease_task = asyncio.create_task(_daemon_lease_renew())
     try:
         yield
     finally:
-        for _t in (_watch_task, _auto_backend_task):
+        for _t in (_watch_task, _auto_backend_task, _lease_task):
             _t.cancel()
             with contextlib.suppress(Exception):
                 await _t
@@ -637,6 +686,9 @@ async def run_start(req: StartRequest):
         capture_run_baseline(_PROJECT_ROOT)
     except RuntimeError as exc:
         raise HTTPException(500, str(exc)) from exc
+    # C1: every run-scoped table (run_flags, decisions, interrupts) keys on this.
+    with contextlib.suppress(Exception):
+        _project_db().begin_run()
 
     await _pipeline.reset_for_new_run()
 
@@ -644,9 +696,10 @@ async def run_start(req: StartRequest):
     events_path.parent.mkdir(parents=True, exist_ok=True)
     events_path.write_text("")
 
+    from orchestrator.langgraph.pipeline_helpers import resolve_run_clock_mhz
     initial_state = {
         "project_root": _PROJECT_ROOT,
-        "target_clock_mhz": req.target_clock_mhz,
+        "target_clock_mhz": resolve_run_clock_mhz(req.target_clock_mhz, _PROJECT_ROOT),
         "max_attempts": req.max_attempts,
         "block_queue": block_queue,
         "tier_list": [],
@@ -727,17 +780,105 @@ def _resume_tick_or_park(has_pending_interrupt: bool, has_next_nodes: bool) -> s
     return "none"
 
 
+@app.post("/rulings")
+async def rulings_add(req: RulingRequest):
+    """Record an operator ruling (C2). Resolves any pending interrupt it
+    answers; if the runner is idle and one was resolved, it is applied now."""
+    from orchestrator.state_store.rulings import apply_ruling_to_interrupts
+    try:
+        db = _project_db()
+        rid = db.add_ruling(req.scope, req.text, rationale=req.rationale, source=req.source,
+                            question_ref=req.question_ref, supersedes_id=req.supersedes_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"rulings table unavailable: {exc}") from exc
+    ruling = db.ruling(rid)
+    resolved = apply_ruling_to_interrupts(db, ruling)
+    with contextlib.suppress(Exception):
+        db.export_rulings_view()
+    applied = False
+    if resolved and not _pipeline_task_in_flight():
+        # Idle runner: a plain tick lets run_task's boundary applier consume
+        # the queued answers for exactly those branches.
+        with contextlib.suppress(Exception):
+            await _pipeline.ensure_graph()
+            await _pipeline.safe_resume(None, {"configurable": {"thread_id": _pipeline.thread_id}})
+            applied = True
+    return {"id": rid, "ruling": ruling, "resolved_interrupts": resolved,
+            "applied_now": applied, "conflicts": ruling["conflicts"]}
+
+
+@app.get("/rulings")
+async def rulings_list(scope: str | None = None, all: bool = False):
+    try:
+        rows = _project_db().rulings(scope=scope or None, active_only=not all)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"rulings table unavailable: {exc}") from exc
+    return {"rulings": rows, "count": len(rows)}
+
+
+@app.post("/rulings/{ruling_id}/revoke")
+async def rulings_revoke(ruling_id: int, req: RevokeRulingRequest):
+    try:
+        db = _project_db()
+        ok = db.revoke_ruling(ruling_id, req.reason)
+        db.export_rulings_view()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"rulings table unavailable: {exc}") from exc
+    if not ok:
+        raise HTTPException(404, f"no active ruling {ruling_id}")
+    return {"revoked": True, "id": ruling_id}
+
+
+@app.get("/run/interrupts")
+async def run_interrupts(status: str | None = None):
+    """The interrupts table for this run (pending by default when asked)."""
+    try:
+        rows = _project_db().interrupts(status=status or None)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"interrupts table unavailable: {exc}") from exc
+    return {"interrupts": rows, "count": len(rows)}
+
+
 @app.post("/run/resume")
 async def run_resume(req: ResumeRequest):
     global _last_resume_ts, _consumed_interrupt_ids
     _last_resume_ts = time.time()  # Section 7b: the driver is alive
+    with contextlib.suppress(Exception):
+        _project_db().clear_flag("stalled_interrupt")
     with contextlib.suppress(OSError):
         _mk = Path(_PROJECT_ROOT) / "STALLED_INTERRUPT"
         if _mk.exists():
             _mk.unlink()
     await _pipeline.ensure_graph()
     if _pipeline.task is not None and not _pipeline.task.done():
-        raise HTTPException(409, "pipeline still running; nothing to resume")
+        if req.interrupt_id:
+            # C1-3: a parked branch whose Send() siblings are still running.
+            # LangGraph only resumes at superstep boundaries, so queue the
+            # answer in the interrupts table; the branch picks it up in its
+            # pre-park wait or the boundary applier in run_task resumes just
+            # that branch when the step ends.
+            resolution = {
+                "action": req.action, "feedback": req.feedback,
+                "rtl_fix_description": req.rtl_fix_description,
+                "rationale": req.rationale, "block_actions": req.block_actions or {},
+            }
+            try:
+                ok = _project_db().resolve_interrupt(
+                    req.interrupt_id, resolution, resolved_by="resume")
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(500, f"interrupts table unavailable: {exc}") from exc
+            if not ok:
+                raise HTTPException(404, f"no pending interrupt {req.interrupt_id!r}")
+            return JSONResponse(status_code=202, content={
+                "resumed": False, "queued": True, "interrupt_id": req.interrupt_id,
+                "action": req.action,
+                "note": "applied at the next superstep boundary (or sooner, if the "
+                        "branch is waiting in CORESMITH_INTERRUPT_WAIT_S)",
+            })
+        raise HTTPException(409, "pipeline still running; pass interrupt_id to "
+                                 "queue an answer for one parked branch")
 
     # A resume re-enters the graph in THIS process: pick up any .coresmith/env
     # edits the operator made while the run was parked.
@@ -753,12 +894,19 @@ async def run_resume(req: ResumeRequest):
     if state_snapshot and state_snapshot.tasks:
         for task in state_snapshot.tasks:
             for intr in task.interrupts:
-                interrupts.append((intr.id, intr.value))
                 _val = intr.value if isinstance(intr.value, dict) else {}
+                # C1-3: a targeted resume answers ONE branch; the others stay
+                # parked (they re-raise their interrupt on the next tick).
+                if req.interrupt_id and _val.get("interrupt_id") != req.interrupt_id:
+                    continue
+                interrupts.append((intr.id, intr.value))
                 interrupt_meta.append((
                     _val.get("block", _val.get("block_name", "")),
                     _val.get("supported_actions", []),
                 ))
+    _bind_interrupt_rows(interrupts)
+    if req.interrupt_id and not interrupts:
+        raise HTTPException(404, f"no parked interrupt {req.interrupt_id!r} in the checkpoint")
 
     _has_next = bool(state_snapshot and state_snapshot.next)
     _mode = _resume_tick_or_park(bool(interrupts), _has_next)
@@ -801,10 +949,13 @@ async def run_resume(req: ResumeRequest):
     }
 
     from langgraph.types import Command
-    if len(interrupts) > 1:
+    if len(interrupts) > 1 or req.interrupt_id:
         cmd = Command(resume={iid: resume_value for iid, _ in interrupts})
     else:
         cmd = Command(resume=resume_value)
+    # C1-3: the rows behind these interrupts are answered by this resume.
+    with contextlib.suppress(Exception):
+        _project_db().consume_lg_interrupts([iid for iid, _ in interrupts])
 
     # D5: remember exactly which interrupts this resume answers, BEFORE the
     # graph starts running. Until it checkpoints again, aget_state still returns
@@ -946,6 +1097,31 @@ async def run_restart_node(req: RestartNodeRequest):
     if result.get("error"):
         raise HTTPException(400, result["error"] + (
             " -- " + result["hint"] if result.get("hint") else ""))
+    result["status"] = _pipeline.status
+    return result
+
+
+@app.post("/run/revise-blocks")
+async def run_revise_blocks(req: ReviseBlocksRequest):
+    """Operator-triggered targeted revise of named published blocks.
+
+    Writes the integration-review revise plan ({block: reuse_spec=True}, the
+    feedback -- else the block's human constraints -- as gate_feedback.txt,
+    best/dv_best dropped for those blocks only) onto the latest checkpoint and
+    re-enters the tier loop at init_tier. Other blocks are not redone.
+    Requires the pipeline to be idle (pause first).
+    """
+    if _pipeline.task is not None and not _pipeline.task.done():
+        raise HTTPException(409, "pipeline already running -- pause first")
+    env_updated = _apply_run_env("run/revise-blocks")
+    from orchestrator.langgraph.pipeline_graph import operator_revise_update
+    result = await _pipeline.restart_with_update(
+        lambda values: operator_revise_update(str(_PROJECT_ROOT), values, req.blocks, req.feedback),
+        "integration_review")
+    if result.get("error"):
+        raise HTTPException(400, result["error"])
+    if env_updated:
+        result["env_updated"] = env_updated
     result["status"] = _pipeline.status
     return result
 
@@ -1412,6 +1588,7 @@ def _shape_state(state_snapshot) -> dict:
         return base
 
     values = state_snapshot.values
+    _bind_pairs: list = []
     completed = values.get("completed_blocks", [])
     block_queue = values.get("block_queue", [])
     # Audit F9: completed_blocks is APPEND-ONLY across resumes / re-validation
@@ -1498,8 +1675,11 @@ def _shape_state(state_snapshot) -> dict:
                 was_consumed = intr.id in consumed
                 if was_consumed:
                     consumed_count += 1
+                _bind_pairs.append((intr.id, payload))
                 interrupts.append({
                     "id": intr.id,
+                    "interrupt_id": (payload.get("interrupt_id")
+                                     if isinstance(payload, dict) else None),
                     "payload": payload,
                     "stale_suspected": stale,
                     "stale_basis": basis,
@@ -1508,6 +1688,7 @@ def _shape_state(state_snapshot) -> dict:
                     "consumed_by_resume": was_consumed,
                 })
 
+    _bind_interrupt_rows(_bind_pairs)
     pending_interrupts = [i for i in interrupts if not i["consumed_by_resume"]]
 
     base.update({
@@ -1553,15 +1734,61 @@ def _daemon_file() -> Path:
     return Path(_PROJECT_ROOT) / ".coresmith" / "daemon.json"
 
 
+_DAEMON_LEASE_TTL_S = 60.0
+_daemon_lease_token: str | None = None
+
+
+def _project_db():
+    from orchestrator.state_store.project_db import open_project
+    return open_project(_PROJECT_ROOT)
+
+
 def _write_daemon_file(port: int):
+    """Take the ``daemon`` lease for this project and publish daemon.json.
+
+    C1: the lease (pid, port, token, expiry) is the ownership record; the file
+    is a read-only view of it for ``bin/coresmith`` and older tools. A live
+    foreign daemon refuses the start instead of being silently overwritten.
+    """
+    global _daemon_lease_token
+    info = {"project_root": _PROJECT_ROOT, "port": port, "pid": os.getpid(),
+            "started_at": time.time()}
+    try:
+        db = _project_db()
+        token = db.acquire_lease("daemon", _DAEMON_LEASE_TTL_S, meta=info)
+        if token is None:
+            holder = db.lease("daemon") or {}
+            raise SystemExit(
+                f"error: another daemon (pid {holder.get('holder_pid')}@"
+                f"{holder.get('holder_host')}, port {holder.get('meta', {}).get('port')}) "
+                f"owns {_PROJECT_ROOT}; stop it or run "
+                "`coresmith leases --steal daemon --reason ...`")
+        _daemon_lease_token = token
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the file view must still appear
+        log.warning("daemon lease unavailable (%s); writing daemon.json only", exc)
     df = _daemon_file()
     df.parent.mkdir(parents=True, exist_ok=True)
-    df.write_text(json.dumps({
-        "project_root": _PROJECT_ROOT,
-        "port": port,
-        "pid": os.getpid(),
-        "started_at": time.time(),
-    }, indent=2))
+    df.write_text(json.dumps(info, indent=2))
+
+
+async def _daemon_lease_renew() -> None:
+    """Heartbeat the ``daemon`` lease at a third of its TTL."""
+    while True:
+        try:
+            await asyncio.sleep(_DAEMON_LEASE_TTL_S / 3.0)
+            if _daemon_lease_token:
+                ok = await asyncio.to_thread(
+                    _project_db().renew_lease, "daemon", _daemon_lease_token,
+                    _DAEMON_LEASE_TTL_S)
+                if not ok:
+                    log.warning("daemon lease was stolen or released; another "
+                                "daemon may now own %s", _PROJECT_ROOT)
+        except asyncio.CancelledError:
+            break
+        except Exception:  # noqa: BLE001 - the heartbeat must never crash
+            continue
 
 
 def _remove_daemon_file():
@@ -1574,7 +1801,12 @@ def _remove_daemon_file():
     the replacement is happily serving HTTP -- which is exactly the bug
     seen on 2026-05-19 in the mcu3 run.
     """
+    global _daemon_lease_token
     try:
+        if _daemon_lease_token:
+            with contextlib.suppress(Exception):
+                _project_db().release_lease("daemon", _daemon_lease_token)
+            _daemon_lease_token = None
         df = _daemon_file()
         if not df.exists():
             return

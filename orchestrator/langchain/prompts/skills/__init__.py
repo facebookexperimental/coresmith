@@ -54,6 +54,12 @@ class MissingSkillError(RuntimeError):
 #: that can be SELECTED must have an entry -- :func:`skill_manifest` raises
 #: otherwise, so adding a skill file without describing it fails loudly.
 SKILL_PURPOSES: dict[str, str] = {
+    "systemc_tlm_lt": "Rules for the SystemC TLM-2.0 loosely-timed block models the uArch phase delivers.",
+    "soc_fabric": (
+        "Declare the SoC bus as a generated fabric primitive (pulp axi crossbar, "
+        "AXI-Lite/APB bridges, error slave) instead of hand-writing arbiters or "
+        "decoders; port naming and address-map rules."
+    ),
     "arithmetic_precision": (
         "bit-width derivation, Q-format, rounding/saturation/wraparound rules "
         "for fixed-point datapaths"
@@ -406,6 +412,19 @@ def _rule_axi(ev: _Evidence) -> bool | None:
     return False if ev.has_contracts else None
 
 
+def _rule_fabric(ev: _Evidence) -> bool | None:
+    """B1: a block on a generated fabric (axi4 / axi_lite / apb edge) or one
+    that smells like interconnect must see the fabric skill -- so it names its
+    ports canonically and never hand-writes a decoder/arbiter."""
+    if ev.label_hit("axi4", "axi_lite", "axi-lite", "apb", "cs_fabric"):
+        return True
+    if ev.label_word("arbiter", "crossbar", "xbar", "interconnect", "fabric", "decoder", "bridge"):
+        return True
+    if ev.signal_hit("awvalid", "arvalid", "psel", "penable", "wstrb", "bresp"):
+        return True
+    return False if ev.has_contracts else None
+
+
 def _rule_srdy(ev: _Evidence) -> bool | None:
     if ev.label_hit("srdy", "drdy", "backpressure", "back-pressure",
                     "valid/ready", "ready/valid", "valid_ready", "ready_valid",
@@ -515,6 +534,7 @@ def _rule_arithmetic(ev: _Evidence) -> bool | None:
 
 
 _RULES = {
+    "soc_fabric": _rule_fabric,
     "axi_stream": _rule_axi,
     "srdy_drdy": _rule_srdy,
     "arithmetic_precision": _rule_arithmetic,

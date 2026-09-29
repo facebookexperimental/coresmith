@@ -185,8 +185,6 @@ Exit codes: `0` pass (`ToolResult.ok`), `1` a blocking checker failed, `3` infra
 (honest skip). Every invocation appends a JSONL record under
 `.coresmith/tool_runs/`. Subprocess env always includes `PDK_ROOT`.
 
-The prompt migration is behind `CORESMITH_TOOL_CLI_PROMPTS` (default ON); set it
-to `0` to fall back to the pre-migration `<name>.legacy.md` prompt text.
 KLayout DRC (`_run_klayout_drc`, `CORESMITH_BACKEND_KLAYOUT`) is still called
 directly from `mpw_precheck_node`.
 

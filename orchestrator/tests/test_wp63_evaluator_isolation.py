@@ -119,3 +119,17 @@ def test_receipt_and_log_history_does_not_overwrite(tmp_path, monkeypatch):
     assert first['candidate_sha'] == second['candidate_sha']
     assert first['captured_dir'] != second['captured_dir']
     assert all(p.read_bytes() == data for p, data in before.items())
+
+
+def test_sandbox_rebinds_an_engine_under_tmp(monkeypatch, tmp_path):
+    """An engine checkout under /tmp (worktree, CI scratch) is masked by the
+    sandbox's tmpfs; it must be re-bound read-only or the runner is missing."""
+    monkeypatch.setenv('CORESMITH_ADAPTER_SANDBOX', 'bwrap')
+    monkeypatch.setattr(ta, '_find_bwrap', lambda: '/fake/bwrap')
+    engine = str(Path(ta.__file__).resolve().parents[2])
+    argv = ta._sandbox_argv(['x'], tmp_path / 'work', str(tmp_path / 'proj'))
+    binds = [argv[i + 1] for i, a in enumerate(argv) if a == '--ro-bind']
+    assert (engine in binds) == engine.startswith('/tmp/')
+    monkeypatch.setattr(ta.Path, 'resolve', lambda self: Path('/tmp/eng/orchestrator/harness/task_adapter.py') if str(self).endswith('task_adapter.py') else Path(str(self)))
+    argv = ta._sandbox_argv(['x'], tmp_path / 'work', str(tmp_path / 'proj'))
+    assert argv[argv.index('--tmpfs') + 2:argv.index('--tmpfs') + 3] != ['--bind'] and '/tmp/eng' in argv

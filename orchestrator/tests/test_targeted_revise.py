@@ -209,6 +209,7 @@ class TestFanOutHonoursPlan:
 
     def test_normal_entry_sends_every_block_without_reuse(self, tmp_path, monkeypatch):
         monkeypatch.delenv("CORESMITH_UARCH_SINGLE_CONTEXT", raising=False)
+        monkeypatch.setenv("CORESMITH_UARCH_PHASE", "0")   # B2: the phase also implies spec reuse
         sends = pipeline_graph.fan_out_tier(_orch_state(tmp_path, ["alpha", "beta"]))
         assert [s.arg["reuse_spec"] for s in sends] == [False, False]
 

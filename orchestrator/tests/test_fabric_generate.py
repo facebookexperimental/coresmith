@@ -1,0 +1,375 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""B1: the SoC fabric is generated from a FabricSpec over the vendored pulp
+IP -- rendered, elaborated to plain Verilog by yosys-slang, and verified by
+its own cocotbext-axi testbench."""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from orchestrator.fabric import (
+    CHANNELS,
+    FabricMaster,
+    FabricSlave,
+    FabricSpec,
+    generate_fabric,
+    render_testbench,
+    render_wrapper_sv,
+    slang_available,
+)
+from orchestrator.fabric.amba import ports_for
+
+_SV = Path(__file__).resolve().parents[1] / "langgraph" / "rtl_lib" / "fabric" / "sv"
+
+
+def _spec():
+    return FabricSpec(name="soc", masters=[FabricMaster("cpu0"), FabricMaster("gpu")],
+                      slaves=[FabricSlave("ram", "axi4", 0x8000_0000, 0x1000_0000),
+                              FabricSlave("uart", "apb", 0x1000_0000, 0x1000),
+                              FabricSlave("gpu_regs", "axi_lite", 0x1000_2000, 0x1000)])
+
+
+class TestSpec:
+    def test_validation(self):
+        assert _spec().validate() == []
+        bad = _spec()
+        bad.slaves.append(FabricSlave("ram2", "axi4", 0x8000_1000, 0x1000))   # overlaps ram
+        bad.slaves.append(FabricSlave("odd", "apb", 0x3000, 0x3000))           # not pow2
+        bad.masters.append(FabricMaster("cpu1", id_width=6))                   # id width mismatch
+        errs = bad.validate()
+        assert any("overlap" in e for e in errs) and any("power of two" in e for e in errs)
+        assert any("id_width" in e for e in errs)
+
+    def test_json_roundtrip_and_digest(self):
+        s = _spec()
+        d = json.loads(json.dumps(s.to_json()))
+        s2 = FabricSpec.from_json(d)
+        assert s2.digest() == s.digest() and s2.slaves[1].protocol == "apb"
+        s2.slaves[1].size = 0x2000
+        assert s2.digest() != s.digest()
+        assert FabricSpec.from_json({"name": "x", "masters": [{"name": "m", "id_width": "0x4"}],
+                                     "slaves": [{"name": "s", "base": "0x1000", "size": "0x1000"}]}).validate() == []
+
+    def test_mst_id_width_grows_with_masters(self):
+        s = _spec()
+        assert s.mst_id_width == 5
+        s.masters = s.masters[:1]
+        assert s.mst_id_width == 4
+
+
+class TestAmba:
+    def test_channel_tables_and_port_naming(self):
+        assert {c[0] for c in CHANNELS["apb"]} >= {"psel", "penable", "pready", "prdata", "pslverr"}
+        p = ports_for("axi4", "s_cpu0", role="slave", AW=32, DW=32, IW=4, UW=1)
+        by = {x["name"]: x for x in p}
+        assert by["s_cpu0_awvalid"]["dir"] == "input" and by["s_cpu0_awready"]["dir"] == "output"
+        assert by["s_cpu0_wstrb"]["width"] == 4 and by["s_cpu0_awid"]["width"] == 4
+        m = {x["name"]: x for x in ports_for("apb", "m_uart", role="master", AW=32, DW=32, IW=5, UW=1)}
+        assert m["m_uart_psel"]["dir"] == "output" and m["m_uart_prdata"]["dir"] == "input"
+
+
+class TestRender:
+    def test_wrapper_has_flat_amba_ports_and_the_address_map(self):
+        sv = render_wrapper_sv(_spec())
+        assert "module cs_fabric_soc (" in sv
+        for p in ("s_cpu0_awvalid", "s_gpu_rdata", "m_ram_awid", "m_uart_psel", "m_gpu_regs_awaddr"):
+            assert p in sv, p
+        assert "start_addr: 32'h80000000, end_addr: 32'h90000000" in sv
+        assert "axi_lite_to_apb" in sv and "axi_to_axi_lite" in sv and "axi_xbar #(" in sv
+        assert sv == render_wrapper_sv(_spec())        # deterministic
+        with pytest.raises(ValueError):
+            render_wrapper_sv(FabricSpec(name="bad"))
+
+    def test_testbench_renders_and_compiles(self):
+        tb = render_testbench(_spec())
+        compile(tb, "tb", "exec")
+        assert "AxiRam" in tb and "ApbMem" in tb and "AxiLiteRam" in tb
+        assert "UNMAPPED = 0x90001000" in tb
+
+    def test_vendored_manifest_matches_files(self):
+        man = json.loads((_SV / "MANIFEST.json").read_text())
+        import hashlib
+        for rel, sha in man["files"].items():
+            assert hashlib.sha256((_SV / rel).read_bytes()).hexdigest() == sha, rel
+        assert man["axi"]["tag"] == "v0.39.9" and man["common_cells"]["tag"] == "v1.37.0"
+        assert (_SV / "axi" / "LICENSE").exists() and (_SV / "common_cells" / "LICENSE").exists()
+
+
+_HAVE_SLANG = slang_available()
+_HAVE_SIM = shutil.which("verilator") is not None and shutil.which("cocotb-config") is not None
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not _HAVE_SLANG, reason="yosys-slang not available")
+def test_elaborate_to_plain_verilog_and_lint(tmp_path):
+    art = generate_fabric(_spec(), tmp_path)
+    v = Path(art.rtl_path)
+    assert v.exists() and "module cs_fabric_soc" in v.read_text()
+    assert not art.cached
+    # plain Yosys (no -sv) reads it, and Verilator lints it
+    yb = os.environ.get("CORESMITH_FABRIC_YOSYS") or "yosys"
+    p = subprocess.run([yb, "-q", "-p", f"read_verilog {v}; hierarchy -check -top cs_fabric_soc"],
+                       capture_output=True, text=True, timeout=600)
+    assert p.returncode == 0, (p.stdout + p.stderr)[-2000:]
+    if shutil.which("verilator"):
+        p = subprocess.run(["verilator", "--lint-only", "-Wno-fatal", "-Wno-WIDTH", "-Wno-UNUSED",
+                            "-Wno-UNOPTFLAT", str(v), "--top-module", "cs_fabric_soc"],
+                           capture_output=True, text=True, timeout=600)
+        assert "%Error" not in p.stderr, p.stderr[-2000:]
+    art2 = generate_fabric(_spec(), tmp_path)
+    assert art2.cached
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not (_HAVE_SLANG and _HAVE_SIM), reason="yosys-slang/verilator/cocotb not available")
+def test_generated_testbench_passes_in_simulation(tmp_path, monkeypatch):
+    import orchestrator.langgraph.pipeline_helpers as ph
+    monkeypatch.setattr(ph, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "0")
+    monkeypatch.setenv("CORESMITH_COVERAGE", "0")
+    monkeypatch.setenv("CORESMITH_INTERFACE_VIP", "0")
+    monkeypatch.setattr(ph, "create_golden_model_wrapper", lambda *a, **k: None)
+    art = generate_fabric(_spec(), tmp_path / "rtl", tb_dir=tmp_path / "tb")
+    res = ph.run_simulation({"name": "cs_fabric_soc"}, art.rtl_path, art.tb_path,
+                            project_root=str(tmp_path))
+    assert res["passed"], res.get("log", "")[-4000:]
+
+
+def test_wrapper_declares_apb_types_once_for_many_apb_slaves():
+    spec = FabricSpec(name="soc", masters=[FabricMaster("cpu0"), FabricMaster("gpu")],
+                      slaves=[FabricSlave("ram", "axi4", 0x8000_0000, 0x1000_0000)]
+                      + [FabricSlave(f"p{i}", "apb", 0x1000_0000 + i * 0x1000, 0x1000) for i in range(7)])
+    assert spec.validate() == []
+    sv = render_wrapper_sv(spec)
+    assert sv.count("} apb_req_t;") == 1 and sv.count("} apb_resp_t;") == 1
+    assert sv.count("axi_lite_to_apb #(") == 7
+
+
+def test_latency_mode_and_slave_cut_default_to_the_registered_fabric():
+    # a spec written before the knobs existed picks up the registered defaults
+    old = FabricSpec.from_json({k: v for k, v in _spec().to_json().items()
+                                if k not in ("latency_mode", "slave_cut")})
+    assert old.latency_mode == "cut_all_ports" and old.slave_cut is True
+    sv = render_wrapper_sv(old)
+    assert "LatencyMode: axi_pkg::CUT_ALL_PORTS" in sv and "CUT_ALL_AX" not in sv
+    # one cut per slave port (the axi4 ram port and in front of each AXI-Lite/APB
+    # converter) plus an AXI-Lite cut behind each converter
+    assert sv.count("axi_cut #(") == 5
+    assert "assign m_ram_awvalid = cut_req_0.aw_valid;" in sv
+    assert ".slv_req_i(cut_req_1)" in sv and ".slv_req_i(cut_req_2)" in sv
+
+
+def test_slave_cut_registers_both_sides_of_each_protocol_converter():
+    sv = render_wrapper_sv(_spec())
+    # uart (1, apb) and gpu_regs (2, axi_lite): full cut -> axi_to_axi_lite -> lite cut
+    for j in (1, 2):
+        assert f".slv_req_i(cut_req_{j}), .slv_resp_o(cut_rsp_{j}), .mst_req_o(lite_req_{j})" in sv
+        assert (f"i_cut_lite_{j} (.clk_i(clk), .rst_ni(rst_n), .slv_req_i(lite_req_{j}), "
+                f".slv_resp_o(lite_rsp_{j}), .mst_req_o(cut_lite_req_{j})") in sv
+    assert ".aw_chan_t(lite_aw_chan_t)" in sv and ".axi_req_t(lite_req_t)" in sv
+    # the lite pins and the APB converter only see the lite cut's outputs
+    assert "assign m_gpu_regs_bready = cut_lite_req_2.b_ready;" in sv
+    assert "assign cut_lite_rsp_2.b_valid = m_gpu_regs_bvalid;" in sv
+    assert ".axi_lite_req_i(cut_lite_req_1), .axi_lite_resp_o(cut_lite_rsp_1)" in sv
+    assert ".PipelineRequest(1'b1), .PipelineResponse(1'b1)" in sv
+    assert "PipelineRequest(1'b0)" not in sv
+    s = _spec()
+    s.slave_cut = False
+    sv = render_wrapper_sv(s)
+    assert "cut_lite" not in sv and ".PipelineRequest(1'b0), .PipelineResponse(1'b0)" in sv
+    assert "assign m_gpu_regs_bready = lite_req_2.b_ready;" in sv
+
+
+def test_latency_mode_and_slave_cut_knobs():
+    s = _spec()
+    s.latency_mode, s.slave_cut = "cut_all_ax", False
+    sv = render_wrapper_sv(s)
+    assert "LatencyMode: axi_pkg::CUT_ALL_AX" in sv and "axi_cut #(" not in sv
+    assert ".slv_req_i(mst_req[1])" in sv and "assign m_ram_awvalid = mst_req[0].aw_valid;" in sv
+    # the knobs are part of the digest, so a cached elaboration is invalidated
+    assert s.digest() != _spec().digest()
+    rt = FabricSpec.from_json(json.loads(json.dumps(s.to_json())))
+    assert (rt.latency_mode, rt.slave_cut, rt.digest()) == ("cut_all_ax", False, s.digest())
+    s.latency_mode = "bogus"
+    assert any("latency_mode" in e for e in s.validate())
+
+
+def test_pipeline_stages_and_unique_ids_knobs_are_digest_stable_at_defaults():
+    base = _spec()
+    # defaults render the pre-knob Cfg and stay out of to_json, so existing digests hold
+    assert "pipeline_stages" not in base.to_json() and "unique_ids" not in base.to_json()
+    sv = render_wrapper_sv(base)
+    assert "PipelineStages: 0," in sv and "UniqueIds: 1'b0," in sv
+    s = _spec()
+    s.pipeline_stages, s.unique_ids = 2, True
+    sv = render_wrapper_sv(s)
+    assert "PipelineStages: 2," in sv and "UniqueIds: 1'b1," in sv
+    assert s.digest() != base.digest()
+    rt = FabricSpec.from_json(json.loads(json.dumps(s.to_json())))
+    assert (rt.pipeline_stages, rt.unique_ids, rt.digest()) == (2, True, s.digest())
+    s.pipeline_stages = 5
+    assert any("pipeline_stages" in e for e in s.validate())
+
+
+def test_slave_max_outstanding_sizes_its_converter_and_defaults_to_the_fabric():
+    base = _spec()
+    base.max_outstanding = 8
+    # unset: every converter takes the fabric's max_outstanding, digest unchanged
+    assert all("max_outstanding" not in s for s in base.to_json()["slaves"])
+    sv = render_wrapper_sv(base)
+    assert sv.count(".AxiMaxWriteTxns(8), .AxiMaxReadTxns(8)") == 2
+    s = FabricSpec.from_json(base.to_json())
+    s.slaves[1].max_outstanding = 2                       # uart (apb) only
+    sv = render_wrapper_sv(s)
+    assert sv.count(".AxiMaxWriteTxns(2), .AxiMaxReadTxns(2)") == 1
+    assert sv.count(".AxiMaxWriteTxns(8), .AxiMaxReadTxns(8)") == 1
+    assert "MaxMstTrans: 8," in sv and s.validate() == []
+    assert s.digest() != base.digest()
+    rt = FabricSpec.from_json(json.loads(json.dumps(s.to_json())))
+    assert (rt.slaves[1].max_outstanding, rt.digest()) == (2, s.digest())
+    s.slaves[0].max_outstanding = 2                       # axi4 port: no converter
+    s.slaves[2].max_outstanding = 0
+    errs = s.validate()
+    assert any("ram" in e and "axi_lite/apb" in e for e in errs)
+    assert any("gpu_regs" in e and "1..64" in e for e in errs)
+
+
+def _spec64():
+    s = FabricSpec.from_json(_spec().to_json())
+    s.data_width = 64
+    s.slaves.append(FabricSlave("gin", "apb", 0x1000_1000, 0x1000))
+    return s
+
+
+def test_apb_paddr_keeps_the_32bit_lane_on_a_64bit_fabric():
+    # INV-FABRIC-APB-ADDR-003: axi_lite_to_apb aligns paddr to DW/8; on a
+    # 64-bit fabric the bridge sees the address one bit up and the port takes
+    # it back, so paddr[2] survives and only paddr[1:0] is cleared.
+    s = _spec64()
+    assert s.validate() == []
+    sv = render_wrapper_sv(s)
+    assert sv.count("localparam int unsigned APB_SHIFT = 1;") == 1
+    assert sv.count("} apb_req_t;") == 1 and "apb_addr_t paddr;" in sv
+    for j, name, base in ((1, "uart", 0x1000_0000), (3, "gin", 0x1000_1000)):
+        assert f"assign m_{name}_paddr = apb_req_{j}.paddr[AW+APB_SHIFT-1:APB_SHIFT];" in sv
+        assert f"start_addr: 33'h{base << 1:X}, end_addr: 33'h{(base + 0x1000) << 1:X}" in sv
+        assert f"aw: '{{addr: {{cut_lite_req_{j}.aw.addr, 1'b0}}" in sv
+        assert f"ar: '{{addr: {{cut_lite_req_{j}.ar.addr, 1'b0}}" in sv
+        assert f".axi_lite_req_i(apb_lite_req_{j}), .axi_lite_resp_o(cut_lite_rsp_{j})" in sv
+    assert sv.count(".AddrWidth(AW+APB_SHIFT), .DataWidth(DW), .PipelineRequest(1'b1), .PipelineResponse(1'b1)") == 2
+    # the AXI-Lite port is untouched
+    assert "assign m_gpu_regs_awaddr = cut_lite_req_2.aw.addr;" in sv
+    # a 32-bit fabric already keeps paddr[2]: no shift, the pre-fix rendering
+    sv32 = render_wrapper_sv(_spec())
+    assert "APB_SHIFT" not in sv32 and "assign m_uart_paddr = apb_req_1.paddr;" in sv32
+    assert "test_apb_subword_address" in render_testbench(s)
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not (_HAVE_SLANG and _HAVE_SIM), reason="yosys-slang/verilator/cocotb not available")
+def test_generated_testbench_passes_on_a_64bit_fabric_with_apb_subword_access(tmp_path, monkeypatch):
+    # the generated TB's test_apb_subword_address: 32-bit write to +0xC
+    # (wstrb 0xF0) -> paddr[3:0] 0xC, read of +0x4 -> paddr[2] 1, +0x0/+0x4 distinct
+    import orchestrator.langgraph.pipeline_helpers as ph
+    monkeypatch.setattr(ph, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "0")
+    monkeypatch.setenv("CORESMITH_COVERAGE", "0")
+    monkeypatch.setenv("CORESMITH_INTERFACE_VIP", "0")
+    monkeypatch.setattr(ph, "create_golden_model_wrapper", lambda *a, **k: None)
+    art = generate_fabric(_spec64(), tmp_path / "rtl", tb_dir=tmp_path / "tb")
+    res = ph.run_simulation({"name": "cs_fabric_soc"}, art.rtl_path, art.tb_path,
+                            project_root=str(tmp_path))
+    assert res["passed"], res.get("log", "")[-4000:]
+
+
+# The renderings of _spec()/_spec64() before shared_apb_bridge existed (4aedaf6):
+# the knob at its default must not change a byte of the wrapper or the TB.
+_PRE_KNOB_SHA256 = {
+    "_spec": ("7edeb1b5086d47412a13d6666d83cd330e4fb05ae95fe37d4f03c602ae6e5f42",
+              "afd1b0d532ba9594a12d94aa016eb60f19babdf1402538ebc7a1fd39b488919b"),
+    "_spec64": ("54c85881931b39143531c6e2ee7054793f588c5f27b2fd2143ad49119868a5fd",
+                "74ec932c02fd933d382e9bc9f60558df999931322b2dc8a47dc08e5b86ca2f9d"),
+}
+
+
+def test_shared_apb_bridge_default_renders_byte_identically():
+    import hashlib
+    for mk in (_spec, _spec64):
+        s = mk()
+        assert s.shared_apb_bridge is False and "shared_apb_bridge" not in s.to_json()
+        explicit = FabricSpec.from_json(dict(s.to_json(), shared_apb_bridge=False))
+        assert explicit.digest() == s.digest()
+        sv, tb = render_wrapper_sv(explicit), render_testbench(explicit)
+        assert (hashlib.sha256(sv.encode()).hexdigest(),
+                hashlib.sha256(tb.encode()).hexdigest()) == _PRE_KNOB_SHA256[mk.__name__]
+        assert "test_apb_shared_decode" not in tb
+    # a single APB slave: the shared bridge is the per-slave bridge
+    one = _spec()
+    shared = FabricSpec.from_json(dict(one.to_json(), shared_apb_bridge=True))
+    assert shared.digest() != one.digest()
+    assert [x for x in render_wrapper_sv(shared).splitlines() if not x.startswith("// shared_apb_bridge")] \
+        == render_wrapper_sv(one).splitlines()
+
+
+def _spec_shared():
+    # 2 APB slaves in non-contiguous windows with an AXI-Lite slave between them
+    s = _spec64()
+    s.slaves[3].base = 0x1000_4000       # gin; gpu_regs stays at 0x1000_2000
+    s.shared_apb_bridge = True
+    return s
+
+
+def test_shared_apb_bridge_renders_one_bridge_with_a_psel_decoder():
+    s = _spec_shared()
+    assert s.validate() == [] and s.to_json()["shared_apb_bridge"] is True
+    assert FabricSpec.from_json(s.to_json()).digest() == s.digest()
+    assert s.xbar_ports() == [[0], [1, 3], [2]]
+    sv = render_wrapper_sv(s)
+    # 3 crossbar ports for 4 slaves; one address rule per slave, both APB windows -> port 1
+    assert "NoMstPorts: 3," in sv and "NoAddrRules: 4 }" in sv
+    assert "'{idx: 1, start_addr: 32'h10004000, end_addr: 32'h10005000}" in sv
+    assert "'{idx: 1, start_addr: 32'h10000000, end_addr: 32'h10001000}" in sv
+    assert "'{idx: 2, start_addr: 32'h10002000, end_addr: 32'h10003000}" in sv
+    assert sv.count("axi_to_axi_lite #(") == 2 and sv.count("axi_lite_to_apb #(") == 1
+    assert ".NoApbSlaves(2), .NoRules(2), .AddrWidth(AW+APB_SHIFT)" in sv
+    assert "localparam apb_rule_t [1:0] ApbMap_1 = '{ '{idx: 1, start_addr: 33'h20008000, end_addr: 33'h2000A000}, " \
+           "'{idx: 0, start_addr: 33'h20000000, end_addr: 33'h20002000} };" in sv
+    # per-slave psel/response, the same external ports and the Q37 paddr slice
+    for k, name in ((0, "uart"), (1, "gin")):
+        assert f"assign m_{name}_psel = apb_req_1[{k}].psel;" in sv
+        assert f"assign m_{name}_paddr = apb_req_1[{k}].paddr[AW+APB_SHIFT-1:APB_SHIFT];" in sv
+        assert f"assign apb_rsp_1[{k}] = '{{pready: m_{name}_pready, prdata: m_{name}_prdata, pslverr: m_{name}_pslverr}};" in sv
+    base = FabricSpec.from_json(dict(s.to_json(), shared_apb_bridge=False))
+    import re
+    def hdr(t):
+        return re.search(r"module cs_fabric_soc \((.*?)\);", t, re.S).group(1)
+    assert hdr(sv) == hdr(render_wrapper_sv(base))
+    tb = render_testbench(s)
+    assert "test_apb_shared_decode" in tb and "APB_HOLES = [0xffff000, 0x10001000, 0x10003000, 0x10005000]" in tb
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not (_HAVE_SLANG and _HAVE_SIM), reason="yosys-slang/verilator/cocotb not available")
+def test_generated_testbench_passes_with_a_shared_apb_bridge(tmp_path, monkeypatch):
+    # decode to each APB slave (psel on exactly that one), DECERR in the holes
+    # around/between the APB windows, the AXI-Lite slave between them, and
+    # test_apb_subword_address through the shared bridge
+    import orchestrator.langgraph.pipeline_helpers as ph
+    monkeypatch.setattr(ph, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "0")
+    monkeypatch.setenv("CORESMITH_COVERAGE", "0")
+    monkeypatch.setenv("CORESMITH_INTERFACE_VIP", "0")
+    monkeypatch.setattr(ph, "create_golden_model_wrapper", lambda *a, **k: None)
+    art = generate_fabric(_spec_shared(), tmp_path / "rtl", tb_dir=tmp_path / "tb")
+    assert "test_apb_shared_decode" in Path(art.tb_path).read_text()
+    res = ph.run_simulation({"name": "cs_fabric_soc"}, art.rtl_path, art.tb_path,
+                            project_root=str(tmp_path))
+    assert res["passed"], res.get("log", "")[-4000:]

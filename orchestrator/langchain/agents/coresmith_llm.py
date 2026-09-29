@@ -1519,6 +1519,14 @@ def _find_opencode_binary() -> str:
 # ClaudeLLM -- plain Python class (no LangChain)
 # ---------------------------------------------------------------------------
 
+def _llm_slot_count() -> int:
+    """CORESMITH_LLM_SLOTS: concurrent CLI workers per project (0 = unlimited)."""
+    try:
+        return max(0, int(os.environ.get("CORESMITH_LLM_SLOTS", "0") or 0))
+    except ValueError:
+        return 0
+
+
 class ClaudeLLM:
     """LLM client backed by the Claude Code CLI.
 
@@ -3064,6 +3072,60 @@ class ClaudeLLM:
     _STREAM_UPDATE_EVERY_N: int = 1  # every poll (~2s)
 
     def _run_cli_with_watchdog(
+        self,
+        cmd: list[str],
+        user_prompt: str,
+        project_root: str,
+        resolved_model: str,
+        t0: float,
+        cwd: str | None = None,
+        process_env: dict[str, str] | None = None,
+    ) -> tuple[str, str, int, float, bool, bool, dict]:
+        """``_run_cli_unslotted`` under an LLM worker slot (C1-4).
+
+        ``CORESMITH_LLM_SLOTS=N`` caps concurrent CLI workers per project with
+        ``llm_slot:<i>`` leases in the project database (the benchmark used
+        external slot files for this). Unset/0 = unlimited, exactly as before.
+        A slot is held for the life of the child; a crashed worker frees it by
+        pid death instead of leaking a lock file.
+        """
+        slots = _llm_slot_count()
+        if slots <= 0 or not project_root:
+            return self._run_cli_unslotted(cmd, user_prompt, project_root, resolved_model,
+                                           t0, cwd=cwd, process_env=process_env)
+        from orchestrator.state_store.leases import LeaseUnavailable
+        from orchestrator.state_store.project_db import open_project
+        try:
+            db = open_project(project_root)
+        except Exception as exc:  # noqa: BLE001 - no DB, no cap
+            logger.warning("LLM slots requested but project DB unavailable (%s)", exc)
+            return self._run_cli_unslotted(cmd, user_prompt, project_root, resolved_model,
+                                           t0, cwd=cwd, process_env=process_env)
+        deadline = _time_mod.monotonic() + max(60.0, float(self.timeout))
+        meta = {"model": resolved_model, "cmd": " ".join(cmd)[:120]}
+        token = name = None
+        while token is None:
+            for i in range(slots):
+                name = f"llm_slot:{i}"
+                token = db.acquire_lease(name, ttl_s=max(120.0, float(self.timeout) + 60.0),
+                                         meta=meta)
+                if token:
+                    break
+            if token is None:
+                if _time_mod.monotonic() > deadline:
+                    raise LeaseUnavailable(
+                        f"no LLM slot free in {slots} after {self.timeout:.0f}s")
+                _time_mod.sleep(0.5)
+        try:
+            return self._run_cli_unslotted(cmd, user_prompt, project_root, resolved_model,
+                                           t0, cwd=cwd, process_env=process_env)
+        finally:
+            try:
+                db.release_lease(name, token)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _run_cli_unslotted(
         self,
         cmd: list[str],
         user_prompt: str,

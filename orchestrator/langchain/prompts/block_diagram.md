@@ -58,6 +58,13 @@ RULES:
      memory/IO/wrapper block that reproduces no golden math, set
      `"golden_exempt": true` AND `"no_golden_reason": "<why the contract fixes
      its behaviour completely>"`; every other block MUST name its golden slice.
+   - kind (optional): "primitive" for an engine-generated block. The only
+     primitive today is the SoC fabric: `"kind": "primitive", "primitive":
+     "cs_fabric", "tier": 0` plus a `"fabric": {{...}}` spec (masters, slaves
+     with base/size/protocol, widths) as the SoC fabric skill shows. Any
+     design with >= 2 initiators sharing a target, or any AXI/APB bus, MUST
+     declare its interconnect this way -- never as an arbiter/crossbar/decoder
+     block for the RTL agent to write.
    - rtl_target: path for generated Verilog (e.g. "rtl/<subsystem>/<name>.v")
    - testbench: path for cocotb testbench (e.g. "tb/cocotb/test_<name>.py")
    - interfaces: dict of port groups (e.g. {{"input": {{"width": 8}}, "output": {{"width": 8}}}})
@@ -93,7 +100,11 @@ RULES:
    {{from, to, interface, data_width, bus_name, handshake_protocol}}
    - handshake_protocol (REQUIRED, authoritative edge intent): exactly one of
      `axi_stream` | `srdy_drdy` | `req_resp` | `mem_write` | `valid_only` |
-     `static`. This is the AUTHORITATIVE family the Interface Definition stage
+     `static` | `axi4` | `axi_lite` | `apb`. The last three are ONLY for edges
+     to/from a `fabric` primitive block (see the SoC fabric skill): masters
+     connect to the fabric with `axi4`; the fabric connects to slaves with
+     `axi4` (memories, DMA targets), `axi_lite` (register files) or `apb`
+     (peripherals). This is the AUTHORITATIVE family the Interface Definition stage
      freezes into the contract; a downstream stage must NOT re-derive it from
      invented port spelling. Selection guidance:
      * `axi_stream` / `srdy_drdy` -- STREAMING only: BOTH producer and consumer

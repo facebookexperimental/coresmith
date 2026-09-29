@@ -66,6 +66,11 @@ def _oracle_files(project_root: str | Path) -> list[Path]:
         except Exception:  # noqa: BLE001
             rp = p
         key = str(rp)
+        # C2: the run's own state dir (rulings view, DB, views) is engine
+        # output, never an oracle. Rulings deliberately live there so adding
+        # one mid-run is not tampering.
+        if ".coresmith" in rp.parts:
+            return
         if p.is_file() and key not in seen:
             seen.add(key)
             files.append(p)

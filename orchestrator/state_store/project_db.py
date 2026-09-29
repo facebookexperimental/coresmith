@@ -43,9 +43,21 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from orchestrator.state_store.interrupts import InterruptMixin
+from orchestrator.state_store.leases import LeaseMixin
+from orchestrator.state_store.ontology import ONTOLOGY_SCHEMA, OntologyMixin
+from orchestrator.state_store.rulings import RulingMixin
 from orchestrator.state_store.store import _SCHEMA as _SCOREBOARD_SCHEMA
 
 DB_NAME = "project.sqlite"
+# Result kinds that carry a per-block pass and are exported as block views.
+#   dv_best -- the block's DV pass (sim green), written the moment cocotb passes;
+#   best    -- the block's PUBLISHED pass: sim AND synth AND timing met (written
+#              by block_done only). Consumers that mean "the block is done" must
+#              read ``best``; consumers that mean "DV passed" read ``dv_best``.
+RESULT_VIEW_KINDS = ("best", "dv_best")
+
+
 DRAFTS_DIR = "drafts"
 BLOCK_VIEW_KINDS = ("constraints", "diagnosis", "attempt_history", "best_result")
 
@@ -144,11 +156,113 @@ CREATE TABLE IF NOT EXISTS constraints (
 CREATE INDEX IF NOT EXISTS idx_constraints_block ON constraints(block);
 CREATE TABLE IF NOT EXISTS results (
     block TEXT NOT NULL,
-    kind TEXT NOT NULL,          -- best | integration | gate_sim | conformance | dv_summary | throughput | ...
+    kind TEXT NOT NULL,          -- best | dv_best | integration | gate_sim | conformance | dv_summary | throughput | ...
     value_json TEXT NOT NULL,
     report_path TEXT,
     ts REAL,
     PRIMARY KEY (block, kind)
+);
+-- Run state (C1): process locks and per-run facts that used to live in
+-- flocks, PID files and in-memory sets. See state_store/leases.py.
+CREATE TABLE IF NOT EXISTS leases (
+    name TEXT PRIMARY KEY,
+    holder_pid INTEGER NOT NULL,
+    holder_host TEXT NOT NULL,
+    token TEXT NOT NULL,
+    acquired_ts REAL NOT NULL,
+    expires_ts REAL NOT NULL,
+    meta_json TEXT,
+    stolen_from_json TEXT
+);
+CREATE TABLE IF NOT EXISTS run_flags (
+    name TEXT NOT NULL,
+    run_id TEXT NOT NULL DEFAULT '',
+    value_json TEXT,
+    ts REAL NOT NULL,
+    PRIMARY KEY (name, run_id)
+);
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY,
+    interrupt_id TEXT,
+    interrupt_type TEXT,
+    block TEXT,
+    action TEXT NOT NULL,
+    reasoning TEXT,
+    decision_index INTEGER NOT NULL,
+    run_id TEXT NOT NULL DEFAULT '',
+    ts REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_run ON decisions(run_id);
+CREATE TABLE IF NOT EXISTS interrupts (
+    id TEXT PRIMARY KEY,             -- coresmith interrupt id (in the payload)
+    lg_interrupt_id TEXT,            -- LangGraph Interrupt.id once the daemon has seen it
+    graph TEXT NOT NULL,             -- architecture | pipeline | backend
+    branch TEXT,
+    node TEXT NOT NULL,
+    block TEXT,
+    kind TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',   -- pending | resolved | consumed | abandoned
+    resolution_json TEXT,
+    resolved_by TEXT,
+    run_id TEXT NOT NULL DEFAULT '',
+    ts REAL NOT NULL,
+    resolved_ts REAL,
+    consumed_ts REAL
+);
+CREATE INDEX IF NOT EXISTS idx_interrupts_status ON interrupts(status, graph);
+-- Operator rulings (C2): additive run-time policy, never under inputs/.
+CREATE TABLE IF NOT EXISTS rulings (
+    id INTEGER PRIMARY KEY,
+    scope TEXT NOT NULL,             -- global | arch | block:<name> | edge:<edge_id>
+    question_ref TEXT,               -- interrupt:<id> | prd:<qid> | block:<name>:<kind>
+    text TEXT NOT NULL,
+    rationale TEXT,
+    source TEXT NOT NULL DEFAULT 'human',   -- human | chip_lead | coordinator
+    ts REAL NOT NULL,
+    supersedes_id INTEGER,
+    revoked_ts REAL,
+    revoked_reason TEXT,
+    conflict_json TEXT
+);
+CREATE TABLE IF NOT EXISTS ruling_uses (
+    id INTEGER PRIMARY KEY,
+    ruling_id INTEGER NOT NULL,
+    consumer TEXT NOT NULL,
+    block TEXT,
+    node TEXT,
+    attempt INTEGER,
+    run_id TEXT NOT NULL DEFAULT '',
+    ts REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ruling_uses_ruling ON ruling_uses(ruling_id);
+-- SystemC models (B2): one row per block model delivered by the uArch phase.
+CREATE TABLE IF NOT EXISTS models (
+    block TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'systemc',
+    path TEXT,
+    sha TEXT,
+    spec_contract_version TEXT,
+    build_ok INTEGER,
+    smoke_ok INTEGER,
+    ts REAL NOT NULL,
+    PRIMARY KEY (block, kind)
+);
+-- Shell integration (A4): every deterministic assembly of the chip top.
+CREATE TABLE IF NOT EXISTS integration_snapshots (
+    id INTEGER PRIMARY KEY,
+    tier TEXT,
+    ts REAL NOT NULL,
+    top TEXT,
+    rtl_path TEXT,
+    real_blocks_json TEXT,
+    stub_blocks_json TEXT,
+    wires INTEGER,
+    boundary_ports INTEGER,
+    elaborated INTEGER,
+    wiring_errors_json TEXT,
+    elab_errors_json TEXT,
+    run_id TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -189,7 +303,7 @@ def _float(v: Any) -> float | None:
         return None
 
 
-class ProjectDB:
+class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin):
     """The project database. Construct with :func:`open_project` in most code."""
 
     def __init__(self, project_root: str | Path):
@@ -202,6 +316,7 @@ class ProjectDB:
         with self._conn() as db:
             db.executescript(_SCHEMA)
             db.executescript(_SCOREBOARD_SCHEMA)
+            db.executescript(ONTOLOGY_SCHEMA)
             for table in ("attempts", "diagnoses"):
                 cols = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
                 if "round" not in cols:
@@ -391,6 +506,15 @@ class ProjectDB:
                     d[k] = ""
             if d["tier"] is None:
                 d["tier"] = "1"
+            # B1: a primitive block (generated fabric) carries its kind and spec
+            # through the queue; ordinary blocks are unchanged.
+            extra = _uj(r["extra_json"], {}) or {}
+            for k in ("kind", "primitive", "fabric", "golden_exempt", "no_golden_reason", "cluster", "instances", "owns"):
+                if k in extra and k not in d:
+                    d[k] = extra[k]
+            # step 4: cluster workers group by ``cluster`` (explicit) or ``subsystem``
+            if r["subsystem"] and "subsystem" not in d:
+                d["subsystem"] = r["subsystem"]
             out.append(d)
         return out
 
@@ -638,7 +762,7 @@ class ProjectDB:
         return _uj(row["value_json"], None) if row else None
 
     def set_result(self, block: str, kind: str, value: dict, report_path: str | None = None) -> None:
-        if kind == "best" and "spec_sha256" not in value:
+        if kind in RESULT_VIEW_KINDS and "spec_sha256" not in value:
             import hashlib
             spec = self.root / "arch/uarch_specs" / f"{block}.md"
             if spec.is_file():
@@ -650,7 +774,7 @@ class ProjectDB:
                 "report_path=excluded.report_path, ts=excluded.ts",
                 (block, kind, _j(value), report_path, time.time()),
             )
-        if kind == "best":
+        if kind in RESULT_VIEW_KINDS:
             self.export_block_views(block)
 
     def update_result(self, block: str, kind: str, **fields: Any) -> dict:
@@ -665,25 +789,35 @@ class ProjectDB:
     def clear_result(self, block: str, kind: str) -> None:
         with self._tx() as db:
             db.execute("DELETE FROM results WHERE block=? AND kind=?", (block, kind))
-        if kind == "best":
+        if kind in RESULT_VIEW_KINDS:
             self.export_block_views(block)
 
     def invalidate_results_for_specs(self, spec_hashes: dict[str, str]) -> list[str]:
-        """Archive and clear best results for different (or unrecorded) spec bytes."""
+        """Archive and clear pass results for different (or unrecorded) spec bytes.
+
+        Both the DV-only pass (``dv_best``) and the published block pass
+        (``best``) are earned against one reviewed spec; a changed spec voids
+        both.
+        """
         invalidated = []
         with self._tx() as db:
             for block, digest in spec_hashes.items():
-                row = db.execute("SELECT value_json FROM results WHERE block=? AND kind='best'",
-                                 (block,)).fetchone()
-                best = _uj(row["value_json"], {}) if row else None
-                if best is None or best.get("spec_sha256") == digest:
-                    continue
-                archived = {"previous_best": best, "adopted_spec_sha256": digest,
-                            "reason": "reviewed spec changed; verification required"}
-                db.execute("INSERT OR REPLACE INTO results(block,kind,value_json,ts) VALUES(?,?,?,?)",
-                           (block, "spec_invalidated", _j(archived), time.time()))
-                db.execute("DELETE FROM results WHERE block=? AND kind='best'", (block,))
-                invalidated.append(block)
+                hit = False
+                for kind in RESULT_VIEW_KINDS:
+                    row = db.execute("SELECT value_json FROM results WHERE block=? AND kind=?",
+                                     (block, kind)).fetchone()
+                    best = _uj(row["value_json"], {}) if row else None
+                    if best is None or best.get("spec_sha256") == digest:
+                        continue
+                    archived = {"previous_best": best, "previous_kind": kind,
+                                "adopted_spec_sha256": digest,
+                                "reason": "reviewed spec changed; verification required"}
+                    db.execute("INSERT OR REPLACE INTO results(block,kind,value_json,ts) VALUES(?,?,?,?)",
+                               (block, "spec_invalidated", _j(archived), time.time()))
+                    db.execute("DELETE FROM results WHERE block=? AND kind=?", (block, kind))
+                    hit = True
+                if hit:
+                    invalidated.append(block)
         for block in invalidated:
             self.export_block_views(block)
         return invalidated
@@ -705,6 +839,89 @@ class ProjectDB:
         tmp.write_text(json.dumps(value, indent=2, default=str), encoding="utf-8")
         os.chmod(tmp, 0o444)
         os.replace(tmp, target)
+
+    @staticmethod
+    def _write_text_view(target: Path, text: str) -> None:
+        """A read-only non-JSON view (jsonl, markdown), written atomically."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.chmod(tmp, 0o444)
+        os.replace(tmp, target)
+
+    def export_decisions_view(self) -> Path:
+        """``.coresmith/chip_lead/decisions.jsonl`` regenerated from ``decisions``.
+
+        The jsonl used to BE the ledger (guarded by a flock); it is now a
+        read-only view for tools that tail it.
+        """
+        target = self.path.parent / "chip_lead" / "decisions.jsonl"
+        lines = [json.dumps({
+            "interrupt_type": d.get("interrupt_type", ""),
+            "block_name": d.get("block", ""),
+            "action": d.get("action", ""),
+            "reasoning": d.get("reasoning", ""),
+            "decision_index": d.get("decision_index"),
+            "interrupt_id": d.get("interrupt_id", ""),
+            "ts": d.get("ts"),
+        }, default=str) for d in self.decisions()]
+        self._write_text_view(target, ("\n".join(lines) + "\n") if lines else "")
+        return target
+
+    def upsert_model(self, block: str, *, path: str = "", sha: str = "", spec_contract_version: str = "",
+                     build_ok: bool | None = None, smoke_ok: bool | None = None,
+                     kind: str = "systemc") -> None:
+        with self._tx() as db:
+            db.execute(
+                "INSERT INTO models(block, kind, path, sha, spec_contract_version, build_ok, smoke_ok, ts) "
+                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(block, kind) DO UPDATE SET path=excluded.path, "
+                "sha=excluded.sha, spec_contract_version=excluded.spec_contract_version, "
+                "build_ok=excluded.build_ok, smoke_ok=excluded.smoke_ok, ts=excluded.ts",
+                (block, kind, path, sha, spec_contract_version,
+                 None if build_ok is None else int(bool(build_ok)),
+                 None if smoke_ok is None else int(bool(smoke_ok)), time.time()))
+
+    def model_for(self, block: str, kind: str = "systemc") -> dict | None:
+        with self._conn() as db:
+            row = db.execute("SELECT * FROM models WHERE block=? AND kind=?", (block, kind)).fetchone()
+        return dict(row) if row else None
+
+    def models(self) -> list[dict]:
+        with self._conn() as db:
+            return [dict(r) for r in db.execute("SELECT * FROM models ORDER BY block").fetchall()]
+
+    def add_integration_snapshot(self, snap: dict) -> int:
+        with self._tx() as db:
+            cur = db.execute(
+                "INSERT INTO integration_snapshots(tier, ts, top, rtl_path, real_blocks_json, "
+                "stub_blocks_json, wires, boundary_ports, elaborated, wiring_errors_json, "
+                "elab_errors_json, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (_s(snap.get("tier")), float(snap.get("ts") or time.time()), _s(snap.get("top")),
+                 _s(snap.get("rtl_path")), _j(snap.get("real_blocks") or []),
+                 _j(snap.get("stub_blocks") or []), _int(snap.get("wires")),
+                 _int(snap.get("boundary_ports")),
+                 None if snap.get("elaborated") is None else int(bool(snap.get("elaborated"))),
+                 _j(snap.get("wiring_errors") or []), _j(snap.get("elab_errors") or []),
+                 self.run_id()))
+            return int(cur.lastrowid)
+
+    def latest_integration_snapshot(self) -> dict | None:
+        with self._conn() as db:
+            row = db.execute("SELECT * FROM integration_snapshots ORDER BY id DESC LIMIT 1").fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        for k in ("real_blocks", "stub_blocks", "wiring_errors", "elab_errors"):
+            d[k] = _uj(d.pop(f"{k}_json"), [])
+        d["elaborated"] = None if d["elaborated"] is None else bool(d["elaborated"])
+        return d
+
+    def begin_run(self, run_id: str | None = None) -> str:
+        """Mint (or adopt) the run id every run-scoped table is keyed by."""
+        import uuid
+        rid = run_id or f"run-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        self.set_setting("run_id", rid)
+        return rid
 
     # WP-75: the registry views are read-only by convention, but the chip lead
     # (and operators) edit them with file tools -- the prompts tell them to fix
@@ -763,6 +980,10 @@ class ProjectDB:
             contracts = self.contracts()
             if contracts:
                 self._export_view(cdir / "interface_contracts.json", contracts)
+            try:
+                self.export_rulings_view()
+            except OSError:
+                pass
         finally:
             self._exporting_views = False
         note = cdir / "STATE.md"
@@ -783,12 +1004,13 @@ class ProjectDB:
         self._write_view(bdir / "attempt_history.json", self.attempt_history(block))
         self._write_view(bdir / "attempt_history_all_rounds.json", self.attempt_history(block, all_rounds=True))
         self._write_view(bdir / "diagnoses_all_rounds.json", self.diagnoses(block))
-        best = self.result(block, "best")
-        target = bdir / "best_result.json"
-        if best is None:
-            target.unlink(missing_ok=True)
-        else:
-            self._write_view(target, best)
+        for kind, fname in (("best", "best_result.json"), ("dv_best", "dv_best_result.json")):
+            val = self.result(block, kind)
+            target = bdir / fname
+            if val is None:
+                target.unlink(missing_ok=True)
+            else:
+                self._write_view(target, val)
 
     def drafts_dir(self) -> Path:
         d = self.path.parent / DRAFTS_DIR
@@ -828,7 +1050,8 @@ class ProjectDB:
             imported.append("interface_contracts.json")
         blocks_dir = cdir / "blocks"
         if blocks_dir.is_dir():
-            kinds = (("best", "best_result.json"), ("coverage", "coverage.json"),
+            kinds = (("best", "best_result.json"), ("dv_best", "dv_best_result.json"),
+                     ("coverage", "coverage.json"),
                      ("throughput", "throughput.json"), ("dv_summary", "dv_summary.json"),
                      ("ppa", "ppa_report.json"), ("provenance", "provenance.json"))
             for bdir in sorted(p for p in blocks_dir.iterdir() if p.is_dir()):
@@ -858,6 +1081,17 @@ class ProjectDB:
                     if isinstance(val, dict):
                         self.set_result(name, kind, val, report_path=str(bdir / fname))
                         imported.append(f"blocks/{name}/{fname}")
+                # A pre-gate run recorded its sim-pass as ``best`` before synth
+                # and timing ran. Under the done-result gate that record is a
+                # DV pass only: keep it as ``dv_best`` and let ``best`` mean
+                # "sim AND synth AND timing" from here on.
+                legacy_best = results.get("best")
+                if (isinstance(legacy_best, dict) and not legacy_best.get("done")
+                        and not isinstance(results.get("dv_best"), dict)):
+                    self.set_result(name, "dv_best", legacy_best,
+                                    report_path=str(bdir / "best_result.json"))
+                    self.clear_result(name, "best")
+                    imported.append(f"blocks/{name}/best_result.json->dv_best")
         self.set_setting("legacy_import_done", "1")
         self.export_views()
         return imported

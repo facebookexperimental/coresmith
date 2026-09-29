@@ -142,7 +142,7 @@ Output format:
 # the spec correctly described an N-stage pipeline, but the RTL generator --
 # which never saw this skill or the PDK budget -- collapsed the datapath into
 # one combinational always-block cloud that walls the synth gate at >600s.
-_SKILLS_TEXT = _load_skills("pipeline_contract", "verify_in_context", "srdy_drdy")
+_SKILLS_TEXT = _load_skills("pipeline_contract", "verify_in_context", "srdy_drdy", "soc_fabric")
 if _SKILLS_TEXT:
     SYSTEM_PROMPT = (
         SYSTEM_PROMPT
@@ -620,6 +620,9 @@ def build_user_message(
             "complete Verilog module and write it to the output path."
         )
 
+    from orchestrator.state_store.rulings import rulings_section
+    parts.append(rulings_section(project_root, consumer="rtl_generator", block=block_name,
+                                 attempt=attempt))
     return "\n".join(parts)
 
 

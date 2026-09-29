@@ -74,6 +74,8 @@ async def _arch_resolve_interrupt(payload: dict) -> dict:
         )
         if _chip_lead_enabled():
             return await _resolve_interrupt(payload)
+        from orchestrator.langgraph.pipeline_graph import _park
+        return _park(payload, graph="architecture", interrupt_fn=interrupt)
     except ImportError:
         pass
     return interrupt(payload)
@@ -82,6 +84,19 @@ async def _arch_resolve_interrupt(payload: dict) -> dict:
 def _pr(state: dict) -> str:
     """Extract project_root from graph state."""
     return state.get("project_root", ".")
+
+
+def _rulings_for_payload(project_root: str) -> list[dict]:
+    """Active arch-scoped rulings, for an interrupt payload (C2)."""
+    pr = str(project_root or "").strip()
+    if not pr or pr == ".":
+        return []
+    try:
+        from orchestrator.state_store.project_db import open_project
+        return [{"id": r["id"], "scope": r["scope"], "text": r["text"]}
+                for r in open_project(pr).rulings_for(arch=True)]
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _event(state: dict, node: str, event_type: str, data: dict | None = None) -> None:
@@ -167,6 +182,8 @@ class ArchGraphState(TypedDict):
     register_spec: dict | None
     benchmark_data: dict | None
     constraint_result: dict | None
+    interface_vip_index: dict | None   # A2: {edges, errors, contract_version}
+    fabric_resolution: dict | None     # B1: {fabrics, notes, unresolved, history}
     human_feedback: str
 
     # Doc-fix repair path: how many times the Doc Fix node has regenerated a
@@ -209,6 +226,27 @@ class ArchGraphState(TypedDict):
 # ---------------------------------------------------------------------------
 # Per-document persistence helpers
 # ---------------------------------------------------------------------------
+
+
+def _register_best_effort(project_root: str, kind: str, rel_path: str) -> None:
+    """Architect-sitting step 1: the graph nodes also feed the ontology so
+    ``coresmith status`` / ``stage`` describe a graph-driven run. Problems are
+    logged, never raised -- the graph's own gates stay authoritative here."""
+    import logging
+    _lg = logging.getLogger(__name__)
+    try:
+        from orchestrator.harness.tools.register import register
+        from orchestrator.state_store.project_db import open_project
+        res = register(open_project(project_root), project_root, kind, rel_path, actor="graph")
+        errs = [q for q in (res.get("problems") or []) if q.get("severity") == "error"]
+        if not res.get("ok"):
+            _lg.warning("[ONTOLOGY] %s: not registered (%d problem(s)): %s", kind, len(errs),
+                        "; ".join(f"{q['code']} {q['where']}" for q in errs[:4]))
+        else:
+            _lg.info("[ONTOLOGY] %s registered v%s (%s items)", kind, res["artifact"]["version"], res.get("items"))
+    except Exception as exc:  # noqa: BLE001
+        _lg.warning("[ONTOLOGY] %s: registration skipped: %s", kind, exc)
+
 
 def _persist_prd(
     project_root: str,
@@ -463,6 +501,7 @@ def _persist_ers(project_root: str, ers_result: dict) -> None:
     from orchestrator.utils import atomic_write
 
     atomic_write(coresmith_dir / "ers_spec.json", json.dumps(ers_result, indent=2, default=str))
+    _register_best_effort(project_root, "ers", ".coresmith/ers_spec.json")
 
     ers = ers_result.get("ers", {})
     md_lines = [
@@ -721,8 +760,9 @@ async def gather_requirements_node(state: ArchGraphState) -> dict:
         if user_answers:
             span.set_attribute("answer_count", len(user_answers))
 
+        from orchestrator.state_store.rulings import rulings_section as _rs
         result = await gather_prd(
-            requirements=state["requirements"],
+            requirements=state["requirements"] + _rs(_pr(state), consumer="gather_prd", arch=True),
             pdk_summary=state["pdk_summary"],
             target_clock_mhz=state["target_clock_mhz"],
             user_answers=user_answers,
@@ -758,6 +798,7 @@ async def gather_requirements_node(state: ArchGraphState) -> dict:
             update["requirements"] = enriched_requirements
 
             _persist_prd(state["project_root"], result, previous_questions, user_answers)
+            _register_best_effort(state["project_root"], "prd", ".coresmith/prd_spec.json")
 
             _event(state, "Gather Requirements", "graph_node_exit", {
                 "round": state["round"],
@@ -841,6 +882,7 @@ async def functional_requirements_node(state: ArchGraphState) -> dict:
         span.set_attribute("frd_text_len", len(frd_text))
 
         _persist_frd(state["project_root"], result)
+        _register_best_effort(state["project_root"], "frd", "arch/frd_spec.md")
 
         _event(state, "Functional Requirements", "graph_node_exit", {
             "round": state["round"],
@@ -874,8 +916,9 @@ async def block_diagram_node(state: ArchGraphState) -> dict:
                     for v in violations
                 ]
 
+        from orchestrator.state_store.rulings import rulings_section as _rs
         result = await analyze_block_diagram(
-            requirements=state["requirements"],
+            requirements=state["requirements"] + _rs(_pr(state), consumer="block_diagram", arch=True),
             pdk_summary=state["pdk_summary"],
             target_clock_mhz=state["target_clock_mhz"],
             existing_diagram=state.get("block_diagram"),
@@ -937,6 +980,7 @@ async def block_diagram_node(state: ArchGraphState) -> dict:
         }
         _persist_intermediate_state(state, update)
         _persist_block_diagram(state["project_root"], result)
+        _register_best_effort(state["project_root"], "block_diagram", ".coresmith/block_diagram.json")
         return update
 
 
@@ -1063,6 +1107,135 @@ def _ers_before_constraints_enabled() -> bool:
     return (
         os.environ.get("CORESMITH_ERS_BEFORE_CONSTRAINTS", "1") or "1"
     ) != "0"
+
+
+def _fabric_resolution_enabled() -> bool:
+    import os as _os
+    return (_os.environ.get("CORESMITH_FABRIC_RESOLUTION", "1") or "1").strip().lower() \
+        not in {"0", "false", "no", "off", ""}
+
+
+async def fabric_resolution_node(state: ArchGraphState) -> dict:
+    """B1: the SoC bus is a generated primitive, never a hand-written block.
+
+    Deterministic: declared fabric blocks are validated and their edges typed
+    (axi4 / axi_lite / apb, fabric-side prefixes); interconnect-shaped blocks
+    without a spec, or targets shared by several initiators, park with a
+    proposed FabricSpec skeleton (``fabric_ambiguous``) for the chip lead /
+    operator to complete. ``accept`` with ``feedback`` = a JSON FabricSpec
+    adopts it for the named block; ``skip`` keeps the diagram as drawn.
+    """
+    _event(state, "Fabric Resolution", "graph_node_enter", {"round": state.get("round")})
+    from orchestrator.architecture.specialists.fabric_resolution import resolve
+    doc = dict(state.get("block_diagram") or {})
+    if not _fabric_resolution_enabled() or not doc.get("blocks"):
+        _event(state, "Fabric Resolution", "graph_node_exit", {"skipped": True})
+        return {}
+    result = resolve(doc)
+    rounds = 0
+    history: list[dict] = []
+    while result["errors"] or result["ambiguous"]:
+        rounds += 1
+        payload = {
+            "type": "fabric_ambiguous",
+            "phase": "fabric_resolution",
+            "round": rounds,
+            "fabric_errors": result["errors"],
+            "ambiguous": result["ambiguous"],
+            "notes": result["notes"],
+            "supported_actions": ["accept", "skip", "abort"],
+            "outer_agent_guidance": (
+                "The design has interconnect that is not a declared fabric primitive. "
+                "Reply `accept` with `feedback` = a JSON object {\"block\": <name>, "
+                "\"fabric\": <FabricSpec>} (fill base/size for every slave; see "
+                "skills/soc_fabric.md) to make that block the generated fabric; "
+                "`skip` to keep the diagram as drawn; `abort` to stop."),
+        }
+        response = await _arch_resolve_interrupt(payload)
+        history.append({"payload_round": rounds, "response": response})
+        action = str((response or {}).get("action") or "skip")
+        if action == "abort":
+            _event(state, "Fabric Resolution", "graph_node_exit", {"aborted": True})
+            return {"fabric_resolution": {"aborted": True, "history": history}}
+        if action != "accept" or rounds > 3:
+            break
+        fb = (response or {}).get("feedback")
+        try:
+            import json as _json
+            fb = _json.loads(fb) if isinstance(fb, str) else fb
+            block_name = str(fb["block"])
+            spec = fb["fabric"]
+        except Exception:  # noqa: BLE001 - malformed answer: ask again
+            continue
+        blocks = []
+        found = False
+        for b in doc.get("blocks") or []:
+            if b.get("name") == block_name:
+                b = {**b, "kind": "primitive", "primitive": "cs_fabric", "fabric": spec}
+                found = True
+            blocks.append(b)
+        if not found:
+            blocks.append({"name": block_name, "kind": "primitive", "primitive": "cs_fabric",
+                           "fabric": spec, "tier": 0, "description": "SoC fabric"})
+        doc = {**doc, "blocks": blocks}
+        result = resolve(doc)
+    new_doc = result["diagram"]
+    if result["fabrics"]:
+        try:
+            from orchestrator.state_store.project_db import open_project
+            open_project(_pr(state)).import_block_diagram(new_doc)
+        except Exception as exc:  # noqa: BLE001
+            _event(state, "Fabric Resolution", "stage_error", {"error": str(exc)[:200]})
+    _event(state, "Fabric Resolution", "graph_node_exit", {
+        "fabrics": result["fabrics"], "ambiguous": [a["block"] for a in result["ambiguous"]],
+        "errors": len(result["errors"]), "rounds": rounds,
+    })
+    return {"block_diagram": new_doc,
+            "fabric_resolution": {"fabrics": result["fabrics"], "notes": result["notes"],
+                                  "unresolved": [a["block"] for a in result["ambiguous"]],
+                                  "history": history}}
+
+
+async def interface_vip_node(state: ArchGraphState) -> dict:
+    """A2: render one interface VIP per frozen contract edge (deterministic).
+
+    The Interface Definition stage froze fields, families and the structured
+    ``timing`` object; this node turns each edge into ``.coresmith/vip/<edge>.py``
+    (cocotb Driver/Monitor/Scoreboard/assertions) and SVA bind files, and
+    writes ``vip_index.json``. Both blocks on an edge test against THIS code,
+    never a hand-written neighbour model. Re-runs after every contract revision.
+    """
+    _event(state, "Interface VIP", "graph_node_enter", {"round": state.get("round")})
+    from orchestrator.langgraph.vip_lib.codegen import vip_enabled, write_all_vips
+    if not vip_enabled():
+        _event(state, "Interface VIP", "graph_node_exit", {"skipped": "CORESMITH_INTERFACE_VIP=0"})
+        return {}
+    pr = _pr(state)
+    contracts: list = []
+    version = None
+    try:
+        from orchestrator.state_store.project_db import open_project
+        db = open_project(pr)
+        contracts = list((db.contracts() or {}).get("contracts") or [])
+        version = db.contracts_version()
+    except Exception:  # noqa: BLE001 - fall back to the graph state
+        contracts = []
+    if not contracts:
+        contracts = list(((state.get("interface_contracts") or {}).get("contracts")) or [])
+    dut_modules = {}
+    for b in ((state.get("block_diagram") or {}).get("blocks") or []):
+        if isinstance(b, dict) and b.get("name"):
+            dut_modules[b["name"]] = str(b.get("rtl_module") or b.get("name"))
+    with _tracer.start_as_current_span("Interface VIP") as span:
+        index = write_all_vips(pr, contracts, contract_version=version, dut_modules=dut_modules)
+        errors = {k: v["error"] for k, v in index["edges"].items() if v.get("error")}
+        span.set_attribute("edge_count", len(index["edges"]))
+        span.set_attribute("error_count", len(errors))
+    _event(state, "Interface VIP", "graph_node_exit", {
+        "edges": len(index["edges"]), "errors": len(errors), "contract_version": version,
+    })
+    return {"interface_vip_index": {"edges": len(index["edges"]), "errors": errors,
+                                    "contract_version": version}}
 
 
 async def engineering_requirements_node(state: ArchGraphState) -> dict:
@@ -1810,6 +1983,7 @@ async def escalate_final_review_node(state: ArchGraphState) -> dict:
         "feedback_rounds_used": _feedback_rounds_used(
             state.get("human_response_history"), "final_review"),
         "feedback_rounds_cap": _max_feedback_rounds(),
+        "operator_rulings": _rulings_for_payload(_pr(state)),
         "supported_actions": ["accept", "feedback", "abort"],
         "instructions": (
             "Architecture is complete. Review the design summary above.\n\n"
@@ -2333,9 +2507,29 @@ def _post_diagram_gate_target() -> str:
     wired 'Interface Definition', so ANY design whose block diagram asked a
     clarifying question (the common case) SKIPPED the complexity/decomposition
     gate entirely -- the residual_recon_engine fusion was never checked."""
+    if _fabric_resolution_enabled():
+        return "Fabric Resolution"
+    return _post_fabric_target()
+
+
+def _post_fabric_target() -> str:
     if _output_contract_gate_enabled():
         return "Output Contract Review"
     return "Interface Definition"
+
+
+def route_after_fabric_resolution(state: ArchGraphState) -> str:
+    fr = state.get("fabric_resolution") or {}
+    if fr.get("aborted"):
+        return "Abort"
+    return _post_fabric_target()
+
+
+route_after_fabric_resolution.__edge_labels__ = {
+    "Output Contract Review": "RESOLVED",
+    "Interface Definition": "RESOLVED",
+    "Abort": "ABORT",
+}
 
 
 def review_diagram(state: ArchGraphState) -> str:
@@ -2371,6 +2565,7 @@ def review_diagram(state: ArchGraphState) -> str:
 
 review_diagram.__edge_labels__ = {
     "Escalate Diagram": "QUESTIONS",
+    "Fabric Resolution": "CLEAN",
     "Complexity Review": "CLEAN",
     "Output Contract Review": "CLEAN",
     "Interface Definition": "CLEAN",
@@ -2549,7 +2744,7 @@ def route_after_interface_definition(state: ArchGraphState) -> str:
     diverts the flow (a stale constraint_result from a prior round is
     ignored)."""
     if not _interface_contract_gate_enabled():
-        return "Engineering Requirements"
+        return "Interface VIP"
     cr = state.get("constraint_result", {}) or {}
     violations = cr.get("violations", []) or []
     interface_blocked = (
@@ -2557,7 +2752,7 @@ def route_after_interface_definition(state: ArchGraphState) -> str:
         and cr.get("has_structural")
         and len(violations) > 0
     )
-    target = "Escalate Constraints" if interface_blocked else "Engineering Requirements"
+    target = "Escalate Constraints" if interface_blocked else "Interface VIP"
 
     span = trace.get_current_span()
     if span.is_recording():
@@ -2573,7 +2768,7 @@ def route_after_interface_definition(state: ArchGraphState) -> str:
     return target
 
 route_after_interface_definition.__edge_labels__ = {
-    "Engineering Requirements": "OK",
+    "Interface VIP": "OK",
     "Escalate Constraints": "CONTRACT VIOLATIONS",
 }
 
@@ -2601,6 +2796,7 @@ def route_after_diagram_escalation(state: ArchGraphState) -> str:
     return target
 
 route_after_diagram_escalation.__edge_labels__ = {
+    "Fabric Resolution": "CONTINUE",
     "Complexity Review": "CONTINUE",
     "Output Contract Review": "CONTINUE",
     "Interface Definition": "CONTINUE",
@@ -2937,6 +3133,8 @@ def build_architecture_graph(checkpointer=None):
     graph.add_node("Block Diagram", block_diagram_node)
     graph.add_node("Output Contract Review", output_contract_review_node)
     graph.add_node("Interface Definition", interface_definition_node)
+    graph.add_node("Fabric Resolution", fabric_resolution_node)
+    graph.add_node("Interface VIP", interface_vip_node)
     graph.add_node("Engineering Requirements", engineering_requirements_node)
     graph.add_node("Constraint Check", constraint_check_node)
     graph.add_node("Finalize Architecture", finalize_node)
@@ -2972,6 +3170,9 @@ def build_architecture_graph(checkpointer=None):
     # output-contract ownership gate (when enabled) before interfaces freeze.
     graph.add_conditional_edges("Block Diagram", review_diagram)
 
+    # B1: clean diagram -> Fabric Resolution -> the decomposition gates.
+    graph.add_conditional_edges("Fabric Resolution", route_after_fabric_resolution)
+
     # Output Contract Review -> pass (Interface Definition) or re-decompose (Block Diagram)
     graph.add_conditional_edges(
         "Output Contract Review", route_after_output_contract_review,
@@ -2985,6 +3186,8 @@ def build_architecture_graph(checkpointer=None):
     graph.add_conditional_edges(
         "Interface Definition", route_after_interface_definition,
     )
+    # A2: the VIPs are rendered from the frozen contracts before the ERS.
+    graph.add_edge("Interface VIP", "Engineering Requirements")
 
     # Interface Definition -> ERS -> Constraint Check (WP-13 dropped the
     # Memory Map / Clock Tree / Register Spec stages).

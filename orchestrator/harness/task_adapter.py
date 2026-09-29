@@ -195,6 +195,12 @@ def _sandbox_argv(command: list[str], work: Path, project_root: str = "") -> lis
     root = str(Path(project_root).resolve()) if project_root else ""
     if root and root != "/":
         argv += ["--ro-bind", root, root]
+    # The engine checkout is masked by the tmpfs too when it lives under /tmp
+    # (worktrees, CI scratch): the runner script then does not exist inside the
+    # sandbox and the adapter dies "without a receipt". Re-bind it read-only.
+    engine = str(Path(__file__).resolve().parents[2])
+    if engine.startswith("/tmp/") and engine != root:
+        argv += ["--ro-bind", engine, engine]
     argv += ["--bind", str(work), str(work),
              "--unshare-net", "--die-with-parent", *command]
     return argv

@@ -89,6 +89,35 @@ def _recover_codex_artifact(abs_path: str) -> str:
     return ""
 
 
+def _vip_lines(project_root: str, block_name: str) -> str:
+    """The MANDATORY interface-VIP section of the TB prompt (A2).
+
+    Every edge of the block with a generated VIP is listed with its module,
+    role and channel prefix; the contract slice path carries the frozen
+    fields/timing. A TB that does not import each listed VIP fails the
+    deterministic lint before simulation.
+    """
+    if not project_root:
+        return ""
+    try:
+        from orchestrator.langgraph.vip_lib.codegen import vips_for_block
+        rows = vips_for_block(project_root, block_name)
+    except Exception:  # noqa: BLE001
+        rows = []
+    slice_path = f".coresmith/blocks/{block_name}/contract_slice.json"
+    lines = [f"- Interface contract slice (this block's edges, incl. timing): {slice_path}"]
+    if rows:
+        lines.append("- Interface VIPs (MANDATORY -- import and use each; never hand-model "
+                     "the other side of these edges):")
+        for r in rows:
+            lines.append(f"    * `from vip.{r['module']} import Driver, Monitor, Scoreboard, "
+                         f"assertions, SIDES` -- edge {r['edge_id']}, this block is the "
+                         f"{r['role']} (use `SIDES[\"{r['role']}\"]`), channel prefix "
+                         f"`{r['channel']}`, family {r['family']}. Start "
+                         "`cocotb.start_soon(assertions(dut, side))` in every test.")
+    return "\n".join(lines)
+
+
 class TestbenchGeneratorAgent:
     """Agent for cocotb testbench generation.
 
@@ -196,7 +225,8 @@ class TestbenchGeneratorAgent:
                 f"{python_source_path}\n"
                 f"- uArch Spec: arch/uarch_specs/{block_name}.md\n"
                 f"- Constraints: .coresmith/blocks/{block_name}/constraints.json\n"
-                f"- DV Rules: arch/DV_RULES.md (if it exists, read and follow ALL rules)\n\n"
+                f"- DV Rules: arch/DV_RULES.md (if it exists, read and follow ALL rules)\n"
+                f"{_vip_lines(project_root, block_name)}\n"
                 f"## Output\n"
                 f"Write the complete cocotb testbench to: {testbench_path}\n\n"
                 f"## Instructions\n"
@@ -249,6 +279,8 @@ class TestbenchGeneratorAgent:
                 )
 
             run_name = f"Generate Testbench [{block_title}]"
+            from orchestrator.state_store.rulings import rulings_section
+            user_message += rulings_section(project_root, consumer="testbench", block=block_name)
             await self.llm.call(
                 system=SYSTEM_PROMPT,
                 prompt=user_message,

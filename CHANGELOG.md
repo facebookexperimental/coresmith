@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (feat/soc-stages -- see docs/SOC_STAGES.md)
+- Fabric Resolution: the SoC bus is a generated primitive over vendored
+  pulp-platform `axi` IP (FabricSpec -> yosys-slang -> plain Verilog +
+  cocotbext-axi testbench); `axi4` / `axi_lite` / `apb` contract families.
+- Structured contract `timing` and one generated Interface VIP per edge
+  (cocotb driver/monitor/scoreboard/assertions, `$past` SVA binds); block
+  testbenches must exercise every edge through its VIP.
+- Shell integration: the chip top is assembled from the contracts before the
+  first tier and after every tier; the final top is the same assembly.
+- uArch phase delivers a SystemC TLM-2.0 loosely-timed SoC model.
+- Pre-layout STA binds cs_sram instances to their concrete macros and links the macro
+  liberty, so paths through memories are timed instead of black-boxed; a met design
+  reports its real worst slack instead of report_wns's clamped 0.00.
+- Architect sitting step 5: chip-lead decisions are made by the resumed architect
+  session (fallback: the chip-lead agent).
+- Architect sitting step 4: `coresmith block-done` is the block gate (conformance ->
+  DV -> synth -> timing publishes `best`); `CORESMITH_FANOUT=cluster` sends one
+  long-lived cluster worker per subsystem instead of a subgraph per block.
+- Architect sitting step 3: `coresmith architect start` runs one long-lived claude
+  session (resumed between sittings with the current blockers) that advances the run
+  only through the CLI state machine; `init_tier` parks until stage `blocks` when
+  CORESMITH_ARCHITECT_SITTING=1.
+- Architect sitting step 2: the executable SAD -- an abstract SystemC performance
+  model built from `model/arch/arch_model.json` (`coresmith model init|build|run|eval
+  --arch`), FRD verdicts recorded as `model_eval` checks, and `coresmith fabric derive`
+  producing the FabricSpec from the measured link table.
+- Architect sitting step 1: project ontology (artifacts / items / links / checks /
+  questions / stages) and the deterministic stage machine, driven by `coresmith
+  register|item|link|check|question|stage|status`; the graph nodes register too.
+- The FRD is evaluated on that model before any RTL is lowered: an agent-authored
+  SystemC harness answers every FRD requirement id (pass / fail / not_testable with
+  reason); the uArch phase gate (default on) parks on build, smoke or FRD failure.
+  The model prompts demand behaviourally complete models (full register maps, ISA
+  execution for processor blocks, real memory contents).
+- Assertion stage: spec invariants must exist as assertions; phantom claims
+  are rejected.
+- Timing false pass closed: `best` means sim AND synth AND timing; `abc -D`;
+  a `timing_fix` loop.
+- Run state in the project DB: leases, run flags, decisions, interrupts
+  (single-branch resume), LLM slots; operator rulings channel.
+
 ### Changed
 - **Breaking:** the architecture phase no longer runs the uArch exploration,
   Memory Map, Clock Tree, Register Spec or Complexity Review stages, and their
@@ -20,7 +61,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   candidate manifest that every consumer reads.
 - The oracle integrity baseline moved outside the project, by default under
   `~/.coresmith/trust/`; task adapters run inside a bubblewrap boundary.
-- See [docs/migration-arm-e.md](docs/migration-arm-e.md) for migrating an
+- See [docs/migration.md](docs/migration.md) for migrating an
   existing project.
 
 ### Added

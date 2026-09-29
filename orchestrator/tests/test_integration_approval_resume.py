@@ -17,6 +17,7 @@ async def test_approval_does_not_reauthor(tmp_path, monkeypatch, mutation):
     from orchestrator.langchain.agents.integration_lead import IntegrationLeadAgent
 
     monkeypatch.setenv("CORESMITH_DETERMINISTIC_INTEGRATION_CHECK", "0")
+    monkeypatch.setenv("CORESMITH_DETERMINISTIC_TOP", "0")   # A4: this tests the LLM lead path
     monkeypatch.delenv("CORESMITH_NONBLOCKING_INTEGRATION_WARNINGS", raising=False)
     monkeypatch.setattr(pg, "write_graph_event", lambda *a, **kw: None)
     monkeypatch.setattr(pg, "load_architecture_connections", lambda *a: ([], "chip_top"))

@@ -76,6 +76,7 @@ from orchestrator.langgraph.integration_helpers import (
     load_architecture_connections,
     module_for_block,
     parse_verilog_ports,
+    primitive_rtl_target,
     run_integration_simulation,
 )
 from orchestrator.langgraph.pipeline_helpers import (
@@ -94,6 +95,7 @@ from orchestrator.langgraph.pipeline_helpers import (
     generate_uarch_spec,
     lint_rtl,
     log,
+    resolve_run_clock_mhz,
     run_simulation,
     synthesize_block,
 )
@@ -233,6 +235,10 @@ class BlockState(TypedDict):
     ppa_reasons: list             # human-readable budget-divergence reasons
     timing_ok: bool | None        # measured WNS >= 0 (None = not measured)
     timing_required: bool        # missing required timing cannot complete a block
+    primitive_failed: bool        # B1: the generated primitive could not be materialized
+    assertion_ok: bool            # A3: spec invariants exist as assertions in the RTL
+    sta_report_path: str          # worst-path STA report the timing verdict came from
+    timing_fix_attempts: int      # timing_fix loop iterations consumed (A1c)
     # Post-synthesis GATE-LEVEL SIM verdict (harness.gate_sim). None = not run.
     # False routes the block to diagnose: the synthesized netlist does not
     # reproduce the behaviour the RTL was verified with, so DV and PPA were
@@ -311,6 +317,9 @@ class OrchestratorState(TypedDict):
 
 
     # Results (accumulated via reducer from all Send branches) ──────────────
+    uarch_phase: Annotated[dict | None, _last]                             # B2
+    shell_snapshot: Annotated[dict | None, _last]                          # A4
+    integration_contract_failures: Annotated[list[dict], operator.add]    # A4
     completed_blocks: Annotated[list[dict], operator.add]
 
     # Blocks a declared PRD pin map RETIRED before µarch/RTL (init_tier_node).
@@ -680,7 +689,7 @@ async def _park_conformance_unrepairable(state: BlockState, block_name: str,
 # Constraint sources that survive a fresh block lifecycle: chip-level DV
 # decisions and operator rules are pinned precisely because the spec appends
 # they mirror are destroyed by the per-tier re-spec.
-_PERSISTENT_CONSTRAINT_SOURCES = ("chip_dv_revise", "chip_dv_fix", "human")
+_PERSISTENT_CONSTRAINT_SOURCES = ("chip_dv_revise", "chip_dv_fix", "human", "operator_ruling")
 
 
 from orchestrator.state_store.project_db import open_project as _open_project  # noqa: E402
@@ -822,6 +831,8 @@ async def init_block_node(state: BlockState) -> dict:
         "synth_gate_count": 0,
         "rtl_path": "",
         "tb_path": "",
+        "sta_report_path": "",
+        "timing_fix_attempts": 0,
         "debug_action": "",
         "human_response": None,
         "step_log_paths": {},
@@ -836,7 +847,46 @@ def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-_CHIP_LEAD_TRIPPED = False
+_CHIP_LEAD_TRIPPED = False  # process cache of the run flag below
+
+
+def _chip_lead_tripped() -> bool:
+    """Whether the chip lead is tripped for this run (process cache OR the
+    restart-safe ``run_flags`` row -- a daemon restart used to forget a trip)."""
+    if _CHIP_LEAD_TRIPPED:
+        return True
+    pr = os.environ.get("CORESMITH_PROJECT_ROOT", "").strip()
+    if not pr:
+        return False
+    try:
+        return bool(_db(pr).get_flag("chip_lead_tripped", False))
+    except Exception:  # noqa: BLE001 - the cache alone still fails safe
+        return False
+
+
+def _trip_chip_lead(reason: str = "") -> None:
+    global _CHIP_LEAD_TRIPPED
+    _CHIP_LEAD_TRIPPED = True
+    pr = os.environ.get("CORESMITH_PROJECT_ROOT", "").strip()
+    if not pr:
+        return
+    try:
+        _db(pr).set_flag(
+            "chip_lead_tripped", {"tripped": True, "reason": reason, "ts": _time.time()})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _untrip_chip_lead() -> None:
+    global _CHIP_LEAD_TRIPPED
+    _CHIP_LEAD_TRIPPED = False
+    pr = os.environ.get("CORESMITH_PROJECT_ROOT", "").strip()
+    if not pr:
+        return
+    try:
+        _db(pr).clear_flag("chip_lead_tripped")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _chip_lead_enabled() -> bool:
@@ -908,39 +958,77 @@ def _engine_modified_payload(payload: dict, dirty: list) -> dict:
     return parked
 
 
+def _park(payload: dict, *, node: str = "", graph: str = "pipeline",
+          block: str | None = None, kind: str | None = None, interrupt_fn=None):
+    """Park through the interrupts table (C1-3), then ``interrupt()``.
+
+    A resolution already queued for this park (a targeted resume or an
+    operator ruling that arrived while siblings were running) is returned
+    without raising, so the branch continues in place. ``interrupt_fn`` lets
+    another graph module raise through its own ``interrupt`` binding.
+    ``payload`` is parked as-is (the id is added in place).
+    """
+    raise_fn = interrupt_fn or interrupt
+    pr = os.environ.get("CORESMITH_PROJECT_ROOT", "").strip()
+    if not pr:
+        # No declared project root: nothing to record against. Never open a
+        # database in the process cwd.
+        return raise_fn(payload)
+    try:
+        from orchestrator.state_store.interrupts import park_and_wait
+        payload, res = park_and_wait(_db(pr), payload, graph=graph,
+                                     node=node or str(payload.get("type") or ""),
+                                     block=block, kind=kind)
+        if res is not None:
+            log(f"  [PARK] {payload.get('type', '?')} answered from the interrupts "
+                f"table ({payload.get('interrupt_id')}) -- continuing without parking", GREEN)
+            return res
+    except Exception as exc:  # noqa: BLE001 - the table is bookkeeping; parking must work
+        log(f"  [PARK] interrupts table unavailable ({exc}); parking plainly", YELLOW)
+    return raise_fn(payload)
+
+
 async def _resolve_interrupt(payload: dict) -> dict:
     """Park (default) or let the in-graph chip lead decide. Fail-safe: any
-    chip-lead failure trips to parked interrupts for the process lifetime
-    (re-armed on a fresh run start in init_tier_node)."""
-    global _CHIP_LEAD_TRIPPED
-    if not _chip_lead_enabled() or _CHIP_LEAD_TRIPPED:
-        return interrupt(payload)
+    chip-lead failure trips to parked interrupts for the run (a restart-safe
+    ``run_flags`` row, re-armed on a fresh run start in init_tier_node)."""
+    if not _chip_lead_enabled() or _chip_lead_tripped():
+        return _park(payload)
 
-    ledger = _chip_lead_ledger_path()
-    # Arm-U audit #10: two concurrently-parked blocks read the same ledger
-    # length -> duplicate decision_index, budget drift. Serialize readers/
-    # writers with an advisory lock on a sidecar lockfile.
-    import fcntl as _fcntl
-    ledger.parent.mkdir(parents=True, exist_ok=True)
-    _lockf = open(ledger.parent / ".ledger.lock", "a+")
-    _fcntl.flock(_lockf, _fcntl.LOCK_EX)
-    try:
-        prior = ([ln for ln in ledger.read_text().splitlines() if ln.strip()]
-                 if ledger.exists() else [])
-    finally:
-        _fcntl.flock(_lockf, _fcntl.LOCK_UN)
-        _lockf.close()
-    if len(prior) >= _chip_lead_max_decisions():
+    pr = os.environ.get("CORESMITH_PROJECT_ROOT", ".")
+    db = _db(pr)
+    # C1: the decision ledger is the ``decisions`` table; ``decisions.jsonl`` is
+    # a read-only view of it. Two concurrently-parked blocks used to read the
+    # same jsonl length and mint duplicate decision indices; the count and the
+    # append now happen under one lease so the budget cannot be overshot.
+    from orchestrator.state_store.leases import LeaseUnavailable, adb_lease
+
+    prior = db.decisions(last=10)
+    prior_lines = [json.dumps(d, default=str) for d in prior]
+    if db.decision_count() >= _chip_lead_max_decisions():
         log(f"  [CHIP-LEAD] decision budget exhausted "
-            f"({len(prior)}/{_chip_lead_max_decisions()}) -- parking", YELLOW)
-        _CHIP_LEAD_TRIPPED = True
-        return interrupt(payload)
+            f"({db.decision_count()}/{_chip_lead_max_decisions()}) -- parking", YELLOW)
+        _trip_chip_lead("decision budget exhausted")
+        return _park(payload)
 
+    decision = None
+    if architect_sitting_enabled():
+        # Step 5: the chip lead is the architect resumed (same session, cache
+        # warm); a missing session or a malformed answer falls back below.
+        try:
+            from orchestrator.architect.consult import consult as _consult
+            decision = await asyncio.to_thread(_consult, pr, payload, prior_lines)
+            if decision:
+                log(f"  [ARCHITECT] decided {payload.get('type')}: {decision.get('action')}", CYAN)
+        except Exception as exc:  # noqa: BLE001
+            log(f"  [ARCHITECT] consult failed ({exc}) -- falling back to the chip lead", YELLOW)
+            decision = None
     try:
         from orchestrator.langchain.agents.chip_lead_agent import ChipLeadAgent
-        decision = await ChipLeadAgent().decide(
-            payload=payload, prior_decisions=prior[-10:],
-        )
+        if decision is None:
+            decision = await ChipLeadAgent().decide(
+                payload=payload, prior_decisions=prior_lines,
+            )
     except Exception as exc:  # noqa: BLE001
         # Arm-F live finding: a single provider hard-timeout tripped the
         # fail-safe, and un-tripping needs a daemon restart. One fresh
@@ -950,20 +1038,20 @@ async def _resolve_interrupt(payload: dict) -> dict:
             "tripping", YELLOW)
         try:
             decision = await ChipLeadAgent().decide(
-                payload=payload, prior_decisions=prior[-10:],
+                payload=payload, prior_decisions=prior_lines,
             )
         except Exception as exc2:  # noqa: BLE001
             log(f"  [CHIP-LEAD] agent failed again ({exc2}) -- tripping "
                 "to parked interrupts", RED)
-            _CHIP_LEAD_TRIPPED = True
-            return interrupt(payload)
+            _trip_chip_lead(f"agent failed twice: {exc2}")
+            return _park(payload)
 
     _dirty = _engine_checkout_guard()
     if _dirty:
         # WP-37: a decision made from a modified engine is invalid. Trip the
         # chip lead and park for a human; never revert automatically.
-        _CHIP_LEAD_TRIPPED = True
-        return interrupt(_engine_modified_payload(payload, _dirty))
+        _trip_chip_lead("engine checkout modified")
+        return _park(_engine_modified_payload(payload, _dirty))
     action = (decision or {}).get("action", "")
     supported = payload.get("supported_actions") or []
     if not action or (supported and action not in supported):
@@ -981,7 +1069,7 @@ async def _resolve_interrupt(payload: dict) -> dict:
                 "strictly from that list."
             )
             decision = await ChipLeadAgent().decide(
-                payload=retry_payload, prior_decisions=prior[-10:],
+                payload=retry_payload, prior_decisions=prior_lines,
             )
         except Exception:  # noqa: BLE001
             decision = None
@@ -989,46 +1077,41 @@ async def _resolve_interrupt(payload: dict) -> dict:
         if not action or (supported and action not in supported):
             log(f"  [CHIP-LEAD] unsupported action {action!r} after "
                 "correction -- tripping to parked interrupts", RED)
-            _CHIP_LEAD_TRIPPED = True
-            return interrupt(payload)
+            _trip_chip_lead(f"unsupported action {action!r}")
+            return _park(payload)
 
-    ledger.parent.mkdir(parents=True, exist_ok=True)
-    _lockf = open(ledger.parent / ".ledger.lock", "a+")
-    _fcntl.flock(_lockf, _fcntl.LOCK_EX)
     try:
-        prior = ([ln for ln in ledger.read_text().splitlines() if ln.strip()]
-                 if ledger.exists() else prior)
-        # Re-check the budget under the write lock: the check above happened
-        # before two awaited agent calls, so N concurrently-parked branches
-        # can each have passed it and overshoot the cap.
-        if len(prior) >= _chip_lead_max_decisions():
-            log(f"  [CHIP-LEAD] decision budget exhausted "
-                f"({len(prior)}/{_chip_lead_max_decisions()}) -- parking",
-                YELLOW)
-            _CHIP_LEAD_TRIPPED = True
-            return interrupt(payload)
-        # The append and the event write stay inside the try: a raise here
-        # with the flock held would block every other branch forever on the
-        # (synchronous) flock syscall.
-        with ledger.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps({
-                "interrupt_type": payload.get("type", ""),
-                "block_name": payload.get("block_name", ""),
-                "action": action,
-                "reasoning": decision.get("reasoning", ""),
-                "ts": _time.time(),
-            }) + "\n")
-        write_graph_event(
-            os.environ.get("CORESMITH_PROJECT_ROOT", "."), "Chip Lead",
-            "chip_lead_decision",
-            {"type": payload.get("type", ""), "action": action,
-             "decision_index": len(prior) + 1},
-        )
-    finally:
-        _fcntl.flock(_lockf, _fcntl.LOCK_UN)
-        _lockf.close()
+        async with adb_lease(db, "chip_lead_ledger", ttl_s=30, wait_s=120,
+                             meta={"block": payload.get("block_name", "")}):
+            # Re-check the budget under the lease: the check above happened
+            # before two awaited agent calls, so N concurrently-parked branches
+            # can each have passed it and overshoot the cap.
+            if db.decision_count() >= _chip_lead_max_decisions():
+                log(f"  [CHIP-LEAD] decision budget exhausted "
+                    f"({db.decision_count()}/{_chip_lead_max_decisions()}) -- parking",
+                    YELLOW)
+                _trip_chip_lead("decision budget exhausted")
+                return _park(payload)
+            index = db.add_decision(
+                action=action, interrupt_type=payload.get("type", ""),
+                block=payload.get("block_name", ""),
+                reasoning=decision.get("reasoning", ""),
+                interrupt_id=str(payload.get("interrupt_id", "")),
+            )
+            try:
+                db.export_decisions_view()
+            except OSError:
+                pass
+    except LeaseUnavailable as exc:
+        log(f"  [CHIP-LEAD] ledger lease unavailable ({exc}) -- parking", RED)
+        return _park(payload)
+    write_graph_event(
+        pr, "Chip Lead", "chip_lead_decision",
+        {"type": payload.get("type", ""), "action": action,
+         "decision_index": index},
+    )
     log(f"  [CHIP-LEAD] {payload.get('type', '?')} -> {action} "
-        f"({len(prior) + 1}/{_chip_lead_max_decisions()})", GREEN)
+        f"({index}/{_chip_lead_max_decisions()})", GREEN)
     return decision
 
 
@@ -1066,6 +1149,7 @@ def _apply_revise_uarch(pr: str, response: dict, contract_audit: dict,
         except OSError:
             continue
         _db(pr).clear_result(name, "best")
+        _db(pr).clear_result(name, "dv_best")
         try:
             _bdir = Path(pr) / ".coresmith" / "blocks" / name
             _bdir.mkdir(parents=True, exist_ok=True)
@@ -2169,6 +2253,231 @@ def _is_likely_testbench_bug(sim_log: str) -> bool:
     return any(p in sim_log for p in _TB_BUG_PATTERNS)
 
 
+def _is_primitive(block: dict) -> bool:
+    return str((block or {}).get("kind") or "").lower() == "primitive"
+
+
+def _live_fabric(pr: str, block: dict) -> dict:
+    """``block`` with its ``fabric`` spec re-read from the project DB.
+
+    The block dicts in the run state (``block_queue``, and the ``current_block``
+    each Send copies from it) are captured once, at run start, and live in the
+    LangGraph checkpoint; restart-node / resume replay them unchanged. A fabric
+    the architect re-registered afterwards must still be the one rendered, so
+    consumers of the spec read it here at node time. Only ``fabric`` is taken
+    from the DB; the rest of the checkpointed block is kept as is.
+    """
+    name = (block or {}).get("name")
+    try:
+        for b in _db(pr).block_specs():
+            if b.get("name") == name and isinstance(b.get("fabric"), dict):
+                return {**block, "fabric": b["fabric"]}
+    except Exception:  # noqa: BLE001 - DB unreadable: fall back to the checkpointed spec
+        pass
+    return block
+
+
+async def materialize_primitive_node(state: BlockState) -> dict:
+    """B1: a primitive block (the SoC fabric) is generated, not authored.
+
+    Writes the block's RTL (plain Verilog elaborated from the vendored pulp
+    IP), its cocotb testbench and a short generated uArch spec, then hands
+    the block to the ordinary DV/synth chain with the testbench preserved.
+    """
+    pr = Path(_pr(state))
+    block = _live_fabric(str(pr), state["current_block"])
+    block_name = block["name"]
+    write_graph_event(str(pr), "Materialize Primitive", "graph_node_enter", {"block": block_name})
+    block_dir = pr / ".coresmith" / "blocks" / block_name
+    block_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        from orchestrator.fabric import FabricSpec, generate_fabric
+        spec = FabricSpec.from_json(block.get("fabric") or {})
+        errs = spec.validate()
+        if errs:
+            raise ValueError("invalid FabricSpec: " + "; ".join(errs))
+        rtl_target = _block_rtl_target(pr, block)
+        tb_target = pr / (block.get("testbench") or f"tb/cocotb/test_{spec.module_name}.py")
+        art = await asyncio.to_thread(generate_fabric, spec, rtl_target.parent, tb_dir=tb_target.parent)
+        rtl_target.parent.mkdir(parents=True, exist_ok=True)
+        if Path(art.rtl_path) != rtl_target:
+            rtl_target.write_text(Path(art.rtl_path).read_text())
+        if Path(art.tb_path) != tb_target:
+            tb_target.parent.mkdir(parents=True, exist_ok=True)
+            tb_target.write_text(Path(art.tb_path).read_text())
+        spec_md = pr / "arch" / "uarch_specs" / f"{block_name}.md"
+        spec_md.parent.mkdir(parents=True, exist_ok=True)
+        spec_md.write_text(_primitive_spec_markdown(block_name, spec, art))
+        try:
+            _db(str(pr)).stamp_block_spec(block_name)
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception as exc:  # noqa: BLE001
+        (block_dir / "previous_error.txt").write_text(f"primitive materialization failed: {exc}\n")
+        log(f"  [PRIMITIVE] {block_name}: generation failed: {exc}", RED)
+        write_graph_event(str(pr), "Materialize Primitive", "graph_node_exit",
+                          {"block": block_name, "ok": False, "error": str(exc)[:300]})
+        return {"phase": "rtl", "lint_clean": False, "debug_action": "escalate",
+                "primitive_failed": True}
+    log(f"  [PRIMITIVE] {block_name}: {art.module} generated "
+        f"({'cached' if art.cached else 'elaborated'}); {len(art.ports)} ports", GREEN)
+    write_graph_event(str(pr), "Materialize Primitive", "graph_node_exit",
+                      {"block": block_name, "ok": True, "module": art.module, "cached": art.cached})
+    return {"current_block": block,
+            "rtl_path": str(rtl_target), "tb_path": str(tb_target), "phase": "lint",
+            "lint_clean": True, "uarch_approved": True, "preserve_testbench": True,
+            "force_regen_tb": False, "assertion_ok": True}
+
+
+def _primitive_spec_markdown(block_name: str, spec, art) -> str:
+    lines = [f"# {block_name} -- generated SoC fabric ({spec.module_name})", "",
+             "GENERATED primitive: plain-Verilog elaboration of the pulp-platform axi crossbar and "
+             "bridges from a FabricSpec (see skills/soc_fabric.md). Not authored by the uArch/RTL "
+             "agents; verified by its generated cocotbext-axi testbench.", "",
+             "## 1. Block Overview", "",
+             f"{len(spec.masters)} AXI4 master port(s) x {len(spec.slaves)} slave port(s); "
+             f"{spec.addr_width}-bit address, {spec.data_width}-bit data; master id width "
+             f"{max(m.id_width for m in spec.masters)}, slave-port id width {spec.mst_id_width}; "
+             f"ordering {spec.ordering}; unmapped addresses answer DECERR.", "",
+             "## 2. Interface Specification", "", "| port | dir | width |", "|---|---|---|"]
+    lines += [f"| {p['name']} | {p['dir']} | {p['width']} |" for p in art.ports]
+    lines += ["", "## Address map", "", "| slave | protocol | base | size |", "|---|---|---|---|"]
+    lines += [f"| m_{s.name} | {s.protocol} | {s.base:#x} | {s.size:#x} |" for s in spec.slaves]
+    lines += ["", "### 4a. Cross-Block Semantic Invariants", "",
+              "- INV-FABRIC-DECODE-001: every transaction is delivered to exactly the slave whose "
+              "range contains its address; unmapped addresses return DECERR.",
+              "- INV-FABRIC-ORDER-002: responses to one master with the same id return in issue order.",
+              "- INV-FABRIC-APB-ADDR-003: every APB access presents paddr[11:2] == AxADDR[11:2] "
+              "(paddr[1:0] = 0); pwdata/prdata/pstrb span the full data width, lane selected by paddr.",
+              "", "### 6a. Output Timing Contract", "",
+              "All channels are AXI valid/ready; latency through the crossbar is 1 cycle per cut "
+              f"(latency_mode {spec.latency_mode}; slave_cut {spec.slave_cut}). The generated "
+              "testbench measures throughput.", ""]
+    if spec.shared_apb_bridge:
+        lines += ["shared_apb_bridge: all APB slaves share one crossbar port and one axi_lite_to_apb, "
+                  "whose decoder asserts psel for exactly the addressed APB slave (one APB access at a "
+                  "time across them); the m_<apb>_* ports and INV-FABRIC-APB-ADDR-003 are unchanged.", ""]
+    return "\n".join(lines)
+
+
+def route_after_init(state: BlockState) -> str:
+    return "materialize_primitive" if _is_primitive(state.get("current_block") or {}) else "generate_uarch_spec"
+
+
+route_after_init.__edge_labels__ = {
+    "generate_uarch_spec": "AUTHORED",
+    "materialize_primitive": "PRIMITIVE",
+}
+
+
+def route_after_materialize(state: BlockState) -> str:
+    return "block_done" if state.get("primitive_failed") else "generate_testbench"
+
+
+route_after_materialize.__edge_labels__ = {
+    "generate_testbench": "GENERATED",
+    "block_done": "FAILED",
+}
+
+
+async def assertion_check_node(state: BlockState) -> dict:
+    """A3: the invariants the spec promises exist as assertions in the RTL.
+
+    Runs after RTL generation + lint and before testbench generation. The
+    checklist is §4a's ``INV-*`` ids plus a ``TIM-*`` per contract timing rule
+    (satisfied by the edge's VIP SVA bind); comments that claim an assertion
+    with none nearby are phantom claims. Gate by default
+    (CORESMITH_ASSERTION_STAGE=1), ``advisory`` records only, ``0`` skips.
+    """
+    from orchestrator.langgraph import assertion_stage as _as
+    block = state["current_block"]
+    block_name = block["name"]
+    if _as.mode() == "off" or _is_primitive(block):
+        return {"assertion_ok": True}
+    rtl_path = state.get("rtl_path") or str(Path(_pr(state)) / block.get("rtl_target", f"rtl/{block_name}.v"))
+    write_graph_event(_pr(state), "Assertion Check", "graph_node_enter", {"block": block_name})
+    report = await asyncio.to_thread(_as.evaluate, _pr(state), block_name, rtl_path)
+    n_missing, n_phantom = len(report["missing"]), len(report["phantom_claims"])
+    if not report["missing"] and not report["phantom_claims"]:
+        log(f"  [ASSERT] {block_name}: {report['assertion_count']} assertion(s); "
+            f"{len(report['covered'])}/{len(report['checklist'])} invariants covered", GREEN)
+    else:
+        log(f"  [ASSERT] {block_name}: {n_missing} invariant(s) without an assertion, "
+            f"{n_phantom} phantom claim(s) ({report['mode']})",
+            YELLOW if report["mode"] == "advisory" else RED)
+        for inv in report["missing"][:6]:
+            log(f"    missing {inv['id']}", RED)
+        for p in report["phantom_claims"][:4]:
+            log(f"    phantom line {p['line']}: {p['text'][:90]}", RED)
+    write_graph_event(_pr(state), "Assertion Check", "graph_node_exit", {
+        "block": block_name, "ok": report["ok"], "mode": report["mode"],
+        "missing": [i["id"] for i in report["missing"]][:16], "phantom": n_phantom,
+        "assertions": report["assertion_count"],
+    })
+    if report["ok"]:
+        return {"assertion_ok": True}
+    block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
+    block_dir.mkdir(parents=True, exist_ok=True)
+    (block_dir / "previous_error.txt").write_text(_as.feedback_text(report) + "\n", encoding="utf-8")
+    return {"assertion_ok": False, "phase": "assertions"}
+
+
+def route_after_assertions(state: BlockState) -> str:
+    return "generate_testbench" if state.get("assertion_ok", True) else "diagnose"
+
+
+route_after_assertions.__edge_labels__ = {
+    "generate_testbench": "ASSERTIONS OK",
+    "diagnose": "MISSING / PHANTOM",
+}
+
+
+def _write_contract_slice(project_root, block_name: str) -> str:
+    """``.coresmith/blocks/<block>/contract_slice.json``: the block's edges with
+    their frozen fields and timing, for the TB author (A2)."""
+    try:
+        edges = _db(project_root).contract_edges_for_block(block_name)
+    except Exception:  # noqa: BLE001
+        edges = []
+    bdir = Path(project_root) / ".coresmith" / "blocks" / block_name
+    bdir.mkdir(parents=True, exist_ok=True)
+    target = bdir / "contract_slice.json"
+    try:
+        from orchestrator.architecture.specialists.contract_timing import (
+            normalize_timing,
+            timing_summary,
+        )
+        payload = []
+        for e in edges:
+            if not isinstance(e, dict):
+                continue
+            e = json.loads(json.dumps(e, default=str))  # a copy; the DB row stays as imported
+            normalize_timing(e)
+            payload.append({**e, "timing_summary": timing_summary(e)})
+        target.write_text(json.dumps({"block": block_name, "edges": payload}, indent=2,
+                                     default=str))
+    except OSError:
+        pass
+    return str(target)
+
+
+def _vip_tb_lint(project_root, block_name: str, tb_path) -> list[str]:
+    """Problems with the TB against the block's generated VIPs (empty = ok,
+    also when the VIP stage is off or produced nothing for this block)."""
+    try:
+        from orchestrator.langgraph.vip_lib import lint_tb_imports
+        from orchestrator.langgraph.vip_lib.codegen import vip_enabled, vips_for_block
+        if not vip_enabled():
+            return []
+        required = vips_for_block(project_root, block_name)
+        if not required:
+            return []
+        text = Path(tb_path).read_text(errors="replace") if Path(tb_path).exists() else ""
+        return lint_tb_imports(text, required)
+    except Exception:  # noqa: BLE001 - the lint is a gate on the VIP, not on DV itself
+        return []
+
+
 async def generate_testbench_node(state: BlockState) -> dict:
     """Generate testbench, run simulation, and fix TB locally on failure.
 
@@ -2182,6 +2491,7 @@ async def generate_testbench_node(state: BlockState) -> dict:
     """
     block = state["current_block"]
     block_name = block["name"]
+    _write_contract_slice(_pr(state), block_name)
     attempt = state["attempt"]
     # A blocks.yaml entry that omits `testbench` must not crash the whole
     # run -- it previously raised KeyError here and aborted every other
@@ -2427,6 +2737,25 @@ async def generate_testbench_node(state: BlockState) -> dict:
         tb_path = str(tb_path_obj)
 
         # --- Step 2: Simulate with local TB fix loop ---
+        # A2: the block's contract slice (fields + timing) is on disk for the
+        # TB author, and every edge with a generated VIP must be exercised
+        # through it. A TB that hand-models a neighbour instead is rejected
+        # before any simulation runs.
+        _vip_problems = [] if _is_primitive(block) else _vip_tb_lint(_pr(state), block_name, tb_path_obj)
+        if _vip_problems:
+            block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
+            block_dir.mkdir(parents=True, exist_ok=True)
+            (block_dir / "previous_error.txt").write_text(
+                "TESTBENCH REJECTED BY THE INTERFACE-VIP LINT (no sim was run). "
+                "Regenerate the testbench so that it imports and uses the generated "
+                "VIP of every listed edge:\n\n" + "\n".join(f"- {p}" for p in _vip_problems)
+                + "\n", encoding="utf-8")
+            for _p in _vip_problems[:6]:
+                log(f"  [VIP-LINT] {block_name}: {_p}", RED)
+            write_graph_event(_pr(state), "Interface VIP Lint", "gate_failed", {
+                "block": block_name, "problems": _vip_problems[:8]})
+            return {"tb_path": tb_path, "sim_passed": False, "phase": "tb",
+                    "force_regen_tb": True, "step_log_paths": existing_logs}
         sim_passed = False
         sim_result = None
         block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
@@ -2453,7 +2782,7 @@ async def generate_testbench_node(state: BlockState) -> dict:
                 span.set_attribute("passed", True)
                 span.set_attribute("tb_fixes", sim_attempt)
 
-                _db(_pr(state)).set_result(block_name, "best", {
+                _db(_pr(state)).set_result(block_name, _dv_result_kind(), {
                     "sim_passed": True,
                     "attempt": attempt,
                     "tests_passed": sim_result.get("tests_passed", 0),
@@ -2797,8 +3126,8 @@ def _park_ppa_unmeasurable(state: BlockState, block_name: str,
         (block_dir / "previous_error.txt").write_text(
             "Required timing is UNMEASURED: " + timing_error +
             "\nPreserve RTL. Repair the tool/constraints and retry synthesis.\n")
-        interrupt({"type": "ppa_gate_unmeasurable", "block_name": block_name,
-                   "supported_actions": ["retry_synth", "abort"],
+        _park({"type": "ppa_gate_unmeasurable", "block_name": block_name,
+               "supported_actions": ["retry_synth", "abort"],
                    "outer_agent_guidance": "Required STA is incomplete: " + timing_error +
                        ". Preserve RTL; fix the tool or constraints, then retry synthesis."})
         return
@@ -2809,7 +3138,7 @@ def _park_ppa_unmeasurable(state: BlockState, block_name: str,
     write_graph_event(pr, "PPA Gate Unmeasurable", "interrupt", {
         "block": block_name, "reason": "tooling_missing",
     })
-    interrupt({
+    _park({
         "type": "ppa_gate_unmeasurable",
         "block_name": block_name,
         "supported_actions": ["proceed"],
@@ -3062,10 +3391,15 @@ def _evaluate_ppa_gate(
 
     sta: dict = {}
     _sta_dir = Path(project_root) / "syn" / "output" / block_name
+    # STA must link the module the netlist DECLARES, which is
+    # not the block name for externally-mandated tops (the generated fabric is
+    # `cs_fabric_soc` for block `soc_fabric`); yosys/cocotb already resolve it so.
+    from orchestrator.langgraph.pipeline_helpers import rtl_module_name as _rtl_module_name
+    _sta_top = _rtl_module_name(rtl_path, block_name) if Path(rtl_path).exists() else block_name
     if synth_result:
         sta = run_pre_layout_sta(
             synth_result.get("netlist_path", ""), synth_result.get("sdc_path", ""),
-            synth_result.get("liberty_path", ""), block_name,
+            synth_result.get("liberty_path", ""), _sta_top,
             report_path=str(_sta_dir / f"{block_name}_sta.rpt"),
         ) or {}
         _meta["sta_report_path"] = str(_sta_dir / f"{block_name}_sta.rpt")
@@ -3127,7 +3461,7 @@ def _evaluate_ppa_gate(
             _clk = "clk"
         _mf_period = _period_ns if (_period_ns and _period_ns > 0) else 20.0
         mf = run_maxfanout_buffered_sta(
-            rtl_path, _liberty_p, block_name, _mf_period, _clk,
+            rtl_path, _liberty_p, _sta_top, _mf_period, _clk,
             timeout_s=_synth_timeout, extra_sources=_mem_lib_srcs,
             report_dir=_sta_dir, project_root=project_root,
             mapped_netlist=(synth_result or {}).get("netlist_path"),
@@ -3342,7 +3676,7 @@ def _container_leaf_map(project_root: str, block_names: list) -> dict:
     out: dict = {}
     for name in block_names:
         try:
-            br = _db(project_root).result(name, "best")
+            br = _block_pass_record(_db(project_root), name)
             if not br:
                 continue
             # Resolve the block's measured RTL: rtl_target when recorded;
@@ -3798,7 +4132,7 @@ async def synthesize_node(state: BlockState) -> dict:
             result = await asyncio.to_thread(
                 synthesize_block,
                 block, rtl_path,
-                target_clock_mhz=state.get("target_clock_mhz", 50.0),
+                target_clock_mhz=resolve_run_clock_mhz(state.get("target_clock_mhz"), _pr(state)),
                 attempt=state["attempt"],
             )
 
@@ -3926,6 +4260,7 @@ async def synthesize_node(state: BlockState) -> dict:
         "ppa_reasons": ppa_reasons,
         "timing_ok": timing_ok,
         "timing_required": ppa_meta.get("timing_required", False),
+        "sta_report_path": str(ppa_meta.get("sta_report_path") or ""),
         "gate_sim_ok": gate_sim_ok,
         "gate_sim_status": gate_sim_status,
         "gate_sim_reason": gate_sim_reason,
@@ -3937,6 +4272,35 @@ async def synthesize_node(state: BlockState) -> dict:
 # ---------------------------------------------------------------------------
 # Node: diagnose
 # ---------------------------------------------------------------------------
+
+def done_result_gate_enabled() -> bool:
+    """``best`` means sim AND synth AND timing (CORESMITH_DONE_RESULT_GATE, default on).
+
+    Before this gate the sim-pass record was written as ``best`` before synth
+    and timing ran, and two consumers (the integration-review reverify and the
+    container leaf map) read it as "the block is done". In the SoC benchmark
+    rv64_core sat at WNS -27.6 ns with a green ``best`` on disk. With the gate
+    on, DV writes ``dv_best`` and only ``block_done`` publishes ``best``.
+    """
+    return os.environ.get(
+        "CORESMITH_DONE_RESULT_GATE", "1"
+    ).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _dv_result_kind() -> str:
+    """The result kind the sim-pass is recorded under."""
+    return "dv_best" if done_result_gate_enabled() else "best"
+
+
+def _block_pass_record(db, name: str) -> dict | None:
+    """The block's DV pass record regardless of which kind carries it."""
+    return db.result(name, "dv_best") or db.result(name, "best")
+
+
+def _block_done_record(db, name: str) -> dict | None:
+    """The block's published pass (sim AND synth AND timing) -- ``best``."""
+    return db.result(name, "best")
+
 
 def _timing_ok_from_ppa_meta(ppa_meta: dict | None) -> bool | None:
     """Translate PPA timing metadata without losing fail-closed outcomes."""
@@ -4249,7 +4613,19 @@ async def diagnose_node(state: BlockState) -> dict:
     import re as _re
     _fast_diag = None
     if phase == "sim":
-        if "has no attribute" in error_log or "AttributeError" in error_log:
+        if _re.search(r"Assertion failed|VIPError|%Error.*assert", error_log):
+            _fast_diag = {
+                "category": "ASSERTION_FAILED",
+                "confidence": 0.95,
+                "diagnosis": "A design assertion (RTL SVA/immediate assertion or interface-VIP contract rule) fired in simulation.",
+                "suggested_fix": "Fix the RTL so the asserted invariant/contract timing holds; do not weaken the assertion or the VIP.",
+                "needs_human": False,
+                "is_testbench_bug": False,
+                "escalate": False,
+                "constraints": [],
+                "affected_blocks": [],
+            }
+        elif "has no attribute" in error_log or "AttributeError" in error_log:
             _fast_diag = {
                 "category": "TESTBENCH_BUG",
                 "confidence": 1.0,
@@ -4285,6 +4661,50 @@ async def diagnose_node(state: BlockState) -> dict:
                 "constraints": [],
                 "affected_blocks": [],
             }
+    elif phase == "assertions":
+        _fast_diag = {
+            "category": "ASSERTION_COVERAGE",
+            "confidence": 1.0,
+            "diagnosis": "The RTL lacks assertions for spec invariants or claims assertions that do not exist.",
+            "suggested_fix": "Add `// INV: <id>` + a real assertion under `ifndef SYNTHESIS` for each missing id; delete or back phantom claims.",
+            "needs_human": False,
+            "is_testbench_bug": False,
+            "escalate": False,
+            "constraints": [],
+            "affected_blocks": [],
+        }
+    elif phase == "tb":
+        if "INTERFACE-VIP LINT" in error_log:
+            _fast_diag = {
+                "category": "TESTBENCH_BUG",
+                "confidence": 1.0,
+                "diagnosis": "Testbench does not import/use the generated interface VIP(s) of its edges.",
+                "suggested_fix": "Regenerate the testbench importing each listed VIP and driving those edges only through it.",
+                "needs_human": False,
+                "is_testbench_bug": True,
+                "escalate": False,
+                "constraints": [],
+                "affected_blocks": [],
+            }
+    elif phase == "synth":
+        # Synthesis succeeded and only the measured timing failed: that is a
+        # pipelining/structure problem the timing-closure loop owns, not a
+        # question for the debug agent (which cannot see the STA path).
+        if (timing_fix_enabled() and state.get("synth_success")
+                and state.get("timing_ok") is False
+                and int(state.get("timing_fix_attempts") or 0) < timing_fix_max()):
+            _fast_diag = {
+                "category": "TIMING_VIOLATION",
+                "confidence": 1.0,
+                "diagnosis": "Synthesis succeeded; pre-layout STA reports negative slack.",
+                "suggested_fix": "Re-pipeline the worst path (timing_fix loop) without changing the interface contract.",
+                "needs_human": False,
+                "is_testbench_bug": False,
+                "escalate": False,
+                "constraints": [],
+                "affected_blocks": [],
+                "timing_fix": True,
+            }
     elif phase == "lint":
         if "Module not found" in error_log or "Cannot find file" in error_log:
             _fast_diag = {
@@ -4311,6 +4731,8 @@ async def diagnose_node(state: BlockState) -> dict:
         history = _db(_pr(state)).attempt_history(block_name)
         _db(_pr(state)).set_diagnosis(block_name, _fast_diag, attempt=state["attempt"])
         fast_action = "retry_tb" if _fast_diag.get("is_testbench_bug") else "retry_rtl"
+        if _fast_diag.get("timing_fix"):
+            fast_action = "retry_rtl_timing"
         write_graph_event(_pr(state), "Diagnose Failure", "graph_node_exit", {
             "block": block_name, "category": _fast_diag["category"],
             "confidence": _fast_diag["confidence"], "needs_human": False,
@@ -4605,6 +5027,142 @@ async def decide_node(state: BlockState) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Node: timing_fix  (A1c -- measured-timing repair loop)
+# ---------------------------------------------------------------------------
+
+def timing_fix_enabled() -> bool:
+    """Route a timing-only synth failure to the timing-closure loop
+    (CORESMITH_TIMING_FIX, default on)."""
+    return os.environ.get(
+        "CORESMITH_TIMING_FIX", "1"
+    ).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def timing_fix_max() -> int:
+    """Timing-fix iterations per block before the failure goes to the
+    ordinary diagnose path (CORESMITH_TIMING_FIX_MAX, default 2)."""
+    try:
+        return max(0, int(os.environ.get("CORESMITH_TIMING_FIX_MAX", "2") or 2))
+    except ValueError:
+        return 2
+
+
+async def timing_fix_node(state: BlockState) -> dict:
+    """Repair a block whose synthesis passed but whose measured timing failed.
+
+    The debug agent never sees the STA path, so it re-attacks a timing miss as
+    a functional bug. This node hands the worst-path report to the
+    ``TimingClosureAgent`` (previously dead code), writes the re-pipelined RTL,
+    re-lints and re-runs DV (the contract latency is frozen: a fix that changes
+    the interface escalates instead), and sends the block back to synthesize.
+    """
+    block = state["current_block"]
+    block_name = block["name"]
+    rtl_path = state.get("rtl_path") or str(Path(_pr(state)) / block.get("rtl_target", f"rtl/{block_name}.v"))
+    tb_path = state.get("tb_path") or ""
+    attempt = int(state.get("attempt") or 1)
+    n = int(state.get("timing_fix_attempts") or 0) + 1
+    block_dir = Path(_pr(state)) / ".coresmith" / "blocks" / block_name
+    block_dir.mkdir(parents=True, exist_ok=True)
+
+    write_graph_event(_pr(state), "Timing Fix", "graph_node_enter", {
+        "block": block_name, "attempt": attempt, "timing_fix_attempt": n,
+    })
+
+    sta_report = ""
+    _rp = state.get("sta_report_path") or ""
+    if _rp and Path(_rp).exists():
+        try:
+            sta_report = Path(_rp).read_text()[-20000:]
+        except OSError:
+            sta_report = ""
+    rtl_src = Path(rtl_path).read_text() if Path(rtl_path).exists() else ""
+    if not rtl_src:
+        (block_dir / "previous_error.txt").write_text(
+            f"timing_fix: RTL not found at {rtl_path}")
+        return {"debug_action": "escalate", "timing_fix_attempts": n}
+
+    with _tracer.start_as_current_span(f"Timing Fix [{block_name}]") as span:
+        span.set_attribute("block_name", block_name)
+        span.set_attribute("timing_fix_attempt", n)
+        from orchestrator.langchain.agents.timing_closure import TimingClosureAgent
+        try:
+            fix = await TimingClosureAgent().fix_timing(
+                block_name=block_name, rtl_source=rtl_src, sta_report=sta_report,
+                target_clock_mhz=resolve_run_clock_mhz(state.get("target_clock_mhz"), _pr(state)),
+                worst_slack_ns=None,
+            )
+        except Exception as exc:  # noqa: BLE001 - the loop must not crash the block
+            fix = {"verilog": rtl_src, "strategy": "ERROR", "interface_changed": False,
+                   "escalate": True, "error": str(exc)}
+        span.set_attribute("strategy", str(fix.get("strategy")))
+
+    log(f"  [TIMING] {block_name}: fix #{n} strategy={fix.get('strategy')} "
+        f"interface_changed={bool(fix.get('interface_changed'))}", YELLOW)
+
+    if fix.get("escalate") or fix.get("interface_changed"):
+        # The interface (latency/ports) is frozen by the contract; a repair
+        # that needs to move it is an architecture question, not a retry.
+        (block_dir / "previous_error.txt").write_text(
+            "timing_fix: the timing-closure agent could not repair the path "
+            "without changing the block interface "
+            f"(strategy={fix.get('strategy')}, interface_changed="
+            f"{bool(fix.get('interface_changed'))}). "
+            + str(fix.get("error") or ""))
+        write_graph_event(_pr(state), "Timing Fix", "graph_node_exit", {
+            "block": block_name, "outcome": "escalate"})
+        return {"debug_action": "escalate", "timing_fix_attempts": n, "phase": "synth"}
+
+    new_rtl = str(fix.get("verilog") or "").strip() + "\n"
+    Path(rtl_path).write_text(new_rtl)
+
+    lint = await asyncio.to_thread(lint_rtl, rtl_path, block_name, attempt)
+    if not lint.get("clean"):
+        (block_dir / "previous_error.txt").write_text(
+            "timing_fix: re-pipelined RTL fails lint\n" + str(lint.get("log", ""))[-5000:])
+        write_graph_event(_pr(state), "Timing Fix", "graph_node_exit", {
+            "block": block_name, "outcome": "lint_fail"})
+        return {"phase": "lint", "lint_clean": False, "timing_fix_attempts": n}
+
+    if tb_path and Path(tb_path).exists():
+        sim = await asyncio.to_thread(
+            run_simulation, block, rtl_path, tb_path, attempt, project_root=_pr(state))
+        if not sim.get("passed"):
+            (block_dir / "previous_error.txt").write_text(
+                "timing_fix: re-pipelined RTL fails DV\n" + str(sim.get("log", ""))[-5000:])
+            write_graph_event(_pr(state), "Timing Fix", "graph_node_exit", {
+                "block": block_name, "outcome": "sim_fail"})
+            return {"phase": "sim", "sim_passed": False, "timing_fix_attempts": n}
+        try:
+            _db(_pr(state)).update_result(
+                block_name, _dv_result_kind(), sim_passed=True, timing_fix_attempt=n,
+                **_pass_provenance(_pr(state), block_name, rtl_path, tb_path))
+        except Exception:  # noqa: BLE001
+            pass
+
+    write_graph_event(_pr(state), "Timing Fix", "graph_node_exit", {
+        "block": block_name, "outcome": "resynth"})
+    return {"phase": "synth", "sim_passed": True, "lint_clean": True,
+            "timing_fix_attempts": n, "debug_action": "retry_synth"}
+
+
+def route_after_timing_fix(state: BlockState) -> str:
+    """synthesize on a repaired block; diagnose on lint/DV regression; escalate."""
+    if state.get("debug_action") == "escalate":
+        return "block_done"
+    if state.get("phase") in ("lint", "sim"):
+        return "diagnose"
+    return "synthesize"
+
+
+route_after_timing_fix.__edge_labels__ = {
+    "synthesize": "REPAIRED",
+    "diagnose": "REGRESSED",
+    "block_done": "ESCALATE",
+}
+
+
+# ---------------------------------------------------------------------------
 # Node: ask_human  (INTERRUPT)
 # ---------------------------------------------------------------------------
 
@@ -4801,8 +5359,33 @@ async def block_done_node(state: BlockState) -> dict:
             "step_log_paths": step_log_paths,
             "completed_at": completed_at,
         }
+        if done_result_gate_enabled():
+            # Publish the block's pass: the DV record plus the synth/timing
+            # facts it was earned with. Only this node may write ``best``.
+            try:
+                _pdb = _db(_pr(state))
+                _dv = dict(_pdb.result(block_name, "dv_best") or {})
+                _pdb.set_result(block_name, "best", {
+                    **_dv,
+                    "sim_passed": True,
+                    "synth_success": True,
+                    "timing_ok": state.get("timing_ok"),
+                    "timing_required": bool(state.get("timing_required")),
+                    "gate_count": gate_count,
+                    "attempt": attempt,
+                    "done": True,
+                })
+            except Exception as _exc:  # noqa: BLE001 - never lose the pass
+                log(f"  [{block_name}] could not publish best result: {_exc}", YELLOW)
         log(f"  [{block_name}] PASSED (attempt {attempt})", GREEN)
     else:
+        if done_result_gate_enabled():
+            # A block that is not done has no published pass, whatever an
+            # earlier round recorded. ``dv_best`` stays (sim did pass).
+            try:
+                _db(_pr(state)).clear_result(block_name, "best")
+            except Exception:  # noqa: BLE001
+                pass
         error_path = block_dir / "previous_error.txt"
         error_text = error_path.read_text()[:500] if error_path.exists() else ""
         result = {
@@ -4840,6 +5423,13 @@ async def block_done_node(state: BlockState) -> dict:
 # Block-level routing functions
 # ---------------------------------------------------------------------------
 
+def _rtl_node(state: BlockState) -> str:
+    """B1: a primitive's RTL is generated, never authored -- every route that
+    would re-enter ``generate_rtl`` re-materializes it instead (a retry after
+    a conformance/lint failure used to hand the fabric to the LLM)."""
+    return "materialize_primitive" if _is_primitive(state.get("current_block") or {}) else "generate_rtl"
+
+
 def route_after_uarch_review(state: BlockState) -> str:
     """Route after uarch spec review.
 
@@ -4857,7 +5447,7 @@ def route_after_uarch_review(state: BlockState) -> str:
         return "generate_uarch_spec"
     if action == "skip":
         return "block_done"
-    return "generate_rtl"
+    return _rtl_node(state)
 
 
 route_after_uarch_review.__edge_labels__ = {
@@ -4868,12 +5458,12 @@ route_after_uarch_review.__edge_labels__ = {
 
 
 def route_after_rtl(state: BlockState) -> str:
-    """Route after RTL generation + lint: CLEAN -> testbench, FAIL -> diagnose."""
-    return "generate_testbench" if state.get("lint_clean") else "diagnose"
+    """Route after RTL generation + lint: CLEAN -> assertion check, FAIL -> diagnose."""
+    return "assertion_check" if state.get("lint_clean") else "diagnose"
 
 
 route_after_rtl.__edge_labels__ = {
-    "generate_testbench": "LINT CLEAN",
+    "assertion_check": "LINT CLEAN",
     "diagnose": "LINT FAIL",
 }
 
@@ -4926,20 +5516,33 @@ def route_decision(state: BlockState) -> str:
     """Route after decide: directly to generate_rtl, generate_testbench, etc."""
     action = state.get("debug_action", "retry_rtl")
     mapping = {
-        "retry_rtl": "generate_rtl",
+        "retry_rtl": _rtl_node(state),
         "retry_tb": "generate_testbench",
         "retry_synth": "synthesize",
         "retry_sim": "simulate",
+        "retry_rtl_timing": "timing_fix",
         "ask_human": "ask_human",
         "escalate": "block_done",
     }
-    return mapping.get(action, "generate_rtl")
+    target = mapping.get(action, _rtl_node(state))
+    if _is_primitive(state.get("current_block") or {}):
+        # A primitive block is generated, never authored: RTL/TB retries
+        # re-materialize it, and a timing miss cannot be repaired by an LLM
+        # editing 18 MB of elaborated IP -- park it so the generator
+        # configuration can change and the block re-materialize (B2 #5/#10).
+        if target in ("generate_rtl", "generate_testbench"):
+            return "materialize_primitive"
+        if target == "timing_fix":
+            return "ask_human"
+    return target
 
 
 route_decision.__edge_labels__ = {
+    "materialize_primitive": "RE-MATERIALIZE",
     "generate_rtl": "RETRY RTL",
     "generate_testbench": "RETRY TB",
     "synthesize": "RETRY SYNTH",
+    "timing_fix": "TIMING FIX",
     "simulate": "RETRY SIM",
     "ask_human": "ASK HUMAN",
     "block_done": "ESCALATE",
@@ -4951,19 +5554,21 @@ def route_after_human(state: BlockState) -> str:
     action = (state.get("human_response") or {}).get("action", "retry")
     if action == "retry" and state.get("phase") == "synth":
         return "synthesize"
+    rtl = _rtl_node(state)
     mapping = {
-        "retry": "generate_rtl",
-        "fix_rtl": "generate_rtl",
+        "retry": rtl,
+        "fix_rtl": rtl,
         "fix_tb": "generate_testbench",
-        "add_constraint": "generate_rtl",
+        "add_constraint": rtl,
         "skip": "block_done",
         "abort": "block_done",
     }
-    return mapping.get(action, "generate_rtl")
+    return mapping.get(action, rtl)
 
 
 route_after_human.__edge_labels__ = {
     "synthesize": "RETRY SYNTH",
+    "materialize_primitive": "RE-MATERIALIZE",
     "generate_rtl": "RETRY / FIX RTL",
     "generate_testbench": "FIX TB",
     "block_done": "SKIP / ABORT",
@@ -4995,10 +5600,13 @@ def build_block_subgraph():
     # Nodes (10 -- lint, simulate, increment_attempt are folded in)
     graph.add_node("init_block", init_block_node)
     graph.add_node("generate_uarch_spec", generate_uarch_spec_node)
+    graph.add_node("materialize_primitive", materialize_primitive_node)
     graph.add_node("review_uarch_spec", review_uarch_spec_node)
     graph.add_node("generate_rtl", generate_rtl_node)
+    graph.add_node("assertion_check", assertion_check_node)
     graph.add_node("generate_testbench", generate_testbench_node)
     graph.add_node("synthesize", synthesize_node)
+    graph.add_node("timing_fix", timing_fix_node)
     graph.add_node("diagnose", diagnose_node)
     graph.add_node("decide", decide_node)
     graph.add_node("ask_human", ask_human_node)
@@ -5006,16 +5614,19 @@ def build_block_subgraph():
 
     # Happy path
     graph.add_edge(START, "init_block")
-    graph.add_edge("init_block", "generate_uarch_spec")
+    graph.add_conditional_edges("init_block", route_after_init)
+    graph.add_conditional_edges("materialize_primitive", route_after_materialize)
     graph.add_edge("generate_uarch_spec", "review_uarch_spec")
     graph.add_conditional_edges("review_uarch_spec", route_after_uarch_review)
     graph.add_conditional_edges("generate_rtl", route_after_rtl)
+    graph.add_conditional_edges("assertion_check", route_after_assertions)
     graph.add_conditional_edges("generate_testbench", route_after_tb)
     graph.add_conditional_edges("synthesize", route_after_synth)
 
     # Failure path
     graph.add_edge("diagnose", "decide")
     graph.add_conditional_edges("decide", route_decision)
+    graph.add_conditional_edges("timing_fix", route_after_timing_fix)
     graph.add_conditional_edges("ask_human", route_after_human)
 
     # Terminal
@@ -5304,9 +5915,385 @@ def _retire_derived_integration_artifacts(project_root: str) -> list[str]:
     return moved
 
 
+def uarch_phase_enabled() -> bool:
+    """B2: uArch specs for every block, plus the SystemC SoC model, before the
+    first RTL tier (CORESMITH_UARCH_PHASE, default on)."""
+    return (os.environ.get("CORESMITH_UARCH_PHASE", "1") or "1").strip().lower() \
+        not in {"0", "false", "no", "off", ""}
+
+
+def system_model_enabled() -> bool:
+    return (os.environ.get("CORESMITH_SYSTEM_MODEL", "1") or "1").strip().lower() \
+        not in {"0", "false", "no", "off", ""}
+
+
+def _system_model_repairs() -> int:
+    try:
+        return max(0, int(os.environ.get("CORESMITH_SYSTEM_MODEL_REPAIRS", "2") or 2))
+    except ValueError:
+        return 2
+
+
+async def _uarch_phase_specs(pr: str, blocks: list[dict]) -> dict:
+    """Author every missing (non-primitive) uArch spec in one session."""
+    spec_dir = Path(pr) / "arch" / "uarch_specs"
+    todo = [b for b in blocks if not _is_primitive(b) and not (spec_dir / f"{b['name']}.md").exists()]
+    if not todo:
+        return {"written": [], "missing": [], "skipped": True}
+    from orchestrator.langgraph.pipeline_helpers import generate_uarch_specs_single_context
+    return await generate_uarch_specs_single_context(todo)
+
+
+async def _uarch_phase_models(pr: str, blocks: list[dict]) -> dict:
+    """SystemC block models (generated fabric router / LLM-authored), the SoC
+    assembly, build and smoke. Never raises; returns the record."""
+    from orchestrator.systemc_model import build, detect, render_block_skeleton, smoke, write_build
+    from orchestrator.systemc_model.conventions import model_name
+    from orchestrator.systemc_model.fabric_model import render_fabric_model
+    rec: dict = {"enabled": True, "toolchain": detect(), "blocks": {}, "build_ok": None, "smoke_ok": None}
+    if not rec["toolchain"]["ok"]:
+        rec["parked_reason"] = "system_model_toolchain_missing: " + rec["toolchain"]["reason"]
+        return rec
+    db = _db(pr)
+    edges = list((db.contracts() or {}).get("contracts") or [])
+    names = [b["name"] for b in blocks if b.get("name")]
+    md = write_build(pr, names, edges, top_name=_shell_top_name(pr),
+                     systemc_home=rec["toolchain"].get("systemc_home") or "")
+    authored: list[str] = []
+    for b in blocks:
+        name = b["name"]
+        hp = md / f"{model_name(name)}.h"
+        cp = md / f"{model_name(name)}.cpp"
+        if _is_primitive(b):
+            try:
+                from orchestrator.fabric import FabricSpec
+                h, c = render_fabric_model(name, FabricSpec.from_json(_live_fabric(pr, b).get("fabric") or {}), edges)
+                hp.write_text(h)
+                cp.write_text(c)
+                rec["blocks"][name] = {"source": "generated", "written": True}
+            except Exception as exc:  # noqa: BLE001
+                rec["blocks"][name] = {"source": "generated", "written": False, "error": str(exc)}
+            continue
+        if not hp.exists():
+            hp.write_text(render_block_skeleton(name, edges))
+        _write_contract_slice(pr, name)
+        if cp.exists():
+            rec["blocks"][name] = {"source": "existing", "written": True}
+            continue
+        authored.append(name)
+    from orchestrator.langchain.agents.systemc_model_generator import SystemCModelGenerator
+    agent = SystemCModelGenerator()
+    sem = asyncio.Semaphore(max(1, int(os.environ.get("CORESMITH_SYSTEM_MODEL_PARALLEL", "4") or 4)))
+
+    async def _author(name: str):
+        async with sem:
+            try:
+                out = await agent.generate(name, project_root=pr,
+                                           header_path=f"model/{model_name(name)}.h")
+                rec["blocks"][name] = {"source": "agent", "written": bool(out.get("written"))}
+            except Exception as exc:  # noqa: BLE001
+                rec["blocks"][name] = {"source": "agent", "written": False, "error": str(exc)[:300]}
+    await asyncio.gather(*(_author(n) for n in authored))
+    missing = [n for n, r in rec["blocks"].items() if not r.get("written")]
+    if missing:
+        rec["build_ok"] = False
+        rec["missing_models"] = missing
+        return rec
+    res = await asyncio.to_thread(build, md)
+    for attempt in range(1, _system_model_repairs() + 1):
+        if res["ok"]:
+            break
+        failing = [n for n in authored if f"{model_name(n)}" in res["log"]] or authored
+        log(f"  [SYSTEMC] build failed; repair round {attempt} for {', '.join(failing)}", YELLOW)
+        for n in failing:
+            try:
+                await agent.generate(n, project_root=pr, header_path=f"model/{model_name(n)}.h",
+                                     compiler_log=res["log"], attempt=attempt + 1)
+            except Exception as exc:  # noqa: BLE001
+                log(f"  [SYSTEMC] {n}: repair failed: {exc}", RED)
+        res = await asyncio.to_thread(build, md)
+    rec["build_ok"] = bool(res["ok"])
+    rec["build_log"] = res["log"][-2000:]
+    if res["ok"]:
+        sm = await asyncio.to_thread(smoke, md)
+        rec["smoke_ok"] = bool(sm["ok"])
+        rec["smoke_log"] = sm["log"][-2000:]
+        if rec["smoke_ok"] and frd_eval_enabled():
+            rec["frd_eval"] = await _frd_evaluation(pr, md, names)
+    import hashlib
+    for name in names:
+        cp = md / f"{model_name(name)}.cpp"
+        try:
+            db.upsert_model(name, path=str(cp), sha=(hashlib.sha256(cp.read_bytes()).hexdigest()[:16]
+                                                     if cp.exists() else ""),
+                            spec_contract_version=str(db.block_contract_version(name)),
+                            build_ok=rec["build_ok"], smoke_ok=rec.get("smoke_ok"))
+        except Exception:  # noqa: BLE001
+            pass
+    return rec
+
+
+def frd_eval_enabled() -> bool:
+    """B2: evaluate the FRD on the SystemC SoC model before RTL (CORESMITH_FRD_EVAL, default on)."""
+    return (os.environ.get("CORESMITH_FRD_EVAL", "1") or "1").strip().lower() \
+        not in {"0", "false", "no", "off", ""}
+
+
+async def _frd_evaluation(pr: str, md, names: list[str]) -> dict:
+    """The FRD evaluated on the assembled SoC model (see
+    ``systemc_model.frd_eval.evaluate``); the verdicts are also recorded as
+    ``model_eval`` checks in the ontology."""
+    from orchestrator.systemc_model import frd_eval as fe
+    try:
+        db = _db(pr)
+    except Exception:  # noqa: BLE001
+        db = None
+    return await fe.evaluate(pr, md, names, arch=False, db=db)
+
+
+
+def uarch_phase_gate_enabled() -> bool:
+    """B2: park the run when the SoC model does not build or smoke (default on)."""
+    return (os.environ.get("CORESMITH_UARCH_PHASE_GATE", "1") or "1").strip().lower() \
+        not in {"0", "false", "no", "off", ""}
+
+
+async def uarch_phase_node(state: OrchestratorState) -> dict:
+    """B2: the uArch stage as a chip-level phase.
+
+    Before the first RTL tier: (1) every block's uArch spec is authored in one
+    session; (2) every block gets a SystemC TLM-2.0 LT model (a generated
+    router for the fabric primitive, LLM-authored from the generated skeleton
+    for the rest); (3) the SoC model is assembled, built (with a bounded
+    compiler-repair loop) and smoked. Results go to ``models`` and
+    ``.coresmith/system_model.json``. A missing toolchain is recorded, not
+    fatal; (4) the FRD is evaluated on the model (``_frd_evaluation``). A
+    failed build, smoke or FRD evaluation parks (CORESMITH_UARCH_PHASE_GATE,
+    default on; ``0`` records the failure and lowers to RTL anyway).
+    """
+    pr = _pr(state)
+    if not uarch_phase_enabled():
+        return {}
+    blocks = list(state.get("block_queue") or [])
+    write_graph_event(pr, "uArch Phase", "graph_node_enter", {"blocks": len(blocks)})
+    result: dict = {"specs": {}, "system_model": {"enabled": system_model_enabled()}}
+    try:
+        result["specs"] = await _uarch_phase_specs(pr, blocks)
+        log(f"  [UARCH-PHASE] specs: {len(result['specs'].get('written') or [])} written, "
+            f"{len(result['specs'].get('missing') or [])} missing", GREEN)
+    except Exception as exc:  # noqa: BLE001 - per-block generation will fill the gaps
+        result["specs"] = {"error": str(exc)[:300]}
+        log(f"  [UARCH-PHASE] chip-level spec authoring failed ({exc}); blocks will spec per tier", YELLOW)
+    if system_model_enabled():
+        try:
+            result["system_model"] = await _uarch_phase_models(pr, blocks)
+        except Exception as exc:  # noqa: BLE001
+            result["system_model"] = {"enabled": True, "error": str(exc)[:300]}
+        sm = result["system_model"]
+        log(f"  [UARCH-PHASE] system model: build={sm.get('build_ok')} smoke={sm.get('smoke_ok')}"
+            + (f" ({sm.get('parked_reason')})" if sm.get("parked_reason") else ""),
+            GREEN if sm.get("smoke_ok") else YELLOW)
+    try:
+        (Path(pr) / ".coresmith" / "system_model.json").write_text(json.dumps(result, indent=2, default=str))
+    except OSError:
+        pass
+    write_graph_event(pr, "uArch Phase", "graph_node_exit", {
+        "specs_written": len(result["specs"].get("written") or []),
+        "model_build_ok": result["system_model"].get("build_ok"),
+        "model_smoke_ok": result["system_model"].get("smoke_ok")})
+    # The phase's exit criterion is an SoC model that builds AND runs its
+    # smoke: the chip is "booted" in the model before any RTL is lowered.
+    # A missing toolchain is recorded (parked_reason), never a park.
+    sm = result["system_model"]
+    frd = sm.get("frd_eval") or {}
+    failed = sm.get("enabled") and (sm.get("build_ok") is False or sm.get("smoke_ok") is False
+                                    or frd.get("gate_ok") is False)
+    if uarch_phase_gate_enabled() and failed:
+        why = ("the FRD evaluation on the model failed (model/frd_eval/REPORT.md, .coresmith/frd_eval.json): "
+               f"failing={((frd.get('summary') or {}).get('failed') or [])[:8]} "
+               f"unanswered_must={((frd.get('summary') or {}).get('unanswered_must') or [])[:8]}"
+               if frd.get("gate_ok") is False else
+               "the SystemC SoC model did not build or its smoke run failed (model/build.log, model/smoke.log)")
+        _park({"type": "uarch_phase_failed", "system_model": sm,
+               "supported_actions": ["retry", "skip", "abort"],
+               "outer_agent_guidance": f"uArch phase exit criterion not met: {why}. Fix model/ (block models "
+                                       "or the harness) and retry, or skip to lower to RTL anyway."},
+              node="uarch_phase")
+    return {"uarch_phase": result}
+
+
+def shell_integration_enabled() -> bool:
+    """A4: assemble the chip top from the contracts before any RTL exists and
+    after every tier (CORESMITH_SHELL_INTEGRATION, default on)."""
+    return (os.environ.get("CORESMITH_SHELL_INTEGRATION", "1") or "1").strip().lower() \
+        not in {"0", "false", "no", "off", ""}
+
+
+def _deterministic_top_enabled() -> bool:
+    """A4: the final chip top is the same deterministic assembly (non-Caravel
+    designs; CORESMITH_DETERMINISTIC_TOP, default on)."""
+    return (os.environ.get("CORESMITH_DETERMINISTIC_TOP", "1") or "1").strip().lower() \
+        not in {"0", "false", "no", "off", ""}
+
+
+def _shell_top_name(pr: str) -> str:
+    from orchestrator.harness.top_module import declared_top
+    try:
+        return declared_top(pr) or "chip_top"
+    except Exception:  # noqa: BLE001
+        return "chip_top"
+
+
+def _block_rtl_target(pr, block: dict) -> Path:
+    """Where a block's RTL lives: its ``rtl_target``, else a primitive fabric's
+    ``rtl/interconnect/<module>.v`` (materialize_primitive_node), else
+    ``rtl/<name>.v``."""
+    if block.get("rtl_target"):
+        return Path(pr) / block["rtl_target"]
+    return primitive_rtl_target(pr, block) or Path(pr) / "rtl" / f"{block.get('name')}.v"
+
+
+def _shell_assemble(pr: str, block_queue: list[dict], *, tier=None, all_real: bool = False):
+    """Assemble the shell top: real RTL for blocks with a published pass
+    (``best``), stubs for the rest. Returns (assembly, elab, snapshot) or None
+    when shell integration does not apply (Caravel chassis / disabled)."""
+    from orchestrator.chassis.profile import declared_chassis
+    from orchestrator.langgraph.shell_integration import assemble_top, elaborate, write_snapshot
+    try:
+        if declared_chassis(pr) is not None:
+            return None
+    except Exception:  # noqa: BLE001 - an unreadable chassis declaration: assemble anyway
+        pass
+    db = _db(pr)
+    edges = list((db.contracts() or {}).get("contracts") or [])
+    names = [b["name"] for b in block_queue if b.get("name")]
+    rtl_paths: dict[str, str] = {}
+    for b in block_queue:
+        name = b.get("name")
+        if not name:
+            continue
+        target = _block_rtl_target(pr, b)
+        if target.exists() and (all_real or db.result(name, "best")):
+            rtl_paths[name] = str(target)
+    asm = assemble_top(pr, top_name=_shell_top_name(pr), blocks=names, edges=edges,
+                       rtl_paths=rtl_paths, out_dir=Path(pr) / ".coresmith" / "shell")
+    elab = elaborate(asm) if not asm.wiring_errors else {"ran": False, "ok": None,
+                                                         "reason": "wiring errors"}
+    snap = write_snapshot(pr, asm, elab, tier=tier)
+    return asm, elab, snap
+
+
+async def shell_integration_init_node(state: OrchestratorState) -> dict:
+    """A4 tier 0: every block as a contract stub, wired and elaborated -- the
+    port-passing netlist exists before a line of RTL is written."""
+    pr = _pr(state)
+    if not shell_integration_enabled():
+        return {}
+    write_graph_event(pr, "Shell Integration", "graph_node_enter", {"phase": "init"})
+    try:
+        res = await asyncio.to_thread(_shell_assemble, pr, list(state.get("block_queue") or []), tier="init")
+    except Exception as exc:  # noqa: BLE001 - the shell must never block a run start
+        log(f"  [SHELL] initial assembly failed: {exc}", YELLOW)
+        write_graph_event(pr, "Shell Integration", "graph_node_exit", {"phase": "init", "error": str(exc)[:300]})
+        return {}
+    if res is None:
+        write_graph_event(pr, "Shell Integration", "graph_node_exit", {"phase": "init", "skipped": True})
+        return {}
+    asm, elab, snap = res
+    ok = not asm.wiring_errors and elab.get("ok") is not False
+    log(f"  [SHELL] {asm.module_name}: {len(asm.instantiated)} block(s) as stubs, {asm.wires} nets, "
+        f"{len(asm.boundary_ports)} boundary port(s); elaboration "
+        f"{'CLEAN' if elab.get('ok') else elab.get('reason') or 'ERRORS'}", GREEN if ok else RED)
+    for e in (asm.wiring_errors + (elab.get("errors") or []))[:8]:
+        log(f"    {e}", RED)
+    write_graph_event(pr, "Shell Integration", "graph_node_exit", {
+        "phase": "init", "ok": ok, "stubs": len(asm.stubs), "wires": asm.wires,
+        "wiring_errors": asm.wiring_errors[:8], "elab_errors": (elab.get("errors") or [])[:8]})
+    return {"shell_snapshot": snap}
+
+
+async def shell_integration_update_node(state: OrchestratorState) -> dict:
+    """A4 after every tier: re-assemble with the real RTL of every block that
+    has a published pass; a real block whose ports drift from the contract is
+    caught HERE, at the block that introduced it."""
+    pr = _pr(state)
+    if not shell_integration_enabled():
+        return {}
+    tier = None
+    try:
+        tier = (state.get("tier_list") or [None])[state.get("current_tier_index", 0)]
+    except (IndexError, TypeError):
+        tier = None
+    write_graph_event(pr, "Shell Integration", "graph_node_enter", {"phase": "update", "tier": tier})
+    try:
+        res = await asyncio.to_thread(_shell_assemble, pr, list(state.get("block_queue") or []), tier=tier)
+    except Exception as exc:  # noqa: BLE001
+        log(f"  [SHELL] assembly failed: {exc}", YELLOW)
+        write_graph_event(pr, "Shell Integration", "graph_node_exit", {"phase": "update", "error": str(exc)[:300]})
+        return {}
+    if res is None:
+        return {}
+    asm, elab, snap = res
+    from orchestrator.langgraph.shell_integration import attribute_errors
+    real = [b for b in asm.instantiated if b not in asm.stubs]
+    blamed, engine_errors = attribute_errors(asm.wiring_errors + (elab.get("errors") or []), real)
+    failures = [{"block": blk, "category": "INTEGRATION_CONTRACT", "detail": err, "tier": tier}
+                for blk, err in blamed]
+    ok = not asm.wiring_errors and elab.get("ok") is not False
+    log(f"  [SHELL] {asm.module_name}: {len(real)} real / {len(asm.stubs)} stub block(s); elaboration "
+        f"{'CLEAN' if elab.get('ok') else elab.get('reason') or 'ERRORS'}"
+        + (f"; {len(failures)} block-attributable contract failure(s)" if failures else "")
+        + (f"; {len(engine_errors)} engine/tool error(s), not attributed to blocks" if engine_errors else ""),
+        GREEN if ok else RED)
+    for f in failures[:8]:
+        log(f"    {f['block']}: {f['detail']}", RED)
+    for e in engine_errors[:8]:
+        log(f"    ENGINE: {e}", RED)
+    write_graph_event(pr, "Shell Integration", "graph_node_exit", {
+        "phase": "update", "tier": tier, "ok": ok, "real": real, "stubs": asm.stubs,
+        "failures": failures[:8], "engine_errors": engine_errors[:8]})
+    # With the architect sitting on, a tier whose assembled top does not
+    # elaborate does not advance: park with the errors so the cause is fixed
+    # first. Errors attributed to the engine's own primitives (engine_errors)
+    # are a tool problem, not a design failure, and do not park.
+    _design_errors = [e for e in (elab.get("errors") or []) if e not in (engine_errors or [])]
+    if architect_sitting_enabled() and (asm.wiring_errors or (elab.get("ok") is False and _design_errors)):
+        _park({"type": "shell_not_elaborated", "tier": tier,
+               "wiring_errors": list(asm.wiring_errors)[:20], "elab_errors": _design_errors[:20],
+               "supported_actions": ["retry", "skip", "abort"],
+               "outer_agent_guidance": "The chip top assembled from the published blocks does not elaborate; "
+                                       "fix the cause (missing wrapper, port mismatch) and retry."},
+              node="shell_update")
+    out: dict = {"shell_snapshot": snap}
+    if failures:
+        out["integration_contract_failures"] = failures
+    return out
+
+
+def architect_sitting_enabled() -> bool:
+    """CORESMITH_ARCHITECT_SITTING=1: the architecture is produced by the
+    architect sitting through the CLI state machine; the tier loop refuses to
+    fan out before the run has entered the ``blocks`` stage."""
+    return (os.environ.get("CORESMITH_ARCHITECT_SITTING", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 async def init_tier_node(state: OrchestratorState) -> dict:
     """Compute the tier list (once) and log the current tier."""
     pr = state.get("project_root", str(PROJECT_ROOT))
+    if architect_sitting_enabled() and not state.get("completed_blocks"):
+        try:
+            from orchestrator.state_store import stages as _st
+            _cur = _st.current(_db(pr))
+        except Exception:  # noqa: BLE001
+            _cur = "?"
+        if _cur not in ("blocks", "integration", "acceptance", "backend"):
+            _blk = _st.entry(_db(pr), pr, _cur) if _cur != "?" else []
+            log(f"  [ARCHITECT] the run is at stage '{_cur}'; block fan-out waits for `coresmith stage next` into 'blocks'", YELLOW)
+            _park({"type": "architect_stage_pending", "stage": _cur, "blocked_by": _blk,
+                   "supported_actions": ["retry", "abort"],
+                   "outer_agent_guidance": f"The architect sitting has not finished (stage {_cur}); run "
+                                           "`coresmith architect start` / resolve the blockers, then retry."},
+                  node="init_tier")
 
     # A declared pin map REPLACES the pad-adapter block, so the flow must not
     # ask for it. Done here -- the head of the dispatch path, before tier_list
@@ -5326,9 +6313,8 @@ async def init_tier_node(state: OrchestratorState) -> dict:
 
     # Chip-lead trip re-arms on a FRESH run start (tier 0, nothing completed);
     # mid-run tier re-entries keep a tripped lead parked.
-    global _CHIP_LEAD_TRIPPED
     if current_idx == 0 and not state.get("completed_blocks"):
-        _CHIP_LEAD_TRIPPED = False
+        _untrip_chip_lead()
 
     tier = tier_list[current_idx]
     tier_blocks = [b for b in block_queue if b.get("tier", 1) == tier]
@@ -5404,6 +6390,50 @@ async def init_tier_node(state: OrchestratorState) -> dict:
     return out
 
 
+def cluster_fanout_enabled() -> bool:
+    """CORESMITH_FANOUT=cluster: one long-lived session per cluster of blocks
+    (``cluster`` / ``subsystem`` in the diagram) instead of one subgraph per
+    block. Default ``block`` unless the architect sitting is on."""
+    v = (os.environ.get("CORESMITH_FANOUT", "") or "").strip().lower()
+    if v in ("cluster", "block"):
+        return v == "cluster"
+    return architect_sitting_enabled()
+
+
+def _cluster_of(block: dict) -> str:
+    return str(block.get("cluster") or block.get("subsystem") or "all").strip().replace(" ", "_") or "all"
+
+
+async def process_cluster_node(state: OrchestratorState) -> dict:
+    """One cluster worker (a resumable claude session using the CLI) for a set
+    of blocks of the current tier; every block it publishes through
+    ``coresmith block-done`` appears in ``completed_blocks`` with the same
+    record shape ``block_done_node`` produces."""
+    from orchestrator.architect.cluster import ClusterSession
+    pr = _pr(state)
+    cluster = state["cluster"]
+    names = [b["name"] for b in state.get("cluster_blocks") or []]
+    write_graph_event(pr, "Cluster Worker", "graph_node_enter", {"cluster": cluster, "blocks": names})
+    sess = ClusterSession(pr, cluster, names, target_clock_mhz=resolve_run_clock_mhz(state.get("target_clock_mhz"), pr),
+                          max_turns=int(os.environ.get("CORESMITH_CLUSTER_MAX_TURNS", "400") or 400),
+                          max_sittings=int(os.environ.get("CORESMITH_CLUSTER_MAX_SITTINGS", "10") or 10))
+    st = await asyncio.to_thread(sess.run)
+    db = _db(pr)
+    done_at = _time.time()
+    completed = []
+    for n in names:
+        best = db.result(n, "best") or {}
+        ok = bool(best.get("done"))
+        completed.append({"name": n, "success": ok, "attempts": int(best.get("attempt") or st.get("sittings") or 1),
+                          "gate_count": best.get("gate_count", 0), "synth_success": ok, "constraints_learned": 0,
+                          "step_log_paths": {}, "completed_at": done_at, "cluster": cluster})
+        log(f"  [{cluster}] {n}: {'PASSED' if ok else 'NOT DONE'} (cluster worker {st.get('state')})", GREEN if ok else RED)
+    write_graph_event(pr, "Cluster Worker", "graph_node_exit", {"cluster": cluster, "state": st.get("state"),
+                                                                "done": [c["name"] for c in completed if c["success"]],
+                                                                "cost_usd": st.get("cost_usd")})
+    return {"completed_blocks": completed}
+
+
 def fan_out_tier(state: OrchestratorState) -> list[Send]:
     """Fan out all blocks in the current tier for parallel execution.
 
@@ -5423,9 +6453,32 @@ def fan_out_tier(state: OrchestratorState) -> list[Send]:
     revise = state.get("revise_blocks") or None
     if revise:
         tier_blocks = [b for b in tier_blocks if b["name"] in revise]
-    single_context = _uarch_single_context_enabled()
+    single_context = _uarch_single_context_enabled() or uarch_phase_enabled()
+    # A2: a block whose contract edges moved after its uArch spec was written
+    # re-specs instead of reusing the stale spec (``_stale_specs`` previously
+    # had no caller, so a contract revision never propagated).
+    stale = {d["block"] for d in _stale_specs(state["project_root"],
+                                                [b["name"] for b in tier_blocks])}
+    if stale:
+        log(f"  Stale uArch specs (contracts revised): {', '.join(sorted(stale))} "
+            "-- re-specifying", YELLOW)
 
     sends = []
+    if cluster_fanout_enabled():
+        groups: dict[str, list[dict]] = {}
+        for block in tier_blocks:
+            if _is_primitive(block):
+                continue                        # generated by the engine, not by a worker
+            groups.setdefault(_cluster_of(block), []).append(block)
+        for cluster, blocks in sorted(groups.items()):
+            sends.append(Send("process_cluster", {
+                "project_root": state["project_root"], "target_clock_mhz": state["target_clock_mhz"],
+                "max_attempts": state["max_attempts"], "cluster": cluster, "cluster_blocks": blocks,
+                "completed_blocks": []}))
+        prims = [b for b in tier_blocks if _is_primitive(b)]
+        tier_blocks = prims                 # primitives still go through materialize_primitive
+        log(f"  [FANOUT] cluster mode: {len(groups)} cluster worker(s) {sorted(groups)}"
+            + (f", {len(prims)} primitive(s)" if prims else ""), CYAN)
     for block in tier_blocks:
         sends.append(Send("process_block", {
             "project_root": state["project_root"],
@@ -5450,8 +6503,10 @@ def fan_out_tier(state: OrchestratorState) -> list[Send]:
             "human_response": None,
             "completed_blocks": [],
             "step_log_paths": {},
-            "reuse_spec": (bool(revise[block["name"]]) if revise
+            "reuse_spec": (False if block["name"] in stale
+                           else bool(revise[block["name"]]) if revise
                            else single_context),
+            "preserve_testbench": _is_primitive(block),
         }))
 
     return sends
@@ -5520,6 +6575,9 @@ def _plan_targeted_revise(
     failed_blocks: list[str],
     review_summary: str,
     tier: int,
+    *,
+    keep_spec: bool = False,
+    heading: str = "INTEGRATION REVIEW REVISION",
 ) -> dict:
     """Turn a chip-level ``revise`` into a per-block plan ``{block: reuse_spec}``.
 
@@ -5558,14 +6616,45 @@ def _plan_targeted_revise(
             try:
                 with (bdir / "gate_feedback.txt").open("a", encoding="utf-8") as fh:
                     fh.write(
-                        f"\n\n## INTEGRATION REVIEW REVISION (tier {tier}; MANDATORY)\n\n"
+                        f"\n\n## {heading} (tier {tier}; MANDATORY)\n\n"
                         f"{feedback}\n"
                     )
             except OSError:
                 pass
-        plan[name] = bool(canonical.exists()) and not needs_respec and name not in adopt_failed
+        plan[name] = (bool(canonical.exists()) and (keep_spec or not needs_respec)
+                      and name not in adopt_failed)
         _db(pr).clear_result(name, "best")
+        _db(pr).clear_result(name, "dv_best")
     return plan
+
+
+def operator_revise_update(pr: str, values: dict, blocks: list[str], feedback: str = "") -> dict:
+    """State update for an operator-triggered targeted revise of published blocks.
+
+    The same plan an integration-review ``revise`` produces
+    (``_plan_targeted_revise``): each named block gets ``feedback`` (else its
+    human constraint-ledger rules) as ``gate_feedback.txt``, loses ``best`` /
+    ``dv_best``, and keeps its spec (``reuse_spec=True``). Applied as the
+    integration_review node's output, so ``route_after_integration_review``
+    re-enters ``init_tier`` and only these blocks are redone; every other block
+    keeps its completed result.
+    """
+    queue = {b.get("name"): b for b in values.get("block_queue") or []}
+    unknown = [b for b in blocks if b not in queue]
+    if not blocks or unknown:
+        raise ValueError(f"not in the run's block_queue: {unknown or '(no blocks named)'}")
+    plan: dict[str, bool] = {}
+    for name in blocks:
+        text = feedback.strip() or "\n".join(
+            f"- {r.get('rule')}" for r in _db(pr).constraints(name) if r.get("source") == "human")
+        if not text:
+            raise ValueError(f"{name}: no --feedback and no human constraint in its ledger")
+        plan.update(_plan_targeted_revise(
+            pr, {"block_actions": {name: "revise"}, "feedback": text}, [name], [], {}, [], "",
+            queue[name].get("tier", 1), keep_spec=True, heading="OPERATOR REVISION"))
+    return {"integration_review_action": "revise", "integration_review_failed": False,
+            "integration_approved_specs": None, "revise_blocks": plan,
+            "current_tier_index": 0, "pipeline_done": False, "pipeline_aborted": False}
 
 
 async def integration_review_prepare_node(state: OrchestratorState) -> dict:
@@ -5637,10 +6726,12 @@ async def integration_review_node(state: OrchestratorState) -> dict:
     if pending:
         import hashlib
         try:
+            # A reverify skip needs the PUBLISHED pass (sim AND synth AND
+            # timing), not merely the DV pass, earned against this spec.
             verified = all(
                 hashlib.sha256((Path(pr) / "arch/uarch_specs" / f"{name}.md").read_bytes()).hexdigest() == digest
-                and (_db(pr).result(name, "best") or {}).get("spec_sha256") == digest
-                and (_db(pr).result(name, "best") or {}).get("sim_passed") is True
+                and (_block_done_record(_db(pr), name) or {}).get("spec_sha256") == digest
+                and (_block_done_record(_db(pr), name) or {}).get("sim_passed") is True
                 for name, digest in pending.items())
         except OSError:
             verified = False
@@ -6438,6 +7529,13 @@ async def _prepare_integration_check(state: OrchestratorState) -> dict:
         connections, design_name = await asyncio.to_thread(
             load_architecture_connections, pr
         )
+        # The task's declared top (CORESMITH_TOP_MODULE / task.yaml), not the
+        # "chip_top" default; an unreadable declaration is reported at adoption.
+        try:
+            from orchestrator.harness.top_module import declared_top
+            design_name = declared_top(pr) or design_name
+        except Exception:  # noqa: BLE001
+            pass
 
         if not connections and len(passed_blocks) < 1:
             log("  [INTEGRATION] No architecture connections found -- "
@@ -6971,6 +8069,75 @@ async def _prepare_integration_check(state: OrchestratorState) -> dict:
             # else: wiring hazards / not-clean assembly -> fall through to the
             # Integration Lead below (which raises the integration_failure
             # interrupt for retry).
+
+        # A4: a non-Caravel design gets the SAME deterministic assembly the shell
+        # used all run, now with every block real. The Integration Lead is only
+        # consulted when the contracts cannot wire the top cleanly.
+        if _chassis is None and _deterministic_top_enabled():
+            try:
+                _shell = await asyncio.to_thread(
+                    _shell_assemble, pr, list(state.get("block_queue") or []), tier="final", all_real=True)
+            except Exception as _exc:  # noqa: BLE001
+                _shell = None
+                log(f"  [INTEGRATION] deterministic top assembly failed ({_exc}); "
+                    "falling back to the Integration Lead", YELLOW)
+            if _shell is not None:
+                _asm, _elab, _snap = _shell
+                if not _asm.wiring_errors and not _asm.stubs:
+                    _lint = await asyncio.to_thread(
+                        lint_top_level, _asm.rtl_path, list(_asm.sources), design_name,
+                        top_module=_asm.module_name, project_root=pr)
+                    if _lint.get("clean"):
+                        log(f"  [INTEGRATION] deterministic top {_asm.module_name}: "
+                            f"{len(_asm.instantiated)} blocks, {_asm.wires} nets, lint CLEAN", GREEN)
+                        # Adopt what the shell instantiated: a boundary block
+                        # named like the top is its renamed <top>_core copy, never
+                        # the original (a second `module <top>`), and hierarchy
+                        # adoption checks module names, not block names.
+                        _blocks_paths = dict(_asm.block_sources)
+                        integration_result = {
+                            "design_name": design_name,
+                            "top_module": _asm.module_name,
+                            "top_rtl_path": _asm.rtl_path,
+                            "block_count": len(_asm.instantiated),
+                            "wire_count": _asm.wires,
+                            "skipped_connections": [],
+                            "mismatches": [],
+                            "error_count": 0,
+                            "warning_count": 0,
+                            "lint_clean": True,
+                            "lint_errors": "",
+                            "block_rtl_paths": _blocks_paths,
+                            "deterministic_top_assembled": True,
+                            "boundary_ports": _asm.boundary_ports,
+                            "missing_instantiations": [],
+                        }
+                        write_graph_event(pr, "Integration Check", "graph_node_exit", {
+                            "success": True, "top_module": _asm.module_name,
+                            "block_count": len(_asm.instantiated), "wire_count": _asm.wires,
+                            "lint_clean": True, "deterministic_top_assembled": True})
+                        from orchestrator.harness.hierarchy import hierarchy_timeout_s
+                        from orchestrator.harness.top_module import write_candidate_receipt
+                        log(f"  [INTEGRATION] adopting candidate {_asm.module_name} (hierarchy "
+                            f"elaboration, timeout {hierarchy_timeout_s()} s)", CYAN)
+                        try:
+                            # Minutes of Yosys on a full SoC: keep the daemon loop responsive.
+                            await asyncio.to_thread(
+                                write_candidate_receipt, pr, _asm.module_name, _asm.rtl_path, _blocks_paths,
+                                note="deterministic shell assembly",
+                                expected_blocks=set(_asm.block_modules.values()),
+                                integration_result=integration_result)
+                        except (ValueError, OSError) as _exc:
+                            log(f"  [INTEGRATION] candidate receipt failed ({_exc}); "
+                                "falling back to the Integration Lead", YELLOW)
+                        else:
+                            return {"integration_result": integration_result}
+                    else:
+                        log("  [INTEGRATION] deterministic top does not lint cleanly -- "
+                            "falling back to the Integration Lead", YELLOW)
+                else:
+                    for _we in (_asm.wiring_errors[:8] or [f"stubs remain: {_asm.stubs}"]):
+                        log(f"  [INTEGRATION] deterministic top: {_we}", YELLOW)
 
         log("  [INTEGRATION] Calling Integration Lead agent...", YELLOW)
         agent = IntegrationLeadAgent()
@@ -7824,9 +8991,10 @@ def _route_uarch_patch_on_retry(project_root: str, block_names: list[str]) -> li
             # revised µarch. Invalidate the recorded sim-pass so the re-validate
             # pass REGENERATES the RTL from the revised spec.
             try:
-                if _db(project_root).result(name, "best"):
-                    _db(project_root).update_result(
-                        name, "best", sim_passed=False, uarch_patch_invalidated=True)
+                for _kind in ("best", "dv_best"):
+                    if _db(project_root).result(name, _kind):
+                        _db(project_root).update_result(
+                            name, _kind, sim_passed=False, uarch_patch_invalidated=True)
             except Exception:  # noqa: BLE001
                 pass
             marker.write_text(f"confidence={conf:g}; sections_applied={n_applied}\n")
@@ -10469,6 +11637,7 @@ def build_pipeline_graph(checkpointer=None):
     # Nodes (shared by both topologies)
     orchestrator.add_node("init_tier", init_tier_node)
     orchestrator.add_node("process_block", block_subgraph)
+    orchestrator.add_node("process_cluster", process_cluster_node)
     orchestrator.add_node("integration_review_prepare", integration_review_prepare_node)
     orchestrator.add_node("integration_review", integration_review_node)
     orchestrator.add_node("advance_tier", advance_tier_node)
@@ -10490,9 +11659,18 @@ def build_pipeline_graph(checkpointer=None):
     orchestrator.add_edge("final_report", END)
 
     # Edges (shared)
-    orchestrator.add_edge(START, "init_tier")
+    # A4: the shell top exists before the first tier and is re-assembled
+    # with real RTL after every tier, so integration drift is caught early.
+    orchestrator.add_node("shell_init", shell_integration_init_node)
+    orchestrator.add_node("shell_update", shell_integration_update_node)
+    orchestrator.add_node("uarch_phase", uarch_phase_node)
+    orchestrator.add_edge(START, "shell_init")
+    orchestrator.add_edge("shell_init", "uarch_phase")
+    orchestrator.add_edge("uarch_phase", "init_tier")
     orchestrator.add_conditional_edges("init_tier", fan_out_tier)
-    orchestrator.add_edge("process_block", "integration_review_prepare")
+    orchestrator.add_edge("process_block", "shell_update")
+    orchestrator.add_edge("process_cluster", "shell_update")
+    orchestrator.add_edge("shell_update", "integration_review_prepare")
     orchestrator.add_edge("integration_review_prepare", "integration_review")
     orchestrator.add_conditional_edges("integration_review", route_after_integration_review)
     orchestrator.add_conditional_edges(

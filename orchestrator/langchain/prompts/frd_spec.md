@@ -170,6 +170,19 @@ DO NOT invent a degenerate one — state explicitly that acceptance is
 undefined and that this must be escalated to the human (the PRD stage should
 already have asked; flag the gap).
 
+## Model-Level Evaluation
+Every requirement above is evaluated on the SystemC TLM loosely-timed model
+of the SoC at the end of the uArch stage, BEFORE any RTL is written (the
+"FRD evaluation" gate). For EVERY requirement add a line
+`- **Model check**: <how the harness observes it on the model -- the
+stimulus, the register/console/frame/counter read, the expected value>` or
+`- **Model check**: not model-testable -- <reason>` (physical design, STA,
+DRC/LVS, precheck, cycle-exact ordering). A must-have requirement with no
+model check and no reason is a defect of this document. Cycle-based PERF
+requirements state how the model's cycle accounting stands in for RTL
+cycles (an LT estimate) and the margin that makes the model verdict
+meaningful.
+
 GUIDELINES:
 - Every requirement MUST have a measurable acceptance criterion
 - Every human-provided validation KPI from the PRD MUST become a measurable

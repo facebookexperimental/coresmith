@@ -10,8 +10,7 @@ Two invariants, same spirit as the no-benchmark-refs-in-engine rule:
    contains a bare tool *invocation* (``yosys -``, ``openroad -``, ``magic -``,
    ``netgen -``), a ``{tool_bin}`` placeholder, or the ``sky130_fd_sc_hd``
    cell-library token. Tool names may still appear in PROSE ("Yosys times out",
-   "Magic DRC") -- only invocation-shaped usage is forbidden. ``.legacy.md``
-   copies (the pre-migration rollback text) are exempt.
+   "Magic DRC") -- only invocation-shaped usage is forbidden.
 
 2. Every ``{placeholder}`` a rewritten prompt references is supplied by that
    prompt's graph context dict (a static per-prompt allowlist) UNION the
@@ -57,7 +56,7 @@ def _guarded_files() -> list[Path]:
         files += _PROMPT_DIR.glob(pat)
     files += (_PROMPT_DIR / "skills").glob("*.md")
     files += [_PROMPT_DIR / n for n in _ADAPTATION_PROMPTS]
-    return [f for f in sorted(set(files)) if not f.name.endswith(".legacy.md")]
+    return sorted(set(files))
 
 
 # ---------------------------------------------------------------------------
@@ -72,23 +71,12 @@ def test_no_bare_tool_invocation(prompt: Path):
 
 def test_guard_actually_scans_files():
     names = {p.name for p in _guarded_files()}
-    # The migrated verb prompts must be in scope, and legacy copies must NOT.
+    # The migrated verb prompts must be in scope.
     assert "backend_synth_llm.md" in names
     assert "tapeout_wrapper_lvs.md" in names
     # The script-adaptation prompts are now in scope too (PR5).
     for n in _ADAPTATION_PROMPTS:
         assert n in names, f"{n} should be guarded"
-    assert not any(n.endswith(".legacy.md") for n in names)
-
-
-def test_legacy_copies_are_exempt_and_hold_the_old_text():
-    """A legacy copy still carries the pre-migration invocation -- proof both
-    that the guard would catch a regression and that rollback text is real."""
-    legacy = _PROMPT_DIR / "backend_synth_llm.legacy.md"
-    assert legacy.is_file()
-    text = legacy.read_text()
-    assert any(rx.search(text) for rx, _ in _FORBIDDEN), \
-        "legacy copy should still contain the old bare invocation"
 
 
 # ---------------------------------------------------------------------------
@@ -188,14 +176,8 @@ def test_migrated_prompts_reference_the_cli():
 
 
 # ---------------------------------------------------------------------------
-# eda_prompts: deployment context + rollback flag
+# eda_prompts: deployment context
 # ---------------------------------------------------------------------------
-_MIGRATED = [n for n in _CALLER_KEYS] + [
-    "tapeout_wrapper_synth.md", "tapeout_wrapper_pnr.md",
-    "tapeout_wrapper_drc.md", "tapeout_wrapper_lvs.md",
-]
-
-
 class TestEdaPromptsHelper:
     def test_deployment_context_supplies_tool_notes(self, monkeypatch):
         monkeypatch.setenv("CORESMITH_DEPLOYMENT", "sky130")
@@ -207,23 +189,6 @@ class TestEdaPromptsHelper:
         assert ctx["tool_notes"], "run_pnr prompt_notes should be non-empty"
         # A prompt that maps to no verb gets an empty tool_notes (not missing).
         assert deployment_prompt_context("backend_wrapper_llm.md")["tool_notes"] == ""
-
-    def test_rollback_flag_selects_legacy(self, monkeypatch):
-        from orchestrator.langgraph.eda_prompts import resolve_prompt_path
-        monkeypatch.setenv("CORESMITH_TOOL_CLI_PROMPTS", "0")
-        p = resolve_prompt_path(_PROMPT_DIR, "backend_synth_llm.md")
-        assert p.name == "backend_synth_llm.legacy.md"
-
-    def test_default_flag_selects_migrated(self, monkeypatch):
-        from orchestrator.langgraph.eda_prompts import resolve_prompt_path
-        monkeypatch.delenv("CORESMITH_TOOL_CLI_PROMPTS", raising=False)
-        p = resolve_prompt_path(_PROMPT_DIR, "backend_synth_llm.md")
-        assert p.name == "backend_synth_llm.md"
-
-    def test_every_migrated_prompt_has_a_legacy_copy(self):
-        for name in _MIGRATED:
-            legacy = _PROMPT_DIR / f"{Path(name).stem}.legacy.md"
-            assert legacy.is_file(), f"missing rollback copy for {name}"
 
 
 def test_gen_macro_cli_skips_when_capability_absent(tmp_path, monkeypatch):

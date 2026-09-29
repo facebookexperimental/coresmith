@@ -27,9 +27,7 @@ def test_all_magic_drc_prompts_and_template_require_scalar_total():
     root = Path(__file__).parents[1]
     paths = (
         root / "langchain" / "prompts" / "backend_drc_llm.md",
-        root / "langchain" / "prompts" / "backend_drc_llm.legacy.md",
         root / "langchain" / "prompts" / "tapeout_wrapper_drc.md",
-        root / "langchain" / "prompts" / "tapeout_wrapper_drc.legacy.md",
         root / "pdk_templates" / "sky130" / "drc.tcl",
     )
     for path in paths:
@@ -51,8 +49,7 @@ def test_pnr_prompt_keeps_pdn_pin_layer_connected():
 
 def test_prompts_exclude_clock_from_input_delay():
     prompt_dir = Path(__file__).parents[1] / "langchain" / "prompts"
-    for name in ("backend_synth_llm.md", "backend_synth_llm.legacy.md",
-                 "sdc_generator.md"):
+    for name in ("backend_synth_llm.md", "sdc_generator.md"):
         text = (prompt_dir / name).read_text()
         assert "[all_inputs -no_clocks]" in text
         assert "-clock clk [all_inputs]" not in text

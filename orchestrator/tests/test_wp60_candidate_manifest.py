@@ -177,3 +177,57 @@ def test_implicit_synthesis_define_cannot_change_candidate_hierarchy(tmp_path):
     leaf.write_text('module leaf(); endmodule\n')
     with pytest.raises(ValueError, match="leaf"):
         tm.write_candidate_receipt(tmp_path, "chip_top", str(top), {"leaf": str(leaf)})
+
+
+def test_simulation_only_region_is_not_hierarchy_evidence(tmp_path):
+    # Q26(b): `final` (simulation-only, under `ifndef SYNTHESIS) used to be a
+    # Yosys syntax error. It is now outside the evidence, and so is a block
+    # instantiated only there (silicon never has it).
+    import shutil
+    if not shutil.which("yosys"):
+        pytest.skip("requires yosys")
+    leaf = tmp_path / "leaf.v"
+    leaf.write_text('module leaf(); endmodule\nmodule probe(); endmodule\n')
+    top = tmp_path / "top.v"
+    top.write_text('module chip_top();\nleaf u();\n`ifndef SYNTHESIS\nprobe p();\n'
+                   'final begin $display("done"); end\n`endif\nendmodule\n')
+    rec = tm.write_candidate_receipt(tmp_path, "chip_top", str(top), {"leaf": str(leaf)})
+    assert "leaf" in rec["elaborated_cells"] and "probe" not in rec["elaborated_cells"]
+    with pytest.raises(ValueError, match="probe"):
+        tm.write_candidate_receipt(tmp_path, "chip_top", str(top), {"leaf": str(leaf)},
+                                   expected_blocks=["leaf", "probe"])
+
+
+def test_synthesis_branches_are_blanked_line_for_line():
+    from orchestrator.harness.hierarchy import _without_synthesis_branches as strip
+    text = ('a\n`ifndef SYNTHESIS\nsim\n`ifdef X\nx\n`endif\n`else\nsyn\n`endif\n'
+            '`ifdef X\nxx\n`elsif SYNTHESIS\ns\n`else\nsim2\n`endif\nb\n')
+    out = strip(text)
+    assert out.count("\n") == text.count("\n")
+    assert [ln for ln in out.splitlines() if ln] == ["a", "`ifdef X", "xx", "`else", "`endif", "b"]
+
+
+def test_hierarchy_timeout_is_configurable(tmp_path, monkeypatch):
+    # Q26(c): the full SoC needs ~259 s; the budget is env/multiplier driven,
+    # and a timeout is an explicit infrastructure failure, never a skip.
+    import subprocess
+
+    from orchestrator.harness import hierarchy
+    monkeypatch.delenv(hierarchy.TIMEOUT_ENV, raising=False)
+    monkeypatch.delenv("CORESMITH_TIMEOUT_MULTIPLIER", raising=False)
+    assert hierarchy.hierarchy_timeout_s() >= 600
+    monkeypatch.setenv("CORESMITH_TIMEOUT_MULTIPLIER", "2")
+    assert hierarchy.hierarchy_timeout_s() >= 1200
+    monkeypatch.setenv(hierarchy.TIMEOUT_ENV, "7")
+    seen = {}
+
+    def run(cmd, **kwargs):
+        seen["timeout"] = kwargs["timeout"]
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+    monkeypatch.setattr(hierarchy.shutil, "which", lambda _: "/bin/yosys")
+    monkeypatch.setattr(hierarchy.subprocess, "run", run)
+    top = tmp_path / "top.v"
+    top.write_text("module chip_top(); endmodule\n")
+    failure = hierarchy.elaborate_hierarchy([top], "chip_top", project_root=tmp_path)
+    assert seen["timeout"] == 14
+    assert failure.kind == "infrastructure_error" and hierarchy.TIMEOUT_ENV in failure

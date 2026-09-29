@@ -71,12 +71,21 @@ def _eda_timeout(env: str, default: int) -> int:
     30 min. Gate the ceiling on an env var so big-design runs don't get
     their OpenROAD child killed mid-route while small designs keep the
     snappy default.
+
+    The (default or overridden) base is scaled by CORESMITH_TIMEOUT_MULTIPLIER
+    (orchestrator._timeouts) like every other long-running call; the claude
+    CLI's hard timeout is ``ClaudeLLM.timeout`` verbatim, so an unscaled value
+    here kills a legitimately long step regardless of the run's multiplier.
     """
+    from orchestrator._timeouts import multiplier
+
     try:
         v = int(os.environ.get(env, "").strip())
-        return v if v > 0 else default
+        base = v if v > 0 else default
     except (ValueError, AttributeError):
-        return default
+        base = default
+    m = multiplier()
+    return max(1, int(base * m)) if m > 0 else base
 
 
 def _last(a, b):
@@ -273,16 +282,12 @@ async def _run_llm_eda_step(
         ClaudeLLM,
         is_llm_error_response,
     )
-    from orchestrator.langgraph.eda_prompts import (
-        merged_prompt_context,
-        resolve_prompt_path,
-    )
+    from orchestrator.langgraph.eda_prompts import merged_prompt_context
 
     # Merge in the active deployment's PDK/tool context ({pdk_summary},
-    # {tool_notes}, ...); the caller's context keys win on collision. The
-    # rollback flag (CORESMITH_TOOL_CLI_PROMPTS=0) selects a .legacy.md sibling.
+    # {tool_notes}, ...); the caller's context keys win on collision.
     context = merged_prompt_context(prompt_file, context)
-    prompt_path = resolve_prompt_path(_PROMPT_DIR, prompt_file)
+    prompt_path = _PROMPT_DIR / prompt_file
     system_prompt = _safe_format(prompt_path.read_text(), context)
 
     user_message = (
@@ -947,6 +952,8 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
             # the driver retries Yosys internally -- its own summary is the only
             # place that says so (see collect_synth_attempt_history)
             capture_reply=True,
+            # a ~600k-cell flat top outruns the old hard-coded 1200s default
+            timeout=_eda_timeout("CORESMITH_FLAT_SYNTH_TIMEOUT", 3600),
         )
 
         span.set_attribute("success", result.get("success", False))

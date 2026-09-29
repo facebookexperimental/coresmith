@@ -47,7 +47,7 @@ Produce JSON with a single top-level object:
       "producer_port": "<m_axis_<name> or m_<name>_srdy/m_<name>_data>",
       "consumer_block": "<block name>",
       "consumer_port": "<s_axis_<name> or s_<name>_drdy/s_<name>_data>",
-      "handshake_protocol": "axi_stream" | "srdy_drdy" | "req_resp" | "mem_write" | "valid_only" | "static",
+      "handshake_protocol": "axi_stream" | "srdy_drdy" | "req_resp" | "mem_write" | "valid_only" | "static" | "axi4" | "axi_lite" | "apb",
       "data_width_bits": <int>,
       "sideband_signals": [
         {"name": "tlast", "purpose": "..."},
@@ -74,6 +74,14 @@ Produce JSON with a single top-level object:
         "producer_can_stall": <bool>,
         "feedback_cycle": <bool>,
         "rationale": "<one sentence — why this elasticity is sufficient to avoid the producer/consumer deadlock>"
+      },
+      "timing": {
+        "req_to_rsp_cycles": {"min": <int>, "max": <int|null>, "exact": <int|null>} | null,
+        "valid_to_ready_max_stall": <int|null>,
+        "ordering": "in_order" | "out_of_order_tagged" | "n/a",
+        "burst": {"last_signal": "<tlast-like sideband or null>", "max_beats": <int|null>},
+        "reset_idle_cycles": <int>,
+        "valid_hold_until_ready": <bool>
       },
       "representations": {
         "enums": [
@@ -232,6 +240,38 @@ retire on `out_valid_q && out_ready_q`). Internal edges keep the standard
    `request_response` / `elastic_fifo` are WRONG for it. The
    `feedback_cycle = true` + backpressure semantics rule applies only to the
    two streaming families (`axi_stream` / `srdy_drdy`).
+
+5a2. **Bus families (`axi4` / `axi_lite` / `apb`) are the generated fabric's
+   edges.** Every master-to-fabric edge is `axi4`; every fabric-to-slave edge
+   is `axi4`, `axi_lite` or `apb` as declared in the fabric block's spec. Do
+   NOT enumerate the AMBA signals in `fields`/`sideband_signals`: the canonical
+   channel set (awvalid/awready/awaddr/..., psel/penable/...) is implied by the
+   family and derived by the engine. Set `data_width_bits` to the data width
+   and add `"bus_params": {"addr_width": 32, "id_width": 4, "user_width": 1}`
+   (id_width on a fabric-to-slave edge is the fabric's slave-port id width).
+   Port prefixes: the fabric side is `s_<master>` / `m_<slave>`, the block
+   side is whatever the block names its bus port (e.g. `m_axi`, `s_apb`).
+   `timing`: `valid_hold_until_ready: true`, `ordering: in_order` (per id).
+
+5b. **`timing` is the cycle-level interface lock -- both sides are built to
+   it and the generated interface VIP asserts it.** Fill it for EVERY edge:
+
+   * `req_resp`: `req_to_rsp_cycles` is MANDATORY -- the cycles from the
+     request being accepted to the response qualifier being high. Use
+     `exact` when the responder is a fixed pipeline ("exactly 1 cycle
+     later" -> `{"min":1,"max":1,"exact":1}`), `min`/`max` when it is
+     bounded, `max: null` when it is only lower-bounded. The uArch spec's
+     §6a and the RTL of BOTH blocks must quote the same number.
+   * `axi_stream` / `srdy_drdy`: `valid_hold_until_ready: true` (a valid
+     beat stays presented until accepted); `valid_to_ready_max_stall` is the
+     consumer's worst stall in cycles or `null` if unbounded; `burst` names
+     the last-beat sideband when packets exist.
+   * `mem_write` / `valid_only` / `static`: no latency, no stall
+     (always-accepted); leave those fields `null`/`false`.
+   * `reset_idle_cycles`: how many cycles after reset deassertion every
+     valid/strobe on the edge is guaranteed low (normally 1).
+   * `ordering`: `in_order` unless responses carry an id/tag that permits
+     reordering (`out_of_order_tagged`); `n/a` for static wires.
 
 6. **If the requirements imply a specific bit ordering** (e.g., a
    golden reference model uses MSB-first byte serialization, or the

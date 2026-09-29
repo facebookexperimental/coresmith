@@ -102,7 +102,7 @@ Constraint Check -> OK2DEV Gate
 
 Acceptance is the task's own checker: a task ships `inputs/task_adapter.py` and its
 verdict outranks the engine's internal requirements. See
-[docs/migration-arm-e.md](docs/migration-arm-e.md) for what a task declares and for
+[docs/migration.md](docs/migration.md) for what a task declares and for
 migrating a project created before that change.
 
 ## Project Structure
