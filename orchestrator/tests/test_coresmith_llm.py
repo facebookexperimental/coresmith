@@ -749,7 +749,12 @@ class TestProcessRegistry:
         with _active_processes_lock:
             assert tid not in _active_processes
 
-    def test_kill_active_processes(self):
+    def test_kill_active_processes(self, monkeypatch):
+        reaped = []
+        monkeypatch.setattr(
+            "orchestrator.langchain.agents.coresmith_llm._reap_process_group",
+            lambda proc, pgid, **kwargs: reaped.append((proc, pgid)),
+        )
         mock_proc = MagicMock(spec=subprocess.Popen)
         mock_proc.poll.return_value = None  # still running
         mock_proc.pid = 99999
@@ -758,7 +763,7 @@ class TestProcessRegistry:
 
         killed = kill_active_cli_processes()
         assert killed == 1
-        mock_proc.kill.assert_called_once()
+        assert reaped == [(mock_proc, 99999)]
 
         with _active_processes_lock:
             assert len(_active_processes) == 0

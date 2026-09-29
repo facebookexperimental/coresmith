@@ -2917,12 +2917,18 @@ def run_integration_simulation(
           f"(base={_to_base}s prior_timeouts={_prior_to} cap={_to_cap}s)",
           flush=True)
 
+    vcd_path = sim_dir / "dump.vcd"
     try:
         # Own process group so a timeout kills the WHOLE tree (make -> verilator
         # -> g++ / vvp) instead of orphaning compilers/sims (the block-tier
         # fork-bomb fix, applied here too).
-        import signal as _signal
+        import uuid
 
+        from orchestrator.langchain.agents.coresmith_llm import (
+            _PROCESS_SCOPE_ENV,
+            _reap_process_group,
+        )
+        env = dict(env, **{_PROCESS_SCOPE_ENV: uuid.uuid4().hex})
         _proc = subprocess.Popen(
             [make_bin, "-C", str(sim_dir)],
             stdout=subprocess.PIPE,
@@ -2931,15 +2937,12 @@ def run_integration_simulation(
             env=env,
             start_new_session=True,
         )
+        _proc._coresmith_process_scope = env[_PROCESS_SCOPE_ENV]
         try:
             _out, _err = _proc.communicate(timeout=_sim_timeout)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(_proc.pid), _signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            _proc.wait()
-            raise
+        finally:
+            # Also reap tools that created their own session, including on cancel.
+            _reap_process_group(_proc, _proc.pid, grace_s=1.0)
         result = subprocess.CompletedProcess(
             [make_bin, "-C", str(sim_dir)], _proc.returncode, _out, _err,
         )
@@ -2962,7 +2965,6 @@ def run_integration_simulation(
                 "Treating simulation as failed even if make returned 0.\n" + output
             )
 
-        vcd_path = sim_dir / "dump.vcd"
         passed = (
             result.returncode == 0
             and not no_tests
@@ -2989,20 +2991,24 @@ def run_integration_simulation(
             "log_path": log_path,
             "vcd_path": str(vcd_path) if vcd_path.exists() else "",
         }
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         cmd = [make_bin, "-C", str(sim_dir)]
-        # Persist the timeout so the NEXT attempt auto-extends (x1.5, capped).
         try:
             _to_state.write_text(json.dumps({"timeouts": _prior_to + 1}))
-        except Exception:  # noqa: BLE001
+        except OSError:
             pass
-        log_path = _write_step_log_error(
-            "integration", _log_step, cmd,
-            f"SIM_TIMEOUT: {sim_scope} simulation exceeded {_sim_timeout}s. "
-            f"No functional verdict produced. Next attempt auto-extends "
-            f"(x1.5, cap {_to_cap}s).", attempt,
-        )
-        return {"passed": False, "log": "Integration simulation timed out (10 min)", "log_path": log_path}
+        partial, stderr = exc.output or b"", exc.stderr or b""
+        if isinstance(partial, bytes):
+            partial = partial.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        message = (f"SIM_TIMEOUT: {sim_scope} simulation exceeded {_sim_timeout}s. "
+                   f"No functional verdict. Artifacts: {sim_dir}\n" +
+                   (partial + "\n" + stderr)[-12000:])
+        log_path = _write_step_log_error("integration", _log_step, cmd, message, attempt)
+        return {"passed": False, "log": message, "log_path": log_path,
+                "sim_timed_out": True, "sim_timeout_s": _sim_timeout,
+                "vcd_path": str(vcd_path) if vcd_path.exists() else ""}
     except FileNotFoundError as e:
         cmd = [make_bin, "-C", str(sim_dir)]
         log_path = _write_step_log_error(

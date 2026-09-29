@@ -37,6 +37,11 @@ Inputs available on disk may include:
 - Golden reference model files referenced by ERS, PRD, validation TB, or examples
 
 Audit method:
+Read the worker failure evidence named in the context, including unfinished
+tool commands and scratch artifacts. Generation failure does not mean no
+simulation ran. For a timeout, inspect the last progress and the stalled end
+of the waveform; early healthy traffic does not explain a later deadlock.
+
 1. Identify the failed KPI or top-level behavior.
 2. Build a first-divergence trace. Prefer measurable evidence:
    - golden model transaction or macro-step
