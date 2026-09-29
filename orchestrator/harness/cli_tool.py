@@ -44,6 +44,7 @@ _VERB_INPUTS: dict[str, tuple[str, ...]] = {
     "run_drc": ("script", "gds"),
     "run_lvs": ("script", "spice", "netlist"),
     "run_sta": ("script", "netlist", "sdc"),
+    "repair_netlist": ("netlist", "liberty"),
     "run_lint": ("rtl",),
 }
 
@@ -101,12 +102,12 @@ def _build_request(verb: str, args):
     if rtls:
         inputs["rtl"] = Path(rtls[0]).resolve()
         params["rtls"] = [str(Path(r).resolve()) for r in rtls]
-    for key in ("script", "netlist", "sdc", "gds", "spice"):
+    for key in ("script", "netlist", "sdc", "gds", "spice", "liberty"):
         val = getattr(args, key, None)
         if val:
             inputs[key] = Path(val).resolve()
     # gen_macro carries scalar params, not file inputs.
-    for key in ("width", "depth", "ports"):
+    for key in ("width", "depth", "ports", "clock_ns", "clock_port"):
         val = getattr(args, key, None)
         if val is not None:
             params[key] = val
@@ -276,9 +277,12 @@ def register_tool(sub, run_wrap, add_project_root, add_json) -> None:
         if "rtl" in keys:
             vp.add_argument("--rtl", action="append", metavar="FILE",
                             help="RTL source (repeatable)")
-        for key in ("script", "netlist", "sdc", "gds", "spice"):
+        for key in ("script", "netlist", "sdc", "gds", "spice", "liberty"):
             if key in keys:
                 vp.add_argument(f"--{key}", metavar="FILE", help=f"{key} input")
+        if verb == "repair_netlist":
+            vp.add_argument("--clock-ns", type=float, required=True)
+            vp.add_argument("--clock-port", default="clk")
         vp.add_argument("--out-dir", dest="out_dir", metavar="DIR",
                         help="output/working directory")
         vp.add_argument("--timeout-s", dest="timeout_s", type=int,

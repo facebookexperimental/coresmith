@@ -62,6 +62,11 @@ RULES:
     code ($display, $dumpvars, SVA assert). If simulation needs behavior synth
     gets from a macro, that split lives ONLY inside the provided cs_* wrapper
     library -- never in your module. A deterministic gate rejects violations.
+14. Before finishing, run the supplied functional and synthesis/timing checks
+    on the current RTL and inspect their verdicts. Fix failures within the
+    available repair budget; report any unresolved failure or unavailable check
+    with its exact command and evidence. A functional pass alone is not a
+    timing pass.
 
 AXI-STREAM OUTPUT FSM -- CRITICAL:
 When producing output on an AXI-Stream master port, you MUST follow this

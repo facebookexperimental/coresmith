@@ -309,7 +309,8 @@ class TestEvaluatePpa:
     def test_storage_ff_does_not_defeat_hard_ceiling(self):
         # Total flops over the absolute hard ceiling still fail even if a chunk
         # is classified as storage (a should-be-SRAM explosion is caught).
-        v = evaluate_ppa(actual_ff=136103, ff_budget=None, storage_ff=2000)
+        v = evaluate_ppa(actual_ff=136103, ff_budget=None, storage_ff=2000,
+                         hard_ff_ceiling=50000)
         assert v.ok is False
         assert any(c["metric"] == "flip_flop_hard_ceiling" for c in v.checks)
 
@@ -634,9 +635,9 @@ class TestRouteAfterSynthPpaGate:
 # --- Hardened gate: real-FF judgment + absolute hard ceiling (codec mb_emitter) ---
 
 def test_hard_ceiling_fires_with_no_budget():
-    # 136k FF (mb_emitter) with NO flip_flop_budget -> hard ceiling blocks it
+    # An explicitly supplied absolute ceiling also applies without a budget.
     from orchestrator.langgraph.ppa_check import evaluate_ppa
-    v = evaluate_ppa(actual_ff=136103, ff_budget=None)
+    v = evaluate_ppa(actual_ff=136103, ff_budget=None, hard_ff_ceiling=50000)
     assert not v.ok
     assert any(c["metric"] == "flip_flop_hard_ceiling" for c in v.checks)
 

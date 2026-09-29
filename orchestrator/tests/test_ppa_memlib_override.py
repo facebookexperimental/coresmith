@@ -7,6 +7,11 @@
 uarch_feasibility override. Pure; no LLM/EDA."""
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
+import pytest
+
 from orchestrator.langgraph.ppa_check import (
     _maxfanout_synth_script,
     evaluate_ppa,
@@ -51,7 +56,7 @@ class TestMemLibSources:
 
     def test_synth_script_reads_all_sources(self, tmp_path):
         script = _maxfanout_synth_script(
-            ["a.v", "b.v"], "lib.lib", tmp_path / "n.v", "top", False, False)
+            ["a.v", "b.v"], "lib.lib", tmp_path / "n.v", "top", False)
         assert "read_verilog -sv a.v b.v" in script
 
     def test_rtl_including_lib_skips_lib(self, tmp_path, monkeypatch):
@@ -89,6 +94,39 @@ class TestMemLibSources:
         assert _dedup_sources(str(rtl), [str(rtl)]) == [str(rtl)]
 
 
+@pytest.mark.parametrize("buffered", [False, True])
+def test_timing_probe_resolves_rom_and_keeps_inferred_memory(tmp_path, monkeypatch, buffered):
+    from orchestrator.langgraph import ppa_check as pc
+
+    project = tmp_path / "project"
+    (project / "inputs/rom_images").mkdir(parents=True)
+    (project / "inputs/rom_images/table.memh").write_text("2a\n")
+    rtl = project / "inner.v"
+    rtl.write_text("module inner; endmodule")
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0] == "yosys":
+            assert (Path(kwargs["cwd"]) / "inputs/rom_images/table.memh").read_text() == "2a\n"
+            script = Path(cmd[-1]).read_text()
+            assert "blackbox" not in script and "submod" not in script
+            Path(cmd[-1]).parent.joinpath("netlist.v").write_text("module inner; endmodule")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return subprocess.CompletedProcess(cmd, 0, "CORESMITH_WNS -3.5\n", "")
+
+    monkeypatch.setattr(pc.subprocess, "run", run)
+    wns, detail = pc._measure_wns_from_rtl(
+        [str(rtl)], "x.lib", tmp_path / "build", "buf", buffered, 15.625,
+        "inner", "clk", "yosys", "sta", 30, project_root=project,
+        persist_to=tmp_path / "reports")
+    assert wns == -3.5 and detail == ""
+    assert len(calls) == 2
+    measured = tmp_path / "reports/inner_sta_buf.v"
+    assert measured.read_bytes() == (tmp_path / "build/buf/netlist.v").read_bytes()
+    assert str(measured) in (tmp_path / "reports/inner_sta_buf.rpt").read_text()
+
+
 class TestEvaluatePpaOverride:
     def test_area_over_budget_deferred(self):
         v = evaluate_ppa(actual_ff=100, ff_budget=1000,
@@ -116,7 +154,7 @@ class TestEvaluatePpaOverride:
 
     def test_hard_ceiling_gates_despite_override(self):
         v = evaluate_ppa(actual_ff=60000, ff_budget=1000,
-                         budget_overridden=True)
+                         budget_overridden=True, hard_ff_ceiling=50000)
         assert v.ok is False
         assert any(c["metric"] == "flip_flop_hard_ceiling" and not c["passed"]
                    for c in v.checks)
