@@ -185,13 +185,24 @@ def _phase_evidence_section(block_name: str, phase: str) -> tuple[str, str]:
     return files, instructions
 
 
-def build_debug_user_message(block_name: str, phase: str = "sim") -> str:
+def build_debug_user_message(block_name: str, phase: str = "sim",
+                             diagnosis_output_path: str = "") -> str:
     """The failure-analysis agent's user message (the production constructor).
 
     ``phase`` is the REAL phase the block died in. It used to be hardcoded
     "sim" even for gates that fail pre-testbench.
     """
     files, instructions = _phase_evidence_section(block_name, phase)
+    output_path = diagnosis_output_path or f".coresmith/drafts/debug/{block_name}/diagnosis.json"
+    instructions = instructions.replace(
+        f".coresmith/blocks/{block_name}/diagnosis.json", output_path,
+    ).replace(
+        f"If you identify new constraints, append them to "
+        f".coresmith/blocks/{block_name}/constraints.json",
+        "Include new constraints in the diagnosis JSON's constraints array; "
+        "the engine imports them into the database. The constraints.json "
+        "and diagnosis.json files under .coresmith/blocks/ are read-only views",
+    )
     return (
         f"Block: {block_name}\n"
         f"Failed phase: {phase}\n\n"
@@ -277,19 +288,17 @@ class DebugAgent:
         block_title = block_name.replace("_", " ").title()
 
         try:
-            user_message = build_debug_user_message(block_name, phase)
-
-            diag_path = Path(project_root) / ".coresmith" / "blocks" / block_name / "diagnosis.json"
-            # The path is STABLE across attempts and ClaudeLLM.call() returns
-            # error strings instead of raising, so a bare exists() check adopts
-            # the PREVIOUS attempt's diagnosis -- for a different failure --
-            # whenever this call writes nothing. Snapshot the bytes before the
-            # call and adopt the file only if it CHANGED (same guard as
-            # ContractAuditAgent).
-            try:
-                diag_before = diag_path.read_bytes() if diag_path.exists() else None
-            except OSError:
-                diag_before = None
+            import tempfile
+            draft_root = Path(project_root).resolve() / ".coresmith" / "drafts" / "debug"
+            draft_root.mkdir(parents=True, exist_ok=True)
+            # Database views are mode 0444. A unique writable draft also
+            # prevents a missing output from adopting an earlier diagnosis,
+            # even if two invocations diagnose the same block concurrently.
+            draft_dir = Path(tempfile.mkdtemp(
+                prefix=re.sub(r"[^A-Za-z0-9_-]", "_", block_name) + "-", dir=draft_root,
+            ))
+            diag_path = draft_dir / "diagnosis.json"
+            user_message = build_debug_user_message(block_name, phase, str(diag_path))
 
             run_name = f"Analyze Failure [{block_title}]"
             await self.llm.call(
@@ -298,14 +307,11 @@ class DebugAgent:
                 run_name=run_name,
             )
 
-            try:
-                written_by_this_call = (
-                    diag_path.exists() and diag_path.read_bytes() != diag_before
-                )
-            except OSError:
-                written_by_this_call = False
-            if written_by_this_call:
-                return json.loads(diag_path.read_text())
+            if diag_path.is_file():
+                diagnosis = json.loads(diag_path.read_text())
+                if not isinstance(diagnosis, dict) or not diagnosis.get("diagnosis") or not diagnosis.get("category"):
+                    raise ValueError("diagnosis draft must contain diagnosis and category")
+                return diagnosis
 
             return {
                 "diagnosis": "Debug agent did not write diagnosis file",
