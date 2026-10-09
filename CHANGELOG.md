@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-09
+
+### Added
+- `AGENTS.md`: agent guidance for driving the CLI (`CLAUDE.md` imports it).
+
 ### Added (feat/soc-stages -- see docs/SOC_STAGES.md)
 - Fabric Resolution: the SoC bus is a generated primitive over vendored
   pulp-platform `axi` IP (FabricSpec -> yosys-slang -> plain Verilog +
