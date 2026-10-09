@@ -7,7 +7,10 @@ tier, recording snapshots; the final top is the same deterministic assembly."""
 from __future__ import annotations
 
 import asyncio
+import shutil
 from pathlib import Path
+
+import pytest
 
 from orchestrator.langgraph import pipeline_graph as pg
 from orchestrator.state_store.project_db import open_project
@@ -23,6 +26,9 @@ _EDGE = {"edge_id": "req__m_q__to__rsp__s_q", "producer_block": "req", "producer
          "timing": {"req_to_rsp_cycles": {"exact": 1}}}
 _QUEUE = [{"name": "req", "tier": 1, "rtl_target": "rtl/req.v"},
           {"name": "rsp", "tier": 1, "rtl_target": "rtl/rsp.v"}]
+
+
+_REQUIRES_VERILATOR = pytest.mark.skipif(not shutil.which("verilator"), reason="requires verilator (shell elaboration)")
 
 
 def _project(tmp_path, chassis=None):
@@ -63,6 +69,7 @@ class TestShellNodes:
         assert latest["tier"] == "init" and latest["stub_blocks"] == snap["stub_blocks"]
         assert (tmp_path / ".coresmith" / "integration_snapshot.json").exists()
 
+    @_REQUIRES_VERILATOR
     def test_update_uses_real_rtl_for_published_blocks(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CORESMITH_SHELL_INTEGRATION", "1")
         monkeypatch.delenv("CORESMITH_TOP_MODULE", raising=False)
@@ -92,6 +99,7 @@ class TestShellNodes:
         assert parked[0][1]["node"] == "shell_update" and "skip" in parked[0][0]["supported_actions"]
         assert any("s_q_rsp_valid" in e for e in parked[0][0]["wiring_errors"] + parked[0][0]["elab_errors"])
 
+    @_REQUIRES_VERILATOR
     def test_contract_less_run_is_inapplicable_never_a_pass_and_never_parks(self, tmp_path, monkeypatch):
         """A bare blocks.yaml run (no contracts, no pins) never declared its
         interfaces: the contract-shell check is recorded ``inapplicable`` --

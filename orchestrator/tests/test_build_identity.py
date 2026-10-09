@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,9 @@ from orchestrator.state_store.store import Scoreboard
 from orchestrator.tests.build_fixtures import complete_build, ready_project, write_env
 
 _complete_build = complete_build   # imported by the stage-gate tests
+
+
+_REQUIRES_YOSYS = pytest.mark.skipif(not shutil.which("yosys"), reason="requires yosys (hierarchy elaboration)")
 
 
 def _codes(blockers):
@@ -477,6 +481,7 @@ def test_composition_manifest_covers_every_declared_input_and_the_tooling(tmp_pa
     assert not s["ok"] and any("did not exist when the verdict was measured" in r for r in s["reasons"])
 
 
+@_REQUIRES_YOSYS
 def test_the_adopted_candidate_is_the_selected_top(tmp_path, monkeypatch):
     """The canonical adoption is the hierarchy-validated candidate receipt:
     when one exists it selects the top over an older shell snapshot; an

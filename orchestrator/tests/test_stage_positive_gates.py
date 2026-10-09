@@ -14,6 +14,7 @@ power that was never measured is recorded as unavailable and is not the
 signoff."""
 from __future__ import annotations
 
+import shutil
 import sqlite3
 
 import pytest
@@ -23,6 +24,8 @@ from orchestrator.state_store import stages as st
 from orchestrator.state_store.store import Scoreboard
 from orchestrator.tests.build_fixtures import ready_project
 from orchestrator.tests.test_build_identity import _complete_build
+
+_REQUIRES_YOSYS = pytest.mark.skipif(not shutil.which("yosys"), reason="requires yosys (hierarchy elaboration)")
 
 
 def _codes(blockers):
@@ -85,6 +88,7 @@ def test_integration_needs_real_top_and_a_passing_chip_row(tmp_path, monkeypatch
     assert st.advance(db, tmp_path)["advanced"] and st.current(db) == "acceptance"
 
 
+@_REQUIRES_YOSYS
 def test_an_adopted_candidate_is_the_integration_elaboration_evidence(tmp_path, monkeypatch):
     """The canonical adoption (``write_candidate_receipt``: a real hierarchy
     elaboration of the actual top) is the elaboration evidence when a receipt
@@ -126,6 +130,7 @@ def test_an_adopted_candidate_is_the_integration_elaboration_evidence(tmp_path, 
     assert stubs and stubs[0]["ids"] == ["sink"] and "INTEGRATION_DV_MISSING" in _codes(blockers)
 
 
+@_REQUIRES_YOSYS
 def test_adopted_hierarchy_presence_resolves_modules_through_their_target_binding(tmp_path, monkeypatch):
     """A registered module's HDL top is what its existing target binding
     names, and the adopted root is part of the elaborated hierarchy: a
