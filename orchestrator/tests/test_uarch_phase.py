@@ -70,6 +70,57 @@ def test_flag_off_is_a_noop(tmp_path, monkeypatch):
     assert asyncio.run(pg.uarch_phase_node(_state(tmp_path))) == {}
 
 
+def test_default_frontend_constructs_no_model_author(tmp_path, monkeypatch):
+    """CORESMITH_SYSTEM_MODEL is an explicit opt-in: the default uArch phase
+    authors the missing specs (its normal helper) and never a SystemC model or
+    an FRD harness; nothing under model/ is created."""
+    monkeypatch.setenv("CORESMITH_UARCH_PHASE", "1")
+    monkeypatch.delenv("CORESMITH_SYSTEM_MODEL", raising=False)
+    monkeypatch.delenv("CORESMITH_FRD_EVAL", raising=False)
+    assert pg.system_model_enabled() is False
+    _project(tmp_path)
+    _fake_specs.root = str(tmp_path)
+    import orchestrator.langchain.agents.frd_eval_generator as fgen
+    import orchestrator.langchain.agents.systemc_model_generator as gen
+    import orchestrator.langgraph.pipeline_helpers as ph
+
+    class _Forbidden:
+        def __init__(self, *a, **k):
+            raise AssertionError("a model author was constructed on the default frontend path")
+    monkeypatch.setattr(gen, "SystemCModelGenerator", _Forbidden)
+    monkeypatch.setattr(fgen, "FRDEvalGenerator", _Forbidden)
+    monkeypatch.setattr(ph, "generate_uarch_specs_single_context", _fake_specs)
+    out = asyncio.run(pg.uarch_phase_node(_state(tmp_path)))
+    assert out["uarch_phase"]["system_model"] == {"enabled": False}
+    assert not (tmp_path / "model").exists()
+    events = (tmp_path / ".coresmith" / "pipeline_events.jsonl").read_text()
+    assert "model_authoring" not in events
+
+
+def test_opt_in_authoring_is_announced_as_authoring(tmp_path, monkeypatch):
+    """With CORESMITH_SYSTEM_MODEL=1 the graph's authoring is identifiable as
+    such: a ``model_authoring`` event names the blocks before any agent runs."""
+    monkeypatch.setenv("CORESMITH_UARCH_PHASE", "1")
+    monkeypatch.setenv("CORESMITH_SYSTEM_MODEL", "1")
+    monkeypatch.setenv("CORESMITH_FRD_EVAL", "0")
+    _project(tmp_path)
+    _fake_specs.root = str(tmp_path)
+    _FakeAgent.calls = []
+    import orchestrator.langchain.agents.systemc_model_generator as gen
+    import orchestrator.langgraph.pipeline_helpers as ph
+    import orchestrator.systemc_model as scm
+    monkeypatch.setattr(ph, "generate_uarch_specs_single_context", _fake_specs)
+    monkeypatch.setattr(gen, "SystemCModelGenerator", _FakeAgent)
+    monkeypatch.setattr(scm, "detect", lambda: {"ok": True, "reason": "", "cxx": "g++", "systemc_home": ""})
+    monkeypatch.setattr(scm, "build", lambda md: {"ok": True, "log": ""})
+    monkeypatch.setattr(scm, "smoke", lambda md: {"ok": True, "log": "reads=4"})
+    out = asyncio.run(pg.uarch_phase_node(_state(tmp_path)))
+    sm = out["uarch_phase"]["system_model"]
+    assert sm["authoring"] is True and sorted(b for b, _ in _FakeAgent.calls) == sorted(_BLOCKS)
+    events = (tmp_path / ".coresmith" / "pipeline_events.jsonl").read_text()
+    assert '"model_authoring"' in events and "frd_eval" not in sm
+
+
 def test_graph_wires_the_phase_and_fan_out_reuses_specs(tmp_path, monkeypatch):
     monkeypatch.setenv("CORESMITH_UARCH_PHASE", "1")
     monkeypatch.setattr(pg, "_stale_specs", lambda pr, names: [])
@@ -127,7 +178,8 @@ def _gate_run(tmp_path, monkeypatch, sm):
     async def _specs(pr, blocks):
         return {"written": [], "missing": []}
 
-    async def _models(pr, blocks):
+    async def _models(pr, blocks, **kw):
+        assert kw.get("author") is True        # the graph's opt-in is explicit authoring
         return dict(sm, enabled=True)
     monkeypatch.setattr(pg, "_uarch_phase_specs", _specs)
     monkeypatch.setattr(pg, "_uarch_phase_models", _models)

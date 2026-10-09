@@ -36,6 +36,14 @@ def _emit_result(args, result) -> int:
     return result.exit_code
 
 
+def _engine_logs_to_stderr():
+    """The engine helpers print progress lines (``[SIM] timeout=...``) to
+    stdout; during a verify call they go to stderr so ``--json`` stdout is
+    exactly one document (the same context ``coresmith model`` uses)."""
+    from orchestrator.harness.cli import _engine_logs_to_stderr as _ctx
+    return _ctx()
+
+
 def _scoreboard(root: Path):
     try:
         from orchestrator.state_store.store import Scoreboard
@@ -66,16 +74,17 @@ def cmd_verify_rtl(args) -> int:
         # Fall back to a minimal spec so a bare `verify rtl <block>` still works
         # against conventional rtl/<block>.v + tb/cocotb/test_<block>.py.
         spec = {"name": args.block}
-    result = V.verify_rtl(
-        root, spec,
-        seed=getattr(args, "seed", None),
-        tb_path=getattr(args, "tb", None),
-        no_equiv=getattr(args, "no_equiv", False),
-        lint_only=getattr(args, "lint_only", False),
-        coverage=getattr(args, "coverage", False),
-        record_source="agent",
-        scoreboard=_scoreboard(root),
-    )
+    with _engine_logs_to_stderr():
+        result = V.verify_rtl(
+            root, spec,
+            seed=getattr(args, "seed", None),
+            tb_path=getattr(args, "tb", None),
+            no_equiv=getattr(args, "no_equiv", False),
+            lint_only=getattr(args, "lint_only", False),
+            coverage=getattr(args, "coverage", False),
+            record_source="agent",
+            scoreboard=_scoreboard(root),
+        )
     return _emit_result(args, result)
 
 
@@ -87,13 +96,14 @@ def cmd_verify_synth(args) -> int:
         return EXIT_USAGE
     from orchestrator.harness import verify as V
     spec = _require_block_spec(root, args.block) or {"name": args.block}
-    result = V.verify_synth(
-        root, spec,
-        full=getattr(args, "full", False),
-        timeout_s=getattr(args, "timeout", 300),
-        scoreboard=_scoreboard(root),
-        record_source="agent",
-    )
+    with _engine_logs_to_stderr():
+        result = V.verify_synth(
+            root, spec,
+            full=getattr(args, "full", False),
+            timeout_s=getattr(args, "timeout", 300),
+            scoreboard=_scoreboard(root),
+            record_source="agent",
+        )
     return _emit_result(args, result)
 
 
@@ -104,14 +114,15 @@ def cmd_verify_chip(args) -> int:
         print(str(exc), file=sys.stderr)
         return EXIT_USAGE
     from orchestrator.harness import verify as V
-    result = V.verify_chip(
-        root,
-        tb_path=getattr(args, "tb", None),
-        seed=getattr(args, "seed", None),
-        stimulus=getattr(args, "stimulus", None),
-        scoreboard=_scoreboard(root),
-        record_source="agent",
-    )
+    with _engine_logs_to_stderr():
+        result = V.verify_chip(
+            root,
+            tb_path=getattr(args, "tb", None),
+            seed=getattr(args, "seed", None),
+            stimulus=getattr(args, "stimulus", None),
+            scoreboard=_scoreboard(root),
+            record_source="agent",
+        )
     return _emit_result(args, result)
 
 
@@ -137,7 +148,8 @@ def register_verify(sub, run_wrap, add_project_root, add_json) -> None:
     add_project_root(vs)
     add_json(vs)
     vs.add_argument("block")
-    vs.add_argument("--full", action="store_true", help="run synthesize_block (PDK)")
+    vs.add_argument("--full", action="store_true", help=("run synthesize_block (PDK) + pre-layout STA; no WNS is a tool error "
+                    "(exit 3) unless CORESMITH_VERIFY_SYNTH_ALLOW_UNMEASURED=1"))
     vs.add_argument("--timeout", type=int, default=300, help="probe timeout (s)")
     vs.set_defaults(func=run_wrap(cmd_verify_synth))
 

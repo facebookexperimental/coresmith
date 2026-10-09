@@ -77,6 +77,10 @@ class VerifyResult:
 # Path resolution (never raise)
 # ---------------------------------------------------------------------------
 def _resolve_rtl_path(pr: Path, spec: dict) -> str:
+    from orchestrator.harness.targets import load
+    bound = load(pr, spec["name"])
+    if bound:
+        return bound["sources"][0]
     target = (spec.get("rtl_target") or spec.get("rtl") or "").strip()
     if target:
         p = Path(target)
@@ -140,7 +144,20 @@ def verify_rtl(
     block = block_spec.get("name")
     rtl_path = _resolve_rtl_path(root, block_spec)
 
+    from orchestrator.harness.targets import load, revision
+    bound_target = load(root, block)
+    bound_revision = revision(bound_target) if bound_target else None
+
     def _record(res: VerifyResult, tests=(None, None, None), first_div=None) -> VerifyResult:
+        if bound_revision:
+            res.details["input_revision"] = bound_revision
+            try:
+                unchanged = revision(load(root, block)) == bound_revision
+            except (ValueError, OSError):
+                unchanged = False
+            if not unchanged:
+                res.passed = False
+                res.verdict = "TARGET_CHANGED: inputs changed during verification; rerun the check"
         if scoreboard is not None:
             try:
                 scoreboard.record_dv(
@@ -258,6 +275,28 @@ def _restore_env(key: str, prev: str | None) -> None:
 # ---------------------------------------------------------------------------
 # verify_synth
 # ---------------------------------------------------------------------------
+def _allow_unmeasured_synth_timing() -> bool:
+    return os.environ.get("CORESMITH_VERIFY_SYNTH_ALLOW_UNMEASURED", "").strip().lower() \
+        in ("1", "true", "yes")
+
+
+def _measure_full_synth_timing(root: Path, block: str, rtl_path: str, res: dict) -> dict:
+    """Pre-layout STA on a ``--full`` synthesis result, through the same
+    ``_evaluate_ppa_gate`` block-done uses. Never raises: a tooling failure is
+    reported as ``timing_error`` with no WNS."""
+    try:
+        from orchestrator.langgraph.pipeline_graph import _evaluate_ppa_gate
+        _ok, _viol, meta = _evaluate_ppa_gate(str(root), block, rtl_path, res,
+                                              require_gate_flag=False)
+    except Exception as exc:  # noqa: BLE001
+        return {"wns_ns": None, "tns_ns": None, "timing_measured": False,
+                "timing_error": f"{type(exc).__name__}: {exc}"[:300]}
+    meta = meta or {}
+    wns = meta.get("wns_ns")
+    return {"wns_ns": wns, "tns_ns": meta.get("tns_ns"), "timing_measured": wns is not None,
+            "sta_report": meta.get("sta_report_path", "")}
+
+
 def verify_synth(
     pr: str | Path,
     block_spec: dict,
@@ -279,6 +318,9 @@ def verify_synth(
     root = Path(pr)
     block = block_spec.get("name")
     rtl_path = _resolve_rtl_path(root, block_spec)
+    from orchestrator.harness.targets import load
+    if load(root, block):
+        full = True
     if not Path(rtl_path).exists():
         return VerifyResult(False, verdict=f"RTL not found: {rtl_path}",
                             duration_s=time.monotonic() - t0)
@@ -320,18 +362,54 @@ def verify_synth(
             return VerifyResult(False, infra_error=True,
                                 verdict=f"synthesize_block import failed: {exc}",
                                 duration_s=time.monotonic() - t0)
-        res = synthesize_block(block_spec, rtl_path, target_clock_mhz, attempt or 1)
+        res = synthesize_block(block_spec, rtl_path, target_clock_mhz, attempt or 1, timeout_s=timeout_s)
         ok = bool(res.get("success"))
         _record(ok, ff=res.get("ff_count"), report_path=res.get("report_path", ""),
                 probe="synth")
-        return VerifyResult(
-            ok, verdict=("synth OK" if ok else "synth FAILED"),
-            details={"stage": "synth", "ff": res.get("ff_count"),
-                     "area_um2": res.get("chip_area_um2"),
-                     "gate_count": res.get("gate_count")},
-            log_path=res.get("log_path", ""),
-            duration_s=time.monotonic() - t0,
-        )
+        details = {"stage": "synth", "ff": res.get("ff_count"),
+                   "area_um2": res.get("chip_area_um2"),
+                   "gate_count": res.get("gate_count")}
+        if res.get("input_revision"):
+            details["input_revision"] = res["input_revision"]
+        if not ok:
+            return VerifyResult(False, infra_error=bool(res.get("timed_out")),
+                                verdict="synth timed out" if res.get("timed_out") else "synth FAILED", details=details,
+                                log_path=res.get("log_path", ""),
+                                duration_s=time.monotonic() - t0)
+        # A --full synthesis is a timing verdict too (the same measurement
+        # block-done publishes on): no WNS is "timing not measured" -- a tool
+        # error, never a pass (it used to report PASS with wns=None when the
+        # OpenSTA binary was missing).
+        timing = _measure_full_synth_timing(root, block, rtl_path, res)
+        details.update(timing)
+        wns, tns = timing.get("wns_ns"), timing.get("tns_ns")
+        try:
+            neg = (wns is not None and float(wns) < 0) or (tns is not None and float(tns) < 0)
+        except (TypeError, ValueError):
+            neg = False
+        if neg:
+            return VerifyResult(False, verdict=f"synth OK; timing violated (WNS {wns} ns, TNS {tns} ns)",
+                                details=details, log_path=res.get("log_path", ""),
+                                duration_s=time.monotonic() - t0)
+        if wns is None:
+            if not _allow_unmeasured_synth_timing():
+                return VerifyResult(
+                    False, infra_error=True,
+                    verdict=("timing not measured (no WNS: the STA did not run or crashed"
+                             + (f": {timing['timing_error']}" if timing.get("timing_error") else "")
+                             + ") -- check bin/sta / CORESMITH_REAL_STA; "
+                             "CORESMITH_VERIFY_SYNTH_ALLOW_UNMEASURED=1 waives"),
+                    details={**details, "tool_error": True},
+                    log_path=res.get("log_path", ""),
+                    duration_s=time.monotonic() - t0,
+                )
+            return VerifyResult(True, verdict="synth OK; timing NOT measured (waived: "
+                                "CORESMITH_VERIFY_SYNTH_ALLOW_UNMEASURED=1)",
+                                details=details, log_path=res.get("log_path", ""),
+                                duration_s=time.monotonic() - t0)
+        return VerifyResult(True, verdict=f"synth OK; WNS {wns} ns", details=details,
+                            log_path=res.get("log_path", ""),
+                            duration_s=time.monotonic() - t0)
 
     spec_path = root / "arch" / "uarch_specs" / f"{block}.md"
     spec_text = spec_path.read_text() if spec_path.exists() else ""

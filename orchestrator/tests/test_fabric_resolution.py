@@ -131,3 +131,22 @@ class TestNode:
                                                      "block_diagram": _hand_written()}))
         assert out["fabric_resolution"]["unresolved"] == ["axi_arbiter"]
         assert ag.route_after_fabric_resolution(out) != "Abort"
+
+    def test_accepted_spec_lands_in_the_fabric_specs_row(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CORESMITH_FABRIC_RESOLUTION", "1")
+        monkeypatch.delenv("CORESMITH_ENABLE_CHIP_LEAD", raising=False)
+        db = open_project(tmp_path)  # a project DB exists -> the accepted spec is recorded as a row
+
+        def fake_interrupt(payload):
+            spec = dict(payload["ambiguous"][0]["proposed_spec"])
+            spec["slaves"] = [{"name": "ram", "protocol": "axi4", "base": "0x80000000", "size": "0x1000000"}]
+            return {"action": "accept", "feedback": json.dumps({"block": "axi_arbiter", "fabric": spec})}
+        monkeypatch.setattr(ag, "interrupt", fake_interrupt)
+        out = asyncio.run(ag.fabric_resolution_node({"project_root": str(tmp_path), "round": 1,
+                                                     "block_diagram": _hand_written()}))
+        assert out["fabric_resolution"]["fabrics"] == ["axi_arbiter"]
+        rows = db.fabric_specs()
+        assert len(rows) == 1
+        spec = rows[0]["spec"]
+        assert {m["name"] for m in spec["masters"]} == {"gpu", "hart0"}
+        assert [s["name"] for s in spec["slaves"]] == ["ram"]

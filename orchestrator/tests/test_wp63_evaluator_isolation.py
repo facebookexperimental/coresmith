@@ -52,7 +52,7 @@ def test_sandbox_argv_and_private_work_policy(tmp_path, monkeypatch):
         i = argv.index(str(ta._RUNNER))
         Path(argv[i+3]).write_text(json.dumps({'declared_cases':['one'], 'cases':{'one':{'ok':True}}}))
         return subprocess.CompletedProcess(argv, 0)
-    monkeypatch.setattr(subprocess, 'run', run)
+    monkeypatch.setattr(ta, 'run_process', run)
     assert ta.run_task_adapter(str(root), str(top))['passed']
     argv, kw = calls[0]
     assert argv[:4] == ['/fake/bwrap', '--ro-bind', '/', '/']

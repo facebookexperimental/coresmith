@@ -85,11 +85,51 @@ CREATE INDEX IF NOT EXISTS idx_cov_block ON coverage_results(block);
 """
 
 
+# Columns added after the first release: every measurement row carries the
+# run and the recorded build it was earned in (``build_id`` links it to the
+# ``builds`` table, see state_store/builds.py), and a PPA row carries the
+# context without which a number is not comparable: the flow stage, the
+# tool, the PDK, the clock, the workload and the basis of its power figure
+# (``measured`` | ``estimated`` | ``unavailable``; NULL power with a basis of
+# ``unavailable`` is "not measured", never zero).
+SCOREBOARD_ADDED_COLUMNS = (
+    ("ppa_history", "tns_ns", "REAL"),
+    ("dv_results", "run_id", "TEXT NOT NULL DEFAULT ''"),
+    ("dv_results", "build_id", "TEXT NOT NULL DEFAULT ''"),
+    ("coverage_results", "run_id", "TEXT NOT NULL DEFAULT ''"),
+    ("coverage_results", "build_id", "TEXT NOT NULL DEFAULT ''"),
+    ("ppa_history", "run_id", "TEXT NOT NULL DEFAULT ''"),
+    ("ppa_history", "build_id", "TEXT NOT NULL DEFAULT ''"),
+    ("ppa_history", "stage", "TEXT"),
+    ("ppa_history", "tool", "TEXT"),
+    ("ppa_history", "pdk", "TEXT"),
+    ("ppa_history", "clock_mhz", "REAL"),
+    ("ppa_history", "workload", "TEXT"),
+    ("ppa_history", "power_mw", "REAL"),
+    ("ppa_history", "power_basis", "TEXT"),
+    # a chip-level verdict names the composition it measured (every module's
+    # current build + the integrated top's bytes, builds.composition_identity)
+    ("dv_results", "composition_sha", "TEXT"),
+    ("ppa_history", "composition_sha", "TEXT"),
+    # a coverage row belongs to one attempt of one source, like a DV row
+    ("coverage_results", "attempt", "INTEGER"),
+    ("coverage_results", "source", "TEXT"),
+)
+POWER_BASES = ("measured", "estimated", "unavailable")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Add columns introduced after a database was created (idempotent)."""
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(ppa_history)")}
-    if cols and "tns_ns" not in cols:
-        conn.execute("ALTER TABLE ppa_history ADD COLUMN tns_ns REAL")
+    """Add columns introduced after a database was created (idempotent, and
+    safe when two connections migrate at once: the second ``ALTER`` of the
+    same column is a duplicate-column error, not a lost column)."""
+    for table, column, decl in SCOREBOARD_ADDED_COLUMNS:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if cols and column not in cols:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
 
 def _b(x: Any) -> int | None:
@@ -180,23 +220,28 @@ class Scoreboard:
         detail: str = "",
         log_path: str = "",
         duration_s: float | None = None,
+        run_id: str = "",
+        build_id: str = "",
+        composition_sha: str | None = None,
     ) -> bool:
         try:
             conn = self._writer_conn()
             try:
                 conn.executescript(_SCHEMA)
+                _migrate(conn)
                 conn.execute(
                     "INSERT INTO dv_results (ts, block, scope, source, attempt, "
                     "passed, skipped, seed, tests_passed, tests_total, "
-                    "tests_failed, first_divergence, detail, log_path, duration_s) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "tests_failed, first_divergence, detail, log_path, duration_s, "
+                    "run_id, build_id, composition_sha) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         time.time(), block, scope, source, int(attempt or 0),
                         _b(passed), _b(skipped),
                         (int(seed) if seed is not None else None),
                         tests_passed, tests_total, tests_failed,
                         _json(first_divergence), detail or "", log_path or "",
-                        duration_s,
+                        duration_s, run_id or "", build_id or "", composition_sha,
                     ),
                 )
             finally:
@@ -224,7 +269,28 @@ class Scoreboard:
         ppa_ok: bool | None = None,
         reasons: Any = None,
         report_path: str = "",
+        run_id: str = "",
+        build_id: str = "",
+        stage: str | None = None,
+        tool: str | None = None,
+        pdk: str | None = None,
+        clock_mhz: float | None = None,
+        workload: str | None = None,
+        power_mw: float | None = None,
+        power_basis: str | None = None,
+        composition_sha: str | None = None,
     ) -> bool:
+        """One PPA row. ``power_mw`` is NULL unless a figure exists; its
+        ``power_basis`` says what kind of figure it is (``measured`` |
+        ``estimated`` | ``unavailable``). A row never carries a power figure
+        without a basis, and a basis of ``unavailable`` never carries a figure:
+        an absent measurement stays NULL with its reason in ``reasons``."""
+        if power_basis is not None and power_basis not in POWER_BASES:
+            return False
+        if power_mw is not None and power_basis in (None, "unavailable"):
+            return False
+        if power_mw is None and power_basis in ("measured", "estimated"):
+            return False
         try:
             conn = self._writer_conn()
             try:
@@ -233,13 +299,15 @@ class Scoreboard:
                 conn.execute(
                     "INSERT INTO ppa_history (ts, block, attempt, source, probe, "
                     "cells, ff, mem_bits, area_um2, wns_ns, tns_ns, elaborated, budget_ff, "
-                    "budget_area_um2, ppa_ok, reasons, report_path) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "budget_area_um2, ppa_ok, reasons, report_path, run_id, build_id, "
+                    "stage, tool, pdk, clock_mhz, workload, power_mw, power_basis, composition_sha) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         time.time(), block, int(attempt or 0), source, probe or "",
                         cells, ff, mem_bits, area_um2, wns_ns, tns_ns, _b(elaborated),
                         budget_ff, budget_area_um2, _b(ppa_ok),
-                        _json(reasons), report_path or "",
+                        _json(reasons), report_path or "", run_id or "", build_id or "",
+                        stage, tool, pdk, clock_mhz, workload, power_mw, power_basis, composition_sha,
                     ),
                 )
             finally:
@@ -259,18 +327,25 @@ class Scoreboard:
         uncovered: Any = None,
         dat_path: str = "",
         annotated_dir: str = "",
+        run_id: str = "",
+        build_id: str = "",
+        attempt: int | None = None,
+        source: str = "gate",
     ) -> bool:
         try:
             conn = self._writer_conn()
             try:
                 conn.executescript(_SCHEMA)
+                _migrate(conn)
                 conn.execute(
                     "INSERT INTO coverage_results (ts, block, scope, points_total, "
-                    "points_hit, pct, uncovered, dat_path, annotated_dir) "
-                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    "points_hit, pct, uncovered, dat_path, annotated_dir, run_id, build_id, attempt, source) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         time.time(), block, scope, points_total, points_hit, pct,
                         _json(uncovered), dat_path or "", annotated_dir or "",
+                        run_id or "", build_id or "",
+                        (int(attempt) if attempt is not None else None), source or "gate",
                     ),
                 )
             finally:
@@ -278,6 +353,29 @@ class Scoreboard:
             return True
         except Exception:  # noqa: BLE001
             return False
+
+    # ------------------------------------------------------------------
+    # Build-scoped reads (the evidence a recorded build is judged by)
+    # ------------------------------------------------------------------
+    def rows_for_build(self, build_id: str) -> dict[str, list[dict]]:
+        """Every measurement row recorded under ``build_id``:
+        ``{dv: [...], ppa: [...], coverage: [...]}`` (oldest first)."""
+        out: dict[str, list[dict]] = {"dv": [], "ppa": [], "coverage": []}
+        if not build_id:
+            return out
+        conn = self._reader_conn()
+        if conn is None:
+            return out
+        try:
+            for key, table in (("dv", "dv_results"), ("ppa", "ppa_history"), ("coverage", "coverage_results")):
+                try:
+                    out[key] = self._rows(conn.execute(
+                        f"SELECT * FROM {table} WHERE build_id = ? ORDER BY id", (build_id,)))
+                except Exception:  # noqa: BLE001 - an old database without the column
+                    out[key] = []
+            return out
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
     # Reads (never raise: return [] / None on any failure)

@@ -16,8 +16,3 @@ def test_integration_failure_offers_no_fix_tb_for_deterministic_bfm():
     src = inspect.getsource(pg.integration_dv_node)
     i = src.find('["retry", "fix_rtl", "revise", "abort"]')
     assert i > 0 and "deterministic_bfm" in src[i - 400:i + 200]
-
-
-def test_chip_lead_prompt_forbids_fix_tb_on_deterministic_bfm():
-    from orchestrator.langchain.agents.chip_lead_agent import CHIP_LEAD_PROMPT
-    assert "DETERMINISTIC BFM TESTBENCHES ARE ENGINE-OWNED" in CHIP_LEAD_PROMPT

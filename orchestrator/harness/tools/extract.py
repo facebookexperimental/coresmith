@@ -85,17 +85,44 @@ def extract_prd_items(doc: dict) -> tuple[list[dict], list[str]]:
     return items, problems
 
 
+# First line of an FRD/PRD rendered from the database (``coresmith state write``).
+# In such a file the trailing ``[<PRIORITY TAG>, <ids>]`` of a requirement line
+# was appended by the renderer and is stripped again, so the text round-trips.
+RENDER_MARKER = "rendered from project.sqlite by coresmith state write"
+_TRAILING_TAG = re.compile(r"\s*\[([^\[\]]*)\]\s*$")
+_TAG_WORDS = {"HARD", "MUST", "MUST_HAVE", "SHOULD", "SHOULD_HAVE", "GOAL", "SELF", "NICE_TO_HAVE", "SOFT"}
+
+
+def split_trailing_tag(text: str) -> tuple[str, list[str]]:
+    """``"body [HARD, KPI-FPS-1]"`` -> ("body", ["HARD", "KPI-FPS-1"]) when every
+    token is a priority word or an item id; otherwise (text, [])."""
+    m = _TRAILING_TAG.search(text or "")
+    if not m:
+        return text or "", []
+    toks = [t.strip() for t in m.group(1).split(",") if t.strip()]
+    if toks and all(t.upper() in _TAG_WORDS or is_item_id(t) for t in toks):
+        return text[:m.start()].rstrip(), toks
+    return text or "", []
+
+
 def extract_frd_items(markdown: str) -> tuple[list[dict], list[str]]:
     from orchestrator.systemc_model.frd_eval import extract_requirements
     reqs = extract_requirements(markdown)
+    rendered = RENDER_MARKER in (markdown or "")[:400]
     items, problems = [], []
     for r in reqs:
-        text = r["requirement"]
+        full = r["requirement"]
+        text = split_trailing_tag(full)[0] if rendered else full
         if not r.get("acceptance"):
             problems.append(f"{r['id']}: no acceptance criteria")
-        items.append({"id": r["id"], "kind": r["id"].split("-")[0], "section": r.get("section", ""), "text": text,
-                      "priority": r.get("priority") or _priority_from_tags("", text), "acceptance": r.get("acceptance", ""),
-                      "model_check": r.get("model_check", ""), "extra": {"refs": references(text + " " + r.get("acceptance", ""), exclude=r["id"])}})
+        it = {"id": r["id"], "kind": r["id"].split("-")[0], "section": r.get("section", ""), "text": text,
+              "priority": r.get("priority") or _priority_from_tags("", full), "acceptance": r.get("acceptance", ""),
+              "model_check": r.get("model_check", ""),
+              "extra": {"refs": references(full + " " + r.get("acceptance", ""), exclude=r["id"])}}
+        for k in ("metric", "bound_min", "bound_max", "unit"):
+            if r.get(k) is not None:
+                it[k] = r[k]
+        items.append(it)
     if not items:
         problems.append("no '**ID**: XXX-NNN' requirement blocks found")
     return items, problems

@@ -20,8 +20,3 @@ def test_acceptance_failure_returns_pending_decision():
 def test_route_parks_on_pending_decision():
     assert pg.route_after_validation_dv({"validation_dv_result": {
         "passed": False, "pending_decision": True}}) == "validation_dv_decision"
-
-
-def test_chip_lead_prompt_covers_acceptance_phase():
-    from orchestrator.langchain.agents.chip_lead_agent import CHIP_LEAD_PROMPT
-    assert "phase: acceptance_dv" in CHIP_LEAD_PROMPT

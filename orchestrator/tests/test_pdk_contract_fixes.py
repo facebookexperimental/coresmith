@@ -106,7 +106,7 @@ def test_renderer_requests_offscreen_qt(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
-    monkeypatch.setattr(bh.subprocess, "run", fake_run)
+    monkeypatch.setattr(bh, "run_process", fake_run)
     assert Path(bh.RENDER_SCRIPT).is_file()
     assert bh.render_layout_image(str(source), str(output)) is True
     assert captured["env"]["QT_QPA_PLATFORM"] == "offscreen"

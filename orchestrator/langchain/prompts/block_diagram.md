@@ -218,11 +218,10 @@ SEMANTIC CONTRACT AND STATEFUL FEEDBACK RULES:
   loop-filter in ONE block) is over budget: it cannot be authored as one
   byte-exact model/RTL, and the architecture will REJECT the diagram and force a
   re-decomposition. Partition so each functional block owns ONE coherent
-  algorithm stage (a natural golden cut-point), not a pipeline of many. You can
-  score a candidate decomposition yourself before committing:
-  `"$CORESMITH_CLI" complexity` (all blocks) or `... complexity <block>` --
-  an `OVER` verdict lists exactly which axis breached; split that block along
-  its golden function boundaries and re-check. Reserve fused multi-stage blocks
+  algorithm stage (a natural golden cut-point), not a pipeline of many. The
+  gate scores the diagram when it is reviewed; an `OVER` verdict lists exactly
+  which axis breached -- split that block along its golden function boundaries
+  and re-submit. Reserve fused multi-stage blocks
   only for genuinely inseparable feedback (and say why in `reasoning`).
 - The "# On-chip memory (SRAM) policy" and the reference skills below give you
   the SAME macro/OpenRAM/memory-vs-flops knowledge the uArch author uses -- size

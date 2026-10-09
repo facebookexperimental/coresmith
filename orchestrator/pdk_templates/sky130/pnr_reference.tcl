@@ -73,13 +73,19 @@ make_tracks met4 -x_offset 0.46 -x_pitch 0.92 -y_offset 0.46 -y_pitch 0.92
 make_tracks met5 -x_offset 1.70 -x_pitch 3.40 -y_offset 1.70 -y_pitch 3.40
 
 # --- place SRAM macros (5th fix; no-op when no macros) ---
-# Resolve real instance names by master (robust to hierarchical flattening),
-# then place the i-th instance at the i-th planned position.
+# Resolve real instance names by master from the odb (robust to hierarchical
+# flattening), then place the i-th instance at the i-th planned position.
+# The odb name is what place_macro looks up: STA's get_full_name returns the
+# UNESCAPED hierarchical name (g_bank[0].u_mem) that place_macro cannot find
+# (MPL-0020), so never route macro names through get_cells/get_full_name.
 if {[info exists macro_place]} {
     set _macro_insts {}
+    set _block [ord::get_db_block]
     foreach _mn $macro_names {
-        foreach _c [get_cells -filter "ref_name == $_mn"] {
-            lappend _macro_insts [get_full_name $_c]
+        foreach _inst [$_block getInsts] {
+            if {[[$_inst getMaster] getName] eq $_mn} {
+                lappend _macro_insts [$_inst getName]
+            }
         }
     }
     set _i 0
@@ -91,6 +97,9 @@ if {[info exists macro_place]} {
         incr _i
     }
     puts "Placed $_i SRAM macro(s)."
+    if {$_i < [llength $_macro_insts]} {
+        error "only $_i of [llength $_macro_insts] SRAM macro instance(s) placed: the floorplan plans fewer positions than the netlist has macros -- never drop a macro"
+    }
 }
 
 place_pins -hor_layers met3 -ver_layers met2

@@ -614,7 +614,9 @@ class TestIntegrationCheckNode:
         assert "parsed" in ir["reason"].lower()
 
     @pytest.mark.asyncio
-    async def test_calls_integration_lead_agent(self):
+    async def test_calls_integration_lead_agent(self, monkeypatch):
+        # the clean path parks for accept by default; this test covers the advance
+        monkeypatch.setenv("CORESMITH_INTEGRATION_CHECK_PARK", "0")
         from orchestrator.langgraph.integration_helpers import (
             VerilogModule,
             VerilogPort,
@@ -918,7 +920,9 @@ class TestIntegrationCheckNode:
         assert ir.get("aborted") is True
 
     @pytest.mark.asyncio
-    async def test_clean_integration_passes(self):
+    async def test_clean_integration_passes(self, monkeypatch):
+        # the clean path parks for accept by default; this test covers the advance
+        monkeypatch.setenv("CORESMITH_INTEGRATION_CHECK_PARK", "0")
         from orchestrator.langgraph.integration_helpers import (
             VerilogModule,
             VerilogPort,
@@ -1246,6 +1250,7 @@ class TestIntegrationCheckWarningTriage:
         pre-change behaviour where warning-only integration results
         silently proceed to integration_dv with no interrupt."""
         monkeypatch.setenv("CORESMITH_NONBLOCKING_INTEGRATION_WARNINGS", "1")
+        monkeypatch.setenv("CORESMITH_INTEGRATION_CHECK_PARK", "0")
         from orchestrator.langgraph.pipeline_graph import integration_check_node
 
         # If the env var really suppresses the triage, this fake_interrupt

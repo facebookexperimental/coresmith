@@ -4,7 +4,7 @@
 
 """``coresmith schema <kind>``: the document shapes ``register`` expects, as
 the architect's reference -- so it never has to read engine source to learn
-them (the first smoke sitting did exactly that, then wandered into a sibling
+them (the first smoke Architect invocation did exactly that, then wandered into a sibling
 project's artifacts)."""
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ items without a Model check, open must-answer questions.''',
      "interfaces": {"m_l1i_req": {"handshake": "req_resp", "req": 64, "resp": 69}, "...": {}},
      "golden_slice": "..."},
     {"name": "soc_fabric", "tier": 0, "kind": "primitive", "primitive": "cs_fabric",
-     "fabric": <the FabricSpec JSON from `coresmith fabric derive` (.coresmith/fabric_spec.json)>}
+     "fabric": <rendered from the registered fabric spec (`coresmith fabric init|master|slave|set|derive`); any fabric object written here is overridden by that DB row>}
   ],
   "connections": [
     {"edge_id": "rv_core0__m_fabric__to__soc_fabric__s_cpu0",
@@ -103,9 +103,16 @@ PHYS/MPW) must be owned by some block. `cluster` groups blocks for the cluster w
    "timing": {"req_to_rsp_cycles": {"min": 2, "max": 2, "exact": 2}, "valid_to_ready_max_stall": 8,
               "ordering": "in_order", "burst": {"last_signal": "last", "max_beats": 16},
               "reset_idle_cycles": 4, "valid_hold_until_ready": true},
-   "flow_control_policy": "...", "semantic_contract": "..."}
+   "flow_control_policy": {"semantics": "skid", "min_buffer_depth_beats": 2},   # optional; an OBJECT, never a string
+   "semantic_contract": "..."}
 ]}
-One contract per diagram connection; instance-expanded edge ids; the diagram's widths must match.''',
+One contract per diagram connection; instance-expanded edge ids; the diagram's widths must match.
+Line-item verbs edit one edge without rewriting the file: `coresmith contract add <pb>.<pp> <cb>.<cp>
+--protocol <family> [--width N] [--field name:width[:msb:lsb]] [--bus-param k=v] [--sideband name:width]
+[--timing k=v]`, `contract set <edge_id> <dotted.key> <value>`, `contract rm <edge_id>`, `contract show|list`,
+`contract lock|unlock [--block b]`. Each write is validated first (same codes as register; refused writes
+change nothing). Every edge is LOCKED when the `interfaces` stage completes; a locked edge changes only with
+`--unlock --reason TEXT` (also `register contracts --unlock --reason TEXT`), and the reason is logged.''',
 
     "abi": '''HW/SW ABI -- register `arch/hw_sw_abi.md` (markdown, >= 200 chars). Must contain: the memory map
 (every window with base/size/owner), every register map (offset, name, bits, reset, access, side
@@ -133,6 +140,21 @@ bases aligned. The FRD harness (model eval) drives `top.u_<name>[i]->body` scena
 workload numbers and prints one verdict per FRD item.''',
 }
 
+SCHEMAS["pins"] = '''Chip pins -- rows, not a document (the `pins` table; the chip top's declared boundary).
+A block port is a contract edge OR a pin. One verb per pin:
+  coresmith pin add clk     --dir in  --kind clock                  # the shell's clk net (fanned to every block)
+  coresmith pin add rst_n   --dir in  --kind reset                  # the shell's reset net
+  coresmith pin add uart_tx --dir out --from uart.uart_tx           # exposes a block port (name/dir/width = the top port)
+  coresmith pin add gpio_in --dir in  --width 8 --from gpio.gpio_in
+  coresmith pin add qspi_io --dir inout --width 4 --from spi.io --bus io --msb 5 --lsb 2 --oe qspi_drive_en   # Caravel pad bus
+Fields: name (top port), dir in|out|inout, width, block+port (--from), kind signal|clock|reset|power,
+bus/msb/lsb/oe (pad-bus mapping -> prd["pin_map"]). `pin set <name> <field> <value>`, `pin rm`, `pin list`,
+`pin lock` / `pin unlock --reason`. Refusals: PIN_EXISTS, PIN_LOCKED, PIN_UNKNOWN_BLOCK, PIN_UNKNOWN_PORT
+(the block's diagram `interfaces` do not list the port), PIN_DOUBLE_DRIVEN (the port is on a contract edge),
+PIN_NO_SOURCE (a signal pin needs --from). `shell assemble` wires every pin and refuses a block port on no
+edge and no pin (SHELL_UNDECLARED_PORT); the interfaces stage needs pins (PINS_MISSING) and a shell whose
+boundary equals them (SHELL_BOUNDARY_MISMATCH). Pins lock with the edges when `interfaces` completes.
+`state write` renders arch/pinout.md.'''
 SCHEMAS["harness"] = "FRD evaluation harness: written by the engine's agent under model/arch/frd_eval/ (model eval --arch) or model/frd_eval/."
 SCHEMAS["sad"] = "SAD -- register `arch/sad_spec.md` (markdown): system decisions, memory map table, component list with the numbers the arch model uses."
 

@@ -1,9 +1,9 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-"""WP-74: the contract-conformance park goes to the in-graph chip lead first
-(it can repair the RTL or the contract and answer `retry`); a human park is the
-fallback, not the default."""
+"""WP-74: the contract-conformance park goes through ``_resolve_interrupt`` (it
+parks; the architect on call can repair the RTL or the contract and answer
+`retry`), and the on-call contract documents the park."""
 from __future__ import annotations
 
 import asyncio
@@ -38,10 +38,3 @@ def test_park_without_a_decision_returns_an_empty_dict(tmp_path, monkeypatch):
     decision = asyncio.run(pg._park_conformance_unrepairable(
         {"project_root": str(tmp_path)}, "blk", {}, 2))
     assert decision == {}
-
-
-def test_chip_lead_prompt_documents_the_park():
-    from pathlib import Path
-    text = (Path(pg.__file__).resolve().parents[1] / "langchain" / "prompts" / "chip_lead.md").read_text()
-    assert "contract_conformance_unrepairable" in text
-    assert "interface_contracts.json" in text

@@ -148,24 +148,28 @@ class LeaseMixin:
 
     # ------------------------------------------------------------ decisions
     def add_decision(self, *, action: str, interrupt_type: str = "", block: str = "",
-                     reasoning: str = "", interrupt_id: str = "",
+                     reasoning: str = "", interrupt_id: str = "", actor: str = "",
                      run_id: str | None = None) -> int:
-        """Append a chip-lead decision; returns its 1-based index in this run."""
+        """Append a decision (who answered a park: ``actor``); returns its
+        1-based index in this run."""
         rid = self.run_id() if run_id is None else run_id
         with self._tx() as db:
             n = db.execute("SELECT COUNT(*) FROM decisions WHERE run_id=?", (rid,)).fetchone()[0]
             db.execute(
                 "INSERT INTO decisions(interrupt_id, interrupt_type, block, action, reasoning, "
-                "decision_index, run_id, ts) VALUES (?,?,?,?,?,?,?,?)",
+                "decision_index, run_id, ts, actor) VALUES (?,?,?,?,?,?,?,?,?)",
                 (interrupt_id, interrupt_type, block, action, reasoning, int(n) + 1, rid,
-                 time.time()))
+                 time.time(), actor or ""))
         return int(n) + 1
 
-    def decision_count(self, *, run_id: str | None = None) -> int:
+    def decision_count(self, *, run_id: str | None = None, actor: str | None = None) -> int:
         rid = self.run_id() if run_id is None else run_id
+        sql, args = "SELECT COUNT(*) FROM decisions WHERE run_id=?", [rid]
+        if actor is not None:
+            sql += " AND actor=?"
+            args.append(actor)
         with self._conn() as db:
-            return int(db.execute("SELECT COUNT(*) FROM decisions WHERE run_id=?",
-                                  (rid,)).fetchone()[0])
+            return int(db.execute(sql, tuple(args)).fetchone()[0])
 
     def decisions(self, *, run_id: str | None = None, last: int | None = None) -> list[dict]:
         rid = self.run_id() if run_id is None else run_id

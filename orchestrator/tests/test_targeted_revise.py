@@ -149,6 +149,9 @@ class TestTargetedRevisePlan:
 
     @pytest.mark.asyncio
     async def test_named_by_mention_in_reasoning(self, tmp_path, monkeypatch):
+        # the old prose-mention rule, behind CORESMITH_REVISE_PROSE_TARGETS=1
+        # (default off: see test_mcufft_run3_fixes.py::test_prose_never_targets)
+        monkeypatch.setenv("CORESMITH_REVISE_PROSE_TARGETS", "1")
         names = ["alpha", "beta"]
         _seed_project(tmp_path, names)
         for n in names:
@@ -591,8 +594,8 @@ class TestReviewFixes:
 
     def test_measured_timing_failure_still_routes_to_diagnose(self):
         base = {"synth_success": True, "gate_sim_ok": None, "ppa_ok": False}
-        assert pipeline_graph.route_after_synth({**base, "timing_ok": None}) == "block_done"
-        assert pipeline_graph.route_after_synth({**base, "timing_ok": True}) == "block_done"
+        assert pipeline_graph.route_after_synth({**base, "timing_ok": None}) == "evaluate_targets"
+        assert pipeline_graph.route_after_synth({**base, "timing_ok": True}) == "evaluate_targets"
         assert pipeline_graph.route_after_synth({**base, "timing_ok": False}) == "diagnose"
 
     def test_explicit_keep_beats_prose_mention(self):
@@ -647,9 +650,6 @@ class TestPrdAnswersFromFeedback:
         from orchestrator.langgraph import architecture_graph as ag
         src = open(ag.__file__).read()
         assert 'human_response.get("feedback")' in src and "_parsed" in src
-        # prompt now names the field the node reads
-        prompt = open(ag.__file__.replace("langgraph/architecture_graph.py", "langchain/prompts/chip_lead.md")).read()
-        assert "`answers` field" in prompt
 
 
 class TestValidationAdmissionRegex:

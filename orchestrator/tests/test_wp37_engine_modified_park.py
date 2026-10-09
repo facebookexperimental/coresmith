@@ -1,4 +1,8 @@
-"""WP-37: a modified engine checkout parks the run; nothing is reverted."""
+"""WP-37, after the Architect-CLI simplification: the graph never decides an
+interrupt (it only parks), and the engine-checkout guard that once tripped an
+engine-owned on-call Architect is gone with its only caller. The engine's
+boundary is the park: nothing in the graph reverts, cleans or inspects its own
+checkout."""
 from __future__ import annotations
 
 import inspect
@@ -6,22 +10,17 @@ import inspect
 from orchestrator.langgraph import pipeline_graph as pg
 
 
-def test_guard_never_reverts():
-    """The guard's only subprocess is `git status`; no checkout/clean argv literals remain."""
-    src = inspect.getsource(pg._engine_checkout_guard)
-    assert '"status"' in src
-    assert '"checkout"' not in src and '"clean"' not in src and "-fdq" not in src
-
-
-def test_engine_modified_payload_discards_decision_and_names_paths():
-    p = pg._engine_modified_payload({"type": "block_failure", "message": "orig", "supported_actions": ["retry"]},
-                                    ["orchestrator/langgraph/x.py", "orchestrator/tests/t.py"])
-    assert p["engine_modified"] == ["orchestrator/langgraph/x.py", "orchestrator/tests/t.py"]
-    assert p["message"].startswith("ENGINE CHECKOUT MODIFIED") and p["message"].endswith("orig")
-    assert p["type"] == "block_failure" and p["supported_actions"] == ["retry"]
-
-
-def test_resolve_interrupt_parks_on_dirty_engine():
+def test_resolve_interrupt_never_decides():
     src = inspect.getsource(pg._resolve_interrupt)
-    assert "_dirty = _engine_checkout_guard()" in src
-    assert "return _park(_engine_modified_payload(payload, _dirty))" in src
+    assert "return _park(payload)" in src
+    assert "decide" not in src.split('"""')[-1]
+    assert not hasattr(pg, "_engine_modified_payload")
+
+
+def test_engine_checkout_guard_is_gone_with_its_caller():
+    """No engine code reads ``CORESMITH_ENGINE_READONLY`` or runs git against
+    its own checkout: a checkout the worker cannot write is the real boundary."""
+    assert not hasattr(pg, "_engine_checkout_guard")
+    src = inspect.getsource(pg)
+    assert "CORESMITH_ENGINE_READONLY" not in src
+    assert '"checkout"' not in src and "-fdq" not in src

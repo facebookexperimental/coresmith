@@ -46,6 +46,7 @@ from orchestrator.langgraph.pipeline_helpers import (
 # existing call site (`from ...backend_helpers import LIBERTY / OPENROAD_BIN / ...`)
 # keeps its byte-identical value. See the byo-pdk plan, PR1.
 from orchestrator.pdk.deployments import sky130 as _sky130
+from orchestrator.processes import run as run_process
 
 _STD_CELL = _sky130._STD_CELL
 _PDK_VAR = _sky130._PDK_VAR
@@ -105,7 +106,7 @@ def render_layout_image(
     try:
         render_env = os.environ.copy()
         render_env.setdefault("QT_QPA_PLATFORM", "offscreen")
-        result = subprocess.run(
+        result = run_process(
             cmd, capture_output=True, text=True, timeout=timeout,
             cwd=str(PROJECT_ROOT), env=render_env,
         )
@@ -583,7 +584,7 @@ def run_flat_synthesis(
     log(f"  [FLAT-SYNTH] Running Yosys flat synthesis for {design_name}...", YELLOW)
 
     try:
-        result = subprocess.run(
+        result = run_process(
             cmd, capture_output=True, text=True, timeout=timeout,
             cwd=project_root,
         )
@@ -800,6 +801,52 @@ def _normalize_macro_lefs(macros: list, out_dir: Path, tech_dbu: int | None):
     return result
 
 
+def pnr_thread_count() -> int:
+    """``CORESMITH_PNR_THREADS`` (default: every CPU of the host)."""
+    try:
+        n = int(os.environ.get("CORESMITH_PNR_THREADS", "") or 0)
+    except ValueError:
+        n = 0
+    return n if n > 0 else max(1, os.cpu_count() or 1)
+
+
+def pnr_deadline_s(tcl_path: str | os.PathLike | None = None, *, gate_count: int = 0,
+                   utilization: float = 35.0) -> int:
+    """The P&R worker deadline (seconds, before CORESMITH_TIMEOUT_MULTIPLIER).
+
+    ``CORESMITH_PNR_DEADLINE_S`` wins, then the legacy ``CORESMITH_PNR_TIMEOUT``.
+    Otherwise it scales with the floorplan: 1800 s base + 900 s per mm^2 of
+    die beyond the first + 120 s per macro instance, capped at 6 h. The die is
+    read from the generated script's ``macro_die_area`` (macro designs), else
+    estimated from the gate count at the target utilization (~5 um^2 per
+    Sky130 HD cell). A 3.1 x 3.1 mm die with 14 macros gets ~3 h; a small
+    std-cell block keeps 30 min."""
+    for env in ("CORESMITH_PNR_DEADLINE_S", "CORESMITH_PNR_TIMEOUT"):
+        try:
+            v = int(float(os.environ.get(env, "") or 0))
+        except ValueError:
+            v = 0
+        if v > 0:
+            return v
+    die_mm2, macros = 0.0, 0
+    text = ""
+    if tcl_path:
+        try:
+            text = Path(tcl_path).read_text(encoding="utf-8", errors="replace")[:20000]
+        except OSError:
+            text = ""
+    m = re.search(r'set macro_die_area "\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)', text)
+    if m:
+        x0, y0, x1, y1 = (float(g) for g in m.groups())
+        die_mm2 = max(0.0, (x1 - x0) * (y1 - y0)) / 1e6
+        mp = re.search(r"set macro_place \[list (.*)\]", text)
+        macros = len(re.findall(r"\{[^{}]*\}", mp.group(1))) if mp else 0
+    elif gate_count:
+        die_mm2 = float(gate_count) * 5.0 / max(1e-3, utilization / 100.0) / 1e6
+    secs = 1800 + 900 * max(0.0, die_mm2 - 1.0) + 120 * macros
+    return int(min(6 * 3600, secs))
+
+
 def prepare_pnr_working_copy(
     design_name: str,
     netlist_path: str,
@@ -825,6 +872,9 @@ def prepare_pnr_working_copy(
     actual_module = _detect_top_module(netlist_path, design_name)
 
     header = (
+        # FIRST: OpenROAD runs single-threaded unless told otherwise, and a
+        # full-chip global placement / repair then outlives the worker deadline.
+        f'set_thread_count {pnr_thread_count()}\n'
         f'# Design-specific variables (auto-generated)\n'
         f'set tech_lef   "{TECH_LEF}"\n'
         f'set cell_lef   "{CELL_LEF}"\n'
@@ -1109,6 +1159,13 @@ def generate_rcx_tcl(
 # Subprocess Wrappers
 # ---------------------------------------------------------------------------
 
+def backend_openroad_bin() -> str:
+    """The OpenROAD binary backend steps run: ``CORESMITH_BACKEND_OPENROAD``,
+    else the configured one -- or, when that is a nix wrapper on a host
+    without nix, the native ``openroad`` (see ``sky130.openroad_for_backend``)."""
+    return _sky130.openroad_for_backend(OPENROAD_BIN)[0]
+
+
 def run_openroad(
     tcl_script: str,
     block_name: str,
@@ -1148,10 +1205,10 @@ def run_openroad(
     # `-exit` so a Tcl error TERMINATES the process instead of dropping to an
     # interactive `openroad>` prompt that hangs (leaked procs observed on macro
     # LEF-discard errors); `-no_init` skips any user ~/.openroad init file.
-    cmd = [OPENROAD_BIN, "-no_init", "-exit", tcl_script]
+    cmd = [backend_openroad_bin(), "-no_init", "-exit", tcl_script]
 
     try:
-        result = subprocess.run(
+        result = run_process(
             cmd, capture_output=True, text=True, timeout=timeout,
             cwd=str(PROJECT_ROOT),
         )
@@ -1202,12 +1259,12 @@ def run_openroad(
     except FileNotFoundError:
         log_path = _write_step_log_error(
             block_name, step, cmd,
-            f"OpenROAD binary not found: {OPENROAD_BIN}", attempt,
+            f"OpenROAD binary not found: {cmd[0]}", attempt,
         )
         return {
             "success": False,
             "stdout": "",
-            "stderr": f"OpenROAD binary not found: {OPENROAD_BIN}",
+            "stderr": f"OpenROAD binary not found: {cmd[0]}",
             "log_path": log_path,
         }
 
@@ -1234,7 +1291,7 @@ def run_magic(
     env["PDK_ROOT"] = str(PDK_ROOT)
 
     try:
-        result = subprocess.run(
+        result = run_process(
             cmd, capture_output=True, text=True, timeout=timeout,
             cwd=str(PROJECT_ROOT), env=env,
         )
@@ -1809,7 +1866,7 @@ def run_netgen_lvs(
     ]
 
     try:
-        result = subprocess.run(
+        result = run_process(
             cmd, capture_output=True, text=True, timeout=timeout,
             cwd=str(PROJECT_ROOT),
         )
@@ -1943,9 +2000,13 @@ def parse_openroad_reports(output_dir: str) -> dict:
         "tns_ns": 0.0,
         "setup_slack_ns": 0.0,
         "hold_slack_ns": 0.0,
-        "total_power_mw": 0.0,
-        "dynamic_power_mw": 0.0,
-        "leakage_power_mw": 0.0,
+        # Power is None until a power report was actually parsed: an absent
+        # figure is "unavailable", never a measured zero. A parsed figure is a
+        # vectorless OpenROAD estimate (``power_basis`` says so).
+        "total_power_mw": None,
+        "dynamic_power_mw": None,
+        "leakage_power_mw": None,
+        "power_basis": "unavailable",
         "die_area_um2": 0.0,
         "design_area_um2": 0.0,
         "utilization_pct": 0.0,
@@ -2006,6 +2067,7 @@ def parse_openroad_reports(output_dir: str) -> dict:
             metrics["total_power_mw"] = total * 1000.0
             metrics["dynamic_power_mw"] = (internal + switching) * 1000.0
             metrics["leakage_power_mw"] = leakage * 1000.0
+            metrics["power_basis"] = "estimated"   # vectorless report_power, not a measurement
 
     # Parse area report
     area_file = out / "area.rpt"
@@ -2442,7 +2504,8 @@ def parse_pnr_stdout(stdout: str) -> dict:
         "utilization_pct": 0.0,
         "wns_ns": 0.0,
         "tns_ns": 0.0,
-        "total_power_mw": 0.0,
+        "total_power_mw": None,        # unavailable until a power line was parsed
+        "power_basis": "unavailable",
         "wire_length_um": 0,
         "via_count": 0,
     }
@@ -2473,6 +2536,7 @@ def parse_pnr_stdout(stdout: str) -> dict:
     )
     if m:
         metrics["total_power_mw"] = float(m.group(4)) * 1000.0
+        metrics["power_basis"] = "estimated"
 
     m = re.search(r"Total wire length\s*=\s*([\d.]+)\s*um", stdout)
     if m:

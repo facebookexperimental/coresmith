@@ -225,7 +225,7 @@ def test_hierarchy_timeout_is_configurable(tmp_path, monkeypatch):
         seen["timeout"] = kwargs["timeout"]
         raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
     monkeypatch.setattr(hierarchy.shutil, "which", lambda _: "/bin/yosys")
-    monkeypatch.setattr(hierarchy.subprocess, "run", run)
+    monkeypatch.setattr(hierarchy, "run_process", run)
     top = tmp_path / "top.v"
     top.write_text("module chip_top(); endmodule\n")
     failure = hierarchy.elaborate_hierarchy([top], "chip_top", project_root=tmp_path)

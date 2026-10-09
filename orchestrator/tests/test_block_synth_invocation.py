@@ -28,7 +28,7 @@ _HAS_YOSYS = shutil.which("yosys") is not None
 
 
 class _StopBeforeYosys(Exception):
-    """Raised by the fake subprocess so the call is observed, not executed."""
+    """Raised by the fake process runner so the call is observed, not executed."""
 
 
 def _project(tmp_path):
@@ -63,7 +63,7 @@ class TestSynthRunsAtTheProjectRoot:
             seen["cwd"] = kw.get("cwd")
             raise _StopBeforeYosys()
 
-        monkeypatch.setattr(ph.subprocess, "run", _fake_run)
+        monkeypatch.setattr(ph, "run_process", _fake_run)
         with pytest.raises(_StopBeforeYosys):
             ph.synthesize_block({"name": "table_reader"}, str(rtl))
         assert seen["cwd"] == str(tmp_path.resolve())
@@ -116,7 +116,7 @@ def _script_for(tmp_path, monkeypatch, name, inst):
     def _fake_run(cmd, **kw):
         raise _StopBeforeYosys()
 
-    monkeypatch.setattr(ph.subprocess, "run", _fake_run)
+    monkeypatch.setattr(ph, "run_process", _fake_run)
     with pytest.raises(_StopBeforeYosys):
         ph.synthesize_block({"name": name}, str(f))
     return (tmp_path / "syn" / "output" / name / f"synth_{name}.ys").read_text()
@@ -237,7 +237,7 @@ def _liberty_script_for(tmp_path, monkeypatch, mhz):
     def _fake_run(cmd, **kw):
         raise _StopBeforeYosys()
 
-    monkeypatch.setattr(ph.subprocess, "run", _fake_run)
+    monkeypatch.setattr(ph, "run_process", _fake_run)
     with pytest.raises(_StopBeforeYosys):
         ph.synthesize_block({"name": "tblk"}, str(f), target_clock_mhz=mhz)
     return (tmp_path / "syn" / "output" / "tblk" / "synth_tblk.ys").read_text()

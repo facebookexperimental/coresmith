@@ -445,9 +445,9 @@ class TestContractPortTable:
             if line.startswith("- `"):
                 assert "/" not in line, line
 
-    def test_rtl_system_prompt_has_port_naming_skill(self):
+    def test_rtl_system_prompt_uses_the_authoritative_port_table(self):
         from orchestrator.langchain.agents import rtl_generator as rg
-        assert "data_write_write_enable" in rg.SYSTEM_PROMPT
+        assert "authoritative port table" in rg.SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------

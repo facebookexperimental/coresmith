@@ -45,7 +45,13 @@ from typing import Any
 
 from orchestrator.state_store.interrupts import InterruptMixin
 from orchestrator.state_store.leases import LeaseMixin
-from orchestrator.state_store.ontology import ONTOLOGY_SCHEMA, OntologyMixin
+from orchestrator.state_store.ontology import (
+    ONTOLOGY_ADDED_COLUMNS,
+    ONTOLOGY_SCHEMA,
+    OntologyMixin,
+    file_sha,
+)
+from orchestrator.state_store.pins import PINS_SCHEMA, PINS_VIEW, PinMixin
 from orchestrator.state_store.rulings import RulingMixin
 from orchestrator.state_store.store import _SCHEMA as _SCOREBOARD_SCHEMA
 
@@ -120,7 +126,16 @@ CREATE TABLE IF NOT EXISTS contracts (
     handshake_protocol TEXT,
     data_width_bits INTEGER,
     spec_json TEXT NOT NULL,
-    version INTEGER NOT NULL DEFAULT 1
+    version INTEGER NOT NULL DEFAULT 1,
+    locked INTEGER NOT NULL DEFAULT 0
+);
+-- Fabric specs (FabricSpec JSON) registered through the CLI; merged into the
+-- matching primitive block's ``fabric`` object by block_diagram()/block_specs().
+CREATE TABLE IF NOT EXISTS fabric_specs (
+    name TEXT PRIMARY KEY,
+    spec_json TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    ts REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS attempts (
     id INTEGER PRIMARY KEY,
@@ -274,6 +289,74 @@ _CONN_COLUMNS = ("from", "to", "from_port", "to_port", "interface", "data_width"
 _CONTRACT_COLUMNS = ("producer_block", "producer_port", "consumer_block", "consumer_port",
                      "handshake_protocol", "data_width_bits")
 _LEGACY_FILES = ("block_diagram.json", "block_specs.json", "interface_contracts.json")
+# Columns added to _SCHEMA tables after their first release (see ensure_schema).
+_ADDED_COLUMNS = (
+    ("contracts", "locked", "INTEGER NOT NULL DEFAULT 0"),
+    ("decisions", "actor", "TEXT NOT NULL DEFAULT ''"),   # who answered: architect | cli | ...
+    ("integration_snapshots", "boundary_json", "TEXT"),   # the top's boundary port names (pins check)
+    ("models", "deps_sha", "TEXT"),                       # the compiled model + its headers (builds.model_deps_sha)
+)
+FABRIC_VIEW = "fabric_spec.json"
+
+
+class ContractLockedError(RuntimeError):
+    """A write would change (or drop) a locked interface-contract edge."""
+
+    def __init__(self, edge_ids: list[str], message: str = ""):
+        self.edge_ids = list(edge_ids)
+        super().__init__(message or f"locked contract edge(s) would change: {', '.join(self.edge_ids)} "
+                                    "(unlock them, or pass unlock=True / --unlock)")
+
+
+def _add_column_if_missing(db: sqlite3.Connection, table: str, column: str, decl: str) -> bool:
+    """ALTER ``table`` to add ``column`` when an older database lacks it. Two
+    connections migrating at once: the loser's duplicate ``ALTER`` is not an
+    error (the column is there either way)."""
+    cols = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+    if not cols or column in cols:
+        return False
+    try:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
+        return False
+    return True
+
+
+def _derive_edge_id(edge: dict) -> str:
+    keys = ("producer_block", "producer_port", "consumer_block", "consumer_port")
+    if all(edge.get(k) for k in keys):
+        return "{}__{}__to__{}__{}".format(*(edge[k] for k in keys))
+    raise ValueError("contract edge needs edge_id (or producer_block/producer_port/consumer_block/consumer_port)")
+
+
+def _coerce_literal(value: Any) -> Any:
+    """A CLI string that is a JSON literal (8, 2.5, true, null, {..}, [..]) becomes that value."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except ValueError:
+        return value
+
+
+def _set_dotted(doc: dict, dotted_key: str, value: Any) -> None:
+    parts = [p for p in dotted_key.split(".") if p]
+    if not parts:
+        raise ValueError("empty field path")
+    cur = doc
+    for p in parts[:-1]:
+        nxt = cur.get(p)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[p] = nxt
+        cur = nxt
+    cur[parts[-1]] = value
+
+
+def _canon(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, default=str)
 
 
 def _j(value: Any) -> str:
@@ -303,7 +386,7 @@ def _float(v: Any) -> float | None:
         return None
 
 
-class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin):
+class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin, PinMixin):
     """The project database. Construct with :func:`open_project` in most code."""
 
     def __init__(self, project_root: str | Path):
@@ -313,17 +396,20 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin):
     # ------------------------------------------------------------------ core
     def ensure_schema(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        from orchestrator.state_store.builds import BUILDS_SCHEMA
+        from orchestrator.state_store.store import SCOREBOARD_ADDED_COLUMNS
         with self._conn() as db:
             db.executescript(_SCHEMA)
             db.executescript(_SCOREBOARD_SCHEMA)
             db.executescript(ONTOLOGY_SCHEMA)
+            db.executescript(PINS_SCHEMA)
+            db.executescript(BUILDS_SCHEMA)
             for table in ("attempts", "diagnoses"):
                 cols = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
                 if "round" not in cols:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN round INTEGER NOT NULL DEFAULT 1")
-            cols = {r[1] for r in db.execute("PRAGMA table_info(ppa_history)")}
-            if cols and "tns_ns" not in cols:
-                db.execute("ALTER TABLE ppa_history ADD COLUMN tns_ns REAL")
+            for table, column, decl in (*SCOREBOARD_ADDED_COLUMNS, *_ADDED_COLUMNS, *ONTOLOGY_ADDED_COLUMNS):
+                _add_column_if_missing(db, table, column, decl)
 
     @contextmanager
     def _conn(self):
@@ -432,7 +518,7 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin):
             meta = db.execute("SELECT key, value_json FROM doc_meta WHERE doc='block_diagram'").fetchall()
         if not brows and not meta:
             return {}
-        doc: dict[str, Any] = {"blocks": [self._block_dict(r) for r in brows],
+        doc: dict[str, Any] = {"blocks": self._merge_fabric_rows([self._block_dict(r) for r in brows]),
                                "connections": [_uj(r["extra_json"], {}) for r in crows]}
         for r in meta:
             doc[r["key"]] = _uj(r["value_json"], None)
@@ -509,26 +595,35 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin):
             # B1: a primitive block (generated fabric) carries its kind and spec
             # through the queue; ordinary blocks are unchanged.
             extra = _uj(r["extra_json"], {}) or {}
-            for k in ("kind", "primitive", "fabric", "golden_exempt", "no_golden_reason", "cluster", "instances", "owns"):
+            for k in ("kind", "primitive", "fabric", "golden_exempt", "no_golden_reason", "cluster", "instances", "owns", "module_name"):
                 if k in extra and k not in d:
                     d[k] = extra[k]
             # step 4: cluster workers group by ``cluster`` (explicit) or ``subsystem``
             if r["subsystem"] and "subsystem" not in d:
                 d["subsystem"] = r["subsystem"]
             out.append(d)
-        return out
+        return self._merge_fabric_rows(out)
 
     # -------------------------------------------------------------- contracts
-    def import_contracts(self, doc: dict) -> int:
+    def import_contracts(self, doc: dict, *, unlock: bool = False) -> int:
         """Replace the interface contracts; returns the new contracts version.
 
         Edges whose content is unchanged keep their version; changed or new edges
-        get the new version, so per-block staleness is exact.
+        get the new version, so per-block staleness is exact. A locked edge that
+        would change or disappear refuses the whole import
+        (:class:`ContractLockedError`, nothing written) unless ``unlock``; every
+        surviving locked edge stays locked (``unlock`` licenses this import only).
         """
         edges = list(doc.get("contracts") or [])
         with self._tx() as db:
             current = {r["edge_id"]: (r["spec_json"], r["version"]) for r in db.execute(
                 "SELECT edge_id, spec_json, version FROM contracts")}
+            locked = {r["edge_id"] for r in db.execute("SELECT edge_id FROM contracts WHERE locked=1")}
+            incoming = {str(e.get("edge_id") or f"edge_{i}"): _j(e) for i, e in enumerate(edges)}
+            touched = sorted(eid for eid in locked
+                             if eid not in incoming or incoming[eid] != current[eid][0])
+            if touched and not unlock:
+                raise ContractLockedError(touched)
             new_version = max([v for _, v in current.values()] + [0]) + 1
             db.execute("DELETE FROM contracts")
             db.execute("DELETE FROM doc_meta WHERE doc='interface_contracts'")
@@ -540,13 +635,17 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin):
                 version = prev[1] if prev and prev[0] == spec else new_version
                 if version == new_version:
                     changed += 1
+                # an unchanged edge keeps its lock; a changed one (only with
+                # ``unlock``) is re-locked: the unlock covers this import only
+                keep_lock = edge_id in locked
                 db.execute(
                     "INSERT INTO contracts(edge_id, ordinal, producer_block, producer_port, consumer_block, "
-                    "consumer_port, handshake_protocol, data_width_bits, spec_json, version) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "consumer_port, handshake_protocol, data_width_bits, spec_json, version, locked) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (edge_id, i, _s(e.get("producer_block")), _s(e.get("producer_port")),
                      _s(e.get("consumer_block")), _s(e.get("consumer_port")),
-                     _s(e.get("handshake_protocol")), _int(e.get("data_width_bits")), spec, version),
+                     _s(e.get("handshake_protocol")), _int(e.get("data_width_bits")), spec, version,
+                     int(keep_lock)),
                 )
             for key, value in doc.items():
                 if key == "contracts":
@@ -561,6 +660,170 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin):
             )
         self.export_views()
         return effective
+
+    def _write_contract_edge(self, edge_id: str, spec: dict, *, unlock: bool) -> dict:
+        """Insert/replace one edge (others untouched); the version bumps only on
+        a content change, a locked edge refuses a change unless ``unlock`` and
+        stays locked after the write (the unlock is one-shot)."""
+        with self._tx() as db:
+            prev = db.execute("SELECT spec_json, version, locked, ordinal FROM contracts WHERE edge_id=?",
+                              (edge_id,)).fetchone()
+            max_v = int(db.execute("SELECT COALESCE(MAX(version), 0) FROM contracts").fetchone()[0])
+            changed = prev is None or _uj(prev["spec_json"], None) != spec
+            was_locked = bool(prev["locked"]) if prev is not None else False
+            if changed and was_locked and not unlock:
+                raise ContractLockedError([edge_id])
+            version = max_v + 1 if changed else int(prev["version"])
+            # ``unlock`` licenses this one write; the edge stays locked
+            # (``contract unlock`` is the only way to leave it open)
+            locked = was_locked
+            if prev is not None:
+                ordinal = prev["ordinal"]
+            else:
+                ordinal = int(db.execute("SELECT COALESCE(MAX(ordinal), -1) FROM contracts").fetchone()[0]) + 1
+            db.execute(
+                "INSERT OR REPLACE INTO contracts(edge_id, ordinal, producer_block, producer_port, consumer_block, "
+                "consumer_port, handshake_protocol, data_width_bits, spec_json, version, locked) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (edge_id, ordinal, _s(spec.get("producer_block")), _s(spec.get("producer_port")),
+                 _s(spec.get("consumer_block")), _s(spec.get("consumer_port")),
+                 _s(spec.get("handshake_protocol")), _int(spec.get("data_width_bits")),
+                 _j(spec) if changed else prev["spec_json"], version, int(locked)),
+            )
+            effective = int(db.execute("SELECT COALESCE(MAX(version), 0) FROM contracts").fetchone()[0])
+            db.execute(
+                "INSERT INTO settings(name, value, updated_at) VALUES ('contracts_version', ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (str(effective), time.time()),
+            )
+        self.export_views()
+        return {"edge_id": edge_id, "version": version, "changed": changed, "locked": locked}
+
+    def upsert_contract_edge(self, edge: dict, *, unlock: bool = False) -> dict:
+        """Add or replace ONE contract edge, keeping every other edge.
+
+        Returns ``{"edge_id", "version", "changed", "locked"}``; raises
+        :class:`ContractLockedError` when a locked edge would change.
+        """
+        spec = dict(edge)
+        edge_id = str(spec.get("edge_id") or "").strip() or _derive_edge_id(spec)
+        spec["edge_id"] = edge_id
+        return self._write_contract_edge(edge_id, spec, unlock=unlock)
+
+    def set_contract_field(self, edge_id: str, dotted_key: str, value: Any, *, unlock: bool = False) -> dict:
+        """Set one (dotted) field of an edge's spec, e.g. ``timing.valid_to_ready_max_stall``.
+        String values that are JSON literals are coerced. Missing edge -> KeyError."""
+        row = self.contract_edge(edge_id)
+        if row is None:
+            raise KeyError(edge_id)
+        if dotted_key.strip() == "edge_id":
+            raise ValueError("edge_id cannot be changed with set_contract_field")
+        spec = json.loads(json.dumps(row["spec"]))
+        _set_dotted(spec, dotted_key.strip(), _coerce_literal(value))
+        return self._write_contract_edge(edge_id, spec, unlock=unlock)
+
+    def lock_contracts(self, block: str | None = None, locked: bool = True) -> int:
+        """Lock (or unlock) every edge, or the edges ``block`` produces/consumes."""
+        with self._tx() as db:
+            if block is None:
+                cur = db.execute("UPDATE contracts SET locked=?", (int(locked),))
+            else:
+                cur = db.execute("UPDATE contracts SET locked=? WHERE producer_block=? OR consumer_block=?",
+                                 (int(locked), block, block))
+            return cur.rowcount
+
+    @staticmethod
+    def _contract_row(r: sqlite3.Row) -> dict:
+        return {"edge_id": r["edge_id"], "version": r["version"], "locked": bool(r["locked"]),
+                "spec": _uj(r["spec_json"], {})}
+
+    def contract_edge(self, edge_id: str) -> dict | None:
+        with self._conn() as db:
+            r = db.execute("SELECT edge_id, version, locked, spec_json FROM contracts WHERE edge_id=?",
+                           (edge_id,)).fetchone()
+        return self._contract_row(r) if r else None
+
+    def contract_rows(self) -> list[dict]:
+        with self._conn() as db:
+            rows = db.execute("SELECT edge_id, version, locked, spec_json FROM contracts ORDER BY ordinal").fetchall()
+        return [self._contract_row(r) for r in rows]
+
+    # ----------------------------------------------------------- fabric specs
+    def fabric_specs(self) -> list[dict]:
+        with self._conn() as db:
+            rows = db.execute("SELECT name, spec_json, version FROM fabric_specs ORDER BY name").fetchall()
+        return [{"name": r["name"], "version": r["version"], "spec": _uj(r["spec_json"], {})} for r in rows]
+
+    def fabric_spec(self, name: str | None = None) -> dict | None:
+        """One registered fabric (``name`` None: the only / first one)."""
+        rows = self.fabric_specs()
+        if name is None:
+            return rows[0] if rows else None
+        return next((r for r in rows if r["name"] == name), None)
+
+    def set_fabric_spec(self, name: str, spec: dict) -> dict:
+        """Validate and store a FabricSpec JSON under ``name`` (its ``name``
+        field is set to ``name``). Invalid -> ``{"ok": False, "problems"}``,
+        nothing written. The version bumps only on a content change."""
+        from orchestrator.fabric.spec import FabricSpec
+        spec = {**dict(spec or {}), "name": name}
+        try:
+            problems = FabricSpec.from_json(spec).validate()
+        except (TypeError, ValueError, AttributeError) as exc:
+            problems = [f"unparsable fabric spec: {exc}"]
+        if problems:
+            return {"ok": False, "name": name, "problems": problems}
+        with self._tx() as db:
+            prev = db.execute("SELECT spec_json, version FROM fabric_specs WHERE name=?", (name,)).fetchone()
+            changed = prev is None or _canon(_uj(prev["spec_json"], None)) != _canon(spec)
+            version = 1 if prev is None else int(prev["version"]) + (1 if changed else 0)
+            if changed:
+                db.execute("INSERT INTO fabric_specs(name, spec_json, version, ts) VALUES (?, ?, ?, ?) "
+                           "ON CONFLICT(name) DO UPDATE SET spec_json=excluded.spec_json, "
+                           "version=excluded.version, ts=excluded.ts",
+                           (name, _j(spec), version, time.time()))
+        self.export_views()
+        return {"ok": True, "name": name, "version": version, "changed": changed}
+
+    def delete_fabric_spec(self, name: str) -> bool:
+        with self._tx() as db:
+            gone = db.execute("DELETE FROM fabric_specs WHERE name=?", (name,)).rowcount > 0
+        if gone:
+            view = self.path.parent / FABRIC_VIEW
+            if (not self.fabric_specs() and view.is_file()
+                    and hashlib.sha256(view.read_bytes()).hexdigest() == self.get_setting(f"view_sha:{FABRIC_VIEW}")):
+                view.unlink()  # our export of the deleted spec, not someone else's file
+            self.export_views()
+        return gone
+
+    def _merge_fabric_rows(self, blocks: list[dict]) -> list[dict]:
+        """Put each registered fabric spec into its primitive block's ``fabric``.
+
+        Match: block name == fabric name, or the block's ``fabric.name`` ==
+        fabric name, or (one fabric, one fabric-bearing/primitive block) that
+        block. The database row replaces what the block carried.
+        """
+        rows = self.fabric_specs()
+        if not rows or not blocks:
+            return blocks
+
+        def _fab_name(b):
+            f = b.get("fabric")
+            return f.get("name") if isinstance(f, dict) else None
+
+        def _fabricish(b):
+            return str(b.get("kind") or "").lower() == "primitive" or "fabric" in b
+
+        for row in rows:
+            target = next((b for b in blocks if b.get("name") == row["name"]), None)
+            if target is None:
+                target = next((b for b in blocks if _fab_name(b) == row["name"]), None)
+            if target is None and len(rows) == 1:
+                cands = [b for b in blocks if _fabricish(b)]
+                target = cands[0] if len(cands) == 1 else None
+            if target is not None:
+                target["fabric"] = {**row["spec"], "name": row["name"]}
+        return blocks
 
     def contracts(self) -> dict:
         """The interface contracts document ({} when none were defined)."""
@@ -755,6 +1018,40 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin):
         self.export_block_views(block)
         return dropped
 
+    def bind_target(self, name: str, value: dict) -> None:
+        """Replace a build binding and invalidate publication in one transaction.
+
+        A binding is PROJECT state the Architect declares before any run and
+        every run consumes, so it is stored under the empty run id rather than
+        the current run's: a run id minted later (``run start``, a module
+        build) must not make the declared inputs invisible to the tools."""
+        rid, now = "", time.time()
+        key, encoded = "target:" + name, _j(value)
+        with self._tx() as db:
+            old = db.execute("SELECT value_json FROM run_flags WHERE name=? AND run_id=?",
+                             (key, rid)).fetchone()
+            if old and _uj(old["value_json"], None) == value:
+                return
+            for kind in ("best", "dv_best"):
+                db.execute(
+                    "INSERT OR REPLACE INTO results(block,kind,value_json,report_path,ts) "
+                    "SELECT block,?,value_json,report_path,ts FROM results WHERE block=? AND kind=?",
+                    ("target_invalidated_" + kind, name, kind))
+                db.execute("DELETE FROM results WHERE block=? AND kind=?", (name, kind))
+            db.execute("INSERT INTO run_flags(name,run_id,value_json,ts) VALUES (?,?,?,?) "
+                       "ON CONFLICT(name,run_id) DO UPDATE SET value_json=excluded.value_json,ts=excluded.ts",
+                       (key, rid, encoded, now))
+        self.export_block_views(name)
+
+    def target_binding(self, name: str) -> dict | None:
+        """The declared build binding of ``name``: the project-scoped row, or
+        (for a database written before bindings were project-scoped) the one
+        recorded under the current run."""
+        doc = self.get_flag("target:" + name, run_id="")
+        if doc is None:
+            doc = self.get_flag("target:" + name)
+        return doc
+
     def result(self, block: str, kind: str) -> dict | None:
         with self._conn() as db:
             row = db.execute("SELECT value_json FROM results WHERE block=? AND kind=?",
@@ -776,6 +1073,68 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin):
             )
         if kind in RESULT_VIEW_KINDS:
             self.export_block_views(block)
+
+    def publish_build_result(self, block: str, best: dict, *, build_id: str, build_result: dict,
+                             report_path: str | None = None) -> dict:
+        """Publish ``best`` and mark the build ``completed`` in ONE transaction.
+
+        The authoritative completion boundary of a recorded build: either both
+        the published pass and the build's terminal record exist, or neither
+        does. Raises on any failure (the caller reports a persistence failure;
+        no pass is published). The previous ``best`` (another build's) is
+        archived as ``best_superseded`` so history survives.
+
+        Immutable once committed: a replay of the completion for a build that
+        is already ``completed`` (a checkpoint restore re-executing the node)
+        changes nothing and reports ``replayed``; a build of another module
+        or one that is not active is refused. The read-only block views are
+        regenerated AFTER the commit as a best-effort export: their failure
+        is reported (``views_exported`` / ``view_error``), never mistaken for
+        a failed commit."""
+        if not build_id or not best.get("done"):
+            raise ValueError("publish_build_result needs a build id and a done result")
+        value = dict(best, build_id=build_id)
+        if "spec_sha256" not in value:
+            spec = self.root / "arch/uarch_specs" / f"{block}.md"
+            if spec.is_file():
+                value["spec_sha256"] = hashlib.sha256(spec.read_bytes()).hexdigest()
+        now = time.time()
+        replayed = False
+        with self._tx() as db:
+            row = db.execute("SELECT module, status FROM builds WHERE id=?", (build_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"unknown build {build_id}")
+            if row["module"] != block:
+                raise ValueError(f"build {build_id} belongs to module {row['module']}, not {block}")
+            if row["status"] == "completed":
+                cur = db.execute("SELECT value_json FROM results WHERE block=? AND kind='best'", (block,)).fetchone()
+                published = _uj(cur["value_json"], {}) if cur else {}
+                if (published or {}).get("build_id") != build_id:
+                    raise ValueError(f"build {build_id} is already completed but its pass is not the published one")
+                replayed = True
+            else:
+                if row["status"] not in ("dispatched", "running", "parked"):
+                    raise ValueError(f"build {build_id} is {row['status']}; it cannot complete")
+                prev = db.execute("SELECT value_json, report_path, ts FROM results WHERE block=? AND kind='best'",
+                                  (block,)).fetchone()
+                if prev is not None:
+                    db.execute("INSERT OR REPLACE INTO results(block, kind, value_json, report_path, ts) "
+                               "VALUES (?, 'best_superseded', ?, ?, ?)",
+                               (block, prev["value_json"], prev["report_path"], prev["ts"]))
+                db.execute(
+                    "INSERT INTO results(block, kind, value_json, report_path, ts) VALUES (?, 'best', ?, ?, ?) "
+                    "ON CONFLICT(block, kind) DO UPDATE SET value_json=excluded.value_json, "
+                    "report_path=excluded.report_path, ts=excluded.ts",
+                    (block, _j(value), report_path, now))
+                db.execute("UPDATE builds SET status='completed', finished_at=?, result_json=?, error=NULL WHERE id=?",
+                           (now, _j(build_result), build_id))
+        out = {"committed": not replayed, "replayed": replayed, "views_exported": True, "view_error": None}
+        try:
+            self.export_block_views(block)
+        except Exception as exc:  # noqa: BLE001 - the views are a derived export, the commit stands
+            out["views_exported"] = False
+            out["view_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+        return out
 
     def update_result(self, block: str, kind: str, **fields: Any) -> dict:
         with self._conn() as db:
@@ -863,6 +1222,7 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin):
             "reasoning": d.get("reasoning", ""),
             "decision_index": d.get("decision_index"),
             "interrupt_id": d.get("interrupt_id", ""),
+            "actor": d.get("actor", ""),
             "ts": d.get("ts"),
         }, default=str) for d in self.decisions()]
         self._write_text_view(target, ("\n".join(lines) + "\n") if lines else "")
@@ -870,16 +1230,20 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin):
 
     def upsert_model(self, block: str, *, path: str = "", sha: str = "", spec_contract_version: str = "",
                      build_ok: bool | None = None, smoke_ok: bool | None = None,
-                     kind: str = "systemc") -> None:
+                     kind: str = "systemc", deps_sha: str | None = None) -> None:
+        """One ``models`` row per block: what ``model build`` compiled.
+        ``sha`` is the implementation's hash (``builds.model_sha16``);
+        ``deps_sha`` covers the implementation with every local header it
+        includes (``builds.model_deps_sha``) so a header edit is visible."""
         with self._tx() as db:
             db.execute(
-                "INSERT INTO models(block, kind, path, sha, spec_contract_version, build_ok, smoke_ok, ts) "
-                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(block, kind) DO UPDATE SET path=excluded.path, "
+                "INSERT INTO models(block, kind, path, sha, spec_contract_version, build_ok, smoke_ok, ts, deps_sha) "
+                "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(block, kind) DO UPDATE SET path=excluded.path, "
                 "sha=excluded.sha, spec_contract_version=excluded.spec_contract_version, "
-                "build_ok=excluded.build_ok, smoke_ok=excluded.smoke_ok, ts=excluded.ts",
+                "build_ok=excluded.build_ok, smoke_ok=excluded.smoke_ok, ts=excluded.ts, deps_sha=excluded.deps_sha",
                 (block, kind, path, sha, spec_contract_version,
                  None if build_ok is None else int(bool(build_ok)),
-                 None if smoke_ok is None else int(bool(smoke_ok)), time.time()))
+                 None if smoke_ok is None else int(bool(smoke_ok)), time.time(), deps_sha))
 
     def model_for(self, block: str, kind: str = "systemc") -> dict | None:
         with self._conn() as db:
@@ -895,14 +1259,15 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin):
             cur = db.execute(
                 "INSERT INTO integration_snapshots(tier, ts, top, rtl_path, real_blocks_json, "
                 "stub_blocks_json, wires, boundary_ports, elaborated, wiring_errors_json, "
-                "elab_errors_json, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "elab_errors_json, run_id, boundary_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (_s(snap.get("tier")), float(snap.get("ts") or time.time()), _s(snap.get("top")),
                  _s(snap.get("rtl_path")), _j(snap.get("real_blocks") or []),
                  _j(snap.get("stub_blocks") or []), _int(snap.get("wires")),
                  _int(snap.get("boundary_ports")),
                  None if snap.get("elaborated") is None else int(bool(snap.get("elaborated"))),
                  _j(snap.get("wiring_errors") or []), _j(snap.get("elab_errors") or []),
-                 self.run_id()))
+                 self.run_id(),
+                 None if snap.get("boundary") is None else _j(list(snap.get("boundary") or []))))
             return int(cur.lastrowid)
 
     def latest_integration_snapshot(self) -> dict | None:
@@ -913,13 +1278,32 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin):
         d = dict(row)
         for k in ("real_blocks", "stub_blocks", "wiring_errors", "elab_errors"):
             d[k] = _uj(d.pop(f"{k}_json"), [])
+        # the boundary port names (None: a snapshot from before pins were recorded)
+        d["boundary"] = _uj(d.pop("boundary_json", None), None)
         d["elaborated"] = None if d["elaborated"] is None else bool(d["elaborated"])
         return d
 
     def begin_run(self, run_id: str | None = None) -> str:
-        """Mint (or adopt) the run id every run-scoped table is keyed by."""
+        """Mint (or adopt) the run id every run-scoped table is keyed by.
+
+        Build bindings (``target:<name>``) are project state: a binding a
+        database recorded under the run that is being rotated away (written
+        before bindings were project-scoped) is preserved as the project's
+        canonical one first, unless the project already has one -- the
+        declared binding never disappears with a run id, and a canonical
+        binding is never overwritten by a historical one."""
         import uuid
         rid = run_id or f"run-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        old = self.run_id()
+        if old and old != rid:
+            with self._tx() as db:
+                rows = db.execute("SELECT name, value_json, ts FROM run_flags WHERE run_id=? AND name LIKE 'target:%'",
+                                  (old,)).fetchall()
+                for r in rows:
+                    if db.execute("SELECT 1 FROM run_flags WHERE name=? AND run_id=''", (r["name"],)).fetchone():
+                        continue
+                    db.execute("INSERT INTO run_flags(name, run_id, value_json, ts) VALUES (?, '', ?, ?)",
+                               (r["name"], r["value_json"], r["ts"]))
         self.set_setting("run_id", rid)
         return rid
 
@@ -948,7 +1332,12 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin):
             return False  # unparsable edit: the database wins, the file is regenerated
         if not isinstance(parsed, kind):
             return False
-        importer(parsed)
+        try:
+            importer(parsed)
+        except ContractLockedError as exc:
+            # a view edit may not move a locked edge: the database wins
+            self.set_setting(f"view_rejected:{target.name}", f"{current} locked:{','.join(exc.edge_ids)}")
+            return False
         self.set_setting(f"view_adopted:{target.name}", current)
         return True
 
@@ -980,6 +1369,18 @@ class ProjectDB(LeaseMixin, InterruptMixin, RulingMixin, OntologyMixin):
             contracts = self.contracts()
             if contracts:
                 self._export_view(cdir / "interface_contracts.json", contracts)
+            pins = self.pins()
+            if pins:
+                self._export_view(cdir / PINS_VIEW, {"pins": [
+                    {k: v for k, v in p.items() if k != "ts"} for p in pins]})
+            elif (cdir / PINS_VIEW).is_file() and hashlib.sha256((cdir / PINS_VIEW).read_bytes()).hexdigest() \
+                    == self.get_setting(f"view_sha:{PINS_VIEW}"):
+                (cdir / PINS_VIEW).unlink()   # our export of the last removed pin
+            fabric = self.fabric_spec()
+            if fabric:
+                target = cdir / FABRIC_VIEW
+                self._export_view(target, fabric["spec"])
+                self.set_setting("fabric_spec_sha", file_sha(target))
             try:
                 self.export_rulings_view()
             except OSError:

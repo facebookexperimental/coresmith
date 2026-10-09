@@ -2,8 +2,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""A2-4: block DV consumes the generated interface VIPs -- the TB must import
-them, the simulation build carries their SVA binds, and a revised contract
+"""A2-4: block DV exposes the generated interface VIPs to the TB author,
+the simulation build carries their SVA binds, and a revised contract
 re-specs the block."""
 from __future__ import annotations
 
@@ -57,9 +57,9 @@ class TestContractSlice:
         assert "exactly 1 cycle" in data["edges"][0]["timing_summary"]
 
 
-class TestTbLintGate:
+class TestTbLintAdvisory:
     @pytest.mark.asyncio
-    async def test_tb_without_the_vip_import_is_rejected_before_sim(self, tmp_path, monkeypatch):
+    async def test_tb_without_the_vip_import_reaches_the_behavioral_check(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CORESMITH_INTERFACE_VIP", "1")
         monkeypatch.setenv("CORESMITH_CONTRACT_CONFORMANCE_GATE", "0")
         monkeypatch.setenv("CORESMITH_CONTRACT_PORT_GATE", "0")
@@ -70,14 +70,11 @@ class TestTbLintGate:
         tb.write_text("# hand-modelled neighbour\nimport cocotb\n")
         calls = []
         with patch("orchestrator.langgraph.pipeline_graph.run_simulation",
-                   lambda *a, **k: calls.append(a) or {"passed": True}):
+                   lambda *a, **k: calls.append(a) or {"passed": False, "log": "assertion failed"}):
             out = await pg.generate_testbench_node(_state(tmp_path, rtl, tb))
-        assert out["sim_passed"] is False and out["phase"] == "tb" and not calls
-        prev = (tmp_path / ".coresmith/blocks/rsp/previous_error.txt").read_text()
-        assert "INTERFACE-VIP LINT" in prev and "vip.req__m_q__to__rsp__s_q" in prev
-        # the diagnose fast path turns it into a TB regeneration, no LLM call
-        st = {**_state(tmp_path, rtl, tb), "phase": "tb"}
-        assert (await pg.diagnose_node(st))["debug_action"] == "retry_tb"
+        assert calls and out["sim_passed"] is False
+        events = (tmp_path / ".coresmith/pipeline_events.jsonl").read_text()
+        assert '"advisory"' in events and "vip.req__m_q__to__rsp__s_q" in events
 
     @pytest.mark.asyncio
     async def test_tb_that_imports_the_vip_reaches_sim(self, tmp_path, monkeypatch):

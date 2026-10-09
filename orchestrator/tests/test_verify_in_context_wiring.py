@@ -48,7 +48,9 @@ class TestSkillWiredBothBranches:
         monkeypatch.setenv("CORESMITH_PROMPT_SLIM", slim)
         import orchestrator.langchain.agents.rtl_generator as rg
         importlib.reload(rg)
-        assert _has_skill(rg.SYSTEM_PROMPT)
+        assert "CORESMITH_CLI" in rg.SYSTEM_PROMPT
+        assert '"$CS" tool run_lint' in rg.SYSTEM_PROMPT
+        assert "synthesis/timing checks" in rg.SYSTEM_PROMPT
 
     def test_testbench_generator_prompt(self, monkeypatch, slim):
         monkeypatch.setenv("CORESMITH_PROMPT_SLIM", slim)

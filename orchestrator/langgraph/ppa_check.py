@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.langgraph import macro_sta as _macro_sta
+from orchestrator.processes import run as run_process
 
 logger = logging.getLogger(__name__)
 
@@ -416,15 +417,14 @@ def probe_synth_generic(
         with tempfile.NamedTemporaryFile("w", suffix=".ys", delete=False) as fh:
             fh.write(script)
             ys = fh.name
-        result = subprocess.run(
+        result = run_process(
             [yosys, "-s", ys],  # NOT -q: that suppresses the stat (log-level) output
             capture_output=True, text=True, timeout=timeout_s,
         )
     except subprocess.TimeoutExpired:
         return {"logic_ff": None, "mem_count": 0, "mem_bits": 0,
-                "elaborated": False,
-                "reason": f"did not elaborate within {timeout_s}s "
-                          "(combinational loop or oversized flop memory)"}
+                "elaborated": False, "timed_out": True,
+                "reason": f"did not elaborate within {timeout_s}s; no synthesis verdict"}
     except OSError:
         return None
     finally:
@@ -511,14 +511,13 @@ def probe_synth_cellcount(
         # temp dir made every ROM-initialized chip_top falsely
         # "not synthesizable" ("Can not open file ... for $readmemh").
         _cwd = cwd if (cwd and Path(cwd).is_dir()) else None
-        result = subprocess.run(
+        result = run_process(
             [yosys, "-s", ys], capture_output=True, text=True, timeout=timeout_s,
             cwd=_cwd,
         )
     except subprocess.TimeoutExpired:
-        return {"cell_count": None, "elaborated": False,
-                "reason": f"did not techmap within {timeout_s}s "
-                          "(combinational-LUT explosion or unpipelined cloud)"}
+        return {"cell_count": None, "elaborated": False, "timed_out": True,
+                "reason": f"did not techmap within {timeout_s}s; no synthesis verdict"}
     except OSError:
         return None
     finally:
@@ -567,14 +566,13 @@ def probe_synth_cellcount_multi(
         # C27: see probe_synth_cellcount -- cwd=project_root makes project-
         # relative $readmemh INIT_FILE paths resolve during the probe.
         _cwd = cwd if (cwd and Path(cwd).is_dir()) else None
-        result = subprocess.run(
+        result = run_process(
             [yosys, "-s", ys], capture_output=True, text=True, timeout=timeout_s,
             cwd=_cwd,
         )
     except subprocess.TimeoutExpired:
-        return {"cell_count": None, "elaborated": False,
-                "reason": f"chip_top did not techmap within {timeout_s}s "
-                          "(combinational-LUT explosion or unpipelined cloud)"}
+        return {"cell_count": None, "elaborated": False, "timed_out": True,
+                "reason": f"top did not techmap within {timeout_s}s; no synthesis verdict"}
     except OSError:
         return None
     finally:
@@ -740,7 +738,7 @@ def probe_logic_depth(
         with tempfile.NamedTemporaryFile("w", suffix=".ys", delete=False) as fh:
             fh.write(script)
             ys = fh.name
-        result = subprocess.run(
+        result = run_process(
             [yosys, "-s", ys], capture_output=True, text=True, timeout=timeout_s,
         )
     except subprocess.TimeoutExpired:
@@ -1572,7 +1570,7 @@ def run_pre_layout_sta(
         with tempfile.NamedTemporaryFile("w", suffix=".tcl", delete=False) as fh:
             fh.write(script)
             tcl = fh.name
-        result = subprocess.run(
+        result = run_process(
             [sta_bin, "-no_init", "-exit", tcl],
             capture_output=True, text=True, timeout=timeout_s,
         )
@@ -1613,6 +1611,116 @@ def run_pre_layout_sta(
                     Path(_p).unlink()
                 except OSError:
                     pass
+
+
+def parse_power_report(text: str) -> dict[str, float] | None:
+    """OpenSTA ``report_power``'s ``Total`` row as mW (``module_targets``)."""
+    from orchestrator.state_store.module_targets import parse_power_report as _parse
+    return _parse(text)
+
+
+def run_power_estimate(netlist_path: str, sdc_path: str, liberty_path: str, top_module: str, *,
+                       activity: float = 0.1, duty: float = 0.5, report_path: str | None = None,
+                       timeout_s: int = 600) -> dict[str, Any]:
+    """Vectorless power of a mapped netlist with OpenSTA ``report_power``.
+
+    The build's liberty and SDC (its clock) are read -- plus, like the
+    pre-layout STA, the Liberty of every memory macro the netlist's
+    ``cs_sram`` wrappers bind to (``macro_sta``); an unresolved geometry is an
+    error, never a black box silently left out -- the primary inputs get
+    ``activity`` transitions per clock period and ``duty`` (``set_power_activity
+    -input``) and OpenSTA propagates switching activity through the netlist.
+    The figure is an ESTIMATE (``basis`` estimated) under exactly that
+    method/library/clock/activity, which the result records; it is never a
+    measurement of silicon and never derived from a cell count. An SDC with
+    no clock, an ``Error`` line in OpenSTA's output (it can exit 0 after a
+    failed link or SDC read) or no ``Total`` row is an error.
+
+    Returns ``{power_mw, internal_mw, switching_mw, leakage_mw, method,
+    clock_period_ns, macro_libs, macros, report_path, report_sha256, sta}`` or
+    ``{error}``."""
+    from orchestrator.state_store.module_targets import tool_errors
+    sta_bin = shutil.which("sta")
+    if not sta_bin:
+        return {"error": "OpenSTA (`sta`) is not on PATH"}
+    for p in (netlist_path, sdc_path, liberty_path):
+        if not p or not Path(p).exists():
+            return {"error": f"power input missing: {p or '(none)'}"}
+    try:
+        period = parse_sdc_period_ns(Path(sdc_path).read_text())
+        raw = Path(netlist_path).read_text()
+    except OSError as e:
+        return {"error": f"cannot read the netlist or SDC: {e}"}
+    if not period or period <= 0:
+        return {"error": f"the SDC {sdc_path} defines no clock period: the power basis would have no clock"}
+    # memory macros by explicit identity (wrapper binding or a registered
+    # macro's own cell name); each must be power-characterized in its
+    # Liberty, and nothing may remain a black box: a power subtotal that
+    # silently leaves a cell out is not the module's power
+    from orchestrator.langgraph.target_closure import netlist_blackboxes, resolve_macros
+    from orchestrator.state_store.module_targets import liberty_cell_has_power
+    res = resolve_macros(raw, liberty_path)
+    if res["unresolved"]:
+        return {"error": "cells with no power model in the netlist: " + ", ".join(res["unresolved"][:4])}
+    uncharacterized = sorted({m["name"] for m in res["macros"] if not liberty_cell_has_power(m["lib"], m["name"])})
+    if uncharacterized:
+        return {"error": "macro Liberty without power characterization (a timing/area model is not a power "
+                         "model): " + ", ".join(uncharacterized)}
+    raw, extra_libs, extra_verilog = res["netlist"], list(res["libs"]), res["wrappers"]
+    macros = res["macros"]
+    leftover = netlist_blackboxes(extra_verilog + raw, liberty_path, extra_libs)
+    if leftover:
+        return {"error": "cells still unbound for power: " + ", ".join(leftover[:4])}
+    sta_netlist = strip_signed_declaration_qualifiers(strip_instance_parameters(raw))
+    tcl = nl = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix="_pwr.v", delete=False) as nf:
+            nf.write(extra_verilog + sta_netlist)
+            nl = nf.name
+        script = (f"read_liberty {liberty_path}\n" + "".join(f"read_liberty {lib}\n" for lib in extra_libs)
+                  + f"read_verilog {nl}\nlink_design {top_module}\nread_sdc {sdc_path}\n"
+                  f"set_power_activity -input -activity {float(activity)} -duty {float(duty)}\n"
+                  "report_power\nexit\n")
+        with tempfile.NamedTemporaryFile("w", suffix="_pwr.tcl", delete=False) as fh:
+            fh.write(script)
+            tcl = fh.name
+        result = run_process([sta_bin, "-no_init", "-exit", tcl], capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        return {"error": f"OpenSTA report_power timed out after {timeout_s}s"}
+    except OSError as e:
+        return {"error": f"OpenSTA invocation failed: {e}"}
+    finally:
+        for _p in (tcl, nl):
+            if _p:
+                try:
+                    Path(_p).unlink()
+                except OSError:
+                    pass
+    text = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+    sha = None
+    if report_path:
+        try:
+            Path(report_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(report_path).write_text(
+                f"# OpenSTA report_power for {top_module}\n# netlist: {netlist_path}\n# sdc: {sdc_path}\n"
+                f"# liberty: {liberty_path}\n" + "".join(f"# macro liberty: {lib}\n" for lib in extra_libs)
+                + f"# activity: -input -activity {activity} -duty {duty}\n# rc: {result.returncode}\n\n{text}\n",
+                encoding="utf-8")
+            sha = hashlib.sha256(Path(report_path).read_bytes()).hexdigest()
+        except OSError:
+            sha = None
+    errors = tool_errors(text) + [ln.strip()[:200] for ln in text.splitlines() if "Creating black box" in ln]
+    parsed = parse_power_report(result.stdout or "")
+    if result.returncode != 0 or errors or parsed is None:
+        why = "; ".join(errors[:3]) if errors else (text.strip()[-300:] or "no output")
+        return {"error": f"OpenSTA report_power gave no valid Total power (rc={result.returncode}): {why}",
+                "report_path": report_path}
+    return {**parsed, "method": f"OpenSTA report_power, vectorless: set_power_activity -input -activity {activity} "
+                                f"-duty {duty}, propagated; clock period {period:g} ns from the build SDC",
+            "clock_period_ns": period, "report_path": report_path, "report_sha256": sha, "sta": sta_bin,
+            "macro_libs": [{"path": lib, "sha256": hashlib.sha256(Path(lib).read_bytes()).hexdigest()}
+                           for lib in extra_libs if Path(lib).is_file()],
+            "macros": macros}
 
 
 # --------------------------------------------------------------------------- #
@@ -1755,7 +1863,7 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
         ys.write_text(_maxfanout_synth_script(sources, lib, netlist, top, buffered,
                                               period_ns=period_ns))
         try:
-            yp = subprocess.run([yosys_bin, "-q", str(ys)],
+            yp = run_process([yosys_bin, "-q", str(ys)],
                                 capture_output=True, text=True, timeout=timeout_s,
                                 cwd=project_root)
         except subprocess.TimeoutExpired:
@@ -1813,7 +1921,7 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
         f'puts "CORESMITH_WNS [worst_slack -max]"\n'
     )
     try:
-        sp = subprocess.run([sta_bin, "-no_splash", "-exit", str(tcl)],
+        sp = run_process([sta_bin, "-no_splash", "-exit", str(tcl)],
                             capture_output=True, text=True, timeout=timeout_s)
     except subprocess.TimeoutExpired:
         return None, f"OpenSTA timed out after {timeout_s}s"
@@ -1861,7 +1969,7 @@ def _measure_wns_from_rtl(sources: list[str], lib: str, base_wd: Path, tag: str,
             + f'read_verilog "{netlist}"\n'
             f'hierarchy -check -top {top}\nstat -liberty "{lib}"\n')
         try:
-            stats_run = subprocess.run([yosys_bin, "-Q", "-T", str(stats_script)],
+            stats_run = run_process([yosys_bin, "-Q", "-T", str(stats_script)],
                                        capture_output=True, text=True, timeout=timeout_s)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return None, f"mapped-netlist statistics unavailable: {exc}"
@@ -2131,7 +2239,7 @@ def probe_memory_flops(
         Path(ys).write_text(script)
         _cwd = cwd if (cwd and Path(cwd).is_dir()) else None
         try:
-            result = subprocess.run(
+            result = run_process(
                 [yosys, "-s", ys], capture_output=True, text=True,
                 timeout=timeout_s, cwd=_cwd,
             )

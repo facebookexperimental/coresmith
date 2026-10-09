@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 1951" width="960" height="1951" role="img" aria-labelledby="title desc" xml:space="preserve">
+<title id="title">SystemC, the executable reference: three representations, readiness, and what a check settles</title>
+<desc id="desc">SystemC is required at the uarch stage for every authored module; generated primitives are exempt. Part I aligns one module, cpu, in three planes: specification (interface contracts, the uArch spec, FRD requirements), SystemC reference (model/cpu_model.h generated from the contracts, model/cpu_model.cpp written by the Architect or requested with model author, and the harness model/frd_eval/frd_eval.cpp), and RTL implementation by a worker (targets/cpu.json, rtl/cpu.v written by a worker, and the Architect's fixed acceptance test tb/cocotb/test_cpu.py). The model crosses into the implementation only as a fixed input of the module build with its recorded identity. PERF-CPU-1 declares a model check, so model eval judges it on the model (model_eval, rank 1) and the acceptance test on the RTL (block_dv, rank 2). AREA-CPU-1 declares none, so it passes the model untouched and is measured by synthesis. No automatic equivalence check crosses the seam. Part II: the module is ready only when the model exists, compiles and smoke-runs, is built at current bytes, headers and contract, and each declared check has a current passing verdict; otherwise MODEL_MISSING, MODEL_NOT_BUILT, MODEL_STALE, MODEL_CHECK_MISSING, MODEL_CHECK_FAILED or MODEL_CHECK_STALE. Part III: check ranks model_eval 1, block_dv 2, integration_dv 3, validation_dv and acceptance 4, signoff 5; an item's status is its latest check of the highest rank present.</desc>
+<style>
+.s{font-family:Charter,'Bitstream Charter','Iowan Old Style','Sitka Text',Cambria,Georgia,serif}
+.f{font-family:'Helvetica Neue',Helvetica,Arial,'Liberation Sans','Nimbus Sans',sans-serif}
+.m{font-family:'JetBrains Mono','SF Mono',Menlo,Consolas,'Liberation Mono','DejaVu Sans Mono',monospace}
+.k{font-family:'Helvetica Neue',Helvetica,Arial,'Liberation Sans','Nimbus Sans',sans-serif;font-size:15px;letter-spacing:2.2px;fill:#5D636B}
+.ink{fill:#1B1D21}.gr{fill:#5D636B}.lt{fill:#8C9198}.ver{fill:#BC3F2A}.cob{fill:#2A4BA8}
+.it{font-style:italic}.b{font-weight:700}.sb{font-weight:600}
+</style>
+<rect width="960" height="1951" fill="#FAF8F3"/>
+<text x="40" y="58" class="k">CORESMITH  ·  PLATE 2</text>
+<text x="40" y="108" class="s ink" style="font-size:38px">SystemC, the executable reference</text>
+<text x="40" y="146" class="s gr" style="font-size:19px">Required at uarch for every authored module; generated primitives are exempt.</text>
+<text x="40" y="171" class="s gr" style="font-size:19px">The Architect writes the model and its checks; module builds receive them fixed.</text>
+<line x1="40" y1="206" x2="920" y2="206" stroke="#CBC6BB" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="246" class="s" style="font-size:24px"><tspan class="gr it">I   </tspan><tspan class="ink">One module, three representations</tspan></text>
+<text x="40" y="272" class="s it gr" style="font-size:16px">A requirement is judged in each plane that declares a way to judge it.</text>
+<rect x="298" y="290" width="322" height="650" fill="#F5E4DC" fill-opacity="0.62"/>
+<line x1="628" y1="290" x2="628" y2="940" stroke="#BC3F2A" stroke-width="1" stroke-dasharray="1 5" stroke-linecap="round"/>
+<text x="40" y="322" class="k">SPECIFICATION</text>
+<text x="40" y="345" class="s it gr" style="font-size:16px">prose and rows · Architect</text>
+<text x="318" y="322" class="k" style="fill:#BC3F2A">SYSTEMC</text>
+<text x="318" y="345" class="s it ver" style="font-size:16px">executable · Architect</text>
+<text x="648" y="322" class="k" style="fill:#2A4BA8">RTL</text>
+<text x="648" y="345" class="s it cob" style="font-size:16px">implemented · worker</text>
+<text x="40" y="396" class="k">STRUCTURE</text>
+<line x1="40" y1="404" x2="286" y2="404" stroke="#E7E2D7" stroke-width="1" stroke-linecap="butt"/>
+<line x1="640" y1="404" x2="920" y2="404" stroke="#E7E2D7" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="430" class="s ink" style="font-size:18px">interface contracts</text>
+<text x="40" y="452" class="s it gr" style="font-size:16px">locked at interfaces</text>
+<text x="318" y="430" class="m gr" style="font-size:16px">model/cpu_model.h</text>
+<text x="318" y="452" class="s it gr" style="font-size:16px">generated from the contracts</text>
+<text x="648" y="430" class="m ver" style="font-size:16px">targets/cpu.json</text>
+<text x="648" y="452" class="s it gr" style="font-size:16px">HDL top and sources</text>
+<text x="40" y="510" class="k">BEHAVIOR</text>
+<line x1="40" y1="518" x2="286" y2="518" stroke="#E7E2D7" stroke-width="1" stroke-linecap="butt"/>
+<line x1="640" y1="518" x2="920" y2="518" stroke="#E7E2D7" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="544" class="m ver" style="font-size:16px">arch/uarch_specs/cpu.md</text>
+<text x="40" y="566" class="s it gr" style="font-size:16px">uArch specification</text>
+<text x="318" y="544" class="m ver sb" style="font-size:17px">model/cpu_model.cpp</text>
+<text x="318" y="566" class="s it gr" style="font-size:16px">Architect-written, or model author</text>
+<text x="648" y="544" class="m cob sb" style="font-size:17px">rtl/cpu.v</text>
+<text x="648" y="566" class="s it gr" style="font-size:16px">written by a worker</text>
+<line x1="320" y1="610" x2="644" y2="610" stroke="#BC3F2A" stroke-width="1.5" stroke-linecap="butt"/>
+<circle cx="320" cy="610" r="3.5" fill="#BC3F2A"/>
+<path d="M644 605L653 610L644 615Z" fill="#BC3F2A"/>
+<text x="332" y="601" class="s it ver" style="font-size:16px">fixed input of the module build</text>
+<text x="662" y="615" class="s it ver" style="font-size:16px">and its recorded identity</text>
+<text x="40" y="668" class="k">REQUIREMENTS</text>
+<line x1="40" y1="676" x2="286" y2="676" stroke="#E7E2D7" stroke-width="1" stroke-linecap="butt"/>
+<line x1="640" y1="676" x2="920" y2="676" stroke="#E7E2D7" stroke-width="1" stroke-linecap="butt"/>
+<text x="318" y="702" class="m ver" style="font-size:16px">model/frd_eval/frd_eval.cpp</text>
+<text x="318" y="724" class="s it gr" style="font-size:16px">harness, run by model eval</text>
+<text x="648" y="702" class="m ver" style="font-size:16px">tb/cocotb/test_cpu.py</text>
+<text x="648" y="724" class="s it gr" style="font-size:16px">acceptance test, fixed</text>
+<text x="40" y="778" class="m ink sb" style="font-size:16px">PERF-CPU-1</text>
+<text x="40" y="800" class="s it gr" style="font-size:16px">≤ 1.25 cycles/op</text>
+<text x="40" y="820" class="s it ver" style="font-size:16px">declares a model check</text>
+<line x1="148" y1="773" x2="308" y2="773" stroke="#1B1D21" stroke-width="1" stroke-linecap="butt"/>
+<path d="M320 766L327 773L320 780L313 773Z" fill="#BC3F2A"/>
+<text x="336" y="778" class="m" style="font-size:16px"><tspan class="ink sb">model_eval</tspan><tspan class="gr">  pass</tspan></text>
+<text x="336" y="800" class="s it gr" style="font-size:16px">rank 1</text>
+<line x1="499.6" y1="773" x2="619" y2="773" stroke="#1B1D21" stroke-width="1" stroke-linecap="butt"/>
+<line x1="637" y1="773" x2="638" y2="773" stroke="#1B1D21" stroke-width="1" stroke-linecap="butt"/>
+<rect x="644.5" y="767.5" width="11" height="11" fill="#1B1D21"/>
+<text x="666" y="778" class="m" style="font-size:16px"><tspan class="ink sb">block_dv</tspan><tspan class="gr">  measured</tspan></text>
+<text x="666" y="800" class="s it gr" style="font-size:16px">rank 2, acceptance test</text>
+<text x="40" y="870" class="m ink sb" style="font-size:16px">AREA-CPU-1</text>
+<text x="40" y="892" class="s it gr" style="font-size:16px">≤ 250 000 um2</text>
+<text x="40" y="912" class="s it gr" style="font-size:16px">no model check</text>
+<line x1="148" y1="865" x2="619" y2="865" stroke="#1B1D21" stroke-width="1" stroke-linecap="butt" stroke-dasharray="2 5"/>
+<line x1="637" y1="865" x2="638" y2="865" stroke="#1B1D21" stroke-width="1" stroke-linecap="butt" stroke-dasharray="2 5"/>
+<text x="336" y="892" class="s it gr" style="font-size:16px">not demanded of the model</text>
+<rect x="644.5" y="859.5" width="11" height="11" fill="#1B1D21"/>
+<text x="666" y="870" class="m" style="font-size:16px"><tspan class="ink sb">block_dv</tspan><tspan class="gr">  area_um2</tspan></text>
+<text x="666" y="892" class="s it gr" style="font-size:16px">rank 2, synthesis</text>
+<text x="628" y="962" class="k" style="fill:#BC3F2A" text-anchor="middle">SEAM</text>
+<text x="40" y="1004" class="s ink sb" style="font-size:18px">No automatic equivalence check crosses the seam.</text>
+<text x="40" y="1029" class="s gr" style="font-size:18px">An acceptance test compares only what it is written to compare.</text>
+<line x1="40" y1="1074" x2="920" y2="1074" stroke="#CBC6BB" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="1114" class="s" style="font-size:24px"><tspan class="gr it">II   </tspan><tspan class="ink">Readiness</tspan></text>
+<text x="40" y="1140" class="s it gr" style="font-size:16px">stage next and build module refuse the module until every line holds.</text>
+<text x="40" y="1186" class="k">READY WHEN</text>
+<text x="920" y="1186" class="k" text-anchor="end">ELSE REFUSED</text>
+<line x1="40" y1="1210" x2="920" y2="1210" stroke="#E7E2D7" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="1236" class="f gr" style="font-size:16px">1</text>
+<text x="68" y="1236" class="s ink" style="font-size:18px">the model exists</text>
+<text x="920" y="1236" class="m gr" style="font-size:16px" text-anchor="end">MODEL_MISSING</text>
+<line x1="40" y1="1248" x2="920" y2="1248" stroke="#E7E2D7" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="1274" class="f gr" style="font-size:16px">2</text>
+<text x="68" y="1274" class="s ink" style="font-size:18px">it compiles and smoke-runs (model build)</text>
+<text x="920" y="1274" class="m gr" style="font-size:16px" text-anchor="end">MODEL_NOT_BUILT</text>
+<line x1="40" y1="1286" x2="920" y2="1286" stroke="#E7E2D7" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="1312" class="f gr" style="font-size:16px">3</text>
+<text x="68" y="1312" class="s ink" style="font-size:18px">it is built at current bytes, headers, contract</text>
+<text x="920" y="1312" class="m gr" style="font-size:16px" text-anchor="end">MODEL_STALE</text>
+<line x1="40" y1="1324" x2="920" y2="1324" stroke="#E7E2D7" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="1350" class="f gr" style="font-size:16px">4</text>
+<text x="68" y="1350" class="s ink" style="font-size:18px">each declared check has a verdict (model eval)</text>
+<text x="920" y="1350" class="m gr" style="font-size:16px" text-anchor="end">MODEL_CHECK_MISSING</text>
+<line x1="40" y1="1362" x2="920" y2="1362" stroke="#E7E2D7" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="1388" class="f gr" style="font-size:16px">5</text>
+<text x="68" y="1388" class="s ink" style="font-size:18px">every declared check passes</text>
+<text x="920" y="1388" class="m gr" style="font-size:16px" text-anchor="end">MODEL_CHECK_FAILED</text>
+<line x1="40" y1="1400" x2="920" y2="1400" stroke="#E7E2D7" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="1426" class="f gr" style="font-size:16px">6</text>
+<text x="68" y="1426" class="s ink" style="font-size:18px">verdicts match the model, harness, requirement</text>
+<text x="920" y="1426" class="m gr" style="font-size:16px" text-anchor="end">MODEL_CHECK_STALE</text>
+<line x1="40" y1="1442" x2="920" y2="1442" stroke="#CBC6BB" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="1476" class="s it ink" style="font-size:16px">Editing the model re-opens the gate and stales the module’s published build.</text>
+<line x1="40" y1="1522" x2="920" y2="1522" stroke="#CBC6BB" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="1562" class="s" style="font-size:24px"><tspan class="gr it">III   </tspan><tspan class="ink">What a check settles</tspan></text>
+<text x="40" y="1588" class="s it gr" style="font-size:16px">An item’s status is its latest check of the highest rank present.</text>
+<line x1="96" y1="1678" x2="870" y2="1678" stroke="#1B1D21" stroke-width="1.2" stroke-linecap="butt"/>
+<line x1="96" y1="1668" x2="96" y2="1688" stroke="#BC3F2A" stroke-width="1.6" stroke-linecap="butt"/>
+<text x="96" y="1656" class="s" style="font-size:22px;fill:#BC3F2A" text-anchor="middle">1</text>
+<text x="96" y="1712" class="m sb" style="font-size:15.5px;fill:#BC3F2A" text-anchor="middle">model_eval</text>
+<text x="96" y="1734" class="s it gr" style="font-size:16px" text-anchor="middle">SystemC</text>
+<line x1="289.5" y1="1668" x2="289.5" y2="1688" stroke="#1B1D21" stroke-width="1.2" stroke-linecap="butt"/>
+<text x="289.5" y="1656" class="s" style="font-size:22px;fill:#1B1D21" text-anchor="middle">2</text>
+<text x="289.5" y="1712" class="m sb" style="font-size:15.5px;fill:#1B1D21" text-anchor="middle">block_dv</text>
+<text x="289.5" y="1734" class="s it gr" style="font-size:16px" text-anchor="middle">module</text>
+<line x1="483" y1="1668" x2="483" y2="1688" stroke="#1B1D21" stroke-width="1.2" stroke-linecap="butt"/>
+<text x="483" y="1656" class="s" style="font-size:22px;fill:#1B1D21" text-anchor="middle">3</text>
+<text x="483" y="1712" class="m sb" style="font-size:15.5px;fill:#1B1D21" text-anchor="middle">integration_dv</text>
+<text x="483" y="1734" class="s it gr" style="font-size:16px" text-anchor="middle">chip</text>
+<line x1="676.5" y1="1668" x2="676.5" y2="1688" stroke="#1B1D21" stroke-width="1.2" stroke-linecap="butt"/>
+<text x="676.5" y="1656" class="s" style="font-size:22px;fill:#1B1D21" text-anchor="middle">4</text>
+<text x="676.5" y="1712" class="m sb" style="font-size:15.5px;fill:#1B1D21" text-anchor="middle">validation_dv</text>
+<text x="676.5" y="1734" class="s it gr" style="font-size:16px" text-anchor="middle">acceptance</text>
+<line x1="870" y1="1668" x2="870" y2="1688" stroke="#1B1D21" stroke-width="1.2" stroke-linecap="butt"/>
+<text x="870" y="1656" class="s" style="font-size:22px;fill:#1B1D21" text-anchor="middle">5</text>
+<text x="870" y="1712" class="m sb" style="font-size:15.5px;fill:#1B1D21" text-anchor="middle">signoff</text>
+<text x="870" y="1734" class="s it gr" style="font-size:16px" text-anchor="middle">backend</text>
+<text x="96" y="1620" class="k" style="fill:#BC3F2A" text-anchor="middle">SYSTEMC</text>
+<line x1="259.5" y1="1615" x2="870" y2="1615" stroke="#2A4BA8" stroke-width="1" stroke-linecap="butt"/>
+<line x1="259.5" y1="1615" x2="259.5" y2="1623" stroke="#2A4BA8" stroke-width="1" stroke-linecap="butt"/>
+<line x1="870" y1="1615" x2="870" y2="1623" stroke="#2A4BA8" stroke-width="1" stroke-linecap="butt"/>
+<rect x="539.75" y="1604" width="80" height="22" fill="#FAF8F3"/>
+<text x="579.75" y="1620" class="k" style="fill:#2A4BA8" text-anchor="middle">RTL</text>
+<text x="40" y="1782" class="s ink" style="font-size:18px">A model pass never overrides an RTL fail.</text>
+<text x="40" y="1807" class="s ink" style="font-size:18px">A failed declared model check blocks readiness even after an RTL pass.</text>
+<line x1="40" y1="1844" x2="920" y2="1844" stroke="#CBC6BB" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="1874" class="s it gr" style="font-size:14.5px">Optional: model … --arch builds an abstract performance model; it does not replace this one.</text>
+<text x="40" y="1895" class="s it gr" style="font-size:14.5px">Also required at uarch: a registered spec, a bound target, measurable targets, a worker binding.</text>
+<text x="40" y="1916" class="s it gr" style="font-size:14.5px">File names follow the CLI’s conventions; verdicts are examples.</text>
+</svg>

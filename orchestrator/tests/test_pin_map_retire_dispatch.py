@@ -184,11 +184,18 @@ class TestTheCompletenessGatesAgree:
     @pytest.mark.asyncio
     async def test_pipeline_complete_passes_with_the_reduced_queue(
             self, tmp_path, monkeypatch):
+        from orchestrator.state_store.project_db import open_project
+        from orchestrator.tests.build_fixtures import complete_build
         _seed(tmp_path)
         st = _state(tmp_path)
         st.update(await pipeline_graph.init_tier_node(st))
+        # the core's success entry carries its receipt: a current recorded build
+        monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
+        (tmp_path / "rtl").mkdir(exist_ok=True)
+        (tmp_path / "rtl" / "protocol_engine.v").write_text("module protocol_engine(); endmodule\n")
+        bid = complete_build(open_project(tmp_path), tmp_path, CORE)
         st["completed_blocks"] = [
-            {"name": CORE, "success": True, "attempts": 1, "phase": "rtl"}]
+            {"name": CORE, "success": True, "attempts": 1, "phase": "rtl", "build_id": bid}]
         st["pipeline_phase"] = "rtl"
 
         def _boom(_payload):

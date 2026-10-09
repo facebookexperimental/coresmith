@@ -165,6 +165,45 @@ _tapeout = GraphLifecycle(
 )
 _TAPEOUT_CHECKPOINT_DB = _tapeout.checkpoint_db
 
+# --- Recorded module build runner (the same block subgraph, one thread per
+# build, persistent checkpoint shared with the daemon's build lifecycle) ---
+_build = GraphLifecycle(
+    name="build",
+    checkpoint_db=os.path.join(_PROJECT_ROOT, ".coresmith", "build_checkpoint.db"),
+    builder_fn_path="orchestrator.langgraph.pipeline_graph",
+    builder_fn_name="build_block_graph",
+)
+
+
+def _serialized_tool(what: str, *, as_dict: bool = False, graph: str | None = None):
+    """Run a launching tool inside the one launch section every transport
+    shares (``module_build.launch_section``: the operation lock in this
+    process, the ``graph_launch`` lease across processes, re-entrant for the
+    task that holds it); a graph running in another process refuses it.
+    When the tool started ``graph`` (``pipeline`` / ``backend``), the
+    lifecycle's task holds the ``graph:<graph>`` lease until it ends. The
+    refusal is returned in the tool's own shape (JSON text, or a dict for
+    ``launch_backend``)."""
+    import functools
+
+    def deco(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            from orchestrator import module_build as _MB
+            from orchestrator.state_store.project_db import open_project as _open_project
+            db = _open_project(_project_root())
+            try:
+                async with _MB.launch_section(db, what=what):
+                    if not graph:
+                        return await fn(*args, **kwargs)
+                    getter = (lambda: _pipeline) if graph == "pipeline" else (lambda: _backend)
+                    async with _MB.graph_ownership(db, graph, getter, meta={"what": what}):
+                        return await fn(*args, **kwargs)
+            except _MB.BuildRefusal as refusal:
+                return refusal.to_json() if as_dict else json.dumps(refusal.to_json())
+        return wrapper
+    return deco
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ARCHITECTURE TOOLS -- autonomous background task with interrupt escalation
@@ -1166,18 +1205,7 @@ async def pause_architecture() -> str:
             "error": f"Cannot pause: architecture status is '{_architecture.status}'",
         })
 
-    # Kill any stuck CLI subprocesses first so the task can actually cancel
-    from orchestrator.langchain.agents.coresmith_llm import kill_active_cli_processes
-    kill_active_cli_processes()
-
-    if _architecture.task and not _architecture.task.done():
-        _architecture.task.cancel()
-        try:
-            await _architecture.task
-        except asyncio.CancelledError:
-            pass
-
-    _architecture.status = "paused"
+    await _architecture.safe_pause()
 
     # Read current state for the response
     await _architecture.ensure_graph()
@@ -1641,6 +1669,7 @@ async def get_pipeline_events(
 
 
 @server.tool()
+@_serialized_tool("start_pipeline", graph="pipeline")
 async def start_pipeline(
     max_attempts: int = 5,
     target_clock_mhz: float = 50.0,
@@ -1667,6 +1696,20 @@ async def start_pipeline(
             "thread_id": _pipeline.thread_id,
             "status": _pipeline.status,
         })
+    _busy = _build_running_refusal("start_pipeline")
+    if _busy:
+        return _busy
+    # The same readiness contract as the daemon's /run/start: the stage
+    # machine at ``blocks`` with every earlier stage holding, no cluster
+    # fan-out, no empty-stage exemption (module_build.pipeline_start_refusal).
+    try:
+        from orchestrator import module_build as _MB
+        from orchestrator.state_store.project_db import open_project as _open_project
+        _refusal = _MB.pipeline_start_refusal(_open_project(_project_root()), _project_root())
+    except Exception as exc:  # noqa: BLE001 - an unreadable project DB is a refusal
+        return json.dumps({"error": "STAGE_DB_UNREADABLE", "message": str(exc)})
+    if _refusal is not None:
+        return json.dumps(_refusal.to_json())
 
     # Auto-pause architecture if it's still running (mirrors pause_architecture)
     if _architecture.status == "running":
@@ -2232,6 +2275,7 @@ async def list_interrupts(status: str = "pending") -> str:
 
 
 @server.tool()
+@_serialized_tool("resume_pipeline", graph="pipeline")
 async def resume_pipeline(
     action: str,
     constraint: str = "",
@@ -2264,6 +2308,9 @@ async def resume_pipeline(
         return json.dumps({
             "error": f"Invalid action: {action}. Must be one of: {sorted(valid_actions)}",
         })
+    _busy = _build_running_refusal("resume_pipeline")
+    if _busy:
+        return _busy
 
     if interrupt_id and _pipeline.task is not None and not _pipeline.task.done():
         # C1-3: queue the answer for one parked branch while siblings run.
@@ -2447,18 +2494,7 @@ async def pause_pipeline() -> str:
             "error": f"Cannot pause: pipeline status is '{_pipeline.status}'",
         })
 
-    # Kill any stuck CLI subprocesses first so the task can actually cancel
-    from orchestrator.langchain.agents.coresmith_llm import kill_active_cli_processes
-    kill_active_cli_processes()
-
-    if _pipeline.task and not _pipeline.task.done():
-        _pipeline.task.cancel()
-        try:
-            await _pipeline.task
-        except asyncio.CancelledError:
-            pass
-
-    _pipeline.status = "paused"
+    await _pipeline.safe_pause()
 
     # Read current state for the response
     await _pipeline.ensure_graph()
@@ -2492,6 +2528,7 @@ async def pause_pipeline() -> str:
 
 
 @server.tool()
+@_serialized_tool("restart_node", graph="pipeline")
 async def restart_node(node_name: str) -> str:
     """Re-execute from a specific node by forking from its checkpoint.
 
@@ -2510,6 +2547,9 @@ async def restart_node(node_name: str) -> str:
             "error": "Cannot restart: pipeline is currently running",
             "hint": "Pause the pipeline first with pause_pipeline(), then restart.",
         })
+    _busy = _build_running_refusal("restart_node")
+    if _busy:
+        return _busy
     if not _pipeline.thread_id:
         return json.dumps({
             "error": "Cannot restart: no pipeline run exists",
@@ -2585,229 +2625,152 @@ async def restart_block(
     uarch_feedback: str = "",
     max_attempts: int = 3,
 ) -> str:
-    """Restart a single block from a specific node in its lifecycle.
+    """Rebuild ONE block as a RECORDED module build (orchestrator.module_build).
 
-    Runs the block through a standalone block subgraph independent of
-    the main pipeline checkpoint.  Useful after integration check finds
-    a cross-block mismatch (clock polarity, reset naming, port width) --
-    edit the uArch spec or RTL on disk, then restart just that block.
-
-    After completion, call restart_node('integration_check') to re-verify
-    the integrated design.
-
-    The uArch review interrupt is auto-approved (the spec was already
-    reviewed in the original pipeline run).  If the block fails during
-    its lifecycle and the debug agent escalates to ask_human, the failure
-    payload is returned so the outer agent can diagnose and retry.
+    The block runs through the same block subgraph the pipeline fans out, on
+    the build lifecycle's persistent checkpoint (one thread per build), under
+    the same readiness and provenance rules as ``coresmith build module``:
+    the shared architecture stages must be done, the module must be ready
+    (uArch spec, bound target, built and smoked reference model with its
+    declared checks, worker binding), no other build of it may be in flight
+    and cluster fan-out is refused. Answer any park with ``resume_build``
+    using the actions it exposes. The
+    published pass and the build's ``completed`` record are committed
+    together by the graph's ``block_done`` node; a completed build is merged
+    into the pipeline checkpoint so ``pipeline_complete`` sees it.
 
     Args:
-        block_name: Name of the block to restart (e.g. 'fft_butterfly').
-        from_node: Where to start the lifecycle.  One of:
-            'generate_uarch_spec' -- regenerate uArch spec, then RTL/lint/sim/synth
-            'generate_rtl' -- regenerate RTL from existing uArch spec (default)
-        uarch_feedback: Feedback for uArch spec regeneration (only used
-            when from_node is 'generate_uarch_spec').
-        max_attempts: Max retry attempts for the block lifecycle (default 3).
+        block_name: the registered module to build.
+        from_node: ``generate_uarch_spec`` or ``generate_rtl``; both consume
+            the registered spec unchanged.
+        uarch_feedback: legacy parameter; nonempty feedback is refused.
+            Revise and register the spec before starting a new build.
+        max_attempts: per-build attempt budget (default 3).
+
+    Returns the build id and thread; poll ``get_build_state`` and answer its
+    parks with ``resume_build``.
     """
-    import time as _time
+    from orchestrator import module_build as _MB
+    from orchestrator.state_store.project_db import open_project as _open_project
 
     valid_nodes = ("generate_uarch_spec", "generate_rtl")
     if from_node not in valid_nodes:
-        return json.dumps({
-            "error": f"Invalid from_node '{from_node}'",
-            "hint": f"Must be one of: {', '.join(valid_nodes)}",
-        })
-
-    root = Path(_project_root())
-
-    # ── Load block spec from block_specs.json ─────────────────────────
-    specs_path = root / ".coresmith" / "block_specs.json"
-    block_spec = None
-    if specs_path.exists():
-        try:
-            specs = json.loads(specs_path.read_text())
-            for spec in specs:
-                if spec.get("name") == block_name:
-                    block_spec = spec
-                    break
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-    if not block_spec:
-        return json.dumps({
-            "error": f"Block '{block_name}' not found in .coresmith/block_specs.json",
-            "hint": "The block must exist in the architecture output.",
-        })
-
-    # ── Build standalone block subgraph ───────────────────────────────
-    from langgraph.checkpoint.memory import MemorySaver
-
-    from orchestrator.langgraph.pipeline_graph import build_block_subgraph
-
-    checkpointer = MemorySaver()
-    block_graph = build_block_subgraph().compile(checkpointer=checkpointer)
-
-    thread_id = f"restart-{block_name}-{int(_time.time())}"
-    config = {"configurable": {"thread_id": thread_id}}
-
-    # ── Inherit target_clock_mhz from the main pipeline if available ──
-    target_clock = 50.0
-    effective_max = max_attempts
-    if _pipeline.thread_id and _pipeline.graph:
-        try:
-            await _pipeline.ensure_graph()
-            p_config = {"configurable": {"thread_id": _pipeline.thread_id}}
-            p_snap = await _pipeline.graph.aget_state(p_config)
-            if p_snap and p_snap.values:
-                target_clock = p_snap.values.get(
-                    "target_clock_mhz", 50.0
-                )
-        except Exception:
-            pass
-
-    # ── Build initial BlockState ──────────────────────────────────────
-    initial_state: dict[str, Any] = {
-        "project_root": str(root),
-        "target_clock_mhz": target_clock,
-        "max_attempts": effective_max,
-        "pipeline_run_start": _time.time(),
-        "current_block": block_spec,
-        "attempt": 1,
-        "phase": "init",
-        "constraints": [],
-        "attempt_history": [],
-        "previous_error": "",
-        "uarch_spec": None,
-        "uarch_approved": False,
-        "uarch_feedback": uarch_feedback,
-        "rtl_result": None,
-        "lint_result": None,
-        "tb_result": None,
-        "sim_result": None,
-        "synth_result": None,
-        "debug_result": None,
-        "human_response": None,
-        "completed_blocks": [],
-        "step_log_paths": {},
-        "preserve_testbench": False,
-    }
-
-    # ── Position the graph at the desired starting node ───────────────
-    run_input: Any = initial_state
-
-    if from_node == "generate_rtl":
-        uarch_spec_path = root / ARCH_DOC_DIR / "uarch_specs" / f"{block_name}.md"
-        uarch_spec: dict[str, Any] = {}
-        if uarch_spec_path.exists():
-            spec_text = uarch_spec_path.read_text(encoding="utf-8")
-            uarch_spec = {
-                "spec_text": spec_text,
-                "spec_path": str(uarch_spec_path),
-                "spec_summary": {},
-                "block_name": block_name,
-            }
-        initial_state["uarch_spec"] = uarch_spec
-        initial_state["uarch_approved"] = True
-        initial_state["human_response"] = {"action": "approve"}
-        initial_state["phase"] = "rtl"
-        await block_graph.aupdate_state(
-            config, initial_state, as_node="review_uarch_spec",
-        )
-        run_input = None
-
-    # else: from_node == "generate_uarch_spec" -- start from the top
-
-    # ── Run the block lifecycle ───────────────────────────────────────
-    from langgraph.errors import GraphInterrupt
-
-    max_interrupt_loops = 10
-    for _ in range(max_interrupt_loops):
-        try:
-            await block_graph.ainvoke(run_input, config)
-        except GraphInterrupt:
-            pass
-
-        snap = await block_graph.aget_state(config)
-        if not snap or not snap.next:
-            break
-
-        # Handle pending interrupts
-        handled = False
-        if snap.tasks:
-            for task in snap.tasks:
-                for intr in task.interrupts:
-                    payload = intr.value
-                    if not isinstance(payload, dict):
-                        continue
-                    itype = payload.get("type", "")
-
-                    if itype == "uarch_spec_review":
-                        from langgraph.types import Command
-                        run_input = Command(
-                            resume={intr.id: {"action": "approve"}},
-                        )
-                        handled = True
-                        break
-
-                    if itype == "human_intervention_needed":
-                        return json.dumps({
-                            "status": "needs_intervention",
-                            "block_name": block_name,
-                            "from_node": from_node,
-                            "interrupt_payload": payload,
-                            "hint": (
-                                "The block failed during its lifecycle. "
-                                "Edit the RTL or uArch spec on disk and "
-                                "call restart_block() again."
-                            ),
-                        })
-
-                if handled:
-                    break
-
-        if not handled:
-            break
-
-    # ── Collect final result ──────────────────────────────────────────
-    final_snap = await block_graph.aget_state(config)
-    final_values = final_snap.values if final_snap else {}
-    completed = final_values.get("completed_blocks", [])
-
-    block_result: dict[str, Any] = {}
-    for b in completed:
-        if b.get("name") == block_name:
-            block_result = b
-            break
-
-    # Merge result back into the main pipeline checkpoint
-    merged = False
-    if block_result:
-        merged = await _merge_block_into_pipeline_checkpoint(block_result)
-
-    next_steps = []
-    if block_result.get("success"):
-        next_steps.append(
-            "Block passed all steps. Call restart_node('integration_check') "
-            "to re-verify the integrated design."
-        )
-    else:
-        error_hint = block_result.get("error", "unknown failure")
-        next_steps.append(
-            f"Block did not pass ({error_hint}). Inspect the step logs, "
-            "edit RTL on disk, and call restart_block() again with "
-            "from_node='lint'."
-        )
-
+        return json.dumps({"error": f"Invalid from_node '{from_node}'",
+                           "hint": f"Must be one of: {', '.join(valid_nodes)}"})
+    root = _project_root()
+    try:
+        out = await _MB.start_build(
+            _open_project(root), root, _build, module=block_name, entry="restart_block",
+            busy=[_pipeline, _backend], max_attempts=max_attempts,
+            uarch_feedback=uarch_feedback if from_node == "generate_uarch_spec" else "",
+            apply_env=lambda: _apply_persisted_env_best_effort("restart_block"))
+    except _MB.BuildRefusal as refusal:
+        return json.dumps(refusal.to_json())
+    asyncio.create_task(_watch_build(out["build_id"]))
     return json.dumps({
-        "status": "completed",
-        "block_name": block_name,
-        "from_node": from_node,
-        "result": block_result,
-        "success": block_result.get("success", False),
-        "checkpoint_merged": merged,
-        "next_steps": next_steps,
-    })
+        **out, "block_name": block_name, "from_node": from_node,
+        "next_steps": [
+            "poll get_build_state(build_id); the uArch review parks for your approve/revise",
+            "answer parks with resume_build(build_id, action=...)",
+            "a completed build is merged into the pipeline checkpoint; then restart_node('integration_check')",
+        ],
+    }, default=str)
 
+
+def _apply_persisted_env_best_effort(where: str) -> list:
+    """The persisted ``.coresmith/env`` applied to this process (the same
+    persisted-wins rule the daemon uses) before a build is planned."""
+    try:
+        from orchestrator.run_env import apply_persisted_env
+        return apply_persisted_env(_project_root())
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning("%s: persisted env refresh failed", where, exc_info=True)
+        return []
+
+
+def _build_running_refusal(what: str) -> str | None:
+    """The converse guard as JSON: the pipeline and the backend never start,
+    resume or re-enter while a module build is driving the workspace."""
+    if _build.task is not None and not _build.task.done():
+        return json.dumps({"error": "BUILD_RUNNING",
+                           "message": f"a module build is running (thread {_build.thread_id}); {what} shares the "
+                                      "workspace -- wait for it to park or pause it (coresmith build pause)"})
+    return None
+
+
+async def _watch_build(build_id: str) -> None:
+    """Classify the build's terminal state when its task ends and merge a
+    completed block result into the pipeline checkpoint."""
+    from orchestrator import module_build as _MB
+    from orchestrator.state_store.project_db import open_project as _open_project
+    root = _project_root()
+    await _MB.watch_build(_open_project(root), root, _build, build_id, pipeline=_pipeline)
+
+
+@server.tool()
+async def get_build_state(build_id: str = "") -> str:
+    """The durable record of a module build (``builds`` row: status, inputs
+    digest, worker binding, evidence rows, whether a parked build is still
+    resumable against the live project) plus its live parks. Default: the
+    latest recorded build."""
+    from orchestrator import module_build as _MB
+    from orchestrator.state_store import builds as _B
+    from orchestrator.state_store.project_db import open_project as _open_project
+    root = _project_root()
+    db = _open_project(root)
+    if not build_id:
+        rows = _B.builds_for(db, limit=1)
+        if not rows:
+            return json.dumps({"error": "no recorded builds"})
+        build_id = rows[0]["id"]
+    try:
+        return json.dumps(await _MB.state_with_parks(db, root, _build, build_id), default=str)
+    except _MB.BuildRefusal as refusal:
+        return json.dumps(refusal.to_json())
+
+
+@server.tool()
+async def resume_build(
+    build_id: str,
+    action: str = "approve",
+    feedback: str = "",
+    rtl_fix_description: str = "",
+    rationale: str = "",
+    interrupt_id: str = "",
+) -> str:
+    """Answer a build's park with ONE action per its ``supported_actions``
+    (``approve`` / ``revise`` for the uArch review; ``retry`` / ``fix_rtl`` /
+    ``fix_tb`` / ``skip`` / ``abort`` for failures). The build's thread is
+    selected from its recorded identity, its recorded inputs are re-validated
+    against the live project (``BUILD_STALE`` otherwise), and only then is
+    the checkpoint read."""
+    from orchestrator import module_build as _MB
+    from orchestrator.state_store.project_db import open_project as _open_project
+    root = _project_root()
+    try:
+        out = await _MB.resume_build(
+            _open_project(root), root, _build, build_id, action=action, busy=[_pipeline, _backend],
+            feedback=feedback, rtl_fix_description=rtl_fix_description, rationale=rationale,
+            interrupt_id=interrupt_id or None, actor="mcp",
+            apply_env=lambda: _apply_persisted_env_best_effort("resume_build"))
+    except _MB.BuildRefusal as refusal:
+        return json.dumps(refusal.to_json())
+    asyncio.create_task(_watch_build(build_id))
+    return json.dumps(out, default=str)
+
+
+@server.tool()
+async def abort_build(build_id: str, reason: str = "") -> str:
+    """Mark a build that is not running ``aborted`` (history kept, nothing
+    published) so its module can be built again. A running build must be
+    paused first."""
+    from orchestrator import module_build as _MB
+    from orchestrator.state_store.project_db import open_project as _open_project
+    try:
+        return json.dumps(await _MB.abort_build(_open_project(_project_root()), _build, build_id, reason=reason,
+                                                actor="mcp"))
+    except _MB.BuildRefusal as refusal:
+        return json.dumps(refusal.to_json())
 
 async def _merge_block_into_pipeline_checkpoint(block_result: dict) -> bool:
     """Merge a block result back into the pipeline checkpoint's completed_blocks.
@@ -2881,9 +2844,11 @@ async def _merge_step_result_into_pipeline_checkpoint(
             prior = {}
 
     entry = {**prior, "name": block_name, **facts}
-    entry["success"] = bool(prior.get("success")) or (
-        bool(entry.get("sim_passed")) and bool(entry.get("synth_success"))
-    )
+    # A step's facts never make a block succeed: success is the graph's own
+    # ``block_done`` publication of a recorded build (the entry's build_id),
+    # which ``pipeline_complete`` verifies as a receipt. A prior success is
+    # kept as recorded; a diagnostic step layers facts on it, nothing more.
+    entry["success"] = bool(prior.get("success"))
     return await _merge_block_into_pipeline_checkpoint(entry)
 
 
@@ -3156,6 +3121,7 @@ async def run_step(
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+@_serialized_tool("launch_backend", as_dict=True, graph="backend")
 async def launch_backend(
     max_attempts: int = 3,
     target_clock_mhz: float = 50.0,
@@ -3181,6 +3147,9 @@ async def launch_backend(
             "thread_id": _backend.thread_id,
             "status": _backend.status,
         }
+    _busy = _build_running_refusal("launch_backend")
+    if _busy:
+        return json.loads(_busy)
 
     await _backend.ensure_graph()
 
@@ -3489,6 +3458,7 @@ async def get_backend_state() -> str:
 
 
 @server.tool()
+@_serialized_tool("resume_backend", graph="backend")
 async def resume_backend(
     action: str,
     constraint: str = "",
@@ -3506,6 +3476,9 @@ async def resume_backend(
         return json.dumps({
             "error": f"Invalid action: {action}. Must be one of: {sorted(valid_actions)}",
         })
+    _busy = _build_running_refusal("resume_backend")
+    if _busy:
+        return _busy
 
     if _backend.status not in ("interrupted", "paused"):
         # Self-heal: check checkpoint for pending interrupts.  A fresh MCP
@@ -3609,18 +3582,7 @@ async def pause_backend() -> str:
             "error": f"Cannot pause: backend status is '{_backend.status}'",
         })
 
-    # Kill any stuck CLI subprocesses first so the task can actually cancel
-    from orchestrator.langchain.agents.coresmith_llm import kill_active_cli_processes
-    kill_active_cli_processes()
-
-    if _backend.task and not _backend.task.done():
-        _backend.task.cancel()
-        try:
-            await _backend.task
-        except asyncio.CancelledError:
-            pass
-
-    _backend.status = "paused"
+    await _backend.safe_pause()
 
     await _backend.ensure_graph()
     config = {"configurable": {"thread_id": _backend.thread_id}}
@@ -5194,73 +5156,27 @@ async def mark_block_passed(
     gate_count: int = 0,
     chip_area_um2: float = 0.0,
 ) -> str:
-    """Register a manual verification result in the pipeline checkpoint.
+    """REMOVED: a manual completion override is not a build.
 
-    Injects a success entry for the named block into the pipeline's
-    completed_blocks list. Useful when the outer agent has manually
-    verified RTL (e.g., via run_step) and wants the pipeline_complete_node
-    to see the block as passing.
-
-    Note: the pipeline_complete_node deduplicates by block name (keeps
-    last entry), so this overrides any previous failure for the same block.
-
-    Args:
-        block_name: Name of the block to mark as passed.
-        gate_count: Gate count from synthesis (informational, default 0).
-        chip_area_um2: Chip area from synthesis in um^2 (default 0.0).
+    This tool used to inject a success entry into the pipeline checkpoint so
+    ``pipeline_complete`` would count a hand-verified block as passed. Block
+    completion is now the graph's own publication of a recorded build, and
+    ``pipeline_complete`` verifies every success against that receipt, so an
+    injected entry could never count. The supported path for an
+    implementation verified by hand is ``restart_block`` / ``coresmith build
+    module <block> --seed-rtl <file>``: the on-disk RTL runs through lint, DV,
+    coverage and synthesis without regeneration and is published with its
+    build id.
     """
-    if not _pipeline.thread_id or not _pipeline.graph:
-        return json.dumps({
-            "error": "No pipeline has been run yet.",
-            "hint": "Call start_pipeline() first.",
-        })
-
-    try:
-        await _pipeline.ensure_graph()
-        config = {"configurable": {"thread_id": _pipeline.thread_id}}
-        snap = await _pipeline.graph.aget_state(config)
-        if not snap or not snap.values:
-            return json.dumps({
-                "error": "Pipeline checkpoint not found.",
-                "hint": "The pipeline may not have started or was reset.",
-            })
-
-        import time as _time
-        entry = {
-            "name": block_name,
-            "success": True,
-            "gate_count": gate_count,
-            "chip_area_um2": chip_area_um2,
-            "sim_passed": True,
-            "synth_success": True,
-            "attempts": 0,
-            "skipped": False,
-            "aborted": False,
-            "escalated": False,
-            "error": "",
-            "marked_manually": True,
-            "marked_at": _time.time(),
-        }
-
-        # as_node must name a node of the PARENT orchestrator graph --
-        # "block_done" only exists in the block subgraph, so LangGraph rejected
-        # it with InvalidUpdateError and the override never landed.
-        await _pipeline.graph.aupdate_state(
-            config,
-            {"completed_blocks": [entry]},
-            as_node="process_block",
-        )
-
-        return json.dumps({
-            "status": "ok",
-            "block_name": block_name,
-            "message": f"Block '{block_name}' marked as passed in pipeline checkpoint.",
-        })
-    except Exception as e:
-        return json.dumps({
-            "error": f"Failed to mark block: {e}",
-            "hint": "Check that the pipeline checkpoint DB exists.",
-        })
+    return json.dumps({
+        "error": "MANUAL_COMPLETION_REMOVED",
+        "message": f"mark_block_passed cannot register '{block_name}' as passed: block completion is the graph's "
+                   "publication of a recorded build, and pipeline_complete verifies every success against that "
+                   "receipt",
+        "hint": "restart_block(block_name) or `coresmith build module <block> --seed-rtl <file>` builds the on-disk "
+                "implementation through the module graph without regeneration",
+        "ignored": {"gate_count": gate_count, "chip_area_um2": chip_area_um2},
+    })
 
 
 @server.tool()
@@ -5319,6 +5235,9 @@ async def get_node_prompt(graph_name: str, node_id: str) -> str:
 if __name__ == "__main__":
     import asyncio
     import atexit
+
+    # this process runs the EDA tools of the builds it launches
+    os.environ["CORESMITH_TOOL_AUTHORITY"] = "1"
 
     async def _shutdown():
         await _architecture.cleanup()

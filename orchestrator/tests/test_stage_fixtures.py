@@ -169,6 +169,8 @@ async def _make_post_uarch_fixture(tmp_path, monkeypatch, thread_id):
     import orchestrator.langgraph.pipeline_helpers as ph
     monkeypatch.setattr(ph, "PROJECT_ROOT", record_root)
     monkeypatch.setattr(pg, "PROJECT_ROOT", record_root)
+    # Architecture authoring happens before the recorded module build.
+    await ph.generate_uarch_spec(_BLOCK)
     await _drive_to_post_uarch(record_root, thread_id)
     snap_mod = _load_snapshot_module()
     fixture_dir = tmp_path / f"fx_{thread_id}"

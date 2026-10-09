@@ -35,10 +35,3 @@ def test_llm_testbench_still_fails_hard(tmp_path, monkeypatch):
     for record in (None, {"deterministic_bfm": False}, {"deterministic_bfm": True}):
         v = pg._maxgeo_gate_verdict(str(root), str(tb), record)
         assert v is not None and not v.get("advisory") and "reason" in v, record
-
-
-def test_engine_checkout_guard_is_switchable(monkeypatch):
-    monkeypatch.setenv("CORESMITH_ENGINE_READONLY", "0")
-    assert pg._engine_checkout_guard() == []
-    monkeypatch.setenv("CORESMITH_ENGINE_READONLY", "1")
-    assert isinstance(pg._engine_checkout_guard(), list)   # detection only, never raises

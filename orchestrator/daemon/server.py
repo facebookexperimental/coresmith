@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -66,8 +67,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from orchestrator import module_build as MB
 from orchestrator.graph_lifecycle import GraphLifecycle
 from orchestrator.run_env import apply_persisted_env, format_override_notice
+from orchestrator.state_store import builds as B
 
 log = logging.getLogger("coresmithd")
 log.setLevel(logging.INFO)
@@ -311,6 +314,58 @@ async def _driver_liveness_watch() -> None:
             continue
 
 
+def _backend_lifecycle():
+    """The backend GraphLifecycle when a backend run can hold a park, else
+    None. The MCP module (heavy) is only imported when it is already loaded
+    or the interrupts table records a pending backend park (a daemon restart
+    while the backend was parked)."""
+    mod = sys.modules.get("orchestrator.mcp_server")
+    if mod is None:
+        try:
+            pending = _project_db().interrupts(status="pending", graph="backend")
+        except Exception:  # noqa: BLE001
+            pending = []
+        if not pending:
+            return None
+        try:
+            mod = _backend_handle()
+        except Exception:  # noqa: BLE001
+            return None
+    handle = getattr(mod, "_backend", None)
+    if handle is None or not getattr(handle, "thread_id", ""):
+        return None
+    root = getattr(handle, "project_root", "") or ""
+    if root and Path(str(root)).resolve() != Path(_PROJECT_ROOT).resolve():
+        return None                     # another project's backend: never ours to answer
+    return handle
+
+
+async def _live_backend_parks() -> list[dict]:
+    """Live parks of the backend graph (``graph: backend``):
+    ``[{lg_id, interrupt_id, payload, graph}]`` (what ``backend resume``
+    validates an answer against)."""
+    handle = _backend_lifecycle()
+    if handle is None:
+        return []
+    if handle.task is not None and not handle.task.done():
+        return []                       # running: nothing is parked
+    try:
+        await handle.ensure_graph()
+        snap = await handle.graph.aget_state({"configurable": {"thread_id": handle.thread_id}})
+    except Exception:  # noqa: BLE001
+        return []
+    parks, pairs = [], []
+    for t in (snap.tasks if snap and snap.tasks else []):
+        for i in t.interrupts:
+            val = i.value if isinstance(i.value, dict) else {"value": i.value}
+            pairs.append((i.id, i.value))
+            parks.append({"lg_id": i.id, "interrupt_id": str(val.get("interrupt_id") or ""),
+                          "payload": {**val, "graph": "backend"}, "graph": "backend"})
+    _bind_interrupt_rows(pairs)
+    _note_interrupts_seen({i for i, _ in pairs})
+    return parks
+
+
 # ---------------------------------------------------------------------------
 # Frontend -> backend handoff (opt-in): CORESMITH_AUTO_BACKEND=1
 # ---------------------------------------------------------------------------
@@ -444,6 +499,17 @@ _architecture = GraphLifecycle(
     project_root=_PROJECT_ROOT,
 )
 
+# One recorded module build at a time: the SAME block subgraph the pipeline
+# fans out, compiled on its own and driven on a persistent checkpoint whose
+# thread is the build id (``coresmith build module``; see module_build.py).
+_build = GraphLifecycle(
+    name="build",
+    checkpoint_db=MB.checkpoint_db_path(_PROJECT_ROOT),
+    builder_fn_path="orchestrator.langgraph.pipeline_graph",
+    builder_fn_name="build_block_graph",
+    project_root=_PROJECT_ROOT,
+)
+
 
 # ---------------------------------------------------------------------------
 # Persisted run env (<project_root>/.coresmith/env)
@@ -455,6 +521,26 @@ _architecture = GraphLifecycle(
 # still unset in the graph until someone bounced the daemon. Re-apply the file
 # before launching graph work, with the SAME persisted-wins semantics the CLI
 # uses (one implementation: orchestrator.run_env).
+
+# The CLI role scopes a SHELL (architect / worker / watchdog). The daemon is
+# the engine: it must never run -- or hand its children -- a role, or a daemon
+# started from a watchdog shell refuses its own synthesis agent
+# (``ROLE_FORBIDDEN watchdog may not run tool``, MCU+FFT run 3).
+_DAEMON_SCRUBBED_ENV = ("CORESMITH_ROLE", "CORESMITH_ACTOR")
+
+
+def _clear_role_env(where: str) -> list[str]:
+    """Drop ``CORESMITH_ROLE`` / ``CORESMITH_ACTOR`` from this process (and so
+    from every child it spawns). ``CORESMITH_DAEMON_KEEP_ROLE=1`` keeps them
+    (old behaviour)."""
+    if os.environ.get("CORESMITH_DAEMON_KEEP_ROLE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return []
+    dropped = [k for k in _DAEMON_SCRUBBED_ENV if os.environ.pop(k, None) is not None]
+    if dropped:
+        _daemon_log("warning", "%s: cleared %s for the daemon and its children (a CLI role scopes a "
+                    "shell, never the engine)", where, dropped)
+    return dropped
+
 
 def _apply_run_env(where: str) -> list[str]:
     """Re-read ``.coresmith/env`` into ``os.environ``; return the changed keys.
@@ -468,7 +554,9 @@ def _apply_run_env(where: str) -> list[str]:
     except Exception:  # noqa: BLE001 -- an env refresh must never fail a request
         _daemon_log("warning", "%s: persisted env refresh failed", where,
                     exc_info=True)
+        _clear_role_env(where)
         return []
+    _clear_role_env(where)
     if changes:
         # _daemon_log, not log: under uvicorn the `coresmithd` logger has no
         # handler, and a silent env swap is exactly what this fix is about.
@@ -504,6 +592,11 @@ class ResumeRequest(BaseModel):
     # flight the answer is queued in the interrupts table and applied at the
     # next superstep boundary (202) instead of being rejected (409).
     interrupt_id: str | None = None
+    # Who answered (``cli`` by default; the Architect may pass any identity):
+    # stored in ``decisions.actor`` and ``interrupts.resolved_by``.
+    actor: str = "cli"
+    # A revise's target blocks (the graph reads ``affected_blocks``).
+    affected_blocks: list[str] | None = None
 
 
 class RulingRequest(BaseModel):
@@ -529,6 +622,32 @@ class RestartBlockRequest(BaseModel):
 class RestartNodeRequest(BaseModel):
     node: str
     refresh_sidecars: bool = False
+
+
+class BuildModuleRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    module: str
+    seed_rtl: str = ""            # an existing source of the bound target: the starting implementation
+    max_attempts: int = 3         # implementation attempts: misses/failures go back to the worker
+    target_clock_mhz: float | None = None
+    uarch_feedback: str = ""      # legacy clients receive SPEC_REVISION_REQUIRED
+
+
+class BuildResumeRequest(BaseModel):
+    build_id: str
+    action: str = "approve"
+    feedback: str = ""
+    rtl_fix_description: str = ""
+    rationale: str = ""
+    interrupt_id: str | None = None
+    actor: str = "cli"
+
+
+class BuildAbortRequest(BaseModel):
+    build_id: str
+    reason: str = ""
+    actor: str = "cli"
 
 
 class ReviseBlocksRequest(BaseModel):
@@ -564,6 +683,10 @@ class BackendStartRequest(BaseModel):
 
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    # This process runs the EDA tools: it identifies them by its own
+    # resolution and records the resolved paths every other process (the
+    # Architect's CLI) identifies a build's tools by (state_store/builds.py).
+    os.environ["CORESMITH_TOOL_AUTHORITY"] = "1"
     # Defect 3 (rung1): the import-time _apply_profile() above logs its
     # profile-seed line BEFORE uvicorn configures logging, so it goes nowhere.
     # Re-emit it now (startup runs after uvicorn's logging is up) through the
@@ -587,10 +710,22 @@ async def _lifespan(_app: FastAPI):
     # Frontend -> backend handoff. Returns immediately when the opt-in is off.
     _auto_backend_task = asyncio.create_task(_auto_backend_watch())
     _lease_task = asyncio.create_task(_daemon_lease_renew())
+    # No Architect is launched or resumed by the daemon: parks wait for the
+    # Architect's own `coresmith resume`.
+    from orchestrator.daemon.supervisor import watch
+    _supervisor_task = asyncio.create_task(watch(sys.modules[__name__]))
+    # Recorded builds the previous process left non-terminal are re-read from
+    # their persistent checkpoints (parked / finished while nobody watched).
+    try:
+        recovered = await MB.recover_builds(_project_db(), _PROJECT_ROOT, _build)
+        if recovered:
+            _daemon_log("warning", "build recovery: %s", recovered)
+    except Exception:  # noqa: BLE001 - recovery must never block startup
+        _daemon_log("warning", "build recovery failed", exc_info=True)
     try:
         yield
     finally:
-        for _t in (_watch_task, _auto_backend_task, _lease_task):
+        for _t in (_watch_task, _auto_backend_task, _lease_task, _supervisor_task):
             _t.cancel()
             with contextlib.suppress(Exception):
                 await _t
@@ -599,14 +734,209 @@ async def _lifespan(_app: FastAPI):
 app = FastAPI(title="coresmithd", version="0.1", lifespan=_lifespan)
 
 
+@app.get("/supervisor/status")
+async def supervisor_status():
+    return _project_db().get_flag("supervisor_status") or {"state": "disabled"}
+
+
+@app.post("/supervisor/retry")
+async def supervisor_retry():
+    """Explicit infrastructure retry after the operator repairs the cause."""
+    db = _project_db()
+    db.clear_flag("agent_failure")
+    root = Path(_PROJECT_ROOT) / ".coresmith"
+    for path in root.glob("clusters/*/status.json"):
+        if path.exists():
+            status = json.loads(path.read_text())
+            if status.get("state") in ("provider_blocked", "tool_failed"):
+                status.update(state="retry_requested", previous_failure=status.get("stop_reason"))
+                path.write_text(json.dumps(status, indent=2))
+    pipeline = await run_state()
+    if pipeline.get("values_empty"):
+        db.clear_flag("supervisor_launch")
+    return await supervisor_check()
+
+
+@app.post("/supervisor/check")
+async def supervisor_check():
+    from orchestrator.daemon.supervisor import tick
+    return await tick(sys.modules[__name__])
+
+
 @app.get("/healthz")
 async def healthz():
     return {
         "ok": True,
         "project_root": _PROJECT_ROOT,
         "status": _pipeline.status,
+        "build_status": _build.status,
+        "build_thread_id": _build.thread_id if _build.thread_id != "build" else None,
         "pid": os.getpid(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Recorded module builds (coresmith build module|state|resume|pause)
+# ---------------------------------------------------------------------------
+
+def _refusal_response(refusal: MB.BuildRefusal) -> JSONResponse:
+    return JSONResponse(status_code=refusal.http_status, content=refusal.to_json())
+
+
+def _backend_lifecycle():
+    """The backend GraphLifecycle when the MCP module (which owns it) has
+    been imported into this process; None otherwise (no backend can be
+    running here without it)."""
+    mod = sys.modules.get("orchestrator.mcp_server")
+    return getattr(mod, "_backend", None) if mod is not None else None
+
+
+def _busy_lifecycles() -> list:
+    """The graphs a module build must not interleave with."""
+    out = [_pipeline]
+    backend = _backend_lifecycle()
+    if backend is not None:
+        out.append(backend)
+    return out
+
+
+def _build_running() -> bool:
+    return _build.task is not None and not _build.task.done()
+
+
+def _refuse_if_build_running(what: str) -> None:
+    """The converse guard: the pipeline and the backend never start, resume
+    or re-enter while a module build is driving the workspace."""
+    if _build_running():
+        raise HTTPException(409, f"a module build is running (thread {_build.thread_id}); {what} shares the "
+                                 "workspace -- wait for it to park or coresmith build pause")
+
+
+def _serialized(what: str, graph: str | None = None):
+    """Run a launching route inside the one launch section every transport
+    shares (``module_build.launch_section``): the operation lock in this
+    process and the ``graph_launch`` lease across processes, so its conflict
+    checks and the start they guard are one critical section with every
+    build start/resume and every other launch; a graph running in another
+    process refuses it. The section is re-entrant for the same task, so a
+    route that delegates to the MCP implementation (the backend routes) is
+    one operation. When the route started ``graph`` (``pipeline`` /
+    ``backend``), its lifecycle's task holds the ``graph:<graph>`` lease
+    until it ends, so other processes see it."""
+    def deco(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            db = _project_db()
+            try:
+                async with MB.launch_section(db, what=what):
+                    if not graph:
+                        return await fn(*args, **kwargs)
+                    getter = (lambda: _pipeline) if graph == "pipeline" else _backend_lifecycle
+                    async with MB.graph_ownership(db, graph, getter, meta={"what": what}):
+                        return await fn(*args, **kwargs)
+            except MB.BuildRefusal as refusal:
+                return _refusal_response(refusal)
+        return wrapper
+    return deco
+
+
+async def _watch_build(build_id: str) -> None:
+    """When the build task ends, classify the non-success terminal states
+    (``block_done_node`` itself commits ``completed``) and merge a completed
+    build into the pipeline checkpoint."""
+    outcome = await MB.watch_build(_project_db(), _PROJECT_ROOT, _build, build_id, pipeline=_pipeline)
+    _daemon_log("info", "build %s -> %s", build_id, outcome)
+
+
+async def _start_module_build(req: BuildModuleRequest, *, entry: str):
+    """HTTP transport of :func:`orchestrator.module_build.start_build`."""
+    try:
+        out = await MB.start_build(_project_db(), _PROJECT_ROOT, _build, module=req.module, entry=entry,
+                                   busy=_busy_lifecycles(), seed_rtl=req.seed_rtl, max_attempts=req.max_attempts,
+                                   target_clock_mhz=req.target_clock_mhz, uarch_feedback=req.uarch_feedback,
+                                   apply_env=lambda: _apply_run_env("build/module"), preflight=_preflight_or_400)
+    except MB.BuildRefusal as refusal:
+        return _refusal_response(refusal)
+    asyncio.create_task(_watch_build(out["build_id"]))
+    return out
+
+
+@app.post("/build/module")
+async def build_module(req: BuildModuleRequest):
+    """``coresmith build module <name>``: one recorded build of one module
+    through the existing block subgraph on a persistent checkpoint."""
+    return await _start_module_build(req, entry="build_module")
+
+
+@app.get("/build/state")
+async def build_state(build_id: str = ""):
+    db = _project_db()
+    if not build_id:
+        rows = B.builds_for(db, limit=1)
+        if not rows:
+            raise HTTPException(404, "no recorded builds")
+        build_id = rows[0]["id"]
+    try:
+        out = await MB.state_with_parks(db, _PROJECT_ROOT, _build, build_id)
+    except MB.BuildRefusal as refusal:
+        return _refusal_response(refusal)
+    with contextlib.suppress(Exception):
+        _bind_interrupt_rows([(p["lg_id"], p["payload"]) for p in out["interrupts"]])
+        _note_interrupts_seen({p["lg_id"] for p in out["interrupts"]})
+    return out
+
+
+@app.post("/build/resume")
+async def build_resume(req: BuildResumeRequest):
+    """Answer a build's park with ONE action (``approve`` for the uArch review,
+    ``retry`` / ``fix_rtl`` / ``fix_tb`` / ``skip`` / ``abort`` ... per the park's
+    ``supported_actions``). HTTP transport of
+    :func:`orchestrator.module_build.resume_build`: the build's thread is
+    selected from its recorded identity, its recorded inputs are re-validated
+    against the live project, and only then is the checkpoint read."""
+    try:
+        out = await MB.resume_build(
+            _project_db(), _PROJECT_ROOT, _build, req.build_id, action=req.action, busy=_busy_lifecycles(),
+            feedback=req.feedback, rtl_fix_description=req.rtl_fix_description, rationale=req.rationale,
+            interrupt_id=req.interrupt_id, actor=req.actor or "cli",
+            apply_env=lambda: _apply_run_env("build/resume"),
+            on_parks=lambda parks: _bind_interrupt_rows([(p["lg_id"], p["payload"]) for p in parks]))
+    except MB.BuildRefusal as refusal:
+        if refusal.code == "ACTION_UNSUPPORTED":
+            raise HTTPException(400, f"{refusal.text}; allowed: {refusal.extra.get('allowed')}")
+        if refusal.code in ("UNKNOWN_BUILD", "NO_SUCH_INTERRUPT"):
+            raise HTTPException(404, refusal.text)
+        if refusal.code in ("BUILD_TERMINAL", "BUILD_RUNNING", "PIPELINE_RUNNING", "BACKEND_RUNNING",
+                            "NOTHING_TO_RESUME", "NOT_A_MODULE_BUILD"):
+            raise HTTPException(409, refusal.text)
+        return _refusal_response(refusal)
+    if out.get("answered"):
+        _record_decisions(ResumeRequest(action=req.action, feedback=req.feedback, rationale=req.rationale,
+                                        actor=req.actor or "cli"), out["answered"])
+    asyncio.create_task(_watch_build(req.build_id))
+    return out
+
+
+@app.post("/build/pause")
+async def build_pause():
+    paused = await _build.safe_pause()
+    if paused:
+        with contextlib.suppress(Exception):
+            for row in B.active_builds(_project_db()):
+                if row["thread_id"] == _build.thread_id:
+                    B.mark_status(_project_db(), row["id"], "parked", error="paused by the operator", terminal=False)
+    return {"paused": paused, "thread_id": _build.thread_id}
+
+
+@app.post("/build/abort")
+async def build_abort(req: BuildAbortRequest):
+    """Mark a build that is not running ``aborted`` (history kept, nothing
+    published) so its module can be built again; a running build is paused
+    first."""
+    try:
+        return await MB.abort_build(_project_db(), _build, req.build_id, reason=req.reason, actor=req.actor or "cli")
+    except MB.BuildRefusal as refusal:
+        return _refusal_response(refusal)
 
 
 @app.get("/run/state")
@@ -619,12 +949,15 @@ async def run_state():
 
 
 @app.post("/run/start")
+@_serialized("run start", graph="pipeline")
 async def run_start(req: StartRequest):
     global _last_resume_ts
-    _last_resume_ts = time.time()  # Section 7b: run start resets the stall clock
-    _consumed_interrupt_ids.clear()   # a fresh run answers nothing from the old
+    # The stall clock and the consumed-interrupt set are reset only once every
+    # refusal below has passed (a refused request starts nothing, so it must
+    # not reset the state of the run that is actually there).
     if _pipeline.task is not None and not _pipeline.task.done():
         raise HTTPException(409, "pipeline already running; call /run/pause first")
+    _refuse_if_build_running("run start")
 
     # Guard: a `run start` on an EXISTING run (paused / parked at an interrupt /
     # completed) would SILENTLY discard it via reset_for_new_run() -- wiping all
@@ -656,6 +989,22 @@ async def run_start(req: StartRequest):
     # the work this request is about to launch, not only to the next daemon.
     env_updated = _apply_run_env("run/start")
 
+    # The Architect's stage machine must have reached ``blocks`` (every module
+    # ready: spec, target, built reference model with its declared checks,
+    # worker binding) with every earlier stage still holding, and cluster
+    # fan-out is refused. Checked before any tool preflight, baseline capture
+    # or state reset. There is no empty-stage exemption and ``force`` never
+    # bypasses it: ``force`` only means "replace the existing run". A DB that
+    # cannot be read is a refusal, never a pass.
+    try:
+        refusal = MB.pipeline_start_refusal(_project_db(), _PROJECT_ROOT)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(status_code=409, content={
+            "error": "STAGE_DB_UNREADABLE", "message": f"the project database could not be read: {exc}",
+            "hint": "repair .coresmith/project.sqlite; the stage machine is not bypassed"})
+    if refusal is not None:
+        return _refusal_response(refusal)
+
     block_queue = _load_block_queue(req.blocks_file)
     if not block_queue:
         raise HTTPException(
@@ -665,7 +1014,14 @@ async def run_start(req: StartRequest):
         )
 
     _preflight_or_400()
+    refused = _requirements_gate_response(_PROJECT_ROOT)
+    if refused is not None:
+        return refused
     arch_warnings = _check_architecture_artifacts(_PROJECT_ROOT)
+
+    # Every refusal has passed: this request starts a run.
+    _last_resume_ts = time.time()  # Section 7b: run start resets the stall clock
+    _consumed_interrupt_ids.clear()   # a fresh run answers nothing from the old
 
     # B3: persist the resolved block queue + initialize the scoreboard schema +
     # snapshot the oracle manifest so the harness (`coresmith verify ...`) can
@@ -689,12 +1045,17 @@ async def run_start(req: StartRequest):
     # C1: every run-scoped table (run_flags, decisions, interrupts) keys on this.
     with contextlib.suppress(Exception):
         _project_db().begin_run()
+    # The discarded run's in-flight builds (rows the pipeline graph dispatched)
+    # can never complete once its checkpoint is wiped: they are aborted, with
+    # history, so their modules are buildable again.
+    with contextlib.suppress(Exception):
+        aborted = MB.abort_pipeline_builds(_project_db(), reason="the pipeline run was replaced (run start --force)")
+        if aborted:
+            _daemon_log("warning", "run start: aborted in-flight pipeline builds %s", aborted)
 
     await _pipeline.reset_for_new_run()
 
-    events_path = Path(_PROJECT_ROOT) / ".coresmith" / "pipeline_events.jsonl"
-    events_path.parent.mkdir(parents=True, exist_ok=True)
-    events_path.write_text("")
+    _rotate_events(Path(_PROJECT_ROOT) / ".coresmith" / "pipeline_events.jsonl")
 
     from orchestrator.langgraph.pipeline_helpers import resolve_run_clock_mhz
     initial_state = {
@@ -841,7 +1202,41 @@ async def run_interrupts(status: str | None = None):
     return {"interrupts": rows, "count": len(rows)}
 
 
+def _resume_value(req: ResumeRequest) -> dict:
+    """The resolution a resume hands the graph. ``reasoning`` mirrors the
+    rationale (the revise-churn check reads it); ``actor`` says who answered."""
+    val = {
+        "action": req.action,
+        "feedback": req.feedback,
+        "rtl_fix_description": req.rtl_fix_description,
+        "rationale": req.rationale,
+        "reasoning": req.rationale,
+        "block_actions": req.block_actions or {},
+        "actor": req.actor or "cli",
+    }
+    if req.affected_blocks:
+        val["affected_blocks"] = list(req.affected_blocks)
+    return val
+
+
+def _record_decisions(req: ResumeRequest, answered: list[dict]) -> None:
+    """One ``decisions`` row per answered park, with the actor. Best-effort."""
+    try:
+        db = _project_db()
+        for val in answered:
+            block = val.get("block_name") or val.get("block") or ""
+            action = (req.block_actions or {}).get(block, req.action) if block else req.action
+            db.add_decision(action=action, interrupt_type=str(val.get("type") or ""), block=block,
+                            reasoning=req.rationale or req.feedback or "",
+                            interrupt_id=str(val.get("interrupt_id") or ""), actor=req.actor or "cli")
+        with contextlib.suppress(OSError):
+            db.export_decisions_view()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("decision ledger unavailable (%s)", exc)
+
+
 @app.post("/run/resume")
+@_serialized("run resume", graph="pipeline")
 async def run_resume(req: ResumeRequest):
     global _last_resume_ts, _consumed_interrupt_ids
     _last_resume_ts = time.time()  # Section 7b: the driver is alive
@@ -851,6 +1246,7 @@ async def run_resume(req: ResumeRequest):
         _mk = Path(_PROJECT_ROOT) / "STALLED_INTERRUPT"
         if _mk.exists():
             _mk.unlink()
+    _refuse_if_build_running("run resume")
     await _pipeline.ensure_graph()
     if _pipeline.task is not None and not _pipeline.task.done():
         if req.interrupt_id:
@@ -859,18 +1255,28 @@ async def run_resume(req: ResumeRequest):
             # answer in the interrupts table; the branch picks it up in its
             # pre-park wait or the boundary applier in run_task resumes just
             # that branch when the step ends.
-            resolution = {
-                "action": req.action, "feedback": req.feedback,
-                "rtl_fix_description": req.rtl_fix_description,
-                "rationale": req.rationale, "block_actions": req.block_actions or {},
-            }
+            resolution = _resume_value(req)
+            try:
+                row = _project_db().interrupt(req.interrupt_id)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(500, f"interrupts table unavailable: {exc}") from exc
+            if not row or row.get("status") != "pending":
+                raise HTTPException(404, f"no pending interrupt {req.interrupt_id!r}")
+            _payload = row.get("payload") or {}
+            _meta = [(_payload.get("block", _payload.get("block_name", "")),
+                      _payload.get("supported_actions", []))]
+            _bad = _resume_action_error(req.action, req.block_actions, _meta)
+            if _bad is not None:
+                raise HTTPException(400, f"action '{_bad[1]}' not supported by the parked "
+                                         f"interrupt; allowed: {_bad[2]}")
             try:
                 ok = _project_db().resolve_interrupt(
-                    req.interrupt_id, resolution, resolved_by="resume")
+                    req.interrupt_id, resolution, resolved_by=req.actor or "cli")
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(500, f"interrupts table unavailable: {exc}") from exc
             if not ok:
                 raise HTTPException(404, f"no pending interrupt {req.interrupt_id!r}")
+            _record_decisions(req, [_payload])
             return JSONResponse(status_code=202, content={
                 "resumed": False, "queued": True, "interrupt_id": req.interrupt_id,
                 "action": req.action,
@@ -940,29 +1346,29 @@ async def run_resume(req: ResumeRequest):
             f"allowed: {_allowed}",
         )
 
-    resume_value: Any = {
-        "action": req.action,
-        "feedback": req.feedback,
-        "rtl_fix_description": req.rtl_fix_description,
-        "rationale": req.rationale,
-        "block_actions": req.block_actions or {},
-    }
+    resume_value: Any = _resume_value(req)
 
     from langgraph.types import Command
     if len(interrupts) > 1 or req.interrupt_id:
         cmd = Command(resume={iid: resume_value for iid, _ in interrupts})
     else:
         cmd = Command(resume=resume_value)
-    # C1-3: the rows behind these interrupts are answered by this resume.
+    # C1-3: the rows behind these interrupts are answered by this resume
+    # (resolved_by = the actor, then consumed), one decisions row each.
     with contextlib.suppress(Exception):
-        _project_db().consume_lg_interrupts([iid for iid, _ in interrupts])
+        _db = _project_db()
+        for _, _v in interrupts:
+            if isinstance(_v, dict) and _v.get("interrupt_id"):
+                _db.resolve_interrupt(str(_v["interrupt_id"]), resume_value,
+                                      resolved_by=req.actor or "cli")
+        _db.consume_lg_interrupts([iid for iid, _ in interrupts])
+    _record_decisions(req, [v for _, v in interrupts if isinstance(v, dict)])
 
     # D5: remember exactly which interrupts this resume answers, BEFORE the
     # graph starts running. Until it checkpoints again, aget_state still returns
     # them; without this record /run/state reports them as pending on a running
     # run and the outer agent resumes a second time.
     _consumed_interrupt_ids = {iid for iid, _ in interrupts}
-
     await _pipeline.safe_resume(cmd, graph_config)
     result = {"resumed": True, "interrupts": len(interrupts), "action": req.action}
     if env_updated:
@@ -972,35 +1378,11 @@ async def run_resume(req: ResumeRequest):
 
 @app.post("/run/pause")
 async def run_pause():
-    if _pipeline.task is None or _pipeline.task.done():
-        return {"paused": False, "reason": "no running task"}
-    # Reap any in-flight LLM CLI child (codex/claude) AND its whole process
-    # group BEFORE cancelling the task. The blocking ``Popen`` runs in a thread
-    # executor that ``task.cancel()`` cannot reach, so without this reap the
-    # orphaned codex keeps running (2nd live occurrence: it kept burning tokens
-    # after a run pause). Pausing mid-LLM-call therefore DISCARDS that call's
-    # work -- the interrupted node simply re-runs from the last checkpoint on
-    # resume (LangGraph node-boundary semantics), which is correct: a paused
-    # in-flight generation was never committed to the graph state.
-    try:
-        from orchestrator.langchain.agents.coresmith_llm import (
-            reap_active_cli_processes,
-        )
-        reaped = reap_active_cli_processes()
-        if reaped:
-            log.warning("run/pause reaped %d in-flight CLI process group(s)", reaped)
-    except Exception:
-        log.warning("run/pause: CLI reap failed", exc_info=True)
-    _pipeline.task.cancel()
-    try:
-        await _pipeline.task
-    except (asyncio.CancelledError, Exception):
-        pass
-    _pipeline.status = "paused"
-    return {"paused": True}
+    return {"paused": await _pipeline.safe_pause()}
 
 
 @app.post("/run/continue")
+@_serialized("run continue", graph="pipeline")
 async def run_continue():
     """Continue a pipeline that has next_nodes but no pending interrupt.
 
@@ -1009,6 +1391,7 @@ async def run_continue():
     """
     if _pipeline.task is not None and not _pipeline.task.done():
         raise HTTPException(409, "pipeline already running")
+    _refuse_if_build_running("run continue")
     _apply_run_env("run/continue")
     await _pipeline.ensure_graph()
     snap = await _pipeline.graph.aget_state(
@@ -1023,43 +1406,26 @@ async def run_continue():
 
 @app.post("/run/restart-block")
 async def run_restart_block(req: RestartBlockRequest):
-    """Regenerate ONE block from a specific node in its lifecycle.
-
-    The daemon previously had no way to do this. ``/run/restart-node`` forks
-    the graph but explicitly REUSES every block's on-disk RTL/TB, and
-    ``run start --force`` regenerates the whole design. So after revising a
-    uArch spec -- exactly what ``revise_interface`` and an architecture
-    revision ask for -- the only HTTP-reachable options were "change nothing"
-    or "rebuild everything", and the per-block path existed solely as an MCP
-    tool. Observed cost: a spec fix that needed two blocks rebuilt had no way
-    to be applied without discarding six good ones.
-
-    ``from_node`` is ``generate_uarch_spec`` or ``generate_rtl``. The block
-    runs in a standalone subgraph on its own thread, so the main pipeline
-    checkpoint is untouched; re-enter it afterwards with ``/run/restart-node``.
-    Requires the pipeline to be idle (pause first).
+    """Rebuild ONE block: a compatibility route onto the recorded module
+    build (``POST /build/module``). The block runs through the same block
+    subgraph on the build lifecycle's persistent checkpoint (one thread per
+    build) under the same readiness and provenance rules. ``from_node``
+    is accepted for compatibility; both entries implement the registered
+    spec unchanged. Nonempty ``uarch_feedback`` is refused: the Architect
+    must revise and register the spec before starting a new build.
+    Requires the pipeline to be idle (pause first). Re-enter the pipeline
+    afterwards with ``/run/restart-node``.
     """
-    if _pipeline.task is not None and not _pipeline.task.done():
-        raise HTTPException(409, "pipeline already running -- pause first")
-    try:
-        # Shared with the MCP tool of the same name: one implementation, two
-        # transports. It reads CORESMITH_PROJECT_ROOT, which this daemon sets.
-        from orchestrator.mcp_server import restart_block as _restart_block
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(500, f"restart_block unavailable: {exc}") from exc
-    raw = await _restart_block(
-        block_name=req.block_name,
-        from_node=req.from_node,
-        uarch_feedback=req.uarch_feedback,
-        max_attempts=req.max_attempts,
-    )
-    try:
-        return json.loads(raw) if isinstance(raw, str) else raw
-    except (ValueError, TypeError):
-        return {"result": raw}
+    if req.from_node not in ("generate_uarch_spec", "generate_rtl"):
+        raise HTTPException(400, f"invalid from_node {req.from_node!r}: generate_uarch_spec | generate_rtl")
+    feedback = req.uarch_feedback if req.from_node == "generate_uarch_spec" else ""
+    return await _start_module_build(
+        BuildModuleRequest(module=req.block_name, max_attempts=req.max_attempts, uarch_feedback=feedback),
+        entry="restart_block")
 
 
 @app.post("/run/restart-node")
+@_serialized("run restart-node", graph="pipeline")
 async def run_restart_node(req: RestartNodeRequest):
     """Re-run the pipeline from the checkpoint where ``node`` is next, reusing
     every block's on-disk RTL/TB (engine follow-up #8/#10).
@@ -1072,6 +1438,7 @@ async def run_restart_node(req: RestartNodeRequest):
     """
     if _pipeline.task is not None and not _pipeline.task.done():
         raise HTTPException(409, "pipeline already running -- pause first")
+    _refuse_if_build_running("run restart-node")
     # Re-entering a node runs it with THIS process's env; the operator's
     # mid-run .coresmith/env edits must be live for that re-run (bug C).
     env_updated = _apply_run_env("run/restart-node")
@@ -1155,6 +1522,7 @@ def _backend_handle():
 
 
 @app.post("/backend/start")
+@_serialized("backend start", graph="backend")
 async def backend_start(req: BackendStartRequest):
     """Enter the backend: flat top synthesis + the chip_top gate-sim verdict.
 
@@ -1163,6 +1531,15 @@ async def backend_start(req: BackendStartRequest):
     this before the frontend finished returns the missing-artifact list rather
     than starting a doomed run.
     """
+    # Backend preflight: P&R needs a REACHABLE OpenROAD (the default nix
+    # wrapper fails with `exec: nix: not found` on a host without nix); DRC/LVS
+    # need klayout/magic/netgen (warnings). A --full start without OpenROAD is
+    # refused up front (412 + remedy) instead of parking hours later.
+    _refuse_if_build_running("backend start")
+    pre = _backend_preflight()
+    if req.full and not pre.get("ok", True):
+        raise HTTPException(412, {"error": "backend_preflight_failed", "details": pre.get("errors", []),
+                                  "warnings": pre.get("warnings", [])})
     try:
         _mcp = _backend_handle()
     except Exception as exc:  # noqa: BLE001
@@ -1174,7 +1551,23 @@ async def backend_start(req: BackendStartRequest):
     )
     if result.get("error"):
         raise HTTPException(409, json.dumps(result))
+    notes = list(pre.get("warnings") or []) + ([] if req.full else list(pre.get("errors") or []))
+    if pre.get("openroad_how") == "native":
+        notes.append(f"OpenROAD: nix wrapper without nix -> native {pre.get('openroad')}")
+    if notes and isinstance(result, dict):
+        result = {**result, "preflight_warnings": notes}
     return result
+
+
+def _backend_preflight() -> dict:
+    """``sky130.backend_tools_preflight``; probe failures fail closed."""
+    try:
+        from orchestrator.pdk.deployments.sky130 import backend_tools_preflight
+        return backend_tools_preflight()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False,
+                "errors": [f"backend preflight unavailable: {type(exc).__name__}: {exc}"],
+                "warnings": []}
 
 
 @app.get("/backend/state")
@@ -1210,11 +1603,24 @@ async def backend_state():
 
 
 class BackendResumeRequest(BaseModel):
-    action: str = "retry"          # retry | skip | abort
+    action: str = "retry"          # retry | skip | abort | accept
     constraint: str = ""
+    feedback: str = ""             # alias of constraint (the CLI's --feedback)
+    rationale: str = ""
+    actor: str = "cli"
+    interrupt_id: str = ""
+
+
+async def _backend_park_meta() -> list[dict]:
+    """The backend's live parks (payloads), for validating a backend resume."""
+    try:
+        return [p["payload"] for p in await _live_backend_parks()]
+    except Exception:  # noqa: BLE001
+        return []
 
 
 @app.post("/backend/resume")
+@_serialized("backend resume", graph="backend")
 async def backend_resume(req: BackendResumeRequest):
     """Resume a parked backend interrupt (DRC/LVS/signoff ask_human).
 
@@ -1225,17 +1631,41 @@ async def backend_resume(req: BackendResumeRequest):
     short-lived MCP process, which silently lost the resume. Two campaigns
     were run-blocked on this: backend start --full can only replay into the
     same park, so a DRC/LVS-parked backend was terminal from the outside."""
+    _refuse_if_build_running("backend resume")
     try:
         _mcp = _backend_handle()
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"backend resume unavailable: {exc}") from exc
-    raw = await _mcp.resume_backend(action=req.action, constraint=req.constraint)
+    # Validate against the parked payload(s) and record who answered
+    # (decisions, interrupts.resolved_by) -- the same contract /run/resume has.
+    parked = await _backend_park_meta()
+    if req.interrupt_id and parked:
+        parked = [v for v in parked if v.get("interrupt_id") == req.interrupt_id]
+        if not parked:
+            raise HTTPException(404, f"no parked backend interrupt {req.interrupt_id!r}")
+    meta = [(v.get("block_name", v.get("block", "")), v.get("supported_actions", [])) for v in parked]
+    _bad = _resume_action_error(req.action, None, meta)
+    if _bad is not None:
+        raise HTTPException(400, f"action '{_bad[1]}' not supported by the parked backend "
+                                 f"interrupt; allowed: {_bad[2]}")
+    text = req.feedback or req.constraint
+    raw = await _mcp.resume_backend(action=req.action, constraint=text)
     try:
         result = json.loads(raw) if isinstance(raw, str) else dict(raw)
     except (ValueError, TypeError):
         return {"raw": raw}
     if result.get("error"):
         raise HTTPException(409, json.dumps(result))
+    with contextlib.suppress(Exception):
+        db = _project_db()
+        value = {"action": req.action, "constraint": text, "feedback": text,
+                 "rationale": req.rationale, "actor": req.actor or "cli"}
+        for v in parked:
+            if v.get("interrupt_id"):
+                db.resolve_interrupt(str(v["interrupt_id"]), value, resolved_by=req.actor or "cli")
+                db.consume_interrupt(str(v["interrupt_id"]))
+        _record_decisions(ResumeRequest(action=req.action, feedback=text, rationale=req.rationale,
+                                        actor=req.actor or "cli"), parked)
     return result
 
 
@@ -1423,30 +1853,7 @@ async def architecture_resume(req: ArchResumeRequest):
 
 @app.post("/architecture/pause")
 async def architecture_pause():
-    if _architecture.task is None or _architecture.task.done():
-        return {"paused": False, "reason": "no running task"}
-    # Architecture generation uses the same executor-backed CLI calls as the
-    # frontend graph. Cancelling the asyncio wrapper cannot stop that blocking
-    # child, so reap its process group before cancelling the graph task.
-    try:
-        from orchestrator.langchain.agents.coresmith_llm import (
-            reap_active_cli_processes,
-        )
-        reaped = reap_active_cli_processes()
-        if reaped:
-            log.warning(
-                "architecture/pause reaped %d in-flight CLI process group(s)",
-                reaped,
-            )
-    except Exception:
-        log.warning("architecture/pause: CLI reap failed", exc_info=True)
-    _architecture.task.cancel()
-    try:
-        await _architecture.task
-    except (asyncio.CancelledError, Exception):
-        pass
-    _architecture.status = "paused"
-    return {"paused": True}
+    return {"paused": await _architecture.safe_pause()}
 
 def _shape_arch_state(snap) -> dict:
     base = {
@@ -1534,6 +1941,113 @@ def _preflight_or_400():
         })
 
 
+_ENV_TRUE = {"1", "true", "yes", "on"}
+_ENV_FALSE = {"0", "false", "no", "off"}
+
+
+def requirements_registered(project_root) -> tuple[bool, list[str]]:
+    """Whether the run's requirements are registered in the project DB.
+
+    Returns ``(ok, missing)`` where ``missing`` holds stable codes:
+    ``PRD_NOT_REGISTERED``, ``FRD_NOT_REGISTERED``, ``FRD_NO_MUST_HAVE`` (no
+    must-have FRD item). A project DB that cannot be opened reports
+    ``PROJECT_DB_UNREADABLE`` -- the gate fails closed.
+    """
+    try:
+        from orchestrator.state_store.project_db import open_project
+        db = open_project(project_root)
+        missing = []
+        if not db.artifact("prd"):
+            missing.append("PRD_NOT_REGISTERED")
+        if not db.artifact("frd"):
+            missing.append("FRD_NOT_REGISTERED")
+        if not db.items(artifact="frd", must_have=True):
+            missing.append("FRD_NO_MUST_HAVE")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("requirements gate: project DB unreadable: %s", exc)
+        missing = ["PROJECT_DB_UNREADABLE"]
+    return (not missing, missing)
+
+
+def _requirements_gate_enabled() -> bool:
+    """``/run/start`` requires registered requirements unless
+    ``CORESMITH_REQUIRE_REQUIREMENTS`` is off (default ON) or the batch-eval
+    escape hatch ``CORESMITH_SKIP_ARCH_WARN`` is truthy."""
+    if (os.environ.get("CORESMITH_SKIP_ARCH_WARN", "") or "").strip().lower() in _ENV_TRUE:
+        return False
+    req = (os.environ.get("CORESMITH_REQUIRE_REQUIREMENTS", "1") or "1").strip().lower()
+    return req not in _ENV_FALSE
+
+
+def _stage_before_blocks(project_root) -> dict | None:
+    """The stage machine's refusal for ``/run/start`` as a dict (None when the
+    pipeline may start). Fail-closed: a project with no stage rows is at
+    ``requirements``; a DB that cannot be read is a refusal."""
+    from orchestrator.state_store.project_db import open_project
+    try:
+        refusal = MB.pipeline_start_refusal(open_project(project_root), project_root)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": "STAGE_DB_UNREADABLE", "message": str(exc), "blocked_by": []}
+    return refusal.to_json() if refusal is not None else None
+
+
+def _requirements_gate_response(project_root) -> JSONResponse | None:
+    """The HTTP 409 refusal for ``/run/start`` when the PRD / FRD / a
+    must-have FRD item is not registered, else None. Architecture start is
+    not gated."""
+    if not _requirements_gate_enabled():
+        return None
+    ok, missing = requirements_registered(project_root)
+    if ok:
+        return None
+    body = {
+        "error": "requirements_not_registered",
+        "missing": missing,
+        "hint": ("register them: coresmith register prd|frd <path> (or the frd add verbs); "
+                 "CORESMITH_SKIP_ARCH_WARN=1 bypasses for batch evaluation"),
+    }
+    return JSONResponse(status_code=409, content=body)
+
+
+def _rotate_events(path: Path) -> Path | None:
+    """Start a fresh pipeline events log for a new run.
+
+    ``CORESMITH_ROTATE_EVENTS`` (default ``1``): a non-empty existing log is
+    renamed to ``pipeline_events.<YYYYmmdd-HHMMSS>.jsonl`` next to it (keeping
+    e.g. the Architect's ``stage_done`` events), then an empty file is
+    created. ``0`` restores the old truncation. Returns the rotated path, or
+    None when nothing was rotated.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rotate = (os.environ.get("CORESMITH_ROTATE_EVENTS", "1") or "1").strip().lower() not in _ENV_FALSE
+    rotated = None
+    if rotate and path.exists() and path.stat().st_size > 0:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        stem = path.name[: -len(".jsonl")] if path.name.endswith(".jsonl") else path.stem
+        rotated = path.with_name(f"{stem}.{stamp}.jsonl")
+        n = 1
+        while rotated.exists():
+            rotated = path.with_name(f"{stem}.{stamp}-{n}.jsonl")
+            n += 1
+        path.rename(rotated)
+    path.write_text("")
+    return rotated
+
+
+def _registered_artifact_kinds(root: Path) -> set[str]:
+    """Artifact kinds registered in the run's project DB (empty when the run
+    has no DB -- never create one just to look)."""
+    try:
+        from orchestrator.state_store.stages import project_db_exists
+        if not project_db_exists(root):
+            return set()
+        from orchestrator.state_store.project_db import open_project
+        return {str(a.get("kind") or "") for a in open_project(root).artifacts()}
+    except Exception:  # noqa: BLE001 - a warning helper must never fail run start
+        return set()
+
+
 def _check_architecture_artifacts(project_root: str) -> list[str]:
     """Return a list of warnings if the frontend pipeline is about to run
     without architecture-phase artifacts (PRD / ERS / block_diagram).
@@ -1554,12 +2068,25 @@ def _check_architecture_artifacts(project_root: str) -> list[str]:
         return []
 
     root = Path(project_root)
+    # Each artifact may live in more than one place: the architecture graph
+    # writes arch/ers_spec.md, the CLI flow (`coresmith register ers`) renders
+    # the ERS as JSON (arch/ers_spec.json, .coresmith/ers_spec.json -- the one
+    # validation_dv reads). Any of them counts.
+    # The PRD likewise: the architecture graph's .coresmith/prd_spec.json, or
+    # the CLI flow's arch/prd_spec.{json,md} (`coresmith state write`). A
+    # registered artifact row in the project DB (a file, or DB-sourced
+    # ``db:<kind>``) counts as present too.
     expected = {
-        "PRD spec": root / ".coresmith" / "prd_spec.json",
-        "ERS spec": root / "arch" / "ers_spec.md",
-        "block diagram": root / ".coresmith" / "block_diagram.json",
+        "PRD spec": (root / ".coresmith" / "prd_spec.json", root / "arch" / "prd_spec.json",
+                     root / "arch" / "prd_spec.md"),
+        "ERS spec": (root / "arch" / "ers_spec.md", root / "arch" / "ers_spec.json",
+                     root / ".coresmith" / "ers_spec.json"),
+        "block diagram": (root / ".coresmith" / "block_diagram.json", root / "arch" / "block_diagram.json"),
     }
-    missing = [label for label, path in expected.items() if not path.exists()]
+    registered = _registered_artifact_kinds(root)
+    db_kind = {"PRD spec": "prd", "ERS spec": "ers", "block diagram": "block_diagram"}
+    missing = [label for label, paths in expected.items()
+               if db_kind[label] not in registered and not any(p.exists() for p in paths)]
     if not missing:
         return []
 
@@ -1692,6 +2219,9 @@ def _shape_state(state_snapshot) -> dict:
     pending_interrupts = [i for i in interrupts if not i["consumed_by_resume"]]
 
     base.update({
+        "passed_count": sum(b.get("success") is True for b in latest_by_name.values()),
+        "failed_count": sum(b.get("success") is not True for b in latest_by_name.values()),
+        "pending_count": max(0, len(block_queue) - len(latest_by_name)),
         "completed_count": len(latest_by_name),
         "completion_events": len(completed),
         "completed_blocks": [
@@ -1701,6 +2231,13 @@ def _shape_state(state_snapshot) -> dict:
         "total_blocks": len(block_queue),
         "remaining_count": max(0, len(block_queue) - len(latest_by_name)),
         "pipeline_done": values.get("pipeline_done", False),
+        "frontend_outcome": (
+            "awaiting_decision" if pending_interrupts else
+            "failed" if values.get("pipeline_done") and (
+                len(latest_by_name) < len(block_queue) or
+                any(b.get("success") is not True for b in latest_by_name.values())) else
+            "complete" if values.get("pipeline_done") and not state_snapshot.next else
+            "running"),
         "next_nodes": list(state_snapshot.next) if state_snapshot.next else [],
         "interrupts": interrupts,
         # PENDING = still waiting on a decision. An interrupt whose resume is
@@ -1766,8 +2303,8 @@ def _write_daemon_file(port: int):
         _daemon_lease_token = token
     except SystemExit:
         raise
-    except Exception as exc:  # noqa: BLE001 - the file view must still appear
-        log.warning("daemon lease unavailable (%s); writing daemon.json only", exc)
+    except Exception as exc:
+        raise RuntimeError("Cannot acquire daemon ownership; refusing startup") from exc
     df = _daemon_file()
     df.parent.mkdir(parents=True, exist_ok=True)
     df.write_text(json.dumps(info, indent=2))
@@ -1783,12 +2320,17 @@ async def _daemon_lease_renew() -> None:
                     _project_db().renew_lease, "daemon", _daemon_lease_token,
                     _DAEMON_LEASE_TTL_S)
                 if not ok:
-                    log.warning("daemon lease was stolen or released; another "
-                                "daemon may now own %s", _PROJECT_ROOT)
+                    raise RuntimeError("daemon ownership was lost")
         except asyncio.CancelledError:
             break
-        except Exception:  # noqa: BLE001 - the heartbeat must never crash
-            continue
+        except Exception as exc:
+            log.error("cannot retain daemon ownership: %s; stopping owned work", exc)
+            from orchestrator.processes import cancel
+            await asyncio.gather(_pipeline.safe_pause(), _architecture.safe_pause(),
+                                 _backend_handle()._backend.safe_pause(), return_exceptions=True)
+            await asyncio.to_thread(cancel)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
 
 
 def _remove_daemon_file():

@@ -13,9 +13,16 @@ files under `model/frd_eval/` if useful). It owns `sc_main`, instantiates
 does, then executes the FRD's requirements against the model and prints ONE
 verdict line per requirement id listed in `model/frd_eval/requirements.json`:
 
-    FRD_EVAL {"id": "<ID>", "status": "pass|fail|not_testable|skipped", "evidence": "<one line>"}
+    FRD_EVAL {"id": "<ID>", "status": "pass|fail|not_testable|skipped", "value": <number>, "unit": "<unit>", "evidence": "<one line>"}
 
-and finally `FRD_EVAL_DONE`. Exit code 0 whenever the harness itself ran to
+and finally `FRD_EVAL_DONE`. `value`/`unit` are REQUIRED for every bounded
+requirement (one whose `requirements.json` record has `bound_min` or
+`bound_max`): print the number you measured in the item's `metric` and
+`unit` (cycles, dB, %, fps ...), whether or not it meets the bound (a
+separate line `VALUE <ID> <number> [unit]` also works). The engine derives
+pass/fail from the value and the bounds; a bounded `pass`/`fail` without a
+number is recorded as `tool_error` ("no measured value from the model
+harness") and blocks the stage. Unbounded requirements may omit `value`. Exit code 0 whenever the harness itself ran to
 completion -- failing requirements are reported in their lines, never by
 crashing or `sc_stop()`-ing early.
 
@@ -30,7 +37,9 @@ crashing or `sc_stop()`-ing early.
   Loosely timed means cycle counts are estimates -- report them as evidence
   and judge PERF requirements on the model's own cycle accounting, saying so.
 * **Every requirement gets a verdict.** For each id: `pass`/`fail` with the
-  measured evidence (numbers, hashes, the register value, the byte count);
+  measured evidence (numbers, hashes, the register value, the byte count;
+  for a bounded item the measured number goes in `value`, not only in the
+  evidence text -- arithmetic on paper is not a measurement);
   `not_testable` ONLY when the property is not observable on a loosely-timed
   transaction model (physical design, DRC/LVS, MPW precheck, STA slack,
   cycle-exact ordering) -- the evidence must say why in one sentence;

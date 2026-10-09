@@ -192,6 +192,11 @@ def validate_contracts(doc: dict, diagram: dict | None = None) -> list[dict]:
                     if mp not in reached:
                         problems.append(_p("CT_FABRIC_PORT_UNREACHED", f"{b.get('name')}.{mp}",
                                            "fabric master port has no contract edge (an initiator is missing or folded)"))
+    for edge in contracts:
+        policy = edge.get("flow_control_policy")
+        if policy is not None and not isinstance(policy, dict):
+            problems.append(_p("CT_POLICY_TYPE", str(edge.get("edge_id", "")),
+                               "flow_control_policy must be an object"))
     return problems
 
 

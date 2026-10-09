@@ -2,7 +2,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Architect sitting step 2: the executable SAD (abstract SystemC performance model) and fabric derivation."""
+"""The Architect's step 2: the executable SAD (abstract SystemC performance model) and fabric derivation."""
 import json
 from pathlib import Path
 
@@ -65,7 +65,7 @@ def test_cli_helpers_without_toolchain(tmp_path, monkeypatch):
     r = mt.arch_build(tmp_path)
     assert r["ok"] is False and "no initiator" in " ".join(r["problems"])
     r = mt.arch_eval(db, tmp_path)
-    assert r["ok"] is False and "not built" in r["error"]
+    assert r["ok"] is False and r["error"] == "ARCH_MODEL_NOT_BUILT" and r["required"].endswith("arch_model_top.h")
 
 
 _HARNESS = r'''

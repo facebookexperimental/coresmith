@@ -10,6 +10,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from orchestrator.processes import run as run_process
+
 
 def systemc_home() -> str:
     return os.environ.get("CORESMITH_SYSTEMC_HOME", "").strip()
@@ -35,7 +37,7 @@ def detect() -> dict:
     inc = ["-I", f"{home}/include"] if home else []
     lib = ["-L", f"{home}/lib", "-L", f"{home}/lib-linux64"] if home else []
     try:
-        p = subprocess.run([cxx, "-std=c++17", *inc, str(tmp / "p.cpp"), *lib, "-lsystemc", "-o", str(tmp / "p")],
+        p = run_process([cxx, "-std=c++17", *inc, str(tmp / "p.cpp"), *lib, "-lsystemc", "-o", str(tmp / "p")],
                            capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "reason": str(exc), "cxx": cxx, "systemc_home": home}
@@ -53,7 +55,7 @@ def build(model_dir, *, timeout_s: int = 900) -> dict:
     if systemc_home():
         env["SYSTEMC_HOME"] = systemc_home()
     try:
-        p = subprocess.run(["make", "-s", "soc_model"], cwd=md, capture_output=True, text=True,
+        p = run_process(["make", "-s", "soc_model"], cwd=md, capture_output=True, text=True,
                            timeout=timeout_s, env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "log": str(exc)}
@@ -67,7 +69,7 @@ def smoke(model_dir, *, ns: int = 1000, timeout_s: int = 300) -> dict:
     if not exe.exists():
         return {"ok": False, "log": "soc_model not built"}
     try:
-        p = subprocess.run([str(exe), "--ns", str(ns)], cwd=md, capture_output=True, text=True,
+        p = run_process([str(exe), "--ns", str(ns)], cwd=md, capture_output=True, text=True,
                            timeout=timeout_s)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "log": str(exc)}

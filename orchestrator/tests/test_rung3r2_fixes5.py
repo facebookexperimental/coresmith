@@ -192,7 +192,7 @@ class TestPauseReap:
         # The resume-after-pause path (no in-flight call registered) is unaffected.
         assert reap_active_cli_processes() == 0
 
-    def test_architecture_pause_reaps_before_cancelling(self, monkeypatch):
+    def test_architecture_pause_joins_owned_jobs(self, monkeypatch):
         from orchestrator.daemon import server
 
         events = []
@@ -208,11 +208,13 @@ class TestPauseReap:
             await asyncio.sleep(0)
             old_task = server._architecture.task
             old_status = server._architecture.status
+            old_owner = server._architecture._job_owner
+            server._architecture._job_owner = "test-pause-owner"
             server._architecture.task = task
             server._architecture.status = "running"
             monkeypatch.setattr(
-                "orchestrator.langchain.agents.coresmith_llm.reap_active_cli_processes",
-                lambda: events.append("reaped") or 1,
+                "orchestrator.processes.cancel",
+                lambda owner: events.append("reaped") or 1,
             )
             try:
                 result = await server.architecture_pause()
@@ -221,9 +223,10 @@ class TestPauseReap:
             finally:
                 server._architecture.task = old_task
                 server._architecture.status = old_status
+                server._architecture._job_owner = old_owner
 
         asyncio.run(exercise())
-        assert events == ["reaped", "cancelled"]
+        assert sorted(events) == ["cancelled", "reaped"]
 
 
 # ===========================================================================

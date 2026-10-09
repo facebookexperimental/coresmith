@@ -24,11 +24,69 @@ def test_codex_turn_failed_event_becomes_llm_error_marker():
 
 
 def test_codex_agent_message_wins_over_error_event():
+    """A transport notice FOLLOWED by real output is recoverable: the text is
+    the result and the notice is kept as diagnostics."""
     out = "\n".join([
         json.dumps({"type": "error", "message": "transient"}),
         json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "done"}}),
     ])
-    assert _parse_codex_json(out)[0] == "done"
+    text, usage = _parse_codex_json(out)
+    assert text == "done" and usage["provider_notices"] == ["transient"] and "provider_error" not in usage
+
+
+def test_codex_interim_error_then_completed_turn_is_a_success():
+    out = "\n".join([
+        json.dumps({"type": "thread.started", "thread_id": "t9"}),
+        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "first"}}),
+        json.dumps({"type": "error", "message": "stream disconnected; retrying"}),
+        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "final"}}),
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5, "output_tokens": 2}}),
+    ])
+    text, usage = _parse_codex_json(out)
+    assert text == "final" and usage["input_tokens"] == 5 and usage["session_id"] == "t9"
+    assert usage["provider_notices"] == ["stream disconnected; retrying"] and "provider_error" not in usage
+
+
+def test_codex_turn_failed_after_partial_text_is_a_failure_with_the_partial_kept():
+    """``turn.failed`` is terminal (exit 0): the partial agent text is not a
+    result -- it follows the envelope so is_llm_error_response() matches."""
+    from orchestrator.langchain.agents.coresmith_llm import is_llm_error_response
+    out = "\n".join([
+        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "half of the file"}}),
+        json.dumps({"type": "turn.failed", "error": {"message": "stream disconnected before completion"}}),
+    ])
+    text, usage = _parse_codex_json(out)
+    assert is_llm_error_response(text) and "stream disconnected before completion" in text
+    assert text.endswith("\nhalf of the file")
+    assert usage["provider_error"] == "stream disconnected before completion"
+
+
+def test_codex_trailing_error_event_is_terminal():
+    out = "\n".join([
+        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "partial"}}),
+        json.dumps({"type": "error", "message": "You've hit your usage limit."}),
+    ])
+    text, usage = _parse_codex_json(out)
+    assert text.startswith("[ClaudeLLM error: codex CLI reported: You've hit your usage limit.]")
+    assert text.endswith("\npartial") and usage["provider_error"].startswith("You've hit")
+
+
+def test_claude_result_is_error_is_not_a_success():
+    from orchestrator.langchain.agents.coresmith_llm import _parse_stream_json
+    out = "\n".join([
+        json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "partial prose"}]}}),
+        json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                    "result": "API Error: 529 overloaded", "usage": {"input_tokens": 3}, "num_turns": 2}),
+    ])
+    text, usage = _parse_stream_json(out)
+    assert text == "partial prose"                       # the assistant text, not the diagnostic
+    assert usage["result_error"] == "API Error: 529 overloaded" and usage["result_subtype"] == "error_during_execution"
+    assert usage["input_tokens"] == 3 and usage["num_turns"] == 2
+    ok = "\n".join([
+        json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "fine", "usage": {}}),
+    ])
+    text, usage = _parse_stream_json(ok)
+    assert text == "fine" and "result_error" not in usage
 
 
 def test_infra_markers_include_usage_limit():

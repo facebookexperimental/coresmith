@@ -15,7 +15,6 @@ from orchestrator.langgraph import pipeline_graph as pg
 @pytest.fixture
 def project(tmp_path, monkeypatch):
     monkeypatch.delenv("CORESMITH_TOP_MODULE", raising=False)
-    monkeypatch.setenv("CORESMITH_EMIT_SFT", "0")
     monkeypatch.setenv("CORESMITH_UARCH_SINGLE_CONTEXT", "0")
     (tmp_path / "inputs").mkdir()
     (tmp_path / "inputs/task.yaml").write_text("top: chip_top\nchassis: none\n")

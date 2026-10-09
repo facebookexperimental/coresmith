@@ -8,7 +8,7 @@ from orchestrator.langgraph import pipeline_graph as pg
 
 P = Path(pg.__file__).resolve().parent.parent / "langchain" / "prompts"
 FRONTEND = [
-    "chip_lead.md", "block_diagram.md", "uarch_spec_generator.md", "rtl_generator.md",
+    "block_diagram.md", "uarch_spec_generator.md", "rtl_generator.md",
     "validation_dv.md", "interface_definition.md", "integration_review.md",
     "testbench_generator.md", "contract_audit.md", "sad_spec.md", "frd_spec.md",
     "prd_spec.md", "ers_doc.md", "constraint_check.md", "output_contract_review.md",

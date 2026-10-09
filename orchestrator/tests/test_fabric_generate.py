@@ -130,17 +130,22 @@ def test_elaborate_to_plain_verilog_and_lint(tmp_path):
 
 @pytest.mark.slow
 @pytest.mark.skipif(not (_HAVE_SLANG and _HAVE_SIM), reason="yosys-slang/verilator/cocotb not available")
-def test_generated_testbench_passes_in_simulation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("data_width", [32, 64])
+def test_generated_testbench_passes_in_simulation(tmp_path, monkeypatch, data_width):
     import orchestrator.langgraph.pipeline_helpers as ph
     monkeypatch.setattr(ph, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
     monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "0")
     monkeypatch.setenv("CORESMITH_COVERAGE", "0")
     monkeypatch.setenv("CORESMITH_INTERFACE_VIP", "0")
     monkeypatch.setattr(ph, "create_golden_model_wrapper", lambda *a, **k: None)
-    art = generate_fabric(_spec(), tmp_path / "rtl", tb_dir=tmp_path / "tb")
+    spec = _spec()
+    spec.data_width = data_width
+    art = generate_fabric(spec, tmp_path / "rtl", tb_dir=tmp_path / "tb")
     res = ph.run_simulation({"name": "cs_fabric_soc"}, art.rtl_path, art.tb_path,
                             project_root=str(tmp_path))
     assert res["passed"], res.get("log", "")[-4000:]
+    assert Path(res["log_path"]).is_relative_to(tmp_path)
 
 
 def test_wrapper_declares_apb_types_once_for_many_apb_slaves():
@@ -290,13 +295,11 @@ def test_generated_testbench_passes_on_a_64bit_fabric_with_apb_subword_access(tm
     assert res["passed"], res.get("log", "")[-4000:]
 
 
-# The renderings of _spec()/_spec64() before shared_apb_bridge existed (4aedaf6):
-# the knob at its default must not change a byte of the wrapper or the TB.
-_PRE_KNOB_SHA256 = {
-    "_spec": ("7edeb1b5086d47412a13d6666d83cd330e4fb05ae95fe37d4f03c602ae6e5f42",
-              "afd1b0d532ba9594a12d94aa016eb60f19babdf1402538ebc7a1fd39b488919b"),
-    "_spec64": ("54c85881931b39143531c6e2ee7054793f588c5f27b2fd2143ad49119868a5fd",
-                "74ec932c02fd933d382e9bc9f60558df999931322b2dc8a47dc08e5b86ca2f9d"),
+# The default bridge layout preserves the wrapper; implicit and explicit
+# defaults render the same current testbench.
+_WRAPPER_SHA256 = {
+    "_spec": "7edeb1b5086d47412a13d6666d83cd330e4fb05ae95fe37d4f03c602ae6e5f42",
+    "_spec64": "54c85881931b39143531c6e2ee7054793f588c5f27b2fd2143ad49119868a5fd",
 }
 
 
@@ -308,8 +311,8 @@ def test_shared_apb_bridge_default_renders_byte_identically():
         explicit = FabricSpec.from_json(dict(s.to_json(), shared_apb_bridge=False))
         assert explicit.digest() == s.digest()
         sv, tb = render_wrapper_sv(explicit), render_testbench(explicit)
-        assert (hashlib.sha256(sv.encode()).hexdigest(),
-                hashlib.sha256(tb.encode()).hexdigest()) == _PRE_KNOB_SHA256[mk.__name__]
+        assert hashlib.sha256(sv.encode()).hexdigest() == _WRAPPER_SHA256[mk.__name__]
+        assert tb == render_testbench(s)
         assert "test_apb_shared_decode" not in tb
     # a single APB slave: the shared bridge is the per-slave bridge
     one = _spec()

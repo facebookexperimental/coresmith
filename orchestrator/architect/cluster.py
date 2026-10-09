@@ -2,8 +2,10 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Cluster workers (architect sitting, step 4): few, large, long-lived block
-owners instead of 29 x {spec, RTL, TB, diagnose} micro-calls.
+"""Cluster workers (``CORESMITH_FANOUT=cluster``, an explicit opt-in): few,
+large, long-lived block owners instead of 29 x {spec, RTL, TB, diagnose}
+micro-calls. These are engine subagents the frontend graph launches; the
+Architect driving the CLI is a different thing and is never launched here.
 
 A cluster is a set of blocks that belong together (the diagram's ``cluster``
 or ``subsystem``: cpu, gpu, mem_fabric_periph ...). One session owns them for
@@ -44,15 +46,24 @@ class ClusterSession(ArchitectSession):
         self.dir = self.root / ".coresmith" / "clusters" / cluster
         self.dir.mkdir(parents=True, exist_ok=True)
 
-    # the system prompt is the cluster contract, not the architect's
-    def sit(self, prompt: str, *, resume: str = "", index: int = 1) -> dict:
-        import orchestrator.architect.session as _s
-        orig = _s.build_system_prompt
-        _s.build_system_prompt = build_cluster_prompt
-        try:
-            return super().sit(prompt, resume=resume, index=index)
-        finally:
-            _s.build_system_prompt = orig
+    # A cluster worker is its OWN native session with its own lease, so sibling
+    # clusters of one tier never serialize on a shared lease.
+    LEASE_HOLDER = "cluster worker"
+    BUSY_REASON = "cluster worker busy"
+
+    def lease_name(self) -> str:
+        return f"cluster:{self.cluster}"
+
+    # the system prompt is the cluster contract, not the architect's (a method,
+    # not a module-global swap: concurrent clusters run sit() in parallel threads)
+    def system_prompt(self) -> str:
+        return build_cluster_prompt()
+
+    def sit(self, prompt: str, *, resume: str = "", index: int = 1, **kw) -> dict:
+        # verbs and questions from this session are attributed to the worker
+        # (``actions.actor`` / ``questions.asked_by``), not to the architect
+        env = {"CORESMITH_ACTOR": f"worker:{self.cluster}", **(kw.pop("extra_env", None) or {})}
+        return super().sit(prompt, resume=resume, index=index, extra_env=env, **kw)
 
     def _write_status(self, **kw) -> dict:
         st = self.status()
@@ -110,7 +121,8 @@ class ClusterSession(ArchitectSession):
                          f"slice `{s.get('contract_slice')}`; edges {len(s.get('edges') or [])}, VIPs {len(s.get('vips') or [])}; "
                          f"owns {', '.join(s.get('owned_items') or []) or '-'}")
         lines += ["", "## Shared context", "- HW/SW ABI: arch/hw_sw_abi.md   - DV rules: arch/DV_RULES.md   - FRD: arch/frd_spec.md",
-                  "- SoC model: model/ (soc_model_top.h, per-block <block>_model.h/.cpp -- the golden your RTL must match)",
+                  "- SoC model (when present): model/ (soc_model_top.h, per-block <block>_model.h/.cpp -- the golden "
+                  "your RTL must match; without one, the uArch spec and the contract VIPs are the reference)",
                   "- Shell top (stubs for other clusters' blocks): .coresmith/shell/",
                   "", "## Start", "Run `coresmith block-status <b> --json` for each block, then work block by block: RTL -> "
                   "`coresmith verify rtl <b> --lint-only` -> assertions -> testbench -> `coresmith verify rtl <b>` -> "
@@ -119,7 +131,7 @@ class ClusterSession(ArchitectSession):
         return "\n".join(lines + self.feedback_lines(sts))
 
     def resume_prompt(self, st: dict, sitting: int) -> str:
-        lines = [f"Sitting {sitting}: continue. Blocks without a published pass: {', '.join(st.get('pending') or []) or 'none'}."]
+        lines = [f"Invocation {sitting}: continue. Blocks without a published pass: {', '.join(st.get('pending') or []) or 'none'}."]
         for b, s in (st.get("blocks") or {}).items():
             lines.append(f"- {b}: {'DONE' if s.get('done') else 'pending'}; rtl {'present' if s.get('rtl_exists') else 'MISSING'}, "
                          f"tb {'present' if s.get('tb_exists') else 'MISSING'}, attempts {s.get('attempts')}")

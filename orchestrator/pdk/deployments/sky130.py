@@ -53,6 +53,7 @@ from orchestrator.pdk.checkers import (
     SynthStatChecker,
 )
 from orchestrator.pdk.pdk_config import PDKConfig
+from orchestrator.processes import run as run_process
 
 _STD_CELL = "sky130_fd_sc_hd"
 _CONFIG_YAML = Path(__file__).resolve().parents[1] / "configs" / "sky130.yaml"
@@ -163,6 +164,72 @@ def _resolve_tool(config_key: str, default_script: str) -> str:
     if p.exists():
         return str(p)
     return default_script
+
+
+_NATIVE_NOTED: set[str] = set()
+
+
+def _native_fallback_enabled() -> bool:
+    """``CORESMITH_BACKEND_NATIVE_FALLBACK`` (default ``1``): a nix wrapper
+    on a host without ``nix`` falls back to the native tool on PATH; ``0`` =
+    always the wrapper (old behaviour, fails at the first invocation)."""
+    return (os.environ.get("CORESMITH_BACKEND_NATIVE_FALLBACK", "1") or "1").strip().lower() not in (
+        "0", "false", "no", "off")
+
+
+def openroad_for_backend(configured: str) -> tuple[str, str]:
+    """The OpenROAD binary the backend actually runs, and why.
+
+    ``CORESMITH_BACKEND_OPENROAD`` wins. Otherwise, when ``configured`` is a
+    ``*-nix.sh`` wrapper and ``nix`` is not on PATH (the wrapper can only fail
+    with ``exec: nix: not found``), a native ``openroad`` on PATH is used and one
+    line is logged. Returns ``(path, how)``: ``how`` is ``env`` / ``configured``
+    / ``native`` / ``unreachable`` (a nix wrapper, no nix, no native binary)."""
+    env = os.environ.get("CORESMITH_BACKEND_OPENROAD", "").strip()
+    if env:
+        return env, "env"
+    if not Path(configured).name.endswith("-nix.sh") or shutil.which("nix"):
+        return configured, "configured"
+    if not _native_fallback_enabled():
+        return configured, "unreachable"
+    native = shutil.which("openroad")
+    if not native:
+        return configured, "unreachable"
+    if native not in _NATIVE_NOTED:
+        _NATIVE_NOTED.add(native)
+        import logging
+        logging.getLogger("uvicorn.error").warning(
+            "backend: %s needs nix (not on PATH); using the native OpenROAD %s "
+            "(set CORESMITH_BACKEND_OPENROAD to pin one)", Path(configured).name, native)
+    return native, "native"
+
+
+def backend_tools_preflight() -> dict:
+    """What ``backend start`` needs from the host: OpenROAD reachable (an
+    error, with a remedy) and klayout / magic / netgen for DRC/LVS (warnings).
+    ``{ok, errors, warnings, openroad, openroad_how}``."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    dep = globals().get("DEPLOYMENT")
+    configured = getattr(dep, "openroad_bin", "") or _resolve_tool("openroad_binary", "scripts/openroad-nix.sh")
+    path, how = openroad_for_backend(configured)
+    if how == "unreachable":
+        errors.append(
+            f"OpenROAD unreachable: {configured} is a nix wrapper but `nix` is not on PATH and no native "
+            "`openroad` was found. Remedy: export CORESMITH_BACKEND_OPENROAD=/path/to/openroad (then "
+            "restart the daemon), put `openroad` on PATH, or install nix.")
+    elif not (Path(path).is_file() or shutil.which(path)):
+        errors.append(f"OpenROAD binary not found: {path} (CORESMITH_BACKEND_OPENROAD / config.yaml). Remedy: "
+                      "point CORESMITH_BACKEND_OPENROAD at a working openroad and restart the daemon.")
+    for tool, attr in (("klayout", "klayout_bin"), ("magic", "magic_bin"), ("netgen", "netgen_bin")):
+        b = getattr(dep, attr, "") or ""
+        wrapper_dead = Path(b).name.endswith("-nix.sh") and not shutil.which("nix")
+        present = (Path(b).is_file() and not wrapper_dead) or bool(shutil.which(tool))
+        if not present:
+            warnings.append(f"{tool} not found ({b or 'unset'}"
+                            + (", a nix wrapper without nix" if wrapper_dead else "")
+                            + f"): DRC/LVS will fail; set CORESMITH_BACKEND_{tool.upper()} or put `{tool}` on PATH")
+    return {"ok": not errors, "errors": errors, "warnings": warnings, "openroad": path, "openroad_how": how}
 
 
 def _resolve_yosys() -> str:
@@ -340,7 +407,7 @@ def _run_cmd(cmd: list[str], timeout: int,
     binary missing) so callers can map it to exit-3 rather than a verb fail.
     """
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True,
+        r = run_process(cmd, capture_output=True, text=True,
                            timeout=timeout, cwd=cwd)
         return r.returncode, r.stdout, r.stderr, ""
     except subprocess.TimeoutExpired:
@@ -1628,24 +1695,25 @@ class Sky130Deployment(Deployment):
         return [gl] if gl.is_dir() else []
 
     # -- gate-sim accessors (PR6) ---------------------------------------
+    def backend_openroad_bin(self) -> str:
+        """The OpenROAD the P&R / backend steps run (:func:`openroad_for_backend`)."""
+        return openroad_for_backend(self.openroad_bin)[0]
+
     def resolve_openroad_bin(self) -> str:
         """Real OpenROAD binary for STA/characterization.
 
         ``openroad_bin`` is resolved to a ``nix develop`` wrapper by default;
         on a host without nix that fails (exec: nix: not found). Prefer an
-        explicit env var, then a real ``openroad`` on PATH, then the known
-        local build, and only fall back to the (possibly-wrapper) binary.
+        explicit env var, then a real ``openroad`` on PATH, and only fall back
+        to the configured (possibly-wrapper) binary.
         (Absorbs the old ``mem_characterize._resolve_openroad``.)
         """
         env = os.environ.get("CORESMITH_BACKEND_OPENROAD", "").strip()
-        if env and Path(env).exists():
-            return env
+        if env:
+            return shutil.which(env) or env
         on_path = shutil.which("openroad")
         if on_path:
             return on_path
-        local = Path.home() / "openroad-src" / "build" / "bin" / "openroad"
-        if local.exists():
-            return str(local)
         return self.openroad_bin
 
     def cell_model_files(self, netlist_text: str = "",

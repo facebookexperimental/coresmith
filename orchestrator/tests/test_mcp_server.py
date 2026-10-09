@@ -1771,11 +1771,12 @@ class TestMergeStepResultIntoPipelineCheckpoint:
 
 @pytest.mark.mcp
 class TestMarkBlockPassed:
-    """as_node must name a PARENT-graph node -- 'block_done' lives only in the
-    block subgraph and LangGraph rejects it with InvalidUpdateError."""
+    """The manual completion override is gone: block completion is the
+    graph's own publication of a recorded build, which pipeline_complete
+    verifies as a receipt. The tool refuses and touches no checkpoint."""
 
     @pytest.mark.asyncio
-    async def test_updates_state_as_process_block(self, reset_mcp_state):
+    async def test_manual_completion_is_refused_and_writes_nothing(self, reset_mcp_state):
         import orchestrator.mcp_server as mcp
 
         mcp._pipeline.thread_id = "test-mark"
@@ -1783,16 +1784,11 @@ class TestMarkBlockPassed:
         snapshot.values = {"completed_blocks": []}
         mcp._pipeline.graph = MagicMock()
         mcp._pipeline.graph.aget_state = AsyncMock(return_value=snapshot)
-        captured = {}
-
-        async def _aupdate(config, values, **kw):
-            captured["values"] = values
-            captured["kw"] = kw
-        mcp._pipeline.graph.aupdate_state = AsyncMock(side_effect=_aupdate)
+        mcp._pipeline.graph.aupdate_state = AsyncMock()
 
         with patch.object(mcp._pipeline, "ensure_graph", new_callable=AsyncMock):
-            result = json.loads(await mcp.mark_block_passed("scrambler"))
+            result = json.loads(await mcp.mark_block_passed("scrambler", gate_count=42))
 
-        assert result["status"] == "ok"
-        assert captured["kw"]["as_node"] == "process_block"
-        assert captured["values"]["completed_blocks"][0]["success"] is True
+        assert result["error"] == "MANUAL_COMPLETION_REMOVED"
+        assert "seed-rtl" in result["hint"] and result["ignored"]["gate_count"] == 42
+        mcp._pipeline.graph.aupdate_state.assert_not_called()

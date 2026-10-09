@@ -103,9 +103,12 @@ def _daemon_url(project_root: Path) -> str:
 
 def _alive(pid: int) -> bool:
     try:
+        pid = int(pid)
+        if pid <= 0:
+            return False
         os.kill(pid, 0)
         return True
-    except OSError:
+    except (OSError, ValueError, TypeError):
         return False
 
 
@@ -133,6 +136,79 @@ def _post(project_root: Path, path: str, body: dict) -> dict:
     if r.status_code >= 400:
         sys.exit(f"error: POST {url} -> {r.status_code}\n{r.text}")
     return r.json()
+
+
+# Exit codes of the machine-readable verbs (the harness convention):
+# 0 ok, 1 a failed verdict, 2 a refused / invalid request, 3 infrastructure.
+EXIT_REFUSED, EXIT_INFRA = 2, 3
+
+
+class _DaemonError(Exception):
+    def __init__(self, code: int, payload: dict):
+        super().__init__(payload.get("message") or payload.get("error") or "daemon error")
+        self.code = code
+        self.payload = payload
+
+
+def _request(project_root: Path, method: str, path: str, body: dict | None = None) -> dict:
+    """One daemon request that raises ``_DaemonError`` with the JSON body (or
+    the text) instead of exiting: the ``build`` verbs translate it to a
+    machine-readable document and an exit code."""
+    try:
+        url = _daemon_url(project_root) + path
+    except SystemExit as exc:
+        raise _DaemonError(EXIT_INFRA, {"error": "DAEMON_UNAVAILABLE", "message": str(exc)}) from exc
+    try:
+        r = httpx.post(url, json=body or {}, timeout=60) if method == "POST" else httpx.get(url, timeout=30)
+    except httpx.HTTPError as e:
+        raise _DaemonError(EXIT_INFRA, {"error": "DAEMON_UNREACHABLE", "message": f"{method} {url} -- {e}"}) from e
+    try:
+        payload = r.json()
+    except ValueError:
+        # a daemon that answers something other than JSON -- on any status --
+        # is not a daemon this client can trust: infrastructure, never success
+        raise _DaemonError(EXIT_INFRA, {"error": "DAEMON_BAD_RESPONSE", "http_status": r.status_code,
+                                        "message": f"{method} {url} returned a non-JSON body: {r.text[:500]!r}"}) from None
+    if r.status_code >= 500:
+        raise _DaemonError(EXIT_INFRA, {"http_status": r.status_code, **_as_error(payload)})
+    if r.status_code >= 400:
+        raise _DaemonError(EXIT_REFUSED, {"http_status": r.status_code, **_as_error(payload)})
+    return payload
+
+
+def _as_error(payload) -> dict:
+    """FastAPI's ``{"detail": ...}`` and the daemon's ``{"error": ...}`` as one shape."""
+    if not isinstance(payload, dict):
+        return {"error": "DAEMON_ERROR", "message": str(payload)}
+    if "error" in payload:
+        return payload
+    detail = payload.get("detail")
+    if isinstance(detail, dict):
+        return {"error": str(detail.get("error") or "DAEMON_ERROR"), **detail}
+    return {"error": "DAEMON_ERROR", "message": str(detail if detail is not None else payload)}
+
+
+def _emit_daemon(args, call):
+    """Run ``call()`` (a daemon request) and print its document: JSON with
+    ``--json`` (refusals and failures included), else the human form. Exit
+    2 for a refused / invalid request, 3 for an unreachable daemon or an
+    infrastructure failure."""
+    want_json = bool(getattr(args, "json", False))
+    try:
+        payload = call()
+    except _DaemonError as exc:
+        if want_json:
+            print(json.dumps(exc.payload, indent=2, default=str))
+        else:
+            msg = exc.payload.get("message") or ""
+            print(f"error: {exc.payload.get('error', 'DAEMON_ERROR')}" + (f": {msg}" if msg else ""), file=sys.stderr)
+            for b in exc.payload.get("blocked_by") or []:
+                print(f"  - {b.get('code')}: {b.get('text', '')} {b.get('ids') or ''}", file=sys.stderr)
+            if exc.payload.get("hint"):
+                print(f"  hint: {exc.payload['hint']}", file=sys.stderr)
+        sys.exit(exc.code)
+    print(json.dumps(payload, indent=2, default=str))
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +323,17 @@ def _daemon_start(args):
                   f"{[a.split('=',1)[0] for a in _to_add]}")
     except Exception as e:  # noqa: BLE001 -- persistence is best-effort
         print(f"note: worker-selector persist skipped: {e}")
+
+    # The CLI role (architect / worker / watchdog) scopes the CALLING shell,
+    # never the engine: a daemon started from a watchdog shell must not hand
+    # CORESMITH_ROLE=watchdog to its synthesis agent or cluster workers (they
+    # would be ROLE_FORBIDDEN). CORESMITH_DAEMON_KEEP_ROLE=1 keeps it (old
+    # behaviour).
+    if os.environ.get("CORESMITH_DAEMON_KEEP_ROLE", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        _dropped = [k for k in ("CORESMITH_ROLE", "CORESMITH_ACTOR") if env.pop(k, None) is not None]
+        if _dropped:
+            print(f"note: {', '.join(_dropped)} not passed to the daemon (a CLI role scopes a shell, "
+                  "not the engine)")
 
     log_path = project_root / ".coresmith" / "daemon.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -385,6 +472,29 @@ def _daemon_status(args):
 # Subcommands: run
 # ---------------------------------------------------------------------------
 
+def _supervisor(args):
+    root = _project_root(args.project_root)
+    if args.supervisor_cmd in ("check", "retry"):
+        # The only external recovery responsibility: a dead daemon cannot wake itself.
+        info_file = root / ".coresmith" / "daemon.json"
+        info = json.loads(info_file.read_text()) if info_file.exists() else {}
+        if not _alive(info.get("pid", 0)):
+            import time
+            attempts_file = root / ".coresmith" / "supervisor-daemon-restarts.json"
+            attempts_file.parent.mkdir(parents=True, exist_ok=True)
+            attempts = json.loads(attempts_file.read_text()) if attempts_file.exists() else []
+            attempts = [t for t in attempts if time.time() - t < 3600]
+            if len(attempts) >= 3:
+                sys.exit("supervisor blocked: daemon restart limit reached (3 starts/hour)")
+            attempts.append(time.time())
+            attempts_file.write_text(json.dumps(attempts))
+            _daemon_start(argparse.Namespace(project_root=str(root), port=0))
+        result = _post(root, "/supervisor/" + args.supervisor_cmd, {})
+    else:
+        result = _get(root, "/supervisor/status")
+    print(json.dumps(result, indent=2))
+
+
 def _run_start(args):
     project_root = _project_root(args.project_root)
     body = {
@@ -435,7 +545,12 @@ def _run_resume(args):
         "rtl_fix_description": args.rtl_fix_description or "",
         "rationale": args.rationale or "",
         "block_actions": json.loads(args.block_actions) if args.block_actions else None,
+        "actor": args.actor or os.environ.get("CORESMITH_ROLE") or "cli",
     }
+    if args.interrupt_id:
+        body["interrupt_id"] = args.interrupt_id
+    if args.affected_blocks:
+        body["affected_blocks"] = [b.strip() for b in args.affected_blocks.split(",") if b.strip()]
     print(json.dumps(_post(project_root, "/run/resume", body), indent=2))
 
 
@@ -507,9 +622,216 @@ def _backend_state(args):
     print(json.dumps(_get(project_root, "/backend/state"), indent=2))
 
 
+def _backend_resume(args):
+    project_root = _project_root(args.project_root)
+    body = {
+        "action": args.action,
+        "feedback": args.feedback or "",
+        "rationale": args.rationale or "",
+        "actor": args.actor or os.environ.get("CORESMITH_ROLE") or "cli",
+    }
+    if args.interrupt_id:
+        body["interrupt_id"] = args.interrupt_id
+    print(json.dumps(_post(project_root, "/backend/resume", body), indent=2))
+
+
 def _backend_pause(args):
     project_root = _project_root(args.project_root)
     print(json.dumps(_post(project_root, "/backend/pause", {}), indent=2))
+
+
+# ---------------------------------------------------------------------------
+# build: one recorded module build through the existing block subgraph
+# (daemon lifecycle verbs) + read-only queries of the builds ledger (in-process)
+# ---------------------------------------------------------------------------
+
+def _build_module(args):
+    project_root = _project_root(args.project_root)
+    body = {
+        "module": args.module,
+        "seed_rtl": args.seed_rtl or "",
+        "max_attempts": args.max_attempts,
+        "target_clock_mhz": args.target_clock_mhz,
+        "uarch_feedback": args.uarch_feedback or "",
+    }
+    _emit_daemon(args, lambda: _request(project_root, "POST", "/build/module", body))
+
+
+def _build_targets(args):
+    """``build targets <module>``: the FRD target allocation a build of the
+    module would bind (read-only, in-process), with every refusal it would
+    raise. Measurability is re-checked by the daemon at ``build module``."""
+    from orchestrator.module_build import target_refusal
+    from orchestrator.state_store import module_targets as MT
+    root, db = _build_db(args)
+    if args.module not in {b["name"] for b in db.block_specs()}:
+        _build_refuse(args, "UNKNOWN_MODULE", f"{args.module!r} is not a registered block")
+    alloc = MT.allocation(db, root, args.module)
+    refusal = target_refusal(db, root, args.module)
+    payload = {"module": args.module, **{k: alloc[k] for k in ("targets", "functional", "deferred", "unverified",
+                                                                "acceptance", "frd_revision", "digest", "problems",
+                                                                "advisories")},
+               "refusal": refusal.to_json() if refusal else None,
+               "ok": not alloc["problems"] and refusal is None, "brief": MT.brief(alloc)}
+    lines = [f"targets of {args.module}: digest {str(alloc['digest'] or '-')[:16]}"
+             + (f"  FRD rev {alloc['frd_revision'].get('version')}" if alloc.get("frd_revision") else "")]
+    for t in alloc["targets"]:
+        bound = " ".join(x for x in ((f">={t['bound_min']:g}" if t["bound_min"] is not None else ""),
+                                     (f"<={t['bound_max']:g}" if t["bound_max"] is not None else "")) if x)
+        how = "; ".join((f"cocotb {b['path']}::{b['entry']}" + (f" {json.dumps(b['args'])}" if b.get("args") else "")
+                         if b["kind"] == "cocotb" else f"eda {b['measure']}") for b in t["bindings"])
+        lines.append(f"  {'REQUIRED' if t['required'] else 'advisory':<9} {t['id']:<16} {t['metric']} {bound} "
+                     f"{t['unit']}  <- {how}")
+    for f in alloc["functional"]:
+        lines.append(f"  {'REQUIRED' if f['required'] else 'advisory':<9} {f['id']:<16} functional: "
+                     + ", ".join(b["entry"] for b in f["bindings"]))
+    if alloc["deferred"]:
+        lines.append("  deferred to chip scope: " + ", ".join(alloc["deferred"]))
+    if alloc["unverified"]:
+        lines.append("  must-have without a verifier (blocks exit will require one): " + ", ".join(alloc["unverified"]))
+    acc = alloc.get("acceptance")
+    if acc:
+        for f in MT.acceptance_files(acc):
+            lines.append(f"  acceptance testbench: {f['path']} ({(f.get('sha256') or '-')[:12]}) runs as {f['module']}")
+        lines.append(f"  supplemental tests (coverage closure only) go in {acc['supplemental']}")
+    else:
+        lines.append("  acceptance testbench: none (the worker owns the testbench)")
+    for p in alloc["problems"]:
+        lines.append(f"  REFUSED {p['code']} {p['where']}: {p['text']}")
+    if refusal:
+        lines.append(f"  REFUSED {refusal.code}: {refusal.text}")
+        lines += [f"    {b['text']}" for b in refusal.blockers]
+    for p in alloc["advisories"]:
+        lines.append(f"  advisory {p['code']} {p['where']}: {p['text']}")
+    _emit_build(args, payload, lines)
+    if not payload["ok"]:
+        sys.exit(EXIT_REFUSED)
+
+
+def _build_status(args):
+    project_root = _project_root(args.project_root)
+    path = "/build/state" + (f"?build_id={args.build_id}" if args.build_id else "")
+    _emit_daemon(args, lambda: _request(project_root, "GET", path))
+
+
+def _build_resume(args):
+    project_root = _project_root(args.project_root)
+    body = {
+        "build_id": args.build_id,
+        "action": args.action,
+        "feedback": args.feedback or "",
+        "rtl_fix_description": args.rtl_fix_description or "",
+        "rationale": args.rationale or "",
+        "actor": args.actor or os.environ.get("CORESMITH_ROLE") or "cli",
+    }
+    if args.interrupt_id:
+        body["interrupt_id"] = args.interrupt_id
+    _emit_daemon(args, lambda: _request(project_root, "POST", "/build/resume", body))
+
+
+def _build_pause(args):
+    project_root = _project_root(args.project_root)
+    _emit_daemon(args, lambda: _request(project_root, "POST", "/build/pause", {}))
+
+
+def _build_abort(args):
+    project_root = _project_root(args.project_root)
+    body = {"build_id": args.build_id, "reason": args.reason or "",
+            "actor": args.actor or os.environ.get("CORESMITH_ROLE") or "cli"}
+    _emit_daemon(args, lambda: _request(project_root, "POST", "/build/abort", body))
+
+
+def _build_db(args):
+    from orchestrator.state_store.project_db import open_project
+    root = _project_root(args.project_root)
+    os.environ["CORESMITH_PROJECT_ROOT"] = str(root)
+    return root, open_project(root)
+
+
+def _emit_build(args, payload, human_lines):
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        print("\n".join(human_lines))
+
+
+def _build_refuse(args, code: str, message: str, exit_code: int = EXIT_REFUSED):
+    """A refused read-only build verb: a JSON document with ``--json``, a
+    stderr line otherwise; exit 2 (invalid input) by default."""
+    if getattr(args, "json", False):
+        print(json.dumps({"error": code, "message": message}, indent=2))
+    else:
+        print(f"error: {code}: {message}", file=sys.stderr)
+    sys.exit(exit_code)
+
+
+def _build_list(args):
+    from orchestrator.state_store import builds as B
+    _root, db = _build_db(args)
+    rows = B.builds_for(db, args.module or None, limit=args.limit)
+    lines = [f"{r['id']:<44} {r['module']:<20} {r['status']:<18} {r['entry']:<14} "
+             f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(r['requested_at']))}" for r in rows] or ["(no recorded builds)"]
+    _emit_build(args, {"builds": rows}, lines)
+
+
+def _build_show(args):
+    from orchestrator.state_store import builds as B
+    root, db = _build_db(args)
+    row = B.get_build(db, args.build_id)
+    if row is None:
+        _build_refuse(args, "UNKNOWN_BUILD", f"no build {args.build_id}")
+    payload = {"build": row, "evidence": B.evidence_for_build(root, args.build_id),
+               "current": B.current_build_status(db, root, row["module"]) if row["status"] == "completed" else None}
+    lines = [f"build {row['id']}: module {row['module']} status {row['status']} entry {row['entry']} thread {row['thread_id']}",
+             f"  inputs digest {((row.get('inputs') or {}).get('digest') or '-')}",
+             f"  worker {json.dumps((row.get('worker') or {}).get('provider'))} / {json.dumps((row.get('worker') or {}).get('model'))}",
+             "  rows: " + ", ".join(f"{k} {len(v)}" for k, v in payload["evidence"].items())]
+    if row.get("error"):
+        lines.append(f"  error: {row['error'][:300]}")
+    if payload["current"] is not None:
+        lines.append("  current pass: " + ("ok" if payload["current"]["ok"] else "; ".join(payload["current"]["reasons"])))
+    from orchestrator.module_build import candidate_summaries, targets_summary
+    payload["targets"] = targets_summary(row.get("inputs") or {})
+    payload["candidates"] = candidate_summaries(db, row["id"])
+    tsum = payload["targets"]
+    lines.append(f"  targets: required {tsum['required'] or '-'} advisory {tsum['advisory'] or '-'} functional "
+                 f"{tsum['functional'] or '-'}; acceptance {tsum['acceptance_tb'] or '-'}")
+    for c in payload["candidates"]:
+        vals = ", ".join(f"{k}={v['value'] if v['value'] is not None else '-'}{(' ' + v['unit']) if v['unit'] else ''}"
+                         f"({v['status']})" for k, v in c["targets"].items())
+        lines.append(f"  candidate #{c['id']} attempt {c['attempt']}"
+                     + f": {c['outcome']}" + (f" [{vals}]" if vals else ""))
+    _emit_build(args, payload, lines)
+
+
+def _build_compare(args):
+    from orchestrator.state_store import builds as B
+    root, db = _build_db(args)
+    try:
+        res = B.compare(db, root, args.build_a, args.build_b)
+    except ValueError as exc:
+        _build_refuse(args, "UNKNOWN_BUILD", str(exc))
+    lines = [f"{args.build_a} vs {args.build_b} (same module: {res['same_module']})"]
+    for side in ("a", "b"):
+        m = res[side]
+        lines.append(f"  [{side}] {m['module']} {m['status']} inputs {str(m['inputs_digest'])[:12]} "
+                     f"ppa {json.dumps(m['ppa'])} dv {json.dumps(m['dv'])} coverage {json.dumps(m['coverage'])}"
+                     + (f" targets {json.dumps(m['targets'])}" if m.get("targets") else ""))
+    lines.append("  input differences: " + ("; ".join(res["input_differences"]) or "none"))
+    _emit_build(args, res, lines)
+
+
+def _build_lineage(args):
+    from orchestrator.state_store import builds as B
+    root, db = _build_db(args)
+    res = B.lineage(db, root, args.module or None)
+    lines = [f"intended workflow: {res['intended_workflow']}"]
+    for name, m in res["modules"].items():
+        pub = m["published"]
+        lines.append(f"  {name}: intended_workflow={m['intended_workflow']} published build={pub['build_id']} "
+                     f"ok={pub['ok']} checkpoints={pub['graph_checkpoints_present']} builds={len(m['builds'])}"
+                     + (f" reasons: {'; '.join(pub['reasons'])}" if pub["reasons"] else ""))
+    _emit_build(args, res, lines)
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +870,13 @@ def main():
     p3 = psub.add_parser("status", help="print daemon.json + liveness")
     _add_project_root(p3)
     p3.set_defaults(func=_daemon_status)
+
+    ps = sub.add_parser("supervisor", help="daemon-owned lifecycle supervision")
+    ss = ps.add_subparsers(dest="supervisor_cmd", required=True)
+    for verb in ("status", "check", "retry"):
+        sp = ss.add_parser(verb)
+        _add_project_root(sp)
+        sp.set_defaults(func=_supervisor)
 
     # run start
     pr1 = sub.add_parser("run", help="run lifecycle")
@@ -632,6 +961,87 @@ def main():
     b3 = bsub.add_parser("pause", help="cancel the backend task")
     _add_project_root(b3)
     b3.set_defaults(func=_backend_pause)
+    b4 = bsub.add_parser("resume", help="answer a parked backend interrupt (human_intervention_needed)")
+    _add_project_root(b4)
+    b4.add_argument("--action", required=True, help="retry | skip | abort | accept (see the park's supported_actions)")
+    b4.add_argument("--feedback", help="constraint for the retry / rationale of an accept waiver")
+    b4.add_argument("--rationale", help="rationale logged to the run record")
+    b4.add_argument("--interrupt-id", help="the backend park's interrupt_id (`coresmith backend state`)")
+    b4.add_argument("--actor", help="who answers (decisions / interrupts.resolved_by); default $CORESMITH_ROLE, else cli")
+    b4.set_defaults(func=_backend_resume)
+
+    # build: one recorded module build (the existing block subgraph on a
+    # persistent checkpoint, one thread per build) and the builds ledger.
+    pbu = sub.add_parser("build", help="recorded module builds: module | targets | status | resume | pause | abort | list | show | compare | lineage")
+    busub = pbu.add_subparsers(dest="build_cmd", required=True)
+    _json_help = "machine-readable output (refusals and failures included; exit 2 refused/invalid, 3 infrastructure)"
+    bm = busub.add_parser(
+        "module", help="build one module against its registered FRD targets (refused unless the module is ready)",
+        description="Record the module's FRD target allocation and fixed inputs, then run DV, "
+                    "coverage closure and required target checks.")
+    _add_project_root(bm)
+    bm.add_argument("module")
+    bm.add_argument("--seed-rtl", default="", help="explicit reuse/import: an existing source of the bound target used "
+                    "as the starting implementation (default: the worker implements the RTL from the spec, targets and "
+                    "acceptance tests)")
+    bm.add_argument("--max-attempts", type=int, default=3,
+                    help="implementation attempts per build (default 3; 1 = no retry): a target miss, a failed "
+                         "simulation or synthesis goes back to the worker until they are used up")
+    bm.add_argument("--target-clock-mhz", type=float, default=None)
+    bm.add_argument("--uarch-feedback", default="", help=argparse.SUPPRESS)
+    bm.add_argument("--json", action="store_true", help=_json_help)
+    bm.set_defaults(func=_build_module)
+    bt = busub.add_parser("targets", help="the FRD target allocation a build of the module binds (read-only): required/"
+                                          "advisory targets, measurement bindings, acceptance testbench, refusals")
+    _add_project_root(bt)
+    bt.add_argument("module")
+    bt.add_argument("--json", action="store_true", help="machine-readable output (exit 2 when a build would be refused)")
+    bt.set_defaults(func=_build_targets)
+    bs = busub.add_parser("status", help="the durable build record + its live parks")
+    _add_project_root(bs)
+    bs.add_argument("--build-id", default="", help="default: the latest recorded build")
+    bs.add_argument("--json", action="store_true", help=_json_help)
+    bs.set_defaults(func=_build_status)
+    br = busub.add_parser("resume", help="answer a build's park using one of its supported_actions")
+    _add_project_root(br)
+    br.add_argument("--build-id", required=True)
+    br.add_argument("--action", required=True)
+    br.add_argument("--feedback")
+    br.add_argument("--rtl-fix-description")
+    br.add_argument("--rationale")
+    br.add_argument("--interrupt-id")
+    br.add_argument("--actor")
+    br.add_argument("--json", action="store_true", help=_json_help)
+    br.set_defaults(func=_build_resume)
+    bp = busub.add_parser("pause", help="cancel the running build task (the build parks; resume continues it)")
+    _add_project_root(bp)
+    bp.add_argument("--json", action="store_true", help=_json_help)
+    bp.set_defaults(func=_build_pause)
+    ba = busub.add_parser("abort", help="mark a parked/stopped build aborted (history kept) so its module can be built again")
+    _add_project_root(ba)
+    ba.add_argument("--build-id", required=True)
+    ba.add_argument("--reason", default="")
+    ba.add_argument("--actor")
+    ba.add_argument("--json", action="store_true", help=_json_help)
+    ba.set_defaults(func=_build_abort)
+    for name, fn, help_ in (("list", _build_list, "recorded builds (newest first)"),
+                            ("show", _build_show, "one build: record, evidence rows, current-pass status"),
+                            ("compare", _build_compare, "two builds side by side with provenance"),
+                            ("lineage", _build_lineage, "machine-readable graph lineage per module (treatment validity)")):
+        p = busub.add_parser(name, help=help_)
+        _add_project_root(p)
+        p.add_argument("--json", action="store_true", help="machine-readable output")
+        if name == "list":
+            p.add_argument("--module", default="")
+            p.add_argument("--limit", type=int, default=50)
+        elif name == "show":
+            p.add_argument("build_id")
+        elif name == "compare":
+            p.add_argument("build_a")
+            p.add_argument("build_b")
+        else:
+            p.add_argument("--module", default="")
+        p.set_defaults(func=fn)
 
     # state
     s = sub.add_parser("state", help="print the current pipeline state")
@@ -655,6 +1065,17 @@ def main():
         "--block-actions",
         help="JSON dict of {block_name: action} for per-block resume",
     )
+    rs.add_argument(
+        "--interrupt-id",
+        help="answer ONE parked branch (id from `coresmith interrupts --pending` or the "
+             "payload's interrupt_id); queued (202) while sibling branches still run",
+    )
+    rs.add_argument("--affected-blocks", help="comma-separated blocks a revise targets")
+    rs.add_argument(
+        "--actor",
+        help="who answers (recorded in decisions / interrupts.resolved_by); default "
+             "$CORESMITH_ROLE, else cli",
+    )
     rs.set_defaults(func=_run_resume)
 
     # logs
@@ -672,8 +1093,50 @@ def main():
     except Exception:  # noqa: BLE001
         pass
 
+    # Role-scoped CLI (CORESMITH_ROLE=architect|worker|watchdog): enforced here,
+    # before dispatch, so the daemon-lifecycle verbs above are covered too.
+    _role = (os.environ.get("CORESMITH_ROLE") or "").strip().lower()
+    if _role:
+        try:
+            from orchestrator.harness.cli import role_allows, role_refusal
+        except Exception:  # noqa: BLE001 - engine not importable: fail closed
+            print(f"ROLE_FORBIDDEN {_role}: role check unavailable "
+                  "(orchestrator.harness.cli not importable)", file=sys.stderr)
+            sys.exit(2)
+        if not role_allows(_role, sys.argv[1:]):
+            _msg = role_refusal(_role, sys.argv[1:])
+            print(_msg, file=sys.stderr)
+            try:   # the refusal lands in the actions log (rc 2, actor = the role)
+                from orchestrator.harness.cli import record_role_refusal
+                record_role_refusal(sys.argv[1:], _role, _msg)
+            except Exception:  # noqa: BLE001
+                pass
+            sys.exit(2)
+
     args = ap.parse_args()
-    args.func(args)
+    if getattr(args, "cmd", "") not in ("daemon", "run", "resume", "backend", "build"):
+        args.func(args)
+        return
+    # The daemon-client lifecycle verbs land in the `actions` log too (rc and
+    # the error line as summary), like every harness verb.
+    _rc, _summary = 0, "ok"
+    try:
+        args.func(args)
+    except SystemExit as _exc:
+        _code = _exc.code
+        _rc = _code if isinstance(_code, int) else (0 if _code is None else 1)
+        _summary = "" if isinstance(_code, int) or _code is None else str(_code).splitlines()[0]
+        raise
+    except BaseException as _exc:  # noqa: BLE001 - logged, then re-raised
+        _rc, _summary = 1, f"{type(_exc).__name__}: {_exc}"
+        raise
+    finally:
+        try:
+            from orchestrator.harness.cli import record_cli_action
+            record_cli_action(sys.argv[1:], _rc, _summary,
+                              create=(getattr(args, "cmd", "") == "daemon"))
+        except Exception:  # noqa: BLE001 - the audit log must never break a verb
+            pass
 
 
 if __name__ == "__main__":

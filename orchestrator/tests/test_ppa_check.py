@@ -557,7 +557,7 @@ class TestRunPreLayoutStaLoud:
             seen["netlist"] = Path(rv).read_text()
             return self._R(stdout="wns max -2.50\ntns max -10.00\n", rc=0)
 
-        monkeypatch.setattr(pc.subprocess, "run", fake_run)
+        monkeypatch.setattr(pc, "run_process", fake_run)
         res = run_pre_layout_sta(nl, sdc, lib, "top")
         assert res == {"wns_ns": -2.50, "tns_ns": -10.00}
         # The netlist STA actually read had its instance params stripped.
@@ -571,7 +571,7 @@ class TestRunPreLayoutStaLoud:
         nl, sdc, lib = self._inputs(tmp_path)
         monkeypatch.setattr(pc.shutil, "which", lambda _x: "/usr/bin/true")
         monkeypatch.setattr(
-            pc.subprocess, "run",
+            pc, "run_process",
             lambda *a, **k: self._R(stdout="Error: link failed",
                                     stderr="cannot find cs_sram_1rw", rc=1),
         )
@@ -589,7 +589,7 @@ class TestRunPreLayoutStaLoud:
         def boom(*a, **k):
             raise pc.subprocess.TimeoutExpired(cmd="sta", timeout=300)
 
-        monkeypatch.setattr(pc.subprocess, "run", boom)
+        monkeypatch.setattr(pc, "run_process", boom)
         res = run_pre_layout_sta(nl, sdc, lib, "top")
         assert res["wns_ns"] is None
         assert "timed out" in res["sta_error"]
@@ -621,18 +621,18 @@ class TestRouteAfterSynthPpaGate:
     def test_gate_off_compiles_is_done_even_if_over_budget(self, monkeypatch):
         monkeypatch.delenv("CORESMITH_PPA_GATE", raising=False)
         from orchestrator.langgraph.pipeline_graph import route_after_synth
-        assert route_after_synth(self._state()) == "block_done"
+        assert route_after_synth(self._state()) == "evaluate_targets"
 
     def test_over_budget_is_advisory(self, monkeypatch):
         # WP-10c: the PPA budget verdict never routes a compiled block to rework.
         monkeypatch.setenv("CORESMITH_PPA_GATE", "1")
         from orchestrator.langgraph.pipeline_graph import route_after_synth
-        assert route_after_synth(self._state(ppa_ok=False)) == "block_done"
+        assert route_after_synth(self._state(ppa_ok=False)) == "evaluate_targets"
 
     def test_gate_on_within_budget_is_done(self, monkeypatch):
         monkeypatch.setenv("CORESMITH_PPA_GATE", "1")
         from orchestrator.langgraph.pipeline_graph import route_after_synth
-        assert route_after_synth(self._state(ppa_ok=True)) == "block_done"
+        assert route_after_synth(self._state(ppa_ok=True)) == "evaluate_targets"
 
     def test_synth_failure_always_diagnoses(self, monkeypatch):
         monkeypatch.setenv("CORESMITH_PPA_GATE", "1")
@@ -791,7 +791,7 @@ class TestSentinelSlackIsNotAMeasurement:
             return subprocess.CompletedProcess(
                 cmd, 0, f"CORESMITH_WNS {self.OBSERVED!r}\n", "")
 
-        monkeypatch.setattr(pc.subprocess, "run", _fake_run)
+        monkeypatch.setattr(pc, "run_process", _fake_run)
         wns, detail = pc._measure_wns_from_rtl(
             [str(src)], str(lib), tmp_path, "base", False, 20.0, "b", "clk",
             "/usr/bin/yosys", "/usr/bin/sta", 30)

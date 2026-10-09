@@ -42,7 +42,7 @@ def test_elaborator_output_is_the_decision(tmp_path, cells, ok):
         from subprocess import CompletedProcess
         return CompletedProcess(argv, 0, "", "")
 
-    with patch("shutil.which", return_value="/fake/yosys"), patch("subprocess.run", side_effect=run):
+    with patch("shutil.which", return_value="/fake/yosys"), patch("orchestrator.harness.hierarchy.run_process", side_effect=run):
         result = assert_blocks_instantiated(
             "module chip_top(); leaf u(); endmodule", {"leaf"},
             sources=["module leaf(); endmodule"], top_module="chip_top")

@@ -62,3 +62,34 @@ class TestCheckArchitectureArtifacts:
         monkeypatch.setenv("CORESMITH_SKIP_ARCH_WARN", "")
         warnings = _check_architecture_artifacts(str(tmp_path))
         assert len(warnings) == 1
+
+
+class TestPrdLocations:
+    """The CLI flow writes the PRD to arch/ (``coresmith state write``) or
+    registers it in the project DB; neither is a missing PRD."""
+
+    def _others(self, root):
+        (root / ".coresmith").mkdir(exist_ok=True)
+        (root / "arch").mkdir(exist_ok=True)
+        (root / "arch" / "ers_spec.md").write_text("# ERS")
+        (root / ".coresmith" / "block_diagram.json").write_text("{}")
+
+    @pytest.mark.parametrize("rel", ["arch/prd_spec.json", "arch/prd_spec.md", ".coresmith/prd_spec.json"])
+    def test_prd_file_locations(self, tmp_path, monkeypatch, rel):
+        monkeypatch.delenv("CORESMITH_SKIP_ARCH_WARN", raising=False)
+        self._others(tmp_path)
+        (tmp_path / rel).write_text("{}")
+        assert _check_architecture_artifacts(str(tmp_path)) == []
+
+    def test_registered_db_prd_counts(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CORESMITH_SKIP_ARCH_WARN", raising=False)
+        self._others(tmp_path)
+        from orchestrator.state_store.project_db import open_project
+        open_project(tmp_path).register_artifact("prd", "db:prd", sha="db")
+        assert _check_architecture_artifacts(str(tmp_path)) == []
+
+    def test_still_warns_without_any_prd(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CORESMITH_SKIP_ARCH_WARN", raising=False)
+        self._others(tmp_path)
+        w = _check_architecture_artifacts(str(tmp_path))
+        assert len(w) == 1 and "PRD spec" in w[0] and "ERS spec" not in w[0]

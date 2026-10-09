@@ -29,7 +29,17 @@ import time
 from typing import Any
 
 _STABLE_KEYS = ("type", "block_name", "block", "attempt", "phase", "stage", "node",
+                "question_ids", "round", "tier", "repark_round")
+# Before 2026-10: no tier / round component -- every block-less review park of
+# a run hashed to ONE id and an answered row was re-opened in place.
+_LEGACY_KEYS = ("type", "block_name", "block", "attempt", "phase", "stage", "node",
                 "question_ids", "round")
+
+
+def legacy_ids() -> bool:
+    """``CORESMITH_INTERRUPT_ID_LEGACY=1``: the old id (no ``tier`` / task
+    round component) and the old re-open of a consumed row."""
+    return (os.environ.get("CORESMITH_INTERRUPT_ID_LEGACY", "") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def wait_seconds() -> float:
@@ -41,12 +51,19 @@ def wait_seconds() -> float:
         return 0.0
 
 
-def interrupt_id_for(payload: dict, *, graph: str, node: str, run_id: str) -> str:
+def interrupt_id_for(payload: dict, *, graph: str, node: str, run_id: str, task: str = "") -> str:
     """A deterministic id: the same park re-executed after a resume maps to
-    the same row. Payload keys that vary per park (attempt, block, type, ...)
-    are part of the key; free text is not."""
-    key = {k: payload.get(k) for k in _STABLE_KEYS if k in payload}
+    the same row. Payload keys that vary per park (attempt, block, type,
+    tier, ...) are part of the key; free text is not. ``task`` is the round
+    component: the LangGraph task that raised the park (its
+    ``checkpoint_ns``) -- stable when the node re-executes on resume, new
+    every time the graph enters the node again, so two parks of one kind in
+    one run (tier-1 review round 1 and round 2) never share an id."""
+    legacy = legacy_ids()
+    key = {k: payload.get(k) for k in (_LEGACY_KEYS if legacy else _STABLE_KEYS) if k in payload}
     key.update(graph=graph, node=node, run_id=run_id)
+    if task and not legacy:
+        key["task"] = task
     return "int-" + hashlib.sha1(json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
@@ -62,14 +79,21 @@ class InterruptMixin:
 
     def park_interrupt(self, payload: dict, *, graph: str, node: str,
                        block: str | None = None, kind: str | None = None,
-                       branch: str | None = None) -> tuple[str, dict]:
+                       branch: str | None = None, task: str = "") -> tuple[str, dict]:
         """Record a park; idempotent on the deterministic id. Returns
-        ``(interrupt_id, payload_with_id)``."""
+        ``(interrupt_id, payload_with_id)``.
+
+        With a ``task`` (the raising LangGraph task) a ``consumed`` row is the
+        node RE-EXECUTING after its answer was used: it stays consumed (the
+        resume value is returned by ``interrupt()`` itself). Without one (or
+        under ``CORESMITH_INTERRUPT_ID_LEGACY=1``) the same id raised again is
+        a new park and the row is re-opened, as before."""
         rid = self.run_id()
         # Always derived from the stable keys: a payload copied from another
         # park (a new attempt, another block) gets its own row, and the same
         # park re-executed after a resume lands on the same one.
-        iid = interrupt_id_for(payload, graph=graph, node=node, run_id=rid)
+        iid = interrupt_id_for(payload, graph=graph, node=node, run_id=rid, task=task)
+        reexecution = bool(task) and not legacy_ids()
         # Mutate in place: callers (and tests) hold the payload object and
         # expect the parked value to BE it.
         payload["interrupt_id"] = iid
@@ -84,7 +108,7 @@ class InterruptMixin:
                      block or payload.get("block_name") or payload.get("block") or "",
                      kind or str(payload.get("type") or ""),
                      json.dumps(payload, default=str), rid, time.time()))
-            elif row["status"] == "consumed":
+            elif row["status"] == "consumed" and not reexecution:
                 # The same park, raised again after its answer was used: a
                 # fresh pending row (re-open) so a new answer can be queued.
                 db.execute("UPDATE interrupts SET status='pending', resolution_json=NULL, "
@@ -142,6 +166,19 @@ class InterruptMixin:
                              "status IN ('pending','resolved')", (interrupt_id,))
             return cur.rowcount == 1
 
+    def abandon_parks(self, *, graph: str, block: str) -> list[str]:
+        """Abandon every open park (``pending`` / ``resolved``) ``graph``
+        raised for ``block`` in any run: the work that parked was aborted, so
+        nothing will ever consume the answer. Returns the ids touched."""
+        with self._tx() as db:
+            rows = db.execute("SELECT id FROM interrupts WHERE graph=? AND block=? AND "
+                              "status IN ('pending','resolved')", (graph, block)).fetchall()
+            ids = [r["id"] for r in rows]
+            if ids:
+                q = ",".join("?" * len(ids))
+                db.execute(f"UPDATE interrupts SET status='abandoned' WHERE id IN ({q})", tuple(ids))
+        return ids
+
     def interrupt(self, interrupt_id: str) -> dict | None:
         with self._conn() as db:
             row = db.execute("SELECT * FROM interrupts WHERE id=?", (interrupt_id,)).fetchone()
@@ -185,13 +222,13 @@ class InterruptMixin:
 
 
 def park_and_wait(db, payload: dict, *, graph: str, node: str, block: str | None = None,
-                  kind: str | None = None) -> tuple[dict, Any]:
+                  kind: str | None = None, task: str = "") -> tuple[dict, Any]:
     """Record the park, optionally wait for a queued answer.
 
     Returns ``(payload_with_id, resolution_or_None)``. The caller raises
     ``interrupt(payload_with_id)`` when the resolution is ``None``.
     """
-    iid, out = db.park_interrupt(payload, graph=graph, node=node, block=block, kind=kind)
+    iid, out = db.park_interrupt(payload, graph=graph, node=node, block=block, kind=kind, task=task)
     wait = wait_seconds()
     res = db.wait_for_resolution(iid, wait) if wait > 0 else db.consume_interrupt(iid)
     return out, res

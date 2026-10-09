@@ -381,8 +381,8 @@ async def wrapper_pnr_node(state: TapeoutState) -> dict:
     from orchestrator.langgraph.backend_helpers import (
         CELL_LEF,
         LIBERTY,
-        OPENROAD_BIN,
         TECH_LEF,
+        backend_openroad_bin,
     )
     from orchestrator.langgraph.tapeout_helpers import (
         OPENFRAME_CORE_MARGIN_UM,
@@ -429,7 +429,7 @@ async def wrapper_pnr_node(state: TapeoutState) -> dict:
                 "tech_lef": str(TECH_LEF),
                 "cell_lef": str(CELL_LEF),
                 "liberty_path": str(LIBERTY),
-                "openroad_bin": str(OPENROAD_BIN),
+                "openroad_bin": str(backend_openroad_bin()),
                 "target_clock_mhz": target_clock,
                 "period_ns": 1000.0 / target_clock,
                 "die_width_um": OPENFRAME_DIE_WIDTH_UM,

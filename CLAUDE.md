@@ -12,27 +12,22 @@ AI-orchestrated ASIC pipeline. Three LangGraph state machines run in sequence:
 
 The pipeline is **LLM-driven**, not deterministic. Every code-gen + diagnose step calls an LLM (Claude or Codex). The LLM has shell/file-edit tools and writes RTL/TB directly to disk.
 
-## Architecture: coresmithd daemon + outer agent
+## Architecture: the Architect, the CLI, the daemon
 
-coresmith is a **daemon**, not a CLI. There is no `run_pipeline.py` auto-approver any more. The flow is:
+coresmith is a **CLI plus a daemon**, driven by the **Architect** — the coding agent the human is already talking to (Claude Code, Codex, ...). The engine never launches, resumes, prompts or stops an Architect; there is no engine-owned Architect loop, on-call loop or no-progress counter. The flow is:
 
-1. **`orchestrator/daemon/server.py`** — FastAPI service, one process per `CORESMITH_PROJECT_ROOT`. Wraps the LangGraph via `orchestrator/graph_lifecycle.py`. Writes `<project_root>/.coresmith/daemon.json` ({port, pid}) on startup so clients can discover it. Endpoints: `POST /run/start`, `GET /run/state`, `POST /run/resume`, `POST /run/pause`, `GET /healthz`.
-2. **`bin/coresmith`** — CLI client. Auto-discovers the daemon via daemon.json and shells to its HTTP endpoints. Subcommands: `daemon start|stop|status`, `run start|pause`, `state`, `resume`, `logs`.
-3. **Outer agent (Claude on cron)** — the **autochecker**. The pipeline parks on every interrupt — it never auto-approves. A scheduled Claude invocation runs `coresmith state`, inspects the pending interrupt's payload, decides, and runs `coresmith resume --action ...`. If the daemon is dead or the run is stuck, the agent restarts it.
+1. **Architect** — reads the human's intent, writes the design collateral (PRD/FRD rows, contracts, pins, uArch specs, RTL when it chooses), and advances the run only through `coresmith`: `register`, `stage next`, `run start`, `resume`. Every park waits for its `coresmith resume`.
+2. **`bin/coresmith`** — the CLI. Deterministic state/registry/check verbs run in-process (`register`, `prd|frd|contract|pin|fabric`, `stage`, `verify`, `tool`, `target`, `model build|eval`, `shell assemble`); explicitly named authoring verbs make exactly one helper call (`model author --block <b>`, `harness author`); lifecycle verbs talk HTTP to the daemon (`daemon`, `run start|pause|resume`, `backend start|resume|pause`, `state`, `interrupts`). Checks never author.
+3. **`orchestrator/daemon/server.py`** — FastAPI service, one process per `CORESMITH_PROJECT_ROOT`. Owns the LangGraph frontend (per-block RTL/DV/synth, integration, validation) and backend graphs via `orchestrator/graph_lifecycle.py`; parks every interrupt. `POST /run/start` is refused (409) while the stage machine is before `blocks` unless forced.
 
 ```
-┌────────────────┐     HTTP      ┌─────────────────────┐     LangGraph
-│  bin/coresmith │ ◀──────────▶ │    coresmithd       │ ◀──────────────▶ pipeline_graph
-│  CLI           │              │  (FastAPI daemon)   │                  + SQLite checkpoint
-└────────────────┘              └─────────────────────┘
-        ▲                                ▲
-        │ exec                           │ daemon.json (port, pid)
-┌───────┴──────────────────────────┐    │
-│ Claude on cron (10-min cadence)  │────┘
-│  - reads escalation state         │
-│  - decides + resumes              │
-│  - fixes/restarts on failure      │
-└───────────────────────────────────┘
+Human <-> Architect (the human's coding agent)
+              |  shell: coresmith <verb> ...
+              v
+        bin/coresmith ── direct ──> registry / stage machine / checks (deterministic)
+              |       ── direct ──> model author / harness author (one explicit helper call)
+              `── HTTP ──> coresmithd ──> LangGraph frontend + backend (helper calls, parks)
+                                            ^ the Architect answers parks with `coresmith resume`
 ```
 
 ## How to run
@@ -66,13 +61,14 @@ bin/coresmith architecture start --project-root $RUN_DIR \
 
 # (2) Frontend pipeline — runs against the architecture artifacts from (1)
 #     OR against a hand-written examples/<design>/blocks.yaml if you are
-#     intentionally skipping the architecture phase. Skipping is supported
-#     but the daemon will print a warning at /run/start because
-#     `integration_review` then can't verify cross-block data_width and
-#     `validation_dv` soft-aborts on missing ERS. Set
-#     CORESMITH_SKIP_ARCH_WARN=1 to silence the warning for rapid
-#     iteration / batch evaluation runs where you only care about the
-#     per-block frontend loop.
+#     intentionally skipping the architecture phase. The daemon REFUSES
+#     /run/start (HTTP 409, `missing: [PRD_NOT_REGISTERED, ...]`) unless a
+#     PRD and an FRD with at least one must-have item are registered
+#     (`coresmith register prd|frd <path>`). CORESMITH_SKIP_ARCH_WARN=1 (or
+#     CORESMITH_REQUIRE_REQUIREMENTS=0) bypasses it -- and the missing-ERS
+#     warning -- for batch evaluation runs where you only care about the
+#     per-block frontend loop. /run/start rotates the old events log to
+#     pipeline_events.<ts>.jsonl (CORESMITH_ROTATE_EVENTS=0 truncates).
 bin/coresmith run start --project-root $RUN_DIR \
     --blocks-file /home/ubuntu/coresmith/examples/<design>/blocks.yaml
 
@@ -100,13 +96,13 @@ bin/coresmith logs  --project-root $RUN_DIR -n 100
 
 - The **Amaranth model** (the composition / `uarch_integration_gate` byte-exact pass, `derate_ledger measured=99`) proves the *design intent*. It is **NOT the chip.** A byte-exact model can sit atop RTL that is wrong — the model and the RTL are separate transcriptions (the RTL is lowered/verified separately).
 - **`pipeline_done=True`** and the log line **`PIPELINE COMPLETE: N/N blocks passed`** mean the **PER-BLOCK FRONTEND** is complete (every block passed its *own* DV). They do **NOT** mean the chip is integrated or verified. The run can be `pipeline_done=True` AND `status=interrupted` (parked at `integration_check`/`integration_dv`/`validation_dv`) at the same time — that is NOT done.
-- After per-block completion the run enters **integration**: `integration_check` (assembles `chip_top`, parks for `accept` — lint-clean ≠ functionally-correct) → `integration_dv` (chip_top vs golden) → `validation_dv` (ERS/KPI). The outer agent MUST drive each of these; they do not auto-run.
+- After per-block completion the run enters **integration**: `integration_check` (assembles `chip_top`, parks for `accept` — lint-clean ≠ functionally-correct; `CORESMITH_INTEGRATION_CHECK_PARK=0` skips the park) → `integration_dv` (chip_top vs golden) → `validation_dv` (ERS/KPI). The outer agent MUST drive each of these; they do not auto-run.
 
 **Before reporting a design "closed"/"done"/"working", confirm `integration_dv` AND `validation_dv` actually PASSED (not just per-block / not just the model gate), and ideally simulate the real `chip_top` RTL on representative content.** Do not infer the chip from `pipeline_done`, a `PIPELINE COMPLETE` string, or a byte-exact model.
 
-## Outer-agent decision contract
+## The Architect's decision contract
 
-The pipeline raises interrupts at: `uarch_spec_review`, `uarch_integration_review`, per-block retry/skip choices, `integration_check` accept, `integration_dv` / `validation_dv` failures. **There is no auto-approve.** Every interrupt parks the graph; only an outer-agent `coresmith resume` advances it.
+The pipeline raises interrupts at: `uarch_spec_review`, `uarch_integration_review`, per-block retry/skip choices, `integration_check` accept, `shell_not_elaborated`, `integration_dv` / `validation_dv` failures. **There is no auto-approve.** Every interrupt parks the graph; only the Architect's `coresmith resume` advances it.
 
 When `coresmith state` shows `pending_interrupt_count > 0`:
 
@@ -127,7 +123,7 @@ When `coresmith state` shows `pending_interrupt_count > 0`:
 ## Common pitfalls & how to handle them
 
 - **Don't `rm -rf .coresmith/`** — rename it: `.coresmith.cleared-<reason>-<ts>/`, `.coresmith.failed-<reason>-<ts>/`, `.coresmith.aborted-<reason>-<ts>/`. The repo root is littered with archives because they're valuable for forensics.
-- **Architectural decisions during integration review**: the integration-review LLM agent edits uArch specs on **every run**, so `issues_fixed > 0` is the steady state. Default behavior now honors `action: approve` despite `issues_fixed > 0`; set `CORESMITH_STRICT_INTEGRATION_REVIEW=1` to restore the old auto-`revise` on stale RTL. A `revise` is now TARGETED (WP-7): the blocks the reviewer edited re-enter the tier implementing the reviewed spec (adopted from `arch/uarch_specs_review/`), the blocks named in `affected_blocks` / `block_actions` re-spec with the `feedback`, and every other block keeps its passing result; a revise naming nothing re-runs the whole tier with the review summary as feedback. DV-failure revises (`integration_dv` / `validation_dv`) plan the same way and skip tiers with nothing to redo. `CORESMITH_UARCH_SINGLE_CONTEXT=1` authors every uArch spec of the design in ONE agent session at the first tier entry (no per-block fan-out for the spec stage); blocks fall back to per-block authors for anything the session did not produce or when feedback is pending. (The HTTP daemon currently exposes start/state/resume/pause; for `restart_block` use the MCP server.)
+- **Architectural decisions during integration review**: the integration-review LLM agent edits uArch specs on **every run**, so `issues_fixed > 0` is the steady state. Default behavior now honors `action: approve` despite `issues_fixed > 0`; set `CORESMITH_STRICT_INTEGRATION_REVIEW=1` to restore the old auto-`revise` on stale RTL. A `revise` is now TARGETED (WP-7): the blocks the reviewer edited re-enter the tier implementing the reviewed spec (adopted from `arch/uarch_specs_review/`), the blocks named in `affected_blocks` / `block_actions` re-spec with the `feedback` (block names mentioned in the feedback PROSE are never targets; `CORESMITH_REVISE_PROSE_TARGETS=1` restores that; `--block-actions '{"x": "keep"}'` protects a block), and every other block keeps its passing result; a revise naming nothing re-runs the whole tier with the review summary as feedback. DV-failure revises (`integration_dv` / `validation_dv`) plan the same way and skip tiers with nothing to redo. `CORESMITH_UARCH_SINGLE_CONTEXT=1` authors every uArch spec of the design in ONE agent session at the first tier entry (no per-block fan-out for the spec stage); blocks fall back to per-block authors for anything the session did not produce or when feedback is pending. (The HTTP daemon currently exposes start/state/resume/pause; for `restart_block` use the MCP server.)
 - **Integration Lead JSON-vs-disk mismatch**: the agent (Codex) sometimes writes the full chip_top via its file-edit tool and then returns `{"verilog": "\`include \"<output_path>\""}`. The integration_lead.py now detects this and prefers the on-disk file; if neither source has a real module declaration it raises so retry triggers.
 - **Validation DV TB module name**: cocotb's `MODULE` is `Path(tb_path).stem`. `run_integration_simulation` preserves the original stem on copy so `test_<design>_validation.py` resolves. If you see `No module named test_<design>_validation` at 0 ns, the copy logic regressed.
 - **Pipeline parked at `status=done, completed_count<total_blocks, next_nodes=[]`**: graph fell into a terminal state with work still pending. Almost always the integration_review revise-loop or a node that ran and exited without advancing. Stop the daemon, archive `.coresmith.failed-<ts>/`, and relaunch.
@@ -138,8 +134,10 @@ When `coresmith state` shows `pending_interrupt_count > 0`:
 
 - `orchestrator/langgraph/` — graphs (architecture, pipeline, backend) and helpers (`integration_helpers.py`, `pipeline_helpers.py`).
 - `orchestrator/graph_lifecycle.py` — start / resume / pause / checkpoint plumbing shared by the MCP server and the FastAPI daemon.
+- `orchestrator/state_store/module_targets.py` + `langgraph/target_closure.py` — FRD-linked module targets: owned bounded FRD items + their verifiers are what a `build module` must meet (`coresmith build targets <b>`; docs/CLI_TACTICS.md *Module targets*).
 - `orchestrator/daemon/server.py` — the **coresmithd** FastAPI daemon. One per project_root.
 - `bin/coresmith` — the CLI client. Auto-discovers the daemon by reading `daemon.json`.
+- `docs/CLI_TACTICS.md` — the line-item CLI verbs (`prd`/`frd`/`contract`/`fabric`/`actions`): `project.sqlite` is the SoC state, rendered files are views; refusal codes and env vars.
 - `orchestrator/mcp_server.py` — the MCP entry point. Same graph plumbing, but the transport is stdio MCP for Claude CLI / Cursor. Key tools: `start_architecture`, `start_pipeline`, `resume_*`, `restart_block`, `restart_node`, `get_*_state`.
 - `orchestrator/langchain/agents/` — LLM-agent wrappers (RTL gen, TB gen, integration lead, integration review, debug, etc.).
 - `orchestrator/langchain/prompts/` — system prompts. Edits here change LLM behavior across runs.

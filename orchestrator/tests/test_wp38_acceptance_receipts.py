@@ -96,7 +96,7 @@ def test_incomplete_receipt_is_not_a_pass(tmp_path, monkeypatch):
         Path(argv[2]).write_bytes(struct.pack("<III", 0, 1, 1) + b"\x01")   # ONE record
         return SimpleNamespace(returncode=0, stderr="", stdout="")
 
-    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    monkeypatch.setattr(ad, "run_process", fake_run)
     res = ad.run_acceptance_dv(str(root), str(top), [])
     assert res["passed"] is False and res["skipped"] is False
     assert res["oracle_incomplete"] is True and res["kind"] == "oracle_incomplete"

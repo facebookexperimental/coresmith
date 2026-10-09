@@ -58,7 +58,7 @@ class TestRunOpenroad:
             captured.update(kwargs)
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
-        monkeypatch.setattr(bh.subprocess, "run", fake_run)
+        monkeypatch.setattr(bh, "run_process", fake_run)
         monkeypatch.setattr(bh.time, "time", lambda: 1000.0)
         monkeypatch.setenv("CORESMITH_WORKER_DEADLINE_EPOCH", "1100")
         monkeypatch.setattr(ph, "_LOG_DIR", tmp_path / "logs")
@@ -74,7 +74,7 @@ class TestRunOpenroad:
         from orchestrator.langgraph import pipeline_helpers as ph
 
         monkeypatch.setattr(
-            bh.subprocess, "run",
+            bh, "run_process",
             lambda *_args, **_kwargs: pytest.fail("OpenROAD must not start"),
         )
         monkeypatch.setattr(bh.time, "time", lambda: 1000.0)
@@ -1056,7 +1056,7 @@ class TestNetgenLvsVerdict:
 
         monkeypatch.setattr(bh, "_write_step_log", lambda *a, **k: "")
         monkeypatch.setattr(
-            bh.subprocess, "run",
+            bh, "run_process",
             lambda cmd, **kw: _sp.CompletedProcess(cmd, returncode, stdout, ""),
         )
         return bh.run_netgen_lvs(

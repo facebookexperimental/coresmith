@@ -115,7 +115,7 @@ def test_timing_probe_resolves_rom_and_keeps_inferred_memory(tmp_path, monkeypat
             return subprocess.CompletedProcess(cmd, 0, "", "")
         return subprocess.CompletedProcess(cmd, 0, "CORESMITH_WNS -3.5\n", "")
 
-    monkeypatch.setattr(pc.subprocess, "run", run)
+    monkeypatch.setattr(pc, "run_process", run)
     wns, detail = pc._measure_wns_from_rtl(
         [str(rtl)], "x.lib", tmp_path / "build", "buf", buffered, 15.625,
         "inner", "clk", "yosys", "sta", 30, project_root=project,

@@ -285,7 +285,7 @@ def test_synthesize_block_recovers_box_format_gate_count(tmp_path, monkeypatch):
         return types.SimpleNamespace(
             returncode=0, stdout=_YOSYS_065_BOX_STAT, stderr="")
 
-    monkeypatch.setattr(ph.subprocess, "run", _fake_run)
+    monkeypatch.setattr(ph, "run_process", _fake_run)
     res = ph.synthesize_block({"name": "blk"}, str(rtl))
     assert res["success"] is True
     assert res["gate_count"] == 3911, res["gate_count"]

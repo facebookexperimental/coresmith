@@ -3,11 +3,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-RTLGeneratorAgent -- converts Python DSP models to Verilog RTL.
-
-Reads a Python source file implementing a signal processing block (e.g., LFSR
-scrambler, Reed-Solomon encoder, FFT butterfly), understands the algorithm,
-and generates synthesizable Verilog-2005 with AXI-Stream interfaces.
+Implement a registered module contract as synthesizable RTL.
 
 All invocations are traced via OpenTelemetry for observability and evaluation.
 """
@@ -21,158 +17,16 @@ from typing import Any
 
 from opentelemetry import trace
 
-from orchestrator.langchain.prompts.skills import load_skill_strict as _load_skill_strict
 from orchestrator.langchain.prompts.skills import load_skills as _load_skills
 
 from .coresmith_llm import DEFAULT_MODEL, ClaudeLLM
 
 _tracer = trace.get_tracer(__name__)
 
-# Load system prompt from template file, fall back to inline
 _PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / "rtl_generator.md"
-if _PROMPT_FILE.exists():
-    SYSTEM_PROMPT = _PROMPT_FILE.read_text()
-else:
-    SYSTEM_PROMPT = """\
-You are an expert digital design engineer specializing in converting Python
-signal processing models into synthesizable Verilog-2005 RTL for ASIC
-implementation on the SkyWater Sky130 130nm process.
+SYSTEM_PROMPT = _PROMPT_FILE.read_text()
 
-RULES:
-1. Output ONLY valid Verilog-2005 (no SystemVerilog constructs).
-2. Use AXI-Stream (tdata/tvalid/tready/tlast) for data interfaces.
-3. Use EXACTLY the clock and reset ports the uArch spec's port table declares --
-   name AND polarity (e.g. `wb_clk_i` + synchronous active-HIGH `wb_rst_i` on a
-   Caravel task, `rst` active-high when the spec says so). Only when the spec
-   declares no reset at all, default to a synchronous active-low `rst_n`.
-4. Use a single clock domain (the spec's clock port; `clk` when unspecified).
-5. All arithmetic must be fixed-point -- no floating point.
-6. Use explicit bit widths on all signals. No implicit widths.
-7. Include a module header comment with: block name, description, I/O ports.
-8. Registers must have reset values.
-9. FSMs must use localparam for state encoding.
-10. No latches -- every conditional must have an else clause.
-11. Combinational logic in always @(*) blocks, sequential in always @(posedge clk).
-12. Target: fully synthesizable by Yosys for Sky130.
-13. Exactly ONE implementation per module. NEVER put two versions of the logic
-    in one module behind a `ifdef/`ifndef/`elsif (e.g. the real algorithm under
-    `ifndef SYNTHESIS and a mock under `else) -- DV verifies one branch while
-    synth/backend build the other (DIFFERENT HARDWARE, so DV proves nothing).
-    Conditional compilation may ONLY guard non-functional debug/trace/assertion
-    code ($display, $dumpvars, SVA assert). If simulation needs behavior synth
-    gets from a macro, that split lives ONLY inside the provided cs_* wrapper
-    library -- never in your module. A deterministic gate rejects violations.
-14. Before finishing, run the supplied functional and synthesis/timing checks
-    on the current RTL and inspect their verdicts. Fix failures within the
-    available repair budget; report any unresolved failure or unavailable check
-    with its exact command and evidence. A functional pass alone is not a
-    timing pass.
 
-AXI-STREAM OUTPUT FSM -- CRITICAL:
-When producing output on an AXI-Stream master port, you MUST follow this
-two-phase pattern to avoid the "valid self-cancellation" bug:
-
-  WRONG (valid is set and cleared in the same combinational pass):
-    ST_OUTPUT: begin
-        m_tvalid_next = 1'b1;          // set valid...
-        if (m_tready)                   // ...but tready is already 1...
-            m_tvalid_next = 1'b0;      // ...so valid is immediately cleared!
-    end
-    // Result: m_tvalid_reg NEVER becomes 1. Deadlock.
-
-  CORRECT (set valid, wait one cycle for handshake):
-    ST_OUTPUT: begin
-        m_tvalid_next = 1'b1;          // assert valid
-        if (m_tvalid_reg && m_tready)   // handshake on REGISTERED valid
-            m_tvalid_next = 1'b0;      // clear after transfer
-            state_next = ST_IDLE;
-        end
-    end
-    // Result: valid rises for at least 1 cycle, handshake completes.
-
-  SIMPLEST (registered output, always correct):
-    always @(posedge clk)
-        if (!rst_n) m_tvalid <= 0;
-        else if (produce_data) m_tvalid <= 1;
-        else if (m_tvalid && m_tready) m_tvalid <= 0;
-
-When converting Python to Verilog:
-- Map numpy arrays to register files or SRAM. **Any storage >= 16384 bits AND
-  >= 256 words deep is an SRAM, NOT a flop array: instantiate the generic wrapper
-  `cs_sram_1rw #(.WIDTH(w), .DEPTH(d)) u_name (.clk, .ce, .we, .addr, .wdata,
-  .rdata)` (or `cs_sram_1rw1r` for a 2-read-port memory). NEVER write a raw
-  `reg [w-1:0] mem [0:d-1];` for storage that big -- the lint gate will reject
-  it.** The `cs_sram` wrapper is PROVIDED BY THE TOOLFLOW (a shared library that
-  is auto-included in lint/sim/synth) -- you ONLY *instantiate* it; do NOT
-  define, redeclare, or paste the `module cs_sram_1rw`/`cs_sram_1rw1r` body into
-  your block file (that causes a Verilator MODDUP duplicate-module error). The
-  wrapper is behavioral in simulation and is replaced by an OpenRAM/sky130 SRAM
-  macro at synthesis & backend, so it costs ~0 flip-flops. Do NOT name a
-  specific macro; parametrize the wrapper and the flow resolves the geometry.
-  Smaller register files (< 16384 bits or < 256 deep, e.g. a 16-deep line buffer
-  or a same-cycle multi-read scan array) stay as plain `reg` arrays.
-- Map Python loops to a REGISTERED FSM/datapath (sequentialize the body over
-  cycles). Unroll combinationally ONLY when one iteration's arithmetic fits a
-  single clock period -- NEVER unroll a multi-op search/transform/accumulation
-  into one combinational cloud (functionally correct but UNSYNTHESIZABLE: the
-  synth gate times out). If the uArch spec names a pipeline depth, realize each
-  stage as a registered always block, not one always @(*). See pipeline_contract.
-- Map dictionary lookups to ROM/LUT.
-- Map floating-point math to fixed-point (specify Q format in comments).
-- Handle variable-length data with valid/ready handshaking.
-- A ready/valid transfer is exactly `valid && ready` sampled on the clock edge.
-  Do not qualify the handshake with a registered copy of `ready`, a previous
-  cycle's ready, or a requirement that ready stay high for two cycles. If a
-  registered output token is held valid, a one-cycle `ready` pulse must retire
-  exactly one token and advance state once.
-
-If the previous attempt failed, the error will be provided. Fix the specific
-issue while maintaining correctness.
-
-Output format:
-1. The complete Verilog module (one module per response).
-2. After the module, a JSON block with port information:
-   ```json
-   {{"module_name": "...", "ports": {{"clk": "input", ...}}}}
-   ```
-"""
-
-# Hand the RTL implementer the SAME pipeline-synthesizability discipline the
-# uArch spec author has. The codec RD-search failure was an RTL-fidelity gap:
-# the spec correctly described an N-stage pipeline, but the RTL generator --
-# which never saw this skill or the PDK budget -- collapsed the datapath into
-# one combinational always-block cloud that walls the synth gate at >600s.
-_SKILLS_TEXT = _load_skills("pipeline_contract", "verify_in_context", "srdy_drdy", "soc_fabric")
-if _SKILLS_TEXT:
-    SYSTEM_PROMPT = (
-        SYSTEM_PROMPT
-        + "\n\n# Reference Skill (synthesizable-pipeline discipline -- MANDATORY)"
-        + "\n\n"
-        + _SKILLS_TEXT
-    )
-
-# port_naming is ALWAYS inline (it is ~2 KB). The one rule that has no cheap
-# recovery path: a collapsed `<channel>_<field>` name is not caught until the
-# deterministic pre-sim conformance gate, and costs a whole regeneration. It
-# lived in NO prompt while the RTL generator was told to transcribe the golden
-# model's (collapsed) port list "byte-exact" -- see the AUTHORITATIVE PORT
-# NAMES table injected into every RTL user message.
-_PORT_NAMING_SKILL = _load_skill_strict("port_naming")
-_LATCHED_CTRL_SKILL = _load_skill_strict("latched_control_decisions")
-SYSTEM_PROMPT = (
-    SYSTEM_PROMPT
-    + "\n\n# Reference Skill (canonical port naming -- MANDATORY)\n\n"
-    + _PORT_NAMING_SKILL
-    + "\n\n"
-    + _LATCHED_CTRL_SKILL
-)
-
-# QSPI-slave frontend / IO-subsystem blocks own the external chassis bus boundary
-# and keep shipping protocol-INCOMPLETE code (dropped cmd 0x05 read_status, short
-# read dummy, read launched a nibble early) because the bus protocol is re-derived
-# per design. Match such a block by name/description so the protocol-completeness
-# skill is injected ONLY for the block that owns the bus boundary, not every DSP
-# block.
 def _declared_bus(project_root: str) -> str:
     """The host bus the task DECLARES (``inputs/task.yaml`` ``bus:`` under
     ``interface``, or ``CORESMITH_BUS``), lower-cased; "" when none."""
@@ -277,8 +131,7 @@ def _throughput_contract_fragment(project_root: str, block_name: str) -> str:
             "Realize the DECLARED schedule: if a stage is declared "
             "word-parallel / II=1, build the parallel lanes -- do NOT serialize "
             "it through one shared resource, and do NOT wrap a compile-time-"
-            "static sequence in a per-iteration REQUEST/RESPONSE handshake "
-            "(pre-stage locally; see rule 18 + the srdy_drdy skill).")
+            "static sequence in a per-iteration REQUEST/RESPONSE handshake.")
         return "\n".join(lines)
     except Exception:  # noqa: BLE001 - best-effort, never block RTL generation
         return ""
@@ -408,15 +261,30 @@ def build_user_message(
         f"- uArch Spec: arch/uarch_specs/{block_name}.md",
         "- ERS: arch/ers_spec.md",
         f"- Constraints: .coresmith/blocks/{block_name}/constraints.json",
-        (
-            f"- Hardware Golden Model (Amaranth): {python_source_path}"
-            if reference_is_hw_golden
-            else f"- Golden Model: {python_source_path}"
-        ),
         "- Block Diagram: .coresmith/block_diagram.json (for interface context)",
         "- Interface Contracts: .coresmith/interface_contracts.json "
         "(canonical bit-level edge contracts — see inline excerpt below)",
     ]
+
+    if python_source_path:
+        label = "Hardware Golden Model (Amaranth)" if reference_is_hw_golden else "Golden Model"
+        parts.append(f"- {label}: {python_source_path}")
+    if project_root:
+        import json
+
+        from orchestrator.harness.targets import load
+        from orchestrator.langgraph.assertion_stage import extract_invariants
+        from orchestrator.state_store.project_db import open_project
+        model = open_project(project_root).model_for(block_name)
+        if model:
+            parts.append(f"- Registered reference model ({model['kind']}): {model['path']}")
+        target = load(project_root, block_name, require_files=False)
+        if target:
+            parts.extend(["", "## Bound build target", json.dumps(target, indent=2)])
+        invariants = extract_invariants(project_root, block_name)
+        if invariants:
+            parts.extend(["", "## Required assertion checks"])
+            parts.extend(f"- {inv['id']}: {inv['text']}" for inv in invariants)
 
     if reference_is_hw_golden:
         # Step 1 of the microarchitecture restructure: the RTL is a
@@ -587,9 +455,14 @@ def build_user_message(
     if _thr_text:
         parts.append(
             "\n--- THROUGHPUT CONTRACT (your RTL is cycle-measured in "
-            "DV; exceeding declared x 1.1 is an automatic rejection -- "
-            "see system-prompt rule 18) ---\n" + _thr_text
+            "DV; exceeding declared x 1.1 is an automatic rejection) ---\n" + _thr_text
         )
+
+    # The recorded build's FRD targets, measurement methods and fixed
+    # acceptance testbench (written by the build's init from what it bound).
+    _targets_brief = _build_targets_fragment(project_root, block_name)
+    if _targets_brief:
+        parts.append("\n" + _targets_brief)
 
     if attempt > 1:
         parts.extend([
@@ -624,6 +497,16 @@ def build_user_message(
     parts.append(rulings_section(project_root, consumer="rtl_generator", block=block_name,
                                  attempt=attempt))
     return "\n".join(parts)
+
+
+def _build_targets_fragment(project_root: str, block_name: str) -> str:
+    """The module build's target brief (``.coresmith/blocks/<b>/build_targets.md``)
+    inlined, '' when the build binds nothing."""
+    try:
+        p = Path(project_root or ".") / ".coresmith" / "blocks" / block_name / "build_targets.md"
+        return p.read_text(encoding="utf-8").strip() if p.is_file() else ""
+    except OSError:
+        return ""
 
 
 def _constraint_precedence_line() -> str:
@@ -716,12 +599,8 @@ class RTLGeneratorAgent:
                 rtl_language=_lang,
             )
 
-            # NOTE: use explicit placeholder substitution (NOT str.format) so
-            # literal braces in prompt code examples -- e.g. the anti-memorization
-            # skill's Verilog `key = {mb_cols, mb_rows, qp, mb_y, mb_x};` or
-            # concatenations `{ZERO_COEFF_LEVELS, ...}` -- are not misparsed as
-            # format fields (which raised KeyError and aborted RTL generation).
-            # (engine fix, 2026-06-21)
+            # Replace only declared placeholders so literal braces in code
+            # examples remain intact.
             system_prompt = SYSTEM_PROMPT
             for _ph, _val in (
                 ("{target_process}", _proc),

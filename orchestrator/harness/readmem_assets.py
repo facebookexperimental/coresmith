@@ -120,15 +120,17 @@ def modules(ts: list[Token]) -> list[Module]:
 @dataclass
 class Assets:
     root: Path
+    include_dirs: tuple[Path, ...] = ()
     texts: dict[Path, str] = field(default_factory=dict)
     dependencies: set[Path] = field(default_factory=set)
     # Replacements point to files; includes point to the recursively staged file.
     replacements: dict[Token, tuple[Path, bool]] = field(default_factory=dict)
     empty_guards: set[tuple[Token, Token, str]] = field(default_factory=set)
 
-    def resolve(self, token: Token, name: str) -> Path:
+    def resolve(self, token: Token, name: str, *, include=False) -> Path:
         choices = {p.resolve() for p in (token.path.parent / name, self.root / name,
-                   self.root / 'inputs' / name) if p.is_file()}
+                   self.root / 'inputs' / name,
+                   *[p / name for p in self.include_dirs if include]) if p.is_file()}
         if len(choices) != 1:
             from orchestrator.harness.top_module import CandidateError
             raise CandidateError(f'Dependency {name!r} from {token.path} is '
@@ -143,7 +145,7 @@ class Assets:
         name = token.text[1:-1]
         if not name and not include:
             return  # The parameter convention explicitly means no image.
-        dep = self.resolve(token, name)
+        dep = self.resolve(token, name, include=include)
         self.dependencies.add(dep)
         self.replacements[token] = (dep, include)
         return dep
@@ -221,9 +223,9 @@ def _instantiations(parent: Module, targets: dict):
             yield params, values
 
 
-def bind_assets(paths, project_root, *, top_module="", parameters=None, texts=None) -> Assets:
+def bind_assets(paths, project_root, *, top_module="", parameters=None, texts=None, include_dirs=()) -> Assets:
     from orchestrator.harness.top_module import CandidateError
-    assets = Assets(Path(project_root).resolve(), texts=dict(texts or {}))
+    assets = Assets(Path(project_root).resolve(), include_dirs=tuple(Path(p).resolve() for p in include_dirs), texts=dict(texts or {}))
     try:
         ts = [t for path in paths for t in assets.load(Path(path).resolve())]
         mods = modules(ts)

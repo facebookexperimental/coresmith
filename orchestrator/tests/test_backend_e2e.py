@@ -17,6 +17,16 @@ Marks:
     @pytest.mark.slow         -- takes ~60s
     @pytest.mark.requires_nix -- needs `nix` on PATH
     @pytest.mark.e2e          -- end-to-end integration test
+    @pytest.mark.live_llm     -- the backend drives every EDA step (flat-top
+                                 synthesis, PnR, ...) through an LLM agent
+                                 (``backend_graph._run_eda_driver``), so the
+                                 chain needs a real provider CLI
+
+The candidate gate: ``init_design_node`` builds only the design
+``integration_check`` adopted (``.coresmith/candidate.json``, read through
+``top_module.validated_candidate()``); the fixture records the adder as that
+candidate (``_adopt_adder``). ``test_fixture_satisfies_the_candidate_gate``
+checks the gate without Nix or an LLM.
 """
 
 from __future__ import annotations
@@ -46,6 +56,7 @@ _FIXTURES = Path(__file__).resolve().parent / "fixtures"
 _ADDER_RTL = _FIXTURES / "adder_16bit.v"
 
 _HAS_NIX = shutil.which("nix") is not None
+_HAS_YOSYS = shutil.which("yosys") is not None
 
 requires_nix = pytest.mark.skipif(not _HAS_NIX, reason="Nix not installed")
 
@@ -115,16 +126,38 @@ write_verilog -noattr {netlist_path}
     return netlist_path, sdc_path
 
 
+_TOP_RTL_REL = "rtl/adder/adder_16bit.v"
+
+
+def _adopt_adder(project_root: Path) -> dict:
+    """Record the adder as the validated integration candidate.
+
+    ``backend_graph.init_design_node`` only builds the design that
+    ``integration_check`` adopted: it reads ``.coresmith/candidate.json``
+    through ``top_module.validated_candidate()`` and parks with "Validated
+    candidate manifest is missing" otherwise. A single-block design is its own
+    top, so the receipt is the adder itself with no expected sub-blocks (the
+    same adoption the single-block integration path performs).
+    """
+    from orchestrator.harness.top_module import write_candidate_receipt
+
+    rtl = project_root / _TOP_RTL_REL
+    rtl.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(_ADDER_RTL, rtl)
+    return write_candidate_receipt(project_root, "adder_16bit", str(rtl), {}, expected_blocks=[],
+                                   note="test_backend_e2e fixture")
+
+
 def _make_initial_state(project_root: str) -> dict:
     """Build the initial BackendState for a single adder_16bit block."""
     block = {
         "name": "adder_16bit",
         "tier": 1,
-        "rtl_path": "rtl/adder/adder_16bit.v",
+        "rtl_path": _TOP_RTL_REL,
         "description": "16-bit pipelined unsigned adder",
     }
-    # Pre-set flat_netlist_path to the existing per-block synthesis output
-    # so flat_top_synthesis_node skips Yosys and goes straight to PnR.
+    # The per-block synthesis output (flat_top_synthesis_node re-synthesizes
+    # the adopted candidate through its EDA driver; kept for the old shape).
     netlist = str(Path(project_root) / "syn" / "output" / "adder_16bit" / "adder_16bit_netlist.v")
     sdc = str(Path(project_root) / "syn" / "output" / "adder_16bit" / "adder_16bit.sdc")
     return {
@@ -174,6 +207,21 @@ def _make_initial_state(project_root: str) -> dict:
     }
 
 
+@pytest.mark.skipif(not _HAS_YOSYS, reason="yosys (the hierarchy elaborator) not installed")
+@pytest.mark.asyncio
+async def test_fixture_satisfies_the_candidate_gate(tmp_path):
+    """The e2e state passes ``init_design_node``'s ``validated_candidate()``
+    gate (no Nix needed): the backend gets the adder, not an ask_human park."""
+    from orchestrator.langgraph.backend_graph import init_design_node, route_after_init_design
+
+    rec = _adopt_adder(tmp_path)
+    assert (tmp_path / ".coresmith" / "candidate.json").is_file() and rec["top_module"] == "adder_16bit"
+    out = await init_design_node(_make_initial_state(str(tmp_path)))
+    assert out["previous_error"] == "" and out["design_name"] == "adder_16bit"
+    assert out["integration_top_path"] == str((tmp_path / _TOP_RTL_REL).resolve())
+    assert route_after_init_design(out) == "flat_top_synthesis"
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # End-to-end: Yosys -> Backend Graph (PnR -> DRC -> LVS -> Timing Sign-off)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -181,6 +229,7 @@ def _make_initial_state(project_root: str) -> dict:
 @requires_nix
 @pytest.mark.slow
 @pytest.mark.e2e
+@pytest.mark.live_llm
 class TestBackendE2E:
     """Full backend pipeline on adder_16bit: synth -> PnR -> DRC -> LVS -> sign-off."""
 
@@ -193,6 +242,7 @@ class TestBackendE2E:
             tmp/syn/output/adder_16bit/adder_16bit.sdc
         """
         project_root = tmp_path_factory.mktemp("adder_e2e")
+        _adopt_adder(project_root)
         netlist, sdc = _synthesize_adder(project_root)
         return {
             "project_root": project_root,

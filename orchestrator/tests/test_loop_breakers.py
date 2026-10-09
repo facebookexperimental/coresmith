@@ -77,67 +77,6 @@ class TestReviseUarchPinsConstraints:
         assert entries[1]["source"] == "chip_dv_revise"
 
 
-class TestChipLeadUnsupportedActionRetry:
-    """Arm-S retro: one unsupported action stranded the run until a human
-    daemon restart. The agent now gets exactly one corrective round."""
-
-    @pytest.fixture(autouse=True)
-    def _reset(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(pipeline_graph, "_CHIP_LEAD_TRIPPED", False)
-        # Provider retry decisions are independent of the developer checkout.
-        # The checkout guard has dedicated tests using controlled git output.
-        monkeypatch.setattr(pipeline_graph, "_engine_checkout_guard", lambda: [])
-        monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
-        monkeypatch.setenv("CORESMITH_ENABLE_CHIP_LEAD", "1")
-
-    @pytest.mark.asyncio
-    async def test_corrective_retry_recovers(self, monkeypatch):
-        from orchestrator.langchain.agents import chip_lead_agent
-        seen_payloads = []
-
-        async def fake_decide(self, *, payload, prior_decisions=None):
-            seen_payloads.append(payload)
-            if len(seen_payloads) == 1:
-                return {"action": "revise", "reasoning": "wrong vocab"}
-            return {"action": "retry", "reasoning": "corrected"}
-
-        monkeypatch.setattr(chip_lead_agent.ChipLeadAgent, "__init__",
-                            lambda self, model=None: None)
-        monkeypatch.setattr(chip_lead_agent.ChipLeadAgent, "decide", fake_decide)
-        monkeypatch.setattr(
-            pipeline_graph, "interrupt",
-            lambda p: (_ for _ in ()).throw(AssertionError("parked")))
-
-        out = await pipeline_graph._resolve_interrupt(
-            {"type": "block_failure", "supported_actions": ["retry", "abort"]})
-        assert out["action"] == "retry"
-        assert pipeline_graph._CHIP_LEAD_TRIPPED is False
-        assert len(seen_payloads) == 2
-        assert "action_correction" in seen_payloads[1]
-        assert "'revise'" in seen_payloads[1]["action_correction"]
-
-    @pytest.mark.asyncio
-    async def test_double_unsupported_trips(self, monkeypatch):
-        from orchestrator.langchain.agents import chip_lead_agent
-
-        async def fake_decide(self, *, payload, prior_decisions=None):
-            return {"action": "revise", "reasoning": "stubborn"}
-
-        monkeypatch.setattr(chip_lead_agent.ChipLeadAgent, "__init__",
-                            lambda self, model=None: None)
-        monkeypatch.setattr(chip_lead_agent.ChipLeadAgent, "decide", fake_decide)
-        parked = []
-        monkeypatch.setattr(
-            pipeline_graph, "interrupt",
-            lambda p: parked.append(p) or {"action": "abort"})
-
-        out = await pipeline_graph._resolve_interrupt(
-            {"type": "block_failure", "supported_actions": ["retry", "abort"]})
-        assert out == {"action": "abort"}
-        assert len(parked) == 1
-        assert pipeline_graph._CHIP_LEAD_TRIPPED is True
-
-
 class TestContractAuditStaleArchive:
     """Arm-M biggest single finding: a timed-out auditor left the previous
     attempt's audit in place and it was read back as the current verdict.
@@ -449,65 +388,6 @@ class TestHarnessAuditFastpath:
     def test_clean_and_design_logs_do_not_match(self):
         assert pipeline_graph._harness_failure_fingerprint(self.DESIGN_LOG) is None
         assert pipeline_graph._harness_failure_fingerprint("") is None
-
-
-class TestChipLeadFailureRetry:
-    """Arm-F finding: one provider hard-timeout must not trip the sticky
-    fail-safe; a single fresh retry absorbs it, two consecutive failures
-    still trip."""
-
-    @pytest.fixture(autouse=True)
-    def _reset(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(pipeline_graph, "_CHIP_LEAD_TRIPPED", False)
-        # Provider retry decisions are independent of the developer checkout.
-        # The checkout guard has dedicated tests using controlled git output.
-        monkeypatch.setattr(pipeline_graph, "_engine_checkout_guard", lambda: [])
-        monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
-        monkeypatch.setenv("CORESMITH_ENABLE_CHIP_LEAD", "1")
-
-    @pytest.mark.asyncio
-    async def test_one_failure_retries_and_recovers(self, monkeypatch):
-        from orchestrator.langchain.agents import chip_lead_agent
-        calls = []
-
-        async def fake_decide(self, *, payload, prior_decisions=None):
-            calls.append(1)
-            if len(calls) == 1:
-                raise RuntimeError("codex CLI timed out after 900s")
-            return {"action": "retry", "reasoning": "recovered"}
-
-        monkeypatch.setattr(chip_lead_agent.ChipLeadAgent, "__init__",
-                            lambda self, model=None: None)
-        monkeypatch.setattr(chip_lead_agent.ChipLeadAgent, "decide",
-                            fake_decide)
-        monkeypatch.setattr(
-            pipeline_graph, "interrupt",
-            lambda p: (_ for _ in ()).throw(AssertionError("parked")))
-        out = await pipeline_graph._resolve_interrupt(
-            {"type": "x", "supported_actions": ["retry", "abort"]})
-        assert out["action"] == "retry"
-        assert len(calls) == 2
-        assert pipeline_graph._CHIP_LEAD_TRIPPED is False
-
-    @pytest.mark.asyncio
-    async def test_two_failures_trip(self, monkeypatch):
-        from orchestrator.langchain.agents import chip_lead_agent
-
-        async def fake_decide(self, *, payload, prior_decisions=None):
-            raise RuntimeError("codex CLI timed out after 900s")
-
-        monkeypatch.setattr(chip_lead_agent.ChipLeadAgent, "__init__",
-                            lambda self, model=None: None)
-        monkeypatch.setattr(chip_lead_agent.ChipLeadAgent, "decide",
-                            fake_decide)
-        parked = []
-        monkeypatch.setattr(pipeline_graph, "interrupt",
-                            lambda p: parked.append(p) or {"action": "abort"})
-        out = await pipeline_graph._resolve_interrupt(
-            {"type": "x", "supported_actions": ["retry", "abort"]})
-        assert out == {"action": "abort"}
-        assert len(parked) == 1
-        assert pipeline_graph._CHIP_LEAD_TRIPPED is True
 
 
 @pytest.fixture(autouse=True)

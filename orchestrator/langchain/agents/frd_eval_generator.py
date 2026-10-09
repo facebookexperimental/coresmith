@@ -15,7 +15,7 @@ from pathlib import Path
 
 from opentelemetry import trace
 
-from orchestrator.langchain.agents.coresmith_llm import ClaudeLLM, scaled
+from orchestrator.langchain.agents.coresmith_llm import ClaudeLLM, is_llm_error_response, scaled
 from orchestrator.langchain.prompts.skills import load_skills as _load_skills
 
 _tracer = trace.get_tracer(__name__)
@@ -83,6 +83,9 @@ class FRDEvalGenerator:
                      "", "## Output",
                      "Write model/frd_eval/frd_eval.cpp (plus any frd_eval/*.h|*.cpp helpers you need) and reply with the JSON block.",
                      "Build: `make -C model frd_eval/frd_eval`; run: `model/frd_eval/frd_eval` (no arguments)."]
+        parts += ["", "Bounded requirements (`bound_min`/`bound_max` in requirements.json) are decided by the number "
+                  "you measure: print it as `\"value\": <number>, \"unit\": \"<unit>\"` in the item's FRD_EVAL line "
+                  "(or `VALUE <ID> <number> [unit]`). A bounded pass/fail without a value is recorded as tool_error."]
         if compiler_log:
             parts += ["", f"## Compiler errors from attempt {attempt - 1} (fix them in place)",
                       "```", compiler_log[-8000:], "```"]
@@ -106,4 +109,6 @@ class FRDEvalGenerator:
         srcs = sorted((Path(project_root) / "model" / ("arch/frd_eval" if arch else "frd_eval")).glob("*.cpp"))
         out["sources"] = [str(s) for s in srcs]
         out["written"] = bool(srcs)
+        # The provider's error banner is an error, whatever is on disk.
+        out["response_error"] = content if is_llm_error_response(content) else ""
         return out

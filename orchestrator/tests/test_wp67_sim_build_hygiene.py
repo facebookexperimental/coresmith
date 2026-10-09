@@ -179,19 +179,11 @@ def test_block_fingerprint_reuses_then_cleans_top_level(tmp_path, monkeypatch, c
     monkeypatch.setenv("CORESMITH_LINE_COV_GATE", "0")
     seen = []
 
-    class Make:
-        pid = 12345
-        returncode = 0
+    def make(cmd, **kwargs):
+        seen.append((Path(cmd[2]) / "verilator.o").exists())
+        return ph.subprocess.CompletedProcess(cmd, 0, "** TESTS=1 PASS=1 FAIL=0 **", "")
 
-        def __init__(self, cmd, **kwargs):
-            seen.append((Path(cmd[2]) / "verilator.o").exists())
-
-        def communicate(self, timeout):
-            return "** TESTS=1 PASS=1 FAIL=0 **", ""
-
-    monkeypatch.setattr("orchestrator.langchain.agents.coresmith_llm._reap_process_group",
-                        lambda *a, **k: None)
-    monkeypatch.setattr(ph.subprocess, "Popen", Make)
+    monkeypatch.setattr(ph, "run_process", make)
     block = {"name": "chip_top"}
     ph.run_simulation(block, str(top), str(tb), project_root=tmp_path)
     sim_dir = tmp_path / "sim_build" / "chip_top"
@@ -245,7 +237,7 @@ def test_real_coverage_objects_cannot_contaminate_authoritative_build(tmp_path, 
     assert not (sim_dir / "verilator.o").exists()
 
 
-@pytest.mark.parametrize("prompt", ["integration_testbench", "validation_dv", "chip_lead"])
+@pytest.mark.parametrize("prompt", ["integration_testbench", "validation_dv"])
 def test_prompt_requires_agent_scratch_builds(prompt):
     text = (Path(__file__).parents[1] / "langchain" / "prompts" / f"{prompt}.md").read_text()
     assert "sim_build/agent_<name>/" in text

@@ -187,7 +187,7 @@ def test_helpers_include_extra_sources_and_explicit_limits(tmp_path, monkeypatch
 
     monkeypatch.setattr(pipeline_helpers, "PROJECT_ROOT", tmp_path)
     monkeypatch.setenv("CORESMITH_SYNTH_GENERIC", "1")
-    monkeypatch.setattr(pipeline_helpers.subprocess, "run", fake_run)
+    monkeypatch.setattr(pipeline_helpers, "run_process", fake_run)
     pipeline_helpers.synthesize_block(
         {"name": "top"}, str(top), extra_rtl_paths=[str(leaf)],
         output_dir=synth_out, timeout_s=23,

@@ -197,12 +197,16 @@ def test_strict_gate_both_branches(monkeypatch):
 
 
 def test_max_cycles_and_timeout_env(monkeypatch):
+    # default: no cap -- the whole recorded reference is replayed (run 3: a
+    # 200000 cap made a clean 273k-cycle reference "bounded")
     monkeypatch.delenv("CORESMITH_GATE_SIM_MAX_CYCLES", raising=False)
-    assert gs.gate_sim_max_cycles() == 200000
+    assert gs.gate_sim_max_cycles() == 0
     monkeypatch.setenv("CORESMITH_GATE_SIM_MAX_CYCLES", "512")
     assert gs.gate_sim_max_cycles() == 512
-    monkeypatch.setenv("CORESMITH_GATE_SIM_MAX_CYCLES", "garbage")
+    monkeypatch.setenv("CORESMITH_GATE_SIM_MAX_CYCLES", "200000")     # the old default, explicitly
     assert gs.gate_sim_max_cycles() == 200000
+    monkeypatch.setenv("CORESMITH_GATE_SIM_MAX_CYCLES", "garbage")
+    assert gs.gate_sim_max_cycles() == 0
     monkeypatch.setenv("CORESMITH_GATE_SIM_TIMEOUT_S", "60")
     assert gs.gate_sim_timeout_s() == 60
 

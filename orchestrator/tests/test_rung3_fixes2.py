@@ -366,3 +366,14 @@ class TestMaxgeoFunctionalMaxCase:
         assert v is not None and not v.get("advisory")
         assert v.get("verdict") == "unknown"
         assert "uncovered_dims" in v
+
+
+@pytest.mark.asyncio
+async def test_integration_reports_executed_count_instead_of_author_estimate(tmp_path, monkeypatch):
+    state = _wire_integration_node(monkeypatch, tmp_path, tb_body="import cocotb\n")
+    monkeypatch.setattr(pipeline_graph, "run_integration_simulation",
+                        lambda *a, **k: {"passed": True, "log": "", "tests_total": 9,
+                                         "tests_passed": 9, "tests_failed": 0})
+    monkeypatch.setattr(pipeline_graph, "_maxgeo_gate_verdict", lambda *a, **k: None)
+    result = await pipeline_graph.integration_dv_node(state)
+    assert result["integration_dv_result"]["test_count"] == 9

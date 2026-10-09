@@ -328,7 +328,9 @@ class TestSynthSourcePreparation:
         original = ("module cs_mem_1rw1r; endmodule\n"
                     "module cs_mem_macro_shell; assign r = 0; endmodule\n")
         lib.write_text(original)
-        res = _bound((FakeSpec(8, 4096), FakeMacro("m", "/p/m.v")))
+        model = tmp_path / "m.v"
+        model.write_text("module m; endmodule\n")
+        res = _bound((FakeSpec(8, 4096), FakeMacro("m", str(model))))
 
         got = prepare_synth_sources(str(lib), res, tmp_path / "work")
 
@@ -344,12 +346,16 @@ class TestSynthSourcePreparation:
         from orchestrator.langgraph.macro_prebind import prepare_synth_sources
         lib = tmp_path / "cs_sram.v"
         lib.write_text("module cs_mem_macro_shell; endmodule\n")
-        res = _bound((FakeSpec(8, 4096), FakeMacro("m8", "/p/a.v")),
-                     (FakeSpec(9, 4096), FakeMacro("m9", "/p/b.v")))
+        a, b = tmp_path / "a.v", tmp_path / "b.v"
+        a.write_text("module m8; endmodule\n")
+        b.write_text("module m9; endmodule\n")
+        res = _bound((FakeSpec(8, 4096), FakeMacro("m8", str(a))),
+                     (FakeSpec(9, 4096), FakeMacro("m9", str(b))))
         got = prepare_synth_sources(str(lib), res, tmp_path / "w")
         assert Path(got["bound_shell"]).is_file()
         assert "m8 u_macro" in Path(got["bound_shell"]).read_text()
-        assert got["models"] == ["/p/a.v", "/p/b.v"]
+        assert got["models"] == [str(a), str(b)]
+        assert Path(got["manifest"]).is_file()
 
     def test_no_bindings_leaves_everything_untouched(self, tmp_path):
         """Nothing resolved => do not strip the shell and silently remove the

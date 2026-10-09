@@ -125,7 +125,7 @@ def fake_measurement_tools(tmp_path, monkeypatch, repair_status='repaired', buf_
     tool = None if repair_status == 'unavailable' else SimpleNamespace(run=repair)
     monkeypatch.setattr(registry, 'get_deployment', lambda: SimpleNamespace(tool=lambda name: tool))
     monkeypatch.setattr(pc.shutil, 'which', lambda name: name)
-    monkeypatch.setattr(pc.subprocess, 'run', run)
+    monkeypatch.setattr(pc, 'run_process', run)
     kwargs = {}
     if reuse_mapped:
         sdc = tmp_path / 'core.sdc'
@@ -222,7 +222,7 @@ def test_sta_failure_does_not_accept_printed_slack(tmp_path, monkeypatch):
             Path(cmd[-1]).with_name('netlist.v').write_text('module core; endmodule')
             return subprocess.CompletedProcess(cmd, 0, '', '')
         return subprocess.CompletedProcess(cmd, 1, 'CORESMITH_WNS 10\n', 'error')
-    monkeypatch.setattr(pc.subprocess, 'run', run)
+    monkeypatch.setattr(pc, 'run_process', run)
     wns, detail = pc._measure_wns_from_rtl([], 'lib', tmp_path, 'base', False,
                                         15.625, 'core', 'clk', 'yosys', 'sta', 30)
     assert wns is None and 'rc=1' in detail

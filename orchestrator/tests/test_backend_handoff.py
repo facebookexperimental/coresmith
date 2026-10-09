@@ -325,22 +325,29 @@ async def test_backend_http_pause_preserves_idle_response(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_authoritative_backend_pause_reaps_before_task_cancel(
+async def test_authoritative_backend_pause_fences_and_cancels_the_owned_process_scope(
     monkeypatch,
 ):
+    """The authoritative pause owns the backend's process tree through
+    ``orchestrator.processes``: the job owner is FENCED before the graph task
+    is cancelled (no new child can start under it), every child of that owner
+    is cancelled, and the task is joined before the status reads ``paused``.
+    (The old test patched a removed per-CLI kill hook and never set an owner,
+    so it exercised nothing the lifecycle does today.)"""
     import asyncio
     import json
 
     from orchestrator import mcp_server as mcp
-    from orchestrator.langchain.agents import coresmith_llm
+    from orchestrator import processes
 
     order = []
+    owner = "backend:test-owner"
 
     async def running_worker():
         try:
             await asyncio.Event().wait()
         finally:
-            order.append("cancelled")
+            order.append("task_cancelled")
 
     task = asyncio.create_task(running_worker())
     await asyncio.sleep(0)
@@ -360,18 +367,40 @@ async def test_authoritative_backend_pause_reaps_before_task_cancel(
     monkeypatch.setattr(mcp._backend, "task", task)
     monkeypatch.setattr(mcp._backend, "graph", _Graph())
     monkeypatch.setattr(mcp._backend, "ensure_graph", ensure_graph)
-    monkeypatch.setattr(
-        coresmith_llm,
-        "kill_active_cli_processes",
-        lambda: order.append("reaped"),
-    )
+    monkeypatch.setattr(mcp._backend, "_job_owner", owner)
+    monkeypatch.setattr(processes, "fence", lambda o: order.append(("fenced", o, task.cancelled())))
+    monkeypatch.setattr(processes, "cancel", lambda o=None, grace_s=1.0: order.append(("reaped", o)) or 0)
 
     result = json.loads(await mcp.pause_backend())
 
     assert result["status"] == "paused"
     assert mcp._backend.status == "paused"
-    assert task.cancelled()
-    assert order == ["reaped", "cancelled"]
+    assert task.cancelled() and "task_cancelled" in order           # the task was joined, not abandoned
+    assert order[0] == ("fenced", owner, False)                     # fenced BEFORE the graph task is cancelled
+    assert ("reaped", owner) in order                                # every child of the owner is cancelled
+
+
+@pytest.mark.asyncio
+async def test_pause_without_an_owner_touches_no_process_scope(tmp_path, monkeypatch):
+    """A lifecycle that never began a job owns no processes: pause cancels the
+    task and must not fence or cancel some other owner's children."""
+    import asyncio
+
+    from orchestrator import processes
+    from orchestrator.graph_lifecycle import GraphLifecycle
+
+    async def running_worker():
+        await asyncio.Event().wait()
+
+    lc = GraphLifecycle("probe", str(tmp_path / "probe.db"), "orchestrator.langgraph.pipeline_graph",
+                        "build_pipeline_graph", str(tmp_path))
+    lc.task = asyncio.create_task(running_worker())
+    await asyncio.sleep(0)
+    monkeypatch.setattr(lc, "_job_owner", "")
+    monkeypatch.setattr(processes, "fence", lambda o: pytest.fail("fenced without an owner"))
+    monkeypatch.setattr(processes, "cancel", lambda *a, **k: pytest.fail("cancelled without an owner"))
+    assert await lc.safe_pause() is True
+    assert lc.task.cancelled() and lc.status == "paused"
 
 
 @pytest.mark.asyncio

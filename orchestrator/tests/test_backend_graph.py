@@ -908,3 +908,33 @@ class TestFlatSynthAttemptHistoryWiring:
         out = await bg.flat_top_synthesis_node(self._state(tmp_path))
         assert out["synth_attempt_history"] == []
         assert not (d / "synth_result.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_prebind_runs_for_candidate_with_separate_wrapper_modules(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from orchestrator.langgraph import backend_graph as bg
+    from orchestrator.langgraph import macro_prebind as mp
+    helper = TestFlatSynthAttemptHistoryWiring()
+    state = helper._state(tmp_path)
+    seen = {}
+    monkeypatch.setenv("CORESMITH_MACRO_PREBIND", "1")
+    monkeypatch.setattr(mp, "resolve_prebindings", lambda *a, **k: SimpleNamespace(
+        bindings=[object()], errors=[], unresolved=[], warnings=[]))
+    def prepare(wrapper, result, work, *, sources):
+        assert wrapper == ""  # DV candidate need not contain MACRO-only shell.
+        assert state["integration_top_path"] in sources
+        seen["prepared"] = True
+        return {"wrapper_lib": "", "bound_shell": "bound-memory.v", "models": ["macro.v"],
+                "manifest": "manifest.json"}
+    monkeypatch.setattr(mp, "prepare_synth_sources", prepare)
+    async def synth(**kw):
+        seen["context"] = kw["context"]
+        return {"success": False, "error": "stop before EDA for this wiring test"}
+    monkeypatch.setattr(bg, "_run_llm_eda_step", synth)
+    await bg.flat_top_synthesis_node(state)
+    assert seen["prepared"]
+    assert "bound-memory.v" in seen["context"]["input_files"]
+    assert "macro.v" in seen["context"]["input_files"]
+    assert "library: ``" not in seen["context"]["input_files"]

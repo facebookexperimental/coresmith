@@ -53,6 +53,7 @@ from typing import Any
 # Engine helper imports (degrade gracefully if a dependency is missing)
 # ---------------------------------------------------------------------------
 from orchestrator.langgraph.sram_wrapper import wrapper_lib_path
+from orchestrator.processes import run as run_process
 
 # PDK paths come from the active deployment (PR6, byo-pdk) rather than a
 # cross-module import of backend_helpers constants. These module-level names are
@@ -329,7 +330,7 @@ def _synth_flop(top_path: str, top: str, liberty: str, yosys_bin: str = "yosys",
         fh.write(script)
         ys = fh.name
     try:
-        r = subprocess.run([yosys, "-s", ys], capture_output=True, text=True,
+        r = run_process([yosys, "-s", ys], capture_output=True, text=True,
                            timeout=timeout_s)
     except subprocess.TimeoutExpired:
         return {"error": f"yosys timed out ({timeout_s}s) -- likely an oversized "
@@ -422,7 +423,7 @@ def _worst_path_delay_ns(netlist: str, top: str, liberty: str,
         fh.write(script)
         tcl = fh.name
     try:
-        r = subprocess.run([openroad_bin, "-no_init", "-exit", tcl],
+        r = run_process([openroad_bin, "-no_init", "-exit", tcl],
                            capture_output=True, text=True, timeout=timeout_s)
     except (subprocess.TimeoutExpired, OSError):
         return None

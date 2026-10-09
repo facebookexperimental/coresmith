@@ -56,6 +56,12 @@ def test_extract_requirements_ids_fields_and_sections():
     assert fe.must_have(reqs[0]) and not fe.must_have(reqs[1]) and fe.must_have(reqs[3])
 
 
+@pytest.mark.parametrize("bound", ["fast", "nan", "inf", "-inf"])
+def test_parse_metric_rejects_malformed_or_nonfinite_bounds(bound):
+    with pytest.raises(ValueError, match="malformed metric min bound"):
+        fe._parse_metric(f"fps; min {bound}; max -; unit fps")
+
+
 def test_parse_results_and_summary_gate():
     out = """[frd_eval] booting
 FRD_EVAL {"id": "perf-001", "status": "pass", "evidence": "mean=1900000 (LT estimate)"}
@@ -130,12 +136,20 @@ def test_frd_evaluation_gates_on_verdicts(tmp_path, monkeypatch):
     monkeypatch.setattr(fe, "run_harness", lambda md, **k: next(runs))
     _FakeHarnessAgent.calls = []
     md = _fake_project(tmp_path)
-    rec = asyncio.run(pg._frd_evaluation(str(tmp_path), md, ["a", "b"]))
-    assert rec["requirements"] == 4 and rec["done"] is True and rec["gate_ok"] is False
-    assert rec["summary"]["failed"] == ["PERF-002"]
+    rec = asyncio.run(pg._frd_evaluation(str(tmp_path), md, ["a", "b"], author=True))   # the graph's explicit opt-in
+    # scoped to the requirements that declare a model check: PERF-001 only;
+    # PERF-002's failure is out of scope (kept as a diagnostic, not the gate)
+    assert rec["requirements"] == 1 and rec["done"] is True and rec["gate_ok"] is True and rec["authoring"] is True
+    assert rec["scope"]["evaluated"] == ["PERF-001"] and rec["scope"]["excluded"] == ["PERF-002", "PHYS-001", "INV-001"]
+    assert rec["summary"]["failed"] == [] and {r["id"]: r["status"] for r in rec["out_of_scope_results"]}["PERF-002"] == "fail"
     assert _FakeHarnessAgent.calls == [(1, False, False)]
     assert (tmp_path / ".coresmith" / "frd_eval.json").exists() and (md / "frd_eval" / "REPORT.md").exists()
-    assert "PERF-002" in (md / "frd_eval" / "REPORT.md").read_text()
+    assert "PERF-001" in (md / "frd_eval" / "REPORT.md").read_text()
+    # the declared one failing fails the gate
+    runs = iter([{"ok": True, "done": True, "rc": 0, "log": "", "results": fe.parse_results(
+        'FRD_EVAL {"id":"PERF-001","status":"fail","evidence":"slow"}')}])
+    rec = asyncio.run(pg._frd_evaluation(str(tmp_path), md, ["a", "b"], author=True))
+    assert rec["gate_ok"] is False and rec["summary"]["failed"] == ["PERF-001"]
 
 
 def test_frd_evaluation_repairs_compile_and_crash_then_passes(tmp_path, monkeypatch):
@@ -150,8 +164,8 @@ def test_frd_evaluation_repairs_compile_and_crash_then_passes(tmp_path, monkeypa
     monkeypatch.setattr(fe, "run_harness", lambda md, **k: next(runs))
     _FakeHarnessAgent.calls = []
     md = _fake_project(tmp_path)
-    rec = asyncio.run(pg._frd_evaluation(str(tmp_path), md, ["a"]))
-    assert rec["gate_ok"] is True and rec["summary"]["counts"]["pass"] == 2
+    rec = asyncio.run(pg._frd_evaluation(str(tmp_path), md, ["a"], author=True))
+    assert rec["gate_ok"] is True and rec["summary"]["counts"]["pass"] == 1      # the declared check (PERF-001)
     # attempt 1 author, compile error -> attempt 2 with compiler log, crash -> attempt 3 with run log
     assert _FakeHarnessAgent.calls == [(1, False, False), (2, True, False), (3, False, True)]
 
@@ -166,11 +180,11 @@ def test_frd_evaluation_reuses_an_existing_harness_and_skips_without_frd(tmp_pat
     md = _fake_project(tmp_path)
     (md / "frd_eval").mkdir()
     (md / "frd_eval" / "frd_eval.cpp").write_text("// operator's harness\n")
-    rec = asyncio.run(pg._frd_evaluation(str(tmp_path), md, ["a"]))
+    rec = asyncio.run(pg._frd_evaluation(str(tmp_path), md, ["a"], author=True))
     assert rec["gate_ok"] is True and _FakeHarnessAgent.calls == []
     md2 = tmp_path / "other" / "model"
     md2.mkdir(parents=True)
-    rec2 = asyncio.run(pg._frd_evaluation(str(tmp_path / "other"), md2, ["a"]))
+    rec2 = asyncio.run(pg._frd_evaluation(str(tmp_path / "other"), md2, ["a"], author=True))
     assert rec2["gate_ok"] is None and "no arch/frd_spec.md" in rec2["skipped"]
 
 

@@ -61,6 +61,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from orchestrator.processes import run as run_process
+
 logger = logging.getLogger(__name__)
 
 _RUNNER = Path(__file__).with_name("task_adapter_runner.py")
@@ -278,7 +280,7 @@ def run_task_adapter(project_root: str, top_rtl: str, block_rtls: Any = None) ->
                                 str(cand_json), str(provisional), str(work)], work,
                                 project_root=project_root)
         with open(log_path, "x", encoding="utf-8") as lf:
-            r = subprocess.run(command, stdout=lf, stderr=subprocess.STDOUT, text=True,
+            r = run_process(command, stdout=lf, stderr=subprocess.STDOUT, text=True,
                                timeout=timeout, cwd=str(work), env=env)
         if provisional.is_file():
             # Only the engine can publish into the immutable attempt directory.

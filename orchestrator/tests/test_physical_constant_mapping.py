@@ -120,7 +120,7 @@ def test_flat_synth_script_maps_constants_without_macro_instances(tmp_path):
 
     assert HILOMAP in script
     assert script.index("abc -liberty") < script.index(HILOMAP)
-    assert script.index(HILOMAP) < script.index("clean")
+    assert script.index(HILOMAP) < script.index("\nclean\n")
 
 
 class _BareDeployment(Deployment):

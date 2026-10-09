@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from orchestrator.processes import run as run_process
+
 
 class HierarchyFailure(str):
     """A truthy, serializable postcondition failure with a machine-readable kind."""
@@ -128,7 +130,7 @@ def elaborate_hierarchy(source_paths, top_module: str, *, defines=(), parameters
                 commands.append(f"chparam -set {key} {value} {top_module}")
             commands += [f"hierarchy -check -top {top_module}", "proc", f"write_json {json.dumps(str(output))}"]
             script.write_text("\n".join(commands) + "\n")
-            result = subprocess.run([yosys, "-Q", "-T", "-s", str(script)],
+            result = run_process([yosys, "-Q", "-T", "-s", str(script)],
                                     capture_output=True, text=True, timeout=hierarchy_timeout_s(),
                                     cwd=str(project_root or paths[0].parent))
             if result.returncode:

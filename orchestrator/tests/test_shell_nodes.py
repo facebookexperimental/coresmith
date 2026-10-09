@@ -37,6 +37,14 @@ def _state(tmp_path):
     return {"project_root": str(tmp_path), "block_queue": _QUEUE, "tier_list": [1], "current_tier_index": 0}
 
 
+def _shell_events(tmp_path) -> list[dict]:
+    """The ``shell_update`` exit events written so far."""
+    import json
+    p = tmp_path / ".coresmith" / "pipeline_events.jsonl"
+    rows = [json.loads(ln) for ln in p.read_text().splitlines() if ln.strip()]
+    return [r for r in rows if r.get("event") == "graph_node_exit" and r.get("phase") == "update"]
+
+
 class TestShellNodes:
     def test_init_assembles_all_stubs_and_snapshots(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CORESMITH_SHELL_INTEGRATION", "1")
@@ -47,6 +55,10 @@ class TestShellNodes:
         assert snap["top"] == "chip_top" and sorted(snap["stub_blocks"]) == ["req", "rsp"]
         assert snap["wiring_errors"] == [] and snap["wires"] == 5
         assert (tmp_path / ".coresmith" / "shell" / "chip_top.v").exists()
+        if snap["elaborated"] is True:                # a real successful elaboration reports ok in the init event
+            import json
+            rows = [json.loads(ln) for ln in (tmp_path / ".coresmith" / "pipeline_events.jsonl").read_text().splitlines()]
+            assert [r for r in rows if r.get("event") == "graph_node_exit" and r.get("phase") == "init"][-1]["ok"] is True
         latest = db.latest_integration_snapshot()
         assert latest["tier"] == "init" and latest["stub_blocks"] == snap["stub_blocks"]
         assert (tmp_path / ".coresmith" / "integration_snapshot.json").exists()
@@ -62,13 +74,108 @@ class TestShellNodes:
         out = asyncio.run(pg.shell_integration_update_node(_state(tmp_path)))
         snap = out["shell_snapshot"]
         assert snap["real_blocks"] == ["rsp"] and snap["stub_blocks"] == ["req"]
-        assert "integration_contract_failures" not in out
-        # a block whose RTL drifted from the contract is attributed
+        assert "integration_contract_failures" not in out and snap["contract_check"] == "pass"
+        assert _shell_events(tmp_path)[-1]["contract_check"] == "pass"
+        assert _shell_events(tmp_path)[-1]["ok"] is True and snap["elaborated"] is True   # a real elaboration: ok
+        # a block whose RTL drifted from the contract is attributed, and -- the
+        # project declared its contracts -- the contract check FAILS and the
+        # tier parks for the Architect
+        parked = []
+        monkeypatch.setattr(pg, "_park", lambda payload, **k: parked.append((payload, k)) or {"action": "skip"})
         (tmp_path / "rtl" / "rsp.v").write_text(
             (tmp_path / "rtl" / "rsp.v").read_text().replace("s_q_rsp_valid", "s_q_resp_valid"))
         out = asyncio.run(pg.shell_integration_update_node(_state(tmp_path)))
         fails = out["integration_contract_failures"]
         assert fails and fails[0]["block"] == "rsp" and fails[0]["category"] == "INTEGRATION_CONTRACT"
+        assert out["shell_snapshot"]["contract_check"] == "fail" and _shell_events(tmp_path)[-1]["contract_check"] == "fail"
+        assert len(parked) == 1 and parked[0][0]["type"] == "shell_not_elaborated"
+        assert parked[0][1]["node"] == "shell_update" and "skip" in parked[0][0]["supported_actions"]
+        assert any("s_q_rsp_valid" in e for e in parked[0][0]["wiring_errors"] + parked[0][0]["elab_errors"])
+
+    def test_contract_less_run_is_inapplicable_never_a_pass_and_never_parks(self, tmp_path, monkeypatch):
+        """A bare blocks.yaml run (no contracts, no pins) never declared its
+        interfaces: the contract-shell check is recorded ``inapplicable`` --
+        not a pass, not a park -- and the attributed failures still reach the
+        state (the real RTL gates are elsewhere and untouched)."""
+        monkeypatch.setenv("CORESMITH_SHELL_INTEGRATION", "1")
+        monkeypatch.delenv("CORESMITH_TOP_MODULE", raising=False)
+        (tmp_path / "inputs").mkdir()
+        (tmp_path / "inputs" / "task.yaml").write_text("top: chip_top\n")
+        db = open_project(tmp_path)
+        (tmp_path / "rtl").mkdir()
+        (tmp_path / "rtl" / "rsp.v").write_text(
+            (_FX / "responder.v").read_text().replace("module responder", "module rsp"))
+        db.set_result("rsp", "best", {"sim_passed": True, "done": True})
+        monkeypatch.setattr(pg, "_park", lambda payload, **k: (_ for _ in ()).throw(AssertionError("parked")))
+        assert pg._interfaces_declared(str(tmp_path)) is False
+        # a clean assembly (ports inferred as boundary) is NOT reported as a contract pass
+        out = asyncio.run(pg.shell_integration_update_node(_state(tmp_path)))
+        assert out["shell_snapshot"]["contract_check"] == "inapplicable"
+        ev = _shell_events(tmp_path)[-1]
+        assert ev["contract_check"] == "inapplicable" and ev["ok"] is True
+        assert "integration_contract_failures" not in out
+        # real RTL that does not elaborate: still no park, still not a pass -- the
+        # failure is visible (snapshot, event) and the RTL gates elsewhere judge it
+        (tmp_path / "rtl" / "rsp.v").write_text(
+            (tmp_path / "rtl" / "rsp.v").read_text().replace("endmodule", "assign = ;\nendmodule"))   # a syntax error
+        out = asyncio.run(pg.shell_integration_update_node(_state(tmp_path)))
+        snap = out["shell_snapshot"]
+        assert snap["contract_check"] == "inapplicable" and snap["elaborated"] is False and snap["elab_errors"]
+        ev = _shell_events(tmp_path)[-1]
+        assert ev["contract_check"] == "inapplicable" and ev["ok"] is False
+        assert all(f["category"] == "INTEGRATION_CONTRACT" for f in out.get("integration_contract_failures") or [])
+        # the verdict function itself, on the same inputs
+        asm, elab, _ = pg._shell_assemble(str(tmp_path), _QUEUE, tier=1)
+        assert elab.get("ok") is False
+        assert pg.shell_contract_check(str(tmp_path), asm, elab, [])[0] == "inapplicable"
+        db.import_contracts({"contracts": [_EDGE]})          # once declared, the same errors are a failure
+        assert pg.shell_contract_check(str(tmp_path), asm, elab, [])[0] == "fail"
+        # engine-only errors with declared interfaces: a tool problem, not a design verdict
+        assert pg.shell_contract_check(str(tmp_path), asm, elab, list(elab.get("errors") or []))[0] == "tool_error"
+
+    def test_elaboration_that_did_not_run_is_unverified_never_a_pass(self, tmp_path, monkeypatch):
+        """Declared interfaces, no wiring error, but no elaborator ran
+        (``elab.ok is None``): nothing was checked, so the verdict is
+        ``unverified`` -- not ``pass`` -- with the reason, and no park."""
+        monkeypatch.setenv("CORESMITH_SHELL_INTEGRATION", "1")
+        monkeypatch.delenv("CORESMITH_TOP_MODULE", raising=False)
+        db = _project(tmp_path)
+        (tmp_path / "rtl").mkdir()
+        (tmp_path / "rtl" / "rsp.v").write_text(
+            (_FX / "responder.v").read_text().replace("module responder", "module rsp"))
+        db.set_result("rsp", "best", {"sim_passed": True, "done": True})
+        asm, elab, _ = pg._shell_assemble(str(tmp_path), _QUEUE, tier=1)
+        assert asm.wiring_errors == []
+        for not_run in ({"ran": False, "ok": None, "reason": "no supported elaborator found"},
+                        {"ran": False, "ok": None, "reason": "Command 'verilator' timed out after 600 seconds"}):
+            assert pg.shell_contract_check(str(tmp_path), asm, not_run, [])[0] == "unverified"
+        # through the node: the elaborator is unavailable
+        from orchestrator.langgraph import shell_integration as si
+        monkeypatch.setattr(si, "elaborate", lambda assembly, **k: {"ran": False, "ok": None,
+                                                                   "reason": "no supported elaborator found"})
+        monkeypatch.setattr(pg, "_park", lambda payload, **k: (_ for _ in ()).throw(AssertionError("parked")))
+        out = asyncio.run(pg.shell_integration_update_node(_state(tmp_path)))
+        snap = out["shell_snapshot"]
+        assert snap["contract_check"] == "unverified" and snap["elaborated"] is None
+        ev = _shell_events(tmp_path)[-1]
+        assert ev["contract_check"] == "unverified" and ev["elab_reason"] == "no supported elaborator found"
+        assert ev["ok"] is False                     # the generic ok field cannot say true when nothing elaborated
+        assert "integration_contract_failures" not in out
+        # the init node's generic event, same unavailable elaborator: not ok either (raw elaborated=None kept)
+        init = asyncio.run(pg.shell_integration_init_node(_state(tmp_path)))
+        assert init["shell_snapshot"]["elaborated"] is None and init["shell_snapshot"]["wiring_errors"] == []
+        import json
+        rows = [json.loads(ln) for ln in (tmp_path / ".coresmith" / "pipeline_events.jsonl").read_text().splitlines()]
+        init_ev = [r for r in rows if r.get("event") == "graph_node_exit" and r.get("phase") == "init"][-1]
+        assert init_ev["ok"] is False
+        # the four other verdicts on the same assembly
+        assert pg.shell_contract_check(str(tmp_path), asm, {"ran": True, "ok": True, "errors": []}, [])[0] == "pass"
+        bad = {"ran": True, "ok": False, "errors": ["%Error: rsp.v:3: syntax error"]}
+        assert pg.shell_contract_check(str(tmp_path), asm, bad, [])[0] == "fail"
+        assert pg.shell_contract_check(str(tmp_path), asm, bad, list(bad["errors"]))[0] == "tool_error"
+        (tmp_path / ".coresmith" / "project.db").unlink(missing_ok=True)   # no declared interfaces at all
+        monkeypatch.setattr(pg, "_interfaces_declared", lambda pr: False)
+        assert pg.shell_contract_check(str(tmp_path), asm, bad, [])[0] == "inapplicable"
 
     def test_caravel_chassis_and_flag_off_skip(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CORESMITH_SHELL_INTEGRATION", "1")

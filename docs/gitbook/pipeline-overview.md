@@ -1,72 +1,38 @@
-# Pipeline Overview
+# Workflow
 
-Coresmith is implemented as a set of checkpointed LangGraph state machines. The
-graphs share a project root and write their durable state under `.coresmith/`.
-The same graphs can be driven by the CLI runner, `coresmithd`, or the MCP server.
+`coresmith stage next` checks the current stage before advancing. `coresmith stage status --json` reports missing or stale evidence.
 
-## Graphs
-
-| Graph | Builder | Purpose | Checkpoint |
-| --- | --- | --- | --- |
-| Architecture | `build_architecture_graph` | Requirements to PRD/SAD/FRD/ERS, block diagram, and block specs | `.coresmith/architecture_checkpoint.db` |
-| Frontend pipeline | `build_pipeline_graph` | uArch, RTL, lint, testbench, simulation, synthesis, integration, DV | `.coresmith/pipeline_checkpoint.db` |
-| Backend | `build_backend_graph` | Flat top synthesis, PnR, DRC, LVS, timing, wrapper, precheck | `.coresmith/backend_checkpoint.db` |
-| Tapeout | `build_tapeout_graph` | OpenFrame wrapper PnR/DRC/LVS and MPW precheck | `.coresmith/tapeout_checkpoint.db` |
-
-## End-To-End Flow
-
-```text
-requirements or block registry
-  |
-  v
-Architecture graph
-  PRD -> SAD -> FRD -> block diagram -> optional memory map/clock/registers
-  -> constraint check -> ERS -> OK2DEV
-  |
-  v
-Frontend pipeline graph
-  tiered blocks in parallel:
-    uArch spec -> RTL + lint -> testbench + sim -> synthesis
-  tier integration review
-  all-block gate
-  integration top RTL -> integration DV -> validation DV
-  |
-  v
-Backend graph
-  flat synthesis -> PnR -> DRC -> LVS -> timing -> wrapper -> precheck
-  |
-  v
-Tapeout graph
-  OpenFrame wrapper -> wrapper signoff -> submission directory
+```mermaid
+flowchart TD
+    R[requirements] --> D[decomposition]
+    D --> I[interfaces]
+    I --> U["uarch: specification + SystemC"]
+    U --> B[blocks]
+    B --> G[integration]
+    G --> A[acceptance]
+    A --> P[backend]
 ```
 
-## Disk-First Execution
+| Stage | Exit evidence |
+|---|---|
+| requirements | Registered requirements and acceptance criteria |
+| decomposition | Registered modules and system architecture |
+| interfaces | Contracts, ABI, pins, generated VIP, elaborated shell |
+| uarch | Every module's spec, bound HDL target, current reference model, worker binding |
+| blocks | A current, completed graph build for every module |
+| integration | Current composition passes integration DV |
+| acceptance | Current composition passes validation DV |
+| backend | Current composition has the required backend verdict |
 
-The pipeline intentionally keeps large artifacts out of graph state:
+[SystemC](systemc.md) is a required part of `uarch`: build and smoke the reference model, then pass every declared model check. The CLI keeps the stage name `uarch`.
 
-- Specs are written under `arch/`.
-- RTL is written under `rtl/`.
-- Testbenches are written under `tb/cocotb/`.
-- Tool logs are written under `.coresmith/step_logs/`.
-- Block-local diagnosis state is written under `.coresmith/blocks/<block>/`.
-- Graph progress is checkpointed in SQLite.
+A module can build once the shared architecture stages and that module's inputs are ready; other modules may still be in preparation. A failed implementation shell still permits a repair build.
 
-This matters operationally: when a graph interrupts, the outer controller should
-read the referenced files, make edits on disk when needed, and resume the graph
-with the action that matches the edit.
+```mermaid
+flowchart LR
+    E[Input changes] --> S[Dependent evidence becomes stale]
+    S --> R[Rebuild or recheck]
+    R --> N[Stage can advance]
+```
 
-## Controllers
-
-The controller is transport, not pipeline logic:
-
-- `run_pipeline.py` is a legacy headless frontend runner. It auto-approves some
-  interrupts and retries until limits are hit.
-- `coresmithd` is an HTTP daemon for one project root. It keeps the process
-  alive and exposes run start/state/resume/pause endpoints.
-- MCP exposes architecture, frontend, backend, tapeout, inspection, and restart
-  tools for Claude Code or another MCP client.
-
-Use `coresmithd` when an external service or script should own the control
-loop. Use MCP when an interactive agent should inspect files, diagnose issues,
-and resume the graphs directly.
-
+Code: `orchestrator/state_store/stages.py`, `orchestrator/module_build.py`.

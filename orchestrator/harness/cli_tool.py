@@ -113,6 +113,16 @@ def _build_request(verb: str, args):
             params[key] = val
     design = getattr(args, "design", None) or (
         Path(rtls[0]).stem if rtls else "")
+    if design and verb in ("run_lint", "run_synth"):
+        from orchestrator.harness.targets import load, revision
+        from orchestrator.langgraph.pipeline_helpers import PROJECT_ROOT
+        target = load(PROJECT_ROOT, design)
+        if target:
+            if rtls or inputs.get("script"):
+                raise ValueError("Bound target inputs cannot be overridden by --rtl or --script")
+            inputs["rtl"] = Path(target["sources"][0])
+            params["rtls"] = target["sources"]
+            params["input_revision"] = revision(target)
     out_dir = getattr(args, "out_dir", None)
     return ToolRequest(
         verb=verb,
@@ -179,7 +189,11 @@ def cmd_tool_run(args) -> int:
         _emit(args, result.to_json(), f"SKIP: {reason}")
         return EXIT_SKIP
 
-    req = _build_request(verb, args)
+    try:
+        req = _build_request(verb, args)
+    except (ValueError, OSError) as exc:
+        _emit(args, {"error": str(exc)}, str(exc))
+        return EXIT_USAGE
     try:
         result = dep.tool(verb).run(req)
     except Exception as exc:  # noqa: BLE001
@@ -187,6 +201,28 @@ def cmd_tool_run(args) -> int:
         _record_run(root, verb, req.design, False, {"error": str(exc)})
         return EXIT_INFRA
 
+    # A verb that could not run because a REQUIRED INPUT was not supplied
+    # (``run_sta`` without ``--script``) is a usage error (exit 2) that names
+    # the input, not an infrastructure failure: no tool ran.
+    missing = [c for c in result.checks if c.name == "inputs" and c.status == "fail"]
+    if missing and not result.tool_ok:
+        detail = "; ".join(c.details for c in missing if c.details) or f"{verb} is missing a required input"
+        payload = {**result.to_json(), "error": "TOOL_INPUT_MISSING", "required": detail}
+        _record_run(root, verb, req.design, False, {"error": "TOOL_INPUT_MISSING", "required": detail})
+        _emit(args, payload, f"{verb} {req.design}: USAGE -- {detail}")
+        return EXIT_USAGE
+
+    if req.params.get("input_revision"):
+        from orchestrator.harness.targets import load, revision
+        from orchestrator.pdk.base import CheckResult
+        result.metrics["input_revision"] = req.params["input_revision"]
+        try:
+            unchanged = revision(load(root, req.design)) == req.params["input_revision"]
+        except (ValueError, OSError):
+            unchanged = False
+        if not unchanged:
+            result.ok = False
+            result.checks.append(CheckResult("target_revision", "fail", details="inputs changed during this check; rerun"))
     _record_run(root, verb, req.design, result.ok, result.metrics)
     _emit(args, result.to_json(), _human_result(result))
     if result.ok:

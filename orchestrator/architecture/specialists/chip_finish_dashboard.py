@@ -876,9 +876,12 @@ def _build_metrics(block_result: dict | None, pnr_dir: Path) -> dict:
         "setup_slack_ns": 0,
         "hold_slack_ns": 0,
         "timing_met": False,
-        "total_power_mw": 0,
-        "dynamic_power_mw": 0,
-        "leakage_power_mw": 0,
+        # None = no power figure was ever reported (shown as unavailable);
+        # a real figure carries its basis (estimated / measured).
+        "total_power_mw": None,
+        "dynamic_power_mw": None,
+        "leakage_power_mw": None,
+        "power_basis": "unavailable",
         "drc_clean": False,
         "drc_violations": 0,
         "lvs_match": False,
@@ -900,9 +903,10 @@ def _build_metrics(block_result: dict | None, pnr_dir: Path) -> dict:
             "setup_slack_ns": block_result.get("setup_slack_ns", 0),
             "hold_slack_ns": block_result.get("hold_slack_ns", 0),
             "timing_met": block_result.get("timing_met", False),
-            "total_power_mw": block_result.get("total_power_mw", 0),
-            "dynamic_power_mw": block_result.get("dynamic_power_mw", 0),
-            "leakage_power_mw": block_result.get("leakage_power_mw", 0),
+            "total_power_mw": block_result.get("total_power_mw"),
+            "dynamic_power_mw": block_result.get("dynamic_power_mw"),
+            "leakage_power_mw": block_result.get("leakage_power_mw"),
+            "power_basis": block_result.get("power_basis", "unavailable"),
             "drc_clean": block_result.get("drc_clean", False),
             "drc_violations": block_result.get("drc_violations", 0),
             "lvs_match": block_result.get("lvs_match", False),
@@ -919,6 +923,8 @@ def _build_metrics(block_result: dict | None, pnr_dir: Path) -> dict:
         ):
             if pnr_metrics.get(k, 0) and not metrics.get(k, 0):
                 metrics[k] = pnr_metrics[k]
+                if k == "total_power_mw":
+                    metrics["power_basis"] = pnr_metrics.get("power_basis", "estimated")
         if "timing_met" in pnr_metrics:
             metrics["timing_met"] = pnr_metrics["timing_met"]
 

@@ -12,6 +12,7 @@ from typing import TypedDict
 
 import pytest
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 from orchestrator.graph_lifecycle import (
     GraphLifecycle,
@@ -93,3 +94,60 @@ async def test_real_langgraph_pending_checkpoint_recovers_paused(
         assert restarted.status == "paused"
     finally:
         await restarted.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_historical_restart_forks_latest_checkpoint_before_interrupt(
+    tmp_path, monkeypatch,
+):
+    """A re-run park must become the thread's latest resumable checkpoint."""
+
+    module_name = "_test_historical_restart_interrupt_graph"
+    module = ModuleType(module_name)
+    should_park = {"value": False}
+
+    def build_graph(checkpointer=None):
+        graph = StateGraph(_State)
+        graph.add_node("first", lambda state: {"count": state["count"] + 1})
+
+        def second(state):
+            if should_park["value"]:
+                interrupt({"type": "postcondition", "supported_actions": ["retry"]})
+            return {"count": state["count"] + 1}
+
+        graph.add_node("second", second)
+        graph.add_edge(START, "first")
+        graph.add_edge("first", "second")
+        graph.add_edge("second", END)
+        return graph.compile(checkpointer=checkpointer)
+
+    module.build_graph = build_graph
+    monkeypatch.setitem(sys.modules, module_name, module)
+    lifecycle = GraphLifecycle(
+        "restart-test", str(tmp_path / "checkpoint.db"), module_name,
+        "build_graph", str(tmp_path),
+    )
+    config = {"configurable": {"thread_id": "restart-test"}}
+    try:
+        await lifecycle.ensure_graph()
+        await lifecycle.graph.ainvoke({"count": 0}, config)
+        assert (await lifecycle.graph.aget_state(config)).values["count"] == 2
+
+        should_park["value"] = True
+        result = await lifecycle.restart_from_node("second")
+        assert result["restarted"] is True
+        await lifecycle.task
+
+        parked = await lifecycle.graph.aget_state(config)
+        assert lifecycle.status == "interrupted"
+        assert len(parked.tasks) == 1
+        assert len(parked.tasks[0].interrupts) == 1
+
+        intr = parked.tasks[0].interrupts[0]
+        await lifecycle.graph.ainvoke(Command(resume={intr.id: {"action": "retry"}}), config)
+        done = await lifecycle.graph.aget_state(config)
+        assert done.next == ()
+        assert done.tasks == ()
+        assert done.values["count"] == 2
+    finally:
+        await lifecycle.cleanup()

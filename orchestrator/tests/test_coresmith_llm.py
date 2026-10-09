@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import threading
 import time
 from unittest.mock import MagicMock, patch
 
@@ -56,7 +55,6 @@ from orchestrator.langchain.agents.coresmith_llm import (
     _llm_breakers,
     _llm_breakers_lock,
     _log_llm_call,
-    _log_opencode_turns,
     _normalize_opencode_variant,
     _opencode_endpoint,
     _parse_codex_json,
@@ -295,21 +293,26 @@ class TestOpenCodeJsonParsing:
 
 
 class TestOpenCodeTrajectoryLogging:
-    def test_persists_reasoning_and_text_events(self, tmp_path):
-        stdout = (
-            '{"type":"reasoning","part":{"type":"reasoning","text":"consider"}}\n'
-            'not-json\n'
-            '{"type":"text","part":{"type":"text","text":"ready"}}\n'
-        )
-        count = _log_opencode_turns(stdout, str(tmp_path), 123, 456.0)
+    """The OpenCode event stream is persisted line by line as it arrives
+    (``_append_turn`` from the stdout reader), reasoning included, under the
+    call's identity header; malformed lines are skipped."""
 
-        assert count == 2
-        path = tmp_path / ".coresmith" / "opencode_turns.jsonl"
+    def test_persists_reasoning_and_text_events(self, tmp_path):
+        from orchestrator.langchain.agents.coresmith_llm import _append_turn, _turns_log_path
+        path = _turns_log_path(str(tmp_path), "opencode_cli")
+        assert path == tmp_path / ".coresmith" / "opencode_turns.jsonl"
+        header = {"wall_start": 456.0, "pid": 123, "call_index": 7, "run_name": "r", "process_scope": "s"}
+        lines = [
+            '{"type":"reasoning","part":{"type":"reasoning","text":"consider"}}\n',
+            'not-json\n',
+            '{"type":"text","part":{"type":"text","text":"ready"}}\n',
+        ]
+        assert [_append_turn(path, header, ln) for ln in lines] == [True, False, True]
         records = [json.loads(line) for line in path.read_text().splitlines()]
         assert [record["event"]["type"] for record in records] == ["reasoning", "text"]
-        assert records[0]["pid"] == 123
-        assert records[0]["wall_start"] == 456.0
+        assert records[0]["pid"] == 123 and records[0]["wall_start"] == 456.0 and records[0]["call_index"] == 7
         assert records[0]["event"]["part"]["text"] == "consider"
+        assert _turns_log_path(str(tmp_path), "claude_cli") is None
 
 
 class TestOpenCodeInvocation:
@@ -740,19 +743,18 @@ class TestProcessRegistry:
         mock_proc.pid = 12345
 
         _register_process(mock_proc)
-        tid = threading.get_ident()
         with _active_processes_lock:
-            assert tid in _active_processes
-            assert _active_processes[tid] is mock_proc
+            assert mock_proc.pid in _active_processes
+            assert _active_processes[mock_proc.pid][0] is mock_proc
 
         _unregister_process()
         with _active_processes_lock:
-            assert tid not in _active_processes
+            assert mock_proc.pid not in _active_processes
 
     def test_kill_active_processes(self, monkeypatch):
         reaped = []
         monkeypatch.setattr(
-            "orchestrator.langchain.agents.coresmith_llm._reap_process_group",
+            "orchestrator.processes._reap_process_group",
             lambda proc, pgid, **kwargs: reaped.append((proc, pgid)),
         )
         mock_proc = MagicMock(spec=subprocess.Popen)

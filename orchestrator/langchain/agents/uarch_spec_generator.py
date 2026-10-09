@@ -30,7 +30,7 @@ from orchestrator.langchain.prompts.skills import (
     select_skills,
 )
 
-from .coresmith_llm import ClaudeLLM
+from .coresmith_llm import ClaudeLLM, is_llm_error_response
 
 _tracer = trace.get_tracer(__name__)
 
@@ -557,6 +557,8 @@ class UarchSpecGenerator:
             )
             span.set_attribute("resume", bool(resume_session_id))
 
+            if is_llm_error_response(content):
+                return {"error": content, "block_name": block_name}
             spec_text, spec_summary = self._parse_response(content, block_name)
 
             return {
@@ -747,6 +749,8 @@ class UarchSpecGenerator:
                 run_name=f"Generate Uarch Specs [{len(names)} blocks"
                          + (" - Revision" if revising else "") + "]",
             )
+            if is_llm_error_response(content):
+                raise RuntimeError(content)
             return content or ""
 
     def _parse_response(

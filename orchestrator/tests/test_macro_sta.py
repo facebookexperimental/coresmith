@@ -96,7 +96,7 @@ def _sta_env(tmp_path, monkeypatch, netlist_text):
             if line.startswith("read_verilog "):
                 captured["verilog"] = open(line.split(" ", 1)[1]).read()
         return subprocess.CompletedProcess(cmd, 0, stdout="Startpoint: a\nEndpoint: b\n  slack (MET)  0.77\nwns max 0.77\ntns max 0.00\n", stderr="")
-    monkeypatch.setattr(ppa_check.subprocess, "run", fake_run)
+    monkeypatch.setattr(ppa_check, "run_process", fake_run)
     return netlist, sdc, lib, captured
 
 

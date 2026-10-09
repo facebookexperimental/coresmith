@@ -32,6 +32,7 @@ from orchestrator.langgraph.pipeline_helpers import (
     apply_build_fingerprint,
     log,
 )
+from orchestrator.processes import run as run_process
 
 # ---------------------------------------------------------------------------
 # Port parsing
@@ -122,12 +123,15 @@ def parse_verilog_ports(rtl_path: str, module: str | None = None) -> VerilogModu
     # Narrow to the requested module, else the file stem -- the same precedence
     # rtl_module_name uses. Sliced to its endmodule so a later module's
     # non-ANSI port declarations cannot leak in.
-    for _want in [w for w in (module, path.stem) if w]:
+    for _want in ([module] if module else [path.stem]):
         _m = re.search(r'\bmodule\s+' + re.escape(str(_want)) + r'\b', source)
         if _m:
             _end = source.find('endmodule', _m.start())
             source = source[_m.start():_end if _end != -1 else len(source)]
             break
+    else:
+        if module:
+            return VerilogModule(name="", filepath=rtl_path)
 
     # Find module declaration
     mod_match = re.search(
@@ -2074,7 +2078,7 @@ def lint_top_level(
     ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = run_process(cmd, capture_output=True, text=True, timeout=120)
         log_path = _write_step_log(design_name, "integration_lint", cmd, result)
         stderr = result.stderr.strip()
         has_errors = "%Error" in stderr
@@ -2783,6 +2787,32 @@ def _successful_sim_cases(path: Path) -> list[str]:
         for row in rows if row.get("name") == name))
 
 
+def _stamp_chip_item_checks(root, sim_scope: str, tb_path: str, sim_dir) -> dict | None:
+    """After a chip-level simulation: ``integration_dv`` / ``validation_dv``
+    checks on the FRD items verified by the chip testbench (verifier kind
+    ``chip`` or a verifier whose path is this TB), from its ``results.xml``
+    and ``measurements.jsonl`` -- the ``block-done`` convention one rank up.
+    Other scopes (agent scratch runs) stamp nothing. Never raises."""
+    from orchestrator.harness.tools import block as _blk
+    kind = _blk.CHIP_DV_KINDS.get(sim_scope)
+    if not kind or not _blk.chip_item_checks_enabled():
+        return None
+    if not (Path(sim_dir) / "results.xml").is_file():
+        return None        # the simulation produced no verdict: nothing to stamp
+    try:
+        from orchestrator.state_store.project_db import DB_NAME, open_project
+        if not (Path(root) / ".coresmith" / DB_NAME).is_file():
+            return None
+        res = _blk.stamp_chip_checks(open_project(root), root, kind=kind, tb_path=str(tb_path), sim_dir=sim_dir)
+    except Exception as exc:  # noqa: BLE001 - bookkeeping never changes a DV verdict
+        return {"error": str(exc)[:300]}
+    if res.get("item_checks"):
+        print(f"[{sim_scope.upper()}-SIM] {kind}: {len(res['item_checks'])} item check(s); "
+              f"verified {res['verified_items']}, failed {res['failed_items']}"
+              + (f", unmeasured {res['unmeasured_items']}" if res.get("unmeasured_items") else ""), flush=True)
+    return res
+
+
 def run_integration_simulation(
     design_name: str,
     top_rtl_path: str,
@@ -2884,6 +2914,10 @@ def run_integration_simulation(
     env["PATH"] = f"{venv_bin}:{env.get('PATH', '/usr/bin:/bin')}"
     env["SHELL"] = shutil.which("bash") or "/bin/bash"
     env["PYTHONPATH"] = f"{sim_dir}:{root}:{env.get('PYTHONPATH', '')}"
+    # The chip TB records bounded-item measurements with the same
+    # harness.measure.record convention block TBs use (sim_dir was recreated
+    # above, so no stale number survives).
+    env["CORESMITH_MEASUREMENTS"] = str(sim_dir / "measurements.jsonl")
     # SERIAL make (-j1): with `--build-jobs 1` in the Makefile this keeps the
     # full-chip Verilator build single-threaded so it can never fork-storm the
     # host (the 2026-07-01 incident). Raise only on a big box via
@@ -2929,6 +2963,9 @@ def run_integration_simulation(
             _reap_process_group,
         )
         env = dict(env, **{_PROCESS_SCOPE_ENV: uuid.uuid4().hex})
+        from orchestrator.harness.sim_evidence import input_hashes
+        evidence_inputs = input_hashes([tb_path, sim_tb_path, sim_dir / "Makefile",
+                                        *rec["sources"], *rec.get("dependencies", [])])
         _proc = subprocess.Popen(
             [make_bin, "-C", str(sim_dir)],
             stdout=subprocess.PIPE,
@@ -2965,21 +3002,25 @@ def run_integration_simulation(
                 "Treating simulation as failed even if make returned 0.\n" + output
             )
 
-        passed = (
-            result.returncode == 0
-            and not no_tests
-            and (
-                not summary["found"]
-                or (summary["tests_total"] > 0 and summary["tests_failed"] == 0)
-            )
-        )
+        from orchestrator.harness.sim_evidence import capture
+        try:
+            evidence = capture(sim_dir / "results.xml", evidence_inputs)
+        except (OSError, ValueError) as exc:
+            return {"passed": False, "kind": "simulation_evidence_invalid",
+                    "log": f"{output}\nInvalid simulation evidence: {exc}",
+                    "log_path": log_path, "executed_cases": [], "tests_total": 0}
+        summary.update({k: evidence[k] for k in ("tests_total", "tests_passed", "tests_failed")})
+        passed = result.returncode == 0 and evidence["passed"] and not no_tests
         from orchestrator.harness.top_module import validated_candidate
         try:
             if validated_candidate(root)["candidate_sha"] != rec["candidate_sha"]:
                 raise CandidateError("Candidate changed during simulation")
         except CandidateError as exc:
             return {"passed": False, "kind": exc.kind, "log": str(exc), "executed_cases": []}
+        item_checks = _stamp_chip_item_checks(root, sim_scope, tb_path, sim_dir)
         return {
+            "item_checks": item_checks,
+            "simulation_evidence": evidence,
             "candidate_sha": rec["candidate_sha"],
             "executed_cases": _successful_sim_cases(sim_dir / "results.xml") if passed else [],
             "passed": passed,

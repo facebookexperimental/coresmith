@@ -20,6 +20,18 @@ A refusal comes with a stage report; fix the design, re-run. Nothing else
 publishes a block. `coresmith verify rtl|synth <block>` is the same check
 without publishing -- iterate against it.
 
+## Requirements your block owns
+
+Before `coresmith block-done <block>`, run `coresmith block-status <block>`
+and `coresmith frd list --unverified` to see the FRD items the block owns.
+Name one cocotb test per item and bind it:
+`coresmith frd verifier <id> --kind cocotb --path <tb> --entry <test>
+--block <block>`. `block-done` stamps each item pass/fail from the cocotb
+`results.xml` and lists `unverified_items`; a block with an unverified
+must-have item is not done, whatever the gate says. For a bounded PERF/TIME
+item record the measured number (`coresmith check add <id> block_dv --value
+<n>`) and let the bounds decide -- never a verdict of your own.
+
 ## Rules
 
 * **Never edit** the contracts, the ABI, the uArch specs, `inputs/`,
@@ -31,10 +43,11 @@ without publishing -- iterate against it.
 * **Assertions are not comments.** Every §4a invariant and every contract
   timing rule of your blocks exists as an assertion tagged `// INV: <id>` /
   `// TIM: <edge>` in the RTL; the assertion stage rejects phantom claims.
-* **Match the model.** `model/<block>_model.cpp` is the golden; when the
-  testbench compares against it and they disagree, the RTL is wrong until
-  you can show, with the uArch spec, that the model is -- then say so with
-  evidence, do not silently diverge.
+* **Match the model when there is one.** When `model/<block>_model.cpp`
+  exists it is the golden; when the testbench compares against it and they
+  disagree, the RTL is wrong until you can show, with the uArch spec, that the
+  model is -- then say so with evidence, do not silently diverge. Without a
+  model, the uArch spec and the contract VIPs are the reference.
 * **Measure after every change.** After each published block run `coresmith
   shell assemble` (the chip top with your real RTL and stubs for the rest)
   and keep the cluster's cycles/frame estimate (from the model or the block

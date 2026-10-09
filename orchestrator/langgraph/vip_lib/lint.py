@@ -2,8 +2,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Deterministic testbench lint: every edge with a VIP must be exercised
-through it, never through a hand-written neighbour model."""
+"""Discover generated VIPs available to a testbench. Recommendations only."""
 from __future__ import annotations
 
 import re
@@ -28,5 +27,5 @@ def lint_tb_imports(tb_text: str, required: list[dict]) -> list[str]:
                 f"edge {row['edge_id']} ({row['role']} side) has a generated VIP "
                 f"(.coresmith/vip/{mod}.py) but the testbench does not import it: "
                 f"add `from vip.{mod} import Driver, Monitor, Scoreboard, assertions` "
-                "and drive/observe that channel ONLY through it.")
+                "to reuse the supplied channel driver and checks.")
     return problems

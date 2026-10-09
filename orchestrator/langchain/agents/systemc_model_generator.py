@@ -14,7 +14,7 @@ from pathlib import Path
 
 from opentelemetry import trace
 
-from orchestrator.langchain.agents.coresmith_llm import ClaudeLLM, scaled
+from orchestrator.langchain.agents.coresmith_llm import ClaudeLLM, is_llm_error_response, scaled
 from orchestrator.langchain.prompts.skills import load_skills as _load_skills
 
 _tracer = trace.get_tracer(__name__)
@@ -65,4 +65,7 @@ class SystemCModelGenerator:
         out = _parse(content)
         out["cpp_path"] = str(Path(project_root) / "model" / f"{block_name}_model.cpp")
         out["written"] = Path(out["cpp_path"]).exists()
+        # The provider's error banner is an error, whatever is on disk: a stale
+        # or partial file must not read as a successful authoring call.
+        out["response_error"] = content if is_llm_error_response(content) else ""
         return out

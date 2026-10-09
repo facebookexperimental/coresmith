@@ -1,225 +1,87 @@
-# Usage
+# CLI and operation
 
-The pipeline can be driven by `coresmithd` or by MCP. Both use the same
-LangGraph checkpoints and on-disk artifacts.
+Use one project root for the Architect, daemon, workers, and evidence. Module builds run one at a time per project; a running pipeline or backend also holds the workspace.
 
-## Before Starting
-
-Run preflight from the project root:
-
-```bash
-make preflight
+```mermaid
+flowchart TD
+    A[Architect] --> C[CoreSmith CLI]
+    C -->|Registration and queries| D[(Project database)]
+    C -->|Build, resume, pause| S[Project daemon]
+    S --> G[LangGraph and worker processes]
+    G --> P[Checkpoint and park]
+    P --> A
 ```
 
-For a small smoke test:
+## Command inventory
 
-```bash
-make demo
-```
+Every command below starts with `coresmith`. Use `<command> --help` for its arguments; `tool --help` lists the deployment's EDA verbs.
 
-For a custom block registry, provide YAML with a `blocks:` section:
+[![All 47 CoreSmith CLI commands by purpose and by reach](assets/cli-inventory.svg)](assets/cli-inventory.svg)
 
-```yaml
-blocks:
-  adder8:
-    tier: 1
-    rtl_target: "rtl/adder8/adder8.v"
-    testbench: "tb/cocotb/test_adder8.py"
-    description: |
-      8-bit unsigned adder...
-```
+[Open the plate at full size](assets/cli-inventory.svg)
 
-## Option A: `coresmithd`
+| Purpose | Top-level commands |
+|---|---|
+| Define the chip | `schema`, `register`, `prd`, `frd`, `contract`, `fabric`, `pin`, `target`, `vip`, `shell` |
+| Model and implement | `model`, `harness`, `build`, `architecture`, `run`, `backend`, `verify`, `tool`, `pdk` |
+| Inspect evidence | `status`, `stage`, `block-status`, `blocks`, `block`, `results`, `attempts`, `dv-status`, `ppa`, `coverage`, `contracts`, `settings` |
+| Trace requirements | `item`, `link`, `unlink`, `check`, `question`, `ruling`, `constraints` |
+| Operate and recover | `daemon`, `supervisor`, `leases`, `state`, `resume`, `interrupts`, `logs`, `actions`, `block-done` |
 
-`coresmithd` is a FastAPI daemon for one project root. It exposes the frontend
-pipeline as HTTP endpoints and writes a discovery file at:
+`build` provides `module`, `targets`, `status`, `resume`, `pause`, `abort`, `list`, `show`, `compare`, and `lineage`. `block-done` is diagnostic; it cannot complete the `blocks` stage.
 
-```text
-.coresmith/daemon.json
-```
+## Prepare
 
-Start it:
+With `coresmith` on `PATH`, set the project root and [worker binding](agents-and-models.md), then register the [architecture inputs](architecture-phase.md).
 
 ```bash
 export CORESMITH_PROJECT_ROOT=/path/to/project
-venv/bin/python -m orchestrator.daemon.server
+coresmith daemon start
+coresmith schema --json
+coresmith stage status --json
+coresmith stage next --json
 ```
 
-The daemon binds to a free `127.0.0.1` port unless `--port` is provided.
+Resolve the reported blockers between stage advances.
 
-### HTTP Flow
-
-Read the daemon port:
+## Build and inspect
 
 ```bash
-PORT=$(jq -r .port .coresmith/daemon.json)
+coresmith build targets cpu --json
+coresmith build module cpu --json
+coresmith build status --json
+coresmith build list --module cpu --json
+coresmith build show BUILD_ID --json
+coresmith build compare BUILD_A BUILD_B --json
 ```
 
-Start a run:
+## Answer a park
+
+Read the park's `supported_actions` and answer through its lifecycle.
+
+| Lifecycle | Inspect | Answer |
+|---|---|---|
+| Module build | `build status --build-id BUILD_ID` | `build resume --build-id BUILD_ID --action ACTION` |
+| Frontend | `state` | `resume --interrupt-id ID --action ACTION` |
+| Backend | `backend state` | `backend resume --interrupt-id ID --action ACTION` |
+
+| Condition | Next step |
+|---|---|
+| Missing input or binding | Register it; retry the command |
+| Failed implementation | Repair or retry within the fixed contract |
+| Changed spec or acceptance test | Register the revision; start a new build |
+| Missing measurement | Repair the tool environment; retry measurement |
+| Paused build | Resume its recorded checkpoint |
+
+## Tools and monitoring
 
 ```bash
-curl -sS -X POST "http://127.0.0.1:${PORT}/run/start" \
-  -H "content-type: application/json" \
-  -d '{
-    "max_attempts": 5,
-    "target_clock_mhz": 50.0,
-    "blocks_file": "examples/adder8/blocks.yaml"
-  }' | jq .
+coresmith tool --help
+coresmith tool run_lint --rtl rtl/cpu.v --json
+coresmith status --json
+coresmith supervisor status
 ```
 
-Poll state:
+The optional supervisor checks daemon health and can launch the frontend once the stage reaches `blocks`; decisions remain with the Architect. MCP exposes another route to engine tools; the Architect workflow uses the CLI.
 
-```bash
-curl -sS "http://127.0.0.1:${PORT}/run/state" | jq .
-```
-
-Pause:
-
-```bash
-curl -sS -X POST "http://127.0.0.1:${PORT}/run/pause" | jq .
-```
-
-Resume after an interrupt:
-
-```bash
-curl -sS -X POST "http://127.0.0.1:${PORT}/run/resume" \
-  -H "content-type: application/json" \
-  -d '{
-    "action": "fix_rtl",
-    "rtl_fix_description": "Corrected output width in rtl/adder8/adder8.v",
-    "rationale": "Verilator lint reported a width mismatch on sum."
-  }' | jq .
-```
-
-Supported daemon resume actions mirror the frontend graph actions:
-
-- `approve`
-- `retry`
-- `fix_rtl`
-- `fix_tb`
-- `add_constraint`
-- `skip`
-- `abort`
-
-The current daemon implementation covers the frontend run lifecycle. Backend
-and tapeout control are currently exposed through MCP.
-
-## Option B: MCP
-
-Start the MCP server:
-
-```bash
-make mcp
-```
-
-An MCP client can then call the pipeline tools.
-
-### Architecture
-
-Use the architecture tools when starting from requirements:
-
-```text
-start_architecture(requirements="...", target_clock_mhz=50.0)
-get_architecture_state()
-resume_architecture(action="answer" | "approve" | "revise" | "abort", ...)
-```
-
-When architecture reaches OK2DEV, it writes `.coresmith/block_specs.json` for
-the frontend pipeline.
-
-### Frontend
-
-Start the frontend pipeline:
-
-```text
-start_pipeline(max_attempts=5, target_clock_mhz=50.0)
-```
-
-or with an explicit registry:
-
-```text
-start_pipeline(
-  max_attempts=5,
-  target_clock_mhz=50.0,
-  blocks_file="examples/adder8/blocks.yaml"
-)
-```
-
-Monitor:
-
-```text
-get_pipeline_state()
-get_pipeline_events(limit=100)
-```
-
-Resume:
-
-```text
-resume_pipeline(action="approve")
-resume_pipeline(action="fix_rtl", rtl_fix_description="...")
-resume_pipeline(action="fix_tb", rtl_fix_description="...")
-resume_pipeline(action="add_constraint", constraint="...")
-resume_pipeline(action="retry")
-resume_pipeline(action="abort")
-```
-
-For multiple parallel block interrupts, pass per-block actions as JSON:
-
-```text
-resume_pipeline(
-  action="retry",
-  block_actions='{"alu": "fix_rtl", "decoder": "fix_tb"}'
-)
-```
-
-Pause and restart helpers:
-
-```text
-pause_pipeline()
-restart_node(node_name="generate_rtl")
-restart_block(block_name="alu", from_node="generate_uarch_spec")
-```
-
-### Backend
-
-After the frontend state reports `next_action: "start_backend"`, call:
-
-```text
-start_backend(max_attempts=3, target_clock_mhz=50.0)
-get_backend_state()
-resume_backend(action="retry" | "skip" | "abort")
-pause_backend()
-```
-
-For focused backend iteration:
-
-```text
-run_backend_step(step="pnr", block_name="chip_top")
-run_backend_step(step="drc", block_name="chip_top")
-run_backend_step(step="lvs", block_name="chip_top")
-```
-
-### Tapeout
-
-After backend passes:
-
-```text
-start_tapeout(target_clock_mhz=50.0, max_attempts=2)
-get_tapeout_state()
-resume_tapeout(action="retry" | "fix_pnr" | "skip" | "abort")
-```
-
-Optional GPIO mapping is passed as a JSON string to `start_tapeout`.
-
-## Headless CLI
-
-The legacy CLI runner is still useful for CI or demos:
-
-```bash
-python run_pipeline.py
-```
-
-It auto-approves uArch and integration review interrupts, retries failures until
-`MAX_ATTEMPTS`, and stops if the all-block completion gate fails. Use
-`coresmithd` or MCP for controlled diagnosis and explicit resume decisions.
-
+Code: `bin/coresmith`, `orchestrator/harness/cli.py`, `orchestrator/daemon/server.py`, `orchestrator/daemon/supervisor.py`.

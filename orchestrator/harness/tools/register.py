@@ -29,10 +29,12 @@ def _load(path: Path):
 
 
 def register(db, project_root, kind: str, path: str, *, block: str = "", actor: str = "cli",
-             allow_warnings: bool = True) -> dict:
+             allow_warnings: bool = True, unlock: bool = False, reason: str = "") -> dict:
     """Returns ``{"ok", "kind", "artifact", "items", "links", "problems"}``.
     ``ok`` is False when any problem has severity ``error``; nothing is
-    recorded in that case."""
+    recorded in that case. ``contracts``: a document that would change a
+    locked edge is refused (``CT_LOCKED``) unless ``unlock`` (the CLI demands
+    a ``reason`` with it)."""
     pr = Path(project_root)
     p = Path(path)
     if not p.is_absolute():
@@ -102,9 +104,29 @@ def register(db, project_root, kind: str, path: str, *, block: str = "", actor: 
     errors = [q for q in problems if q.get("severity") == "error"]
     if errors:
         return {"ok": False, "kind": kind, "artifact": art_kind, "items": len(items), "problems": problems}
+    if kind == "contracts" and doc is not None:
+        from orchestrator.state_store.project_db import ContractLockedError
+        if unlock and not (reason or "").strip():
+            return {"ok": False, "kind": kind, "artifact": art_kind, "items": 0, "problems": [
+                {"code": "CT_UNLOCK_NO_REASON", "where": "--unlock", "severity": "error",
+                 "text": "--unlock requires --reason TEXT (recorded in the actions log)"}]}
+        try:
+            db.import_contracts(doc, unlock=unlock)
+        except ContractLockedError as exc:
+            return {"ok": False, "kind": kind, "artifact": art_kind, "items": 0, "problems": [
+                {"code": "CT_LOCKED", "where": ", ".join(exc.edge_ids), "severity": "error",
+                 "text": "locked edges would change; coresmith register contracts --unlock --reason ..."}]}
+        except Exception as exc:  # noqa: BLE001
+            problems.append({"code": "CT_IMPORT", "where": "db", "text": f"contracts import failed: {exc}", "severity": "warning"})
     art = db.register_artifact(art_kind, str(p.relative_to(pr)) if p.is_relative_to(pr) else str(p), sha=sha,
                                meta={"block": block} if block else {}, registered_by=actor)
     counts = db.upsert_items(art_kind, items, artifact_sha=sha) if items or kind in ("prd", "frd", "ers") else {"items": 0}
+    elsewhere = counts.get("owned_elsewhere") or []
+    if elsewhere:
+        problems.append({"code": "ITEM_OWNED_ELSEWHERE", "where": ", ".join(e["id"] for e in elsewhere),
+                         "severity": "warning",
+                         "text": "ids owned by another artifact were NOT moved or rewritten (their links from this "
+                                 "document were still added): " + ", ".join(f"{e['id']}@{e['artifact']}" for e in elsewhere)})
     n_links = 0
     for a, b, rel in links:
         try:
@@ -126,9 +148,29 @@ def register(db, project_root, kind: str, path: str, *, block: str = "", actor: 
             for owned in (b.get("owns") or b.get("requirements") or []):
                 if is_item_id(str(owned)):
                     db.link_items(str(owned), f"block:{b.get('name')}", "owned_by", source="block_diagram")
-    if kind == "contracts" and doc is not None:
-        try:
-            db.import_contracts(doc)
-        except Exception as exc:  # noqa: BLE001
-            problems.append({"code": "CT_IMPORT", "where": "db", "text": f"contracts import failed: {exc}", "severity": "warning"})
+    if kind == "ers" and doc is not None:
+        view = export_ers_view(pr, p, doc)
+        if view:
+            problems.append({"code": "ERS_VIEW", "where": str(view.relative_to(pr)), "severity": "info",
+                             "text": "wrote the ERS view validation_dv reads"})
     return {"ok": True, "kind": kind, "artifact": art, "items": counts, "links": n_links, "problems": problems}
+
+
+ERS_VIEW = Path(".coresmith") / "ers_spec.json"
+
+
+def export_ers_view(project_root, source: Path, doc: dict) -> Path | None:
+    """Write ``.coresmith/ers_spec.json`` (the file ``validation_dv`` reads)
+    from a registered ERS document; None when ``source`` already is that file."""
+    pr = Path(project_root)
+    target = pr / ERS_VIEW
+    try:
+        if Path(source).resolve() == target.resolve():
+            return None
+    except OSError:
+        pass
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(target)
+    return target

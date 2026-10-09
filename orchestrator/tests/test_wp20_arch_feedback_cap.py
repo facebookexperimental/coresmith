@@ -57,5 +57,3 @@ def test_prompts_follow_contract_reset():
     ir = (root / "langchain/prompts/integration_review.md").read_text()
     assert "names them, with their polarity" in bd
     assert "declared names and polarity" in ir
-    from orchestrator.langchain.agents.chip_lead_agent import CHIP_LEAD_PROMPT
-    assert "ARCHITECTURE REVIEW DISCIPLINE" in CHIP_LEAD_PROMPT

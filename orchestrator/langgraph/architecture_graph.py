@@ -62,18 +62,11 @@ _tracer = trace.get_tracer("coresmith.langgraph.architecture_graph")
 
 
 async def _arch_resolve_interrupt(payload: dict) -> dict:
-    """Architecture-phase interrupts through the in-graph chip lead
-    (CORESMITH_ENABLE_CHIP_LEAD) -- previously only the pipeline graph was
-    wrapped, so every PRD/diagram/constraint/final-review park waited on a
-    human even in fully-autonomous runs. Lazy import avoids a module cycle;
-    any failure falls back to a plain parked interrupt."""
+    """Architecture-phase interrupts park through the interrupts table like
+    every pipeline park (the in-graph chip lead is gone; the Architect answers
+    with ``coresmith architecture resume``). Lazy import avoids a module
+    cycle; any failure falls back to a plain parked interrupt."""
     try:
-        from orchestrator.langgraph.pipeline_graph import (
-            _chip_lead_enabled,
-            _resolve_interrupt,
-        )
-        if _chip_lead_enabled():
-            return await _resolve_interrupt(payload)
         from orchestrator.langgraph.pipeline_graph import _park
         return _park(payload, graph="architecture", interrupt_fn=interrupt)
     except ImportError:
@@ -229,7 +222,7 @@ class ArchGraphState(TypedDict):
 
 
 def _register_best_effort(project_root: str, kind: str, rel_path: str) -> None:
-    """Architect-sitting step 1: the graph nodes also feed the ontology so
+    """The Architect's step 1: the graph nodes also feed the ontology so
     ``coresmith status`` / ``stage`` describe a graph-driven run. Problems are
     logged, never raised -- the graph's own gates stay authoritative here."""
     import logging
@@ -1131,6 +1124,12 @@ async def fabric_resolution_node(state: ArchGraphState) -> dict:
     if not _fabric_resolution_enabled() or not doc.get("blocks"):
         _event(state, "Fabric Resolution", "graph_node_exit", {"skipped": True})
         return {}
+    try:  # the registered fabric spec (`coresmith fabric ...`) overrides the document's fabric object
+        from orchestrator.state_store.project_db import DB_NAME, open_project
+        if (Path(_pr(state)) / ".coresmith" / DB_NAME).is_file():
+            doc["blocks"] = open_project(_pr(state))._merge_fabric_rows([dict(b) for b in doc["blocks"]])
+    except Exception as exc:  # noqa: BLE001
+        _event(state, "Fabric Resolution", "stage_error", {"error": f"fabric row merge: {exc}"[:200]})
     result = resolve(doc)
     rounds = 0
     history: list[dict] = []
@@ -1178,6 +1177,15 @@ async def fabric_resolution_node(state: ArchGraphState) -> dict:
             blocks.append({"name": block_name, "kind": "primitive", "primitive": "cs_fabric",
                            "fabric": spec, "tier": 0, "description": "SoC fabric"})
         doc = {**doc, "blocks": blocks}
+        try:  # the fabric_specs row is the fabric's source of truth: record the accepted spec there too
+            from orchestrator.state_store.project_db import DB_NAME, open_project
+            if (Path(_pr(state)) / ".coresmith" / DB_NAME).is_file() and isinstance(spec, dict):
+                name = str(spec.get("name") or block_name)
+                res = open_project(_pr(state)).set_fabric_spec(name, spec)
+                if not res.get("ok"):
+                    _event(state, "Fabric Resolution", "stage_error", {"error": f"fabric row: {res.get('problems')}"[:200]})
+        except Exception as exc:  # noqa: BLE001 - best-effort; the diagram still carries the spec
+            _event(state, "Fabric Resolution", "stage_error", {"error": f"fabric row: {exc}"[:200]})
         result = resolve(doc)
     new_doc = result["diagram"]
     if result["fabrics"]:

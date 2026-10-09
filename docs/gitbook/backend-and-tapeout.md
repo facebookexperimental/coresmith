@@ -1,99 +1,33 @@
-# Backend And Tapeout
+# Integration and backend
 
-The backend and tapeout graphs run after the frontend pipeline has generated and
-verified RTL and synthesis artifacts.
+`coresmith run start` requires the stage machine to have reached `blocks`; it reuses current completed module builds and drives chip integration and validation. Chip verdicts bind to the module builds and the integrated top's bytes.
 
-## Backend Graph
-
-The backend graph is implemented in `orchestrator/langgraph/backend_graph.py`.
-It operates on the integrated flat design, not as a fully independent per-block
-frontend rerun.
-
-```text
-init_design
-  -> flat_top_synthesis
-  -> run_pnr
-  -> drc
-  -> lvs
-  -> timing_signoff
-  -> generate_wrapper
-  -> mpw_precheck
-  -> backend_complete
-  -> generate_3d_view
-  -> final_report
+```mermaid
+flowchart TD
+    B[Current module builds] --> S[Assemble chip shell]
+    S --> I[Integration DV]
+    I --> A[Validation DV and task acceptance]
+    A --> C[Recorded chip candidate]
+    C --> Y[Flat synthesis]
+    Y --> G[Gate simulation]
+    G -->|--full| P[Place and route]
+    P --> D[DRC, LVS and timing signoff]
+    D -.-> W[Declared chassis packaging and precheck]
 ```
 
-The backend start gate checks that all blocks have required RTL and synthesis
-artifacts. If any `rtl/<block>/...v` or `syn/output/<block>/<block>_netlist.v`
-artifact is missing, backend start fails before resetting the backend
-checkpoint.
+| Command | Work |
+|---|---|
+| `coresmith run start` | Frontend composition, integration, validation |
+| `coresmith backend start` | Flat synthesis and gate simulation |
+| `coresmith backend start --full` | Continue through physical design and signoff |
+| `coresmith backend state` | Results and pending backend decisions |
 
-## Backend Artifacts
+`backend start` stops after gate simulation unless `--full` is supplied. Backend inputs come from the recorded candidate; changes to its RTL require adoption and fresh evidence.
 
-Common backend outputs are written under:
+| Claim | Required evidence |
+|---|---|
+| Module works | Current module build and its checks |
+| Chip meets the workload | Current integration and task acceptance results |
+| Physical design closes | Timing, DRC and LVS verdicts for the current candidate |
 
-```text
-syn/output/<design>/
-syn/output/<design>/pnr/
-openframe_submission/
-```
-
-Important paths carried in backend state include:
-
-- `integration_top_path`
-- `flat_netlist_path`
-- `flat_sdc_path`
-- `routed_def_path`
-- `pnr_verilog_path`
-- `pwr_verilog_path`
-- `spef_path`
-- `gds_path`
-- `spice_path`
-- `wrapper_rtl_path`
-- `submission_dir`
-- `final_report_path`
-
-## Backend Failure Handling
-
-EDA steps are LLM-assisted. Each step receives a baseline script or prompt,
-design context, prior failures, and constraints. Failures route through backend
-diagnosis and either retry with adjusted constraints, interrupt for review, skip
-the failing block or phase, or abort.
-
-MCP exposes direct helper tools such as `run_backend_step(step="pnr" | "drc" |
-"lvs", ...)` for focused iteration. Those helpers are operational shortcuts,
-not replacements for the full graph gate.
-
-## Tapeout Graph
-
-The tapeout graph is implemented in `orchestrator/langgraph/tapeout_graph.py`.
-It builds an OpenFrame submission from passing backend results.
-
-```text
-generate_wrapper
-  -> synthesize_wrapper
-  -> wrapper_pnr
-  -> wrapper_drc
-  -> wrapper_lvs
-  -> mpw_precheck
-  -> tapeout_complete
-```
-
-Tapeout requires at least one passing backend block. It can reuse backend wrapper
-artifacts when available. Optional GPIO mapping can be provided as JSON;
-otherwise wrapper generation attempts to assign GPIOs automatically.
-
-## Tapeout Outputs
-
-The tapeout graph reports:
-
-- wrapper RTL
-- wrapper netlist
-- routed DEF
-- wrapper GDS
-- wrapper SPICE
-- submission directory
-- MPW precheck result
-
-The OpenFrame submission directory is usually `openframe_submission/`.
-
+Code: `orchestrator/langgraph/pipeline_graph.py`, `orchestrator/harness/top_module.py`, `orchestrator/langgraph/backend_graph.py`, `orchestrator/langgraph/tapeout_graph.py`.

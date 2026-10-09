@@ -50,6 +50,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from orchestrator.processes import run as run_process
+
 logger = logging.getLogger(__name__)
 
 
@@ -451,7 +453,7 @@ def _build(workdir: Path, top_module: str, sources: list[str],
         str(harness_cpp),
     ] + sources
     try:
-        r = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True,
+        r = run_process(cmd, cwd=workdir, capture_output=True, text=True,
                            timeout=timeout)
     except subprocess.TimeoutExpired:
         logger.warning("acceptance dv: verilator build timed out (%ss)", timeout)
@@ -652,7 +654,7 @@ def run_acceptance_dv(project_root: str, top_rtl: str,
         # WP-18: run from the PROJECT ROOT so project-relative $readmemh
         # images (inputs/rom_images/*.memh) resolve -- from any other cwd the
         # ROMs load empty and a correct chip stalls after its first frame.
-        r = subprocess.run([binp, str(inp), str(outp)], capture_output=True,
+        r = run_process([binp, str(inp), str(outp)], capture_output=True,
                            text=True, timeout=run_to, cwd=str(project_root))
     except subprocess.TimeoutExpired:
         return {"passed": False, "skipped": False,

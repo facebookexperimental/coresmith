@@ -82,6 +82,65 @@ def _dv_one(sb: Any, block: str, scope: str) -> dict | None:
     return rows[0] if rows else None
 
 
+def _published_dv_enabled() -> bool:
+    """``CORESMITH_SCORECARD_PUBLISHED_DV`` (default ``1``): a block's DV
+    verdict is the LATEST of its ``dv_results`` row and its published
+    ``dv_best`` record (``block-done`` / the block gate), with the test counts
+    from the ``results.xml`` that record was earned on. ``0`` = the latest
+    ``dv_results`` row only (old: a worker's earlier ``verify rtl`` debug run
+    outvoted the gate's all-pass)."""
+    import os
+    return os.environ.get("CORESMITH_SCORECARD_PUBLISHED_DV", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _results_xml_counts(path: Path) -> tuple[int, int, int] | None:
+    """``(passed, total, failed)`` testcases of a cocotb ``results.xml``."""
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.parse(str(path)).getroot()
+    except (OSError, ET.ParseError):
+        return None
+    cases = list(root.iter("testcase"))
+    if not cases:
+        return None
+    failed = sum(1 for c in cases if c.find("failure") is not None or c.find("error") is not None)
+    skipped = sum(1 for c in cases if c.find("skipped") is not None
+                  and c.find("failure") is None and c.find("error") is None)
+    return len(cases) - failed - skipped, len(cases), failed
+
+
+def _dv_latest(sb: Any, project_root: str, block: str) -> dict | None:
+    """The block's latest DV verdict: the newer of the latest ``dv_results``
+    row (scope ``rtl``) and the published ``dv_best`` record."""
+    row = _dv_one(sb, block, "rtl")
+    if not _published_dv_enabled():
+        return row
+    try:
+        from orchestrator.state_store.project_db import DB_NAME, open_project
+        if not (Path(project_root) / ".coresmith" / DB_NAME).is_file():
+            return row
+        pub = open_project(project_root).result(block, "dv_best") or {}
+    except Exception:  # noqa: BLE001
+        return row
+    pub_ts = _num(pub.get("ts"))
+    if not pub or pub.get("sim_passed") is None or pub_ts is None:
+        return row
+    if row is not None and (_num(row.get("ts")) or 0.0) > pub_ts:
+        return row
+    out = {"passed": bool(pub.get("sim_passed")), "source": f"published:{pub.get('source') or 'gate'}",
+           "ts": pub_ts, "log_path": (row or {}).get("log_path", "") if row else ""}
+    from orchestrator.harness.sim_evidence import validate
+    try:
+        evidence = validate(pub.get("simulation_evidence") or {})
+    except (OSError, ValueError, KeyError) as exc:
+        out.update(passed=False, evidence_error=f"Published DV evidence is unverified: {exc}")
+        return out
+    out.update(passed=bool(pub["sim_passed"] and evidence["passed"]),
+               tests_passed=evidence["tests_passed"], tests_total=evidence["tests_total"],
+               tests_failed=evidence["tests_failed"], tests_skipped=evidence["tests_skipped"])
+    return out
+
+
 def _read_json(path: Path) -> dict | None:
     try:
         if path.exists():
@@ -405,8 +464,9 @@ def build_final_report(state: dict, project_root: str, *,
     for name in _block_names(state):
         spec = _spec_for(state, name)
         comp = _completed_for(state, name)
-        dv_row = _dv_one(sb, name, "rtl")
-        # DV verdict: scoreboard row is authoritative; else completed_blocks.
+        dv_row = _dv_latest(sb, project_root, name)
+        # DV verdict: the latest recorded verdict (dv_results row or the
+        # published gate record, whichever is newer); else completed_blocks.
         if dv_row is not None and dv_row.get("passed") is not None:
             dv_pass = bool(dv_row.get("passed"))
         elif comp:

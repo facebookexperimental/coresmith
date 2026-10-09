@@ -2,7 +2,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Architect sitting step 1: ontology, extractors, validators, register, state machine, CLI."""
+"""The Architect's step 1: ontology, extractors, validators, register, state machine, CLI."""
 import json
 import subprocess
 import sys
@@ -158,22 +158,20 @@ def test_register_and_state_machine(tmp_path):
     qid = db.questions()[0]["id"]
     assert db.answer_question(qid, "measured: mean 206, max 294")
     res = st.advance(db, tmp_path)
-    assert res["advanced"] and res["stage"] == "arch_model"
-    assert [b["code"] for b in st.entry(db, tmp_path, "arch_model")] == ["MISSING_ARTIFACT"]
+    # executable models are optional evidence: requirements goes straight to decomposition
+    assert res["advanced"] and res["stage"] == "decomposition" and st.current(db) == "decomposition"
+    assert "arch_model" not in st.STAGES and "model_eval" not in st.STAGES
+    # model checks may still be recorded; a model-level failure is advisory, never a blocker
     (tmp_path / "model").mkdir()
     (tmp_path / "model" / "arch.json").write_text("{}")
     db.register_artifact("arch_model", "model/arch.json")
-    blk = {b["code"]: b for b in st.entry(db, tmp_path, "arch_model")}
-    assert blk["MODEL_EVAL_MISSING"]["ids"] == ["INV-001", "PERF-001", "PHYS-001"]
     db.add_check("PERF-001", "model_eval", "pass", evidence="1.9M cyc/frame", sha="abc")
     db.add_check("INV-001", "model_eval", "fail", evidence="two M holders at t=12")
-    db.add_check("PHYS-001", "model_eval", "not_testable", evidence="")
-    blk = {b["code"]: b for b in st.entry(db, tmp_path, "arch_model")}
-    assert blk["MODEL_EVAL_FAILED"]["ids"] == ["INV-001"] and blk["MODEL_EVAL_NO_REASON"]["ids"] == ["PHYS-001"]
     assert db.item("PERF-001")["status"] == "verified" and db.item("INV-001")["status"] == "failed"
-    db.add_check("INV-001", "model_eval", "pass", evidence="fixed", sha="def")
-    db.add_check("PHYS-001", "model_eval", "not_testable", evidence="physical design")
-    assert st.advance(db, tmp_path)["advanced"] and st.current(db) == "decomposition"
+    blk = {b["code"]: b for b in st.entry(db, tmp_path, "decomposition")}
+    assert "MUST_HAVE_FAILED" not in blk
+    assert st.status(db, tmp_path)["advisories"][0]["code"] == "MODEL_ONLY_FAILED"
+    assert st.status(db, tmp_path)["advisories"][0]["ids"] == ["INV-001"]
     r = register(db, tmp_path, "block_diagram", ".coresmith/block_diagram.json")
     assert r["ok"], r["problems"]
     r = register(db, tmp_path, "ers", ".coresmith/ers_spec.json")
@@ -212,7 +210,7 @@ def test_cli_round_trip(tmp_path):
     rc, out = run("question", "answer", "1", "--ruling", "triangles: mean 206 max 294")
     assert rc == 0 and out["ruling_id"]
     rc, out = run("stage", "next")
-    assert rc == 0 and out["stage"] == "arch_model"
+    assert rc == 0 and out["stage"] == "decomposition"      # models are optional: no arch_model stage
     rc, out = run("item", "show", "PERF-001")
     assert rc == 0 and out["item"]["model_check"].startswith("arch model")
     rc, out = run("check", "add", "PERF-001", "model_eval", "pass", "--evidence", "1.9M")

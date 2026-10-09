@@ -293,8 +293,8 @@ class TestRunKlayoutDrc:
 
     def _fake_subprocess(self, monkeypatch, *, returncode=0,
                          writes: str | None = None, out_dir: Path | None = None):
-        import subprocess as sp
-
+        """The fake KLayout runner at the supported process boundary
+        (``tapeout_helpers.run_process``)."""
         class R:
             def __init__(self):
                 self.returncode = returncode
@@ -306,7 +306,7 @@ class TestRunKlayoutDrc:
                 (out_dir / "klayout_drc.xml").write_text(writes)
             return R()
 
-        monkeypatch.setattr(sp, "run", fake_run)
+        monkeypatch.setattr(th, "run_process", fake_run)
         monkeypatch.setattr(th, "_write_step_log",
                             lambda *a, **k: "/tmp/klayout.log")
 
@@ -336,12 +336,10 @@ class TestRunKlayoutDrc:
 
     def test_missing_binary_stays_skipped_and_unmeasured(self, monkeypatch,
                                                         tmp_path, gds):
-        import subprocess as sp
-
         def boom(cmd, **kw):
             raise FileNotFoundError("klayout")
 
-        monkeypatch.setattr(sp, "run", boom)
+        monkeypatch.setattr(th, "run_process", boom)
         v = th._run_klayout_drc(gds, str(tmp_path))
         assert v["status"] == STATUS_NOT_RUN
         assert v["skipped"] is True

@@ -16,75 +16,62 @@ import pytest
 from orchestrator.state_store.project_db import open_project
 
 
-class _Lead:
-    def __init__(self, action="retry"):
-        self._a = action
-
-    async def decide(self, payload, prior_decisions):
-        await asyncio.sleep(0.01)
-        return {"action": self._a, "reasoning": "because"}
-
-
-def _arm(monkeypatch, tmp_path, action="retry"):
-    import orchestrator.langchain.agents.chip_lead_agent as cla
-    from orchestrator.langgraph import pipeline_graph as pg
-    monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
-    monkeypatch.setenv("CORESMITH_ENABLE_CHIP_LEAD", "1")
-    monkeypatch.setattr(pg, "_CHIP_LEAD_TRIPPED", False)
-    monkeypatch.setattr(pg, "_engine_checkout_guard", lambda: [])
-    monkeypatch.setattr(cla, "ChipLeadAgent", lambda: _Lead(action))
-    db = open_project(tmp_path)
-    db.begin_run("r1")
-    return pg, db
-
-
 class TestDecisionsLedger:
-    def test_concurrent_branches_get_unique_indices_and_a_view(self, tmp_path, monkeypatch):
-        pg, db = _arm(monkeypatch, tmp_path)
-        payloads = [{"type": "dv_failure", "block_name": f"b{i}",
-                     "supported_actions": ["retry", "skip"]} for i in range(4)]
+    """The decision ledger is the ``decisions`` table (who answered each park:
+    ``actor``); ``.coresmith/chip_lead/decisions.jsonl`` is a read-only view.
+    The in-graph chip lead is gone: ``_resolve_interrupt`` only parks."""
 
-        async def go():
-            return await asyncio.gather(*(pg._resolve_interrupt(p) for p in payloads))
-        out = asyncio.run(go())
-        assert all(d["action"] == "retry" for d in out)
+    def test_concurrent_writers_get_unique_indices_and_a_view(self, tmp_path):
+        import threading
+        db = open_project(tmp_path)
+        db.begin_run("r1")
+
+        def add(i):
+            open_project(tmp_path).add_decision(action="retry", interrupt_type="dv_failure",
+                                                block=f"b{i}", reasoning="because", actor="architect")
+        ts = [threading.Thread(target=add, args=(i,)) for i in range(4)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
         rows = db.decisions()
-        assert [d["decision_index"] for d in rows] == [1, 2, 3, 4]
+        assert sorted(d["decision_index"] for d in rows) == [1, 2, 3, 4]
         assert sorted(d["block"] for d in rows) == ["b0", "b1", "b2", "b3"]
-        view = tmp_path / ".coresmith" / "chip_lead" / "decisions.jsonl"
+        assert {d["actor"] for d in rows} == {"architect"}
+        view = db.export_decisions_view()
         lines = [json.loads(ln) for ln in view.read_text().splitlines()]
-        assert [ln["decision_index"] for ln in lines] == [1, 2, 3, 4]
+        assert sorted(ln["decision_index"] for ln in lines) == [1, 2, 3, 4]
+        assert lines[0]["actor"] == "architect"
         assert not (view.stat().st_mode & stat.S_IWUSR)  # read-only view
-        assert db.leases() == []  # the ledger lease was released
 
-    def test_budget_trips_into_a_run_flag(self, tmp_path, monkeypatch):
-        pg, db = _arm(monkeypatch, tmp_path)
-        monkeypatch.setenv("CORESMITH_CHIP_LEAD_MAX_DECISIONS", "1")
+    def test_count_by_actor(self, tmp_path):
+        db = open_project(tmp_path)
+        db.begin_run("r1")
+        db.add_decision(action="retry", actor="architect")
+        db.add_decision(action="approve", actor="cli")
+        db.add_decision(action="approve")
+        assert db.decision_count() == 3
+        assert db.decision_count(actor="architect") == 1
+        assert db.decision_count(actor="cli") == 1
+
+    def test_resolve_interrupt_only_parks(self, tmp_path, monkeypatch):
+        from orchestrator.langgraph import pipeline_graph as pg
+        monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setenv("CORESMITH_ENABLE_CHIP_LEAD", "1")   # deprecated no-op
+        db = open_project(tmp_path)
+        db.begin_run("r1")
         parked = []
         monkeypatch.setattr(pg, "interrupt", lambda payload: parked.append(payload) or {"action": "parked"})
-        p = {"type": "dv_failure", "block_name": "b", "supported_actions": ["retry"]}
-        assert asyncio.run(pg._resolve_interrupt(p))["action"] == "retry"
-        assert asyncio.run(pg._resolve_interrupt(p))["action"] == "parked"
-        assert db.get_flag("chip_lead_tripped")["tripped"] is True
-        assert pg._CHIP_LEAD_TRIPPED is True
+        out = asyncio.run(pg._resolve_interrupt({"type": "x", "supported_actions": ["retry"]}))
+        assert out == {"action": "parked"} and len(parked) == 1
+        assert db.decision_count() == 0 and db.interrupts(status="pending")
 
-    def test_trip_survives_a_process_restart(self, tmp_path, monkeypatch):
-        pg, db = _arm(monkeypatch, tmp_path)
-        db.set_flag("chip_lead_tripped", {"tripped": True})
-        assert pg._CHIP_LEAD_TRIPPED is False   # the process cache is cold...
-        assert pg._chip_lead_tripped() is True  # ...but the run flag remembers
-        parked = []
-        monkeypatch.setattr(pg, "interrupt", lambda payload: parked.append(payload) or {})
-        asyncio.run(pg._resolve_interrupt({"type": "x", "supported_actions": ["retry"]}))
-        assert parked and db.decision_count() == 0
-        pg._untrip_chip_lead()
-        assert pg._chip_lead_tripped() is False and db.get_flag("chip_lead_tripped") is None
-
-    def test_new_run_resets_the_ledger_index(self, tmp_path, monkeypatch):
-        pg, db = _arm(monkeypatch, tmp_path)
-        asyncio.run(pg._resolve_interrupt({"type": "x", "supported_actions": ["retry"]}))
+    def test_new_run_resets_the_ledger_index(self, tmp_path):
+        db = open_project(tmp_path)
+        db.begin_run("r1")
+        db.add_decision(action="retry", actor="architect")
         db.begin_run("r2")
-        asyncio.run(pg._resolve_interrupt({"type": "x", "supported_actions": ["retry"]}))
+        db.add_decision(action="retry", actor="architect")
         assert db.decisions(run_id="r1")[0]["decision_index"] == 1
         assert db.decisions(run_id="r2")[0]["decision_index"] == 1
 

@@ -53,13 +53,13 @@ def test_an_unresolvable_name_still_fails_closed(tmp_path, monkeypatch):
 def test_an_absolute_path_is_used_verbatim(tmp_path, monkeypatch):
     root, top = _project(tmp_path, monkeypatch, f"# coresmith-python: {sys.executable}")
     seen: dict = {}
-    real = ta.subprocess.run
+    real = ta.run_process
 
     def spy(cmd, **kw):
         seen.setdefault("argv0", cmd[0])
         return real(cmd, **kw)
 
-    monkeypatch.setattr(ta.subprocess, "run", spy)
+    monkeypatch.setattr(ta, "run_process", spy)
     ta.run_task_adapter(str(root), str(top))
     assert seen["argv0"] == sys.executable
 

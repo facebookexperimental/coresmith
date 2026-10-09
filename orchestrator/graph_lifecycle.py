@@ -86,6 +86,7 @@ class GraphLifecycle:
         self._last_config: dict | None = None
         self._watchdog: asyncio.Task | None = None
         self._watchdog_heals: int = 0
+        self._job_owner = ""
 
     # -- Recovery helpers ---------------------------------------------------
 
@@ -215,6 +216,29 @@ class GraphLifecycle:
 
             self._close_orphaned_events()
 
+    async def select_thread(self, thread_id: str) -> str:
+        """Point this lifecycle at ``thread_id`` (one thread per recorded
+        build) and recover its status from the persistent checkpoint:
+        ``interrupted`` (parked), ``paused`` (a node boundary), ``done`` or
+        ``idle`` (no checkpoint yet). Refused while a task is running."""
+        if self.task is not None and not self.task.done():
+            raise RuntimeError(f"{self.name} graph is running thread {self.thread_id!r}; pause or wait first")
+        await self.ensure_graph()
+        self.thread_id = thread_id
+        self.status = "idle"
+        self.error_message = ""
+        self._last_config = {"configurable": {"thread_id": thread_id}}
+        try:
+            state = await self.graph.aget_state(self._last_config)
+            recovered = _checkpoint_recovery_status(state)
+            if recovered is not None:
+                self.status = recovered
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "%s: recovery check for thread %s failed", self.name, thread_id, exc_info=True,
+            )
+        return self.status
+
     async def cleanup(self) -> None:
         """Close the async SQLite checkpointer."""
         if self._checkpointer_cm is not None:
@@ -242,6 +266,8 @@ class GraphLifecycle:
 
     async def run_task(self, initial_input: Any, config: dict) -> None:
         """Background task: drive the graph until interrupt / completion / error."""
+        from orchestrator.processes import begin_owner
+        self._job_owner = begin_owner(self.name)
         try:
             from orchestrator.langchain.agents.coresmith_llm import _breaker_context
             _breaker_context.set(self.name)
@@ -448,6 +474,25 @@ class GraphLifecycle:
             return
         self._watchdog = asyncio.create_task(self._wedge_watchdog_loop())
 
+    async def safe_pause(self) -> bool:
+        """Fence launches, cancel the graph, then join its complete process tree."""
+        from orchestrator.processes import cancel, fence
+        async with self._lock:
+            running = self.task is not None and not self.task.done()
+            if self._job_owner:
+                fence(self._job_owner)
+            if running:
+                self.task.cancel()
+            if self._job_owner:
+                await asyncio.to_thread(cancel, self._job_owner)
+            if running:
+                try:
+                    await self.task
+                except asyncio.CancelledError:
+                    pass
+            self.status = "paused"
+            return running
+
     async def safe_start(self, initial_input: Any, config: dict) -> None:
         """Spawn a fresh run_task (raises if one is already in flight)."""
         async with self._lock:
@@ -524,8 +569,14 @@ class GraphLifecycle:
                         "exact node name (e.g. integration_check, "
                         "integration_dv, validation_dv, process_block).",
             }
-        ckpt_id = found["configurable"].get("checkpoint_id")
-        fork = {"configurable": {"thread_id": self.thread_id,
-                                 "checkpoint_id": ckpt_id}}
+        # Never invoke directly against a historical checkpoint. LangGraph
+        # writes an interrupt raised by that invocation as a pending write on
+        # the old checkpoint, while a thread-only state lookup keeps returning
+        # the newer terminal checkpoint. The lifecycle then says interrupted,
+        # but state/resume see no task and cannot act on it. Materialize
+        # a fresh latest checkpoint with the same values and scheduled nodes;
+        # ``__copy__`` deliberately leaves the historical pending writes behind.
+        fork = await self.graph.aupdate_state(found, None, as_node="__copy__")
+        ckpt_id = fork["configurable"].get("checkpoint_id")
         await self.safe_start(None, fork)
         return {"restarted": True, "node": node_name, "checkpoint_id": ckpt_id}

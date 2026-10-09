@@ -91,10 +91,20 @@ ENV GATES
 ``CORESMITH_GATE_SIM_STRICT``     default off. When on, a MISSING TOOLCHAIN
                                   (no Verilator, no PDK cell models) is a FAIL
                                   instead of a non-blocking ``not_run``.
-``CORESMITH_GATE_SIM_MAX_CYCLES`` default 200000. Reduced-stimulus cap: replay
-                                  at most this many cycles.
-``CORESMITH_GATE_SIM_TIMEOUT_S``  default 1800.
+``CORESMITH_GATE_SIM_MAX_CYCLES`` default unset = the WHOLE recorded reference
+                                  is replayed (the time budget below bounds it).
+                                  A positive value caps the replay (verdict
+                                  ``bounded`` when the reference is longer);
+                                  ``200000`` restores the old default.
+``CORESMITH_GATE_SIM_TIMEOUT_S``  default 1800: the time budget of the build and
+                                  of the replay. A replay that exceeds it is
+                                  ``bounded`` (nothing was disproved), not a fail.
 ``CORESMITH_GATE_SIM_MACRO_MODEL`` ``generated`` (default) | ``pdk``.
+``CORESMITH_GATE_SIM_BIND_SHELLS`` default **ON**. A netlist whose memories are
+                                  UNBOUND ``cs_mem_macro_shell`` placeholders
+                                  (read data tied to 0) has each shell bound to
+                                  its concrete macro for the simulation; ``0``
+                                  makes such a netlist a FAIL instead.
 ``CORESMITH_GATE_SIM_DEBUG``      default off. TRIAGE AID: keep comparing past
                                   the first divergence and report how many there
                                   were in total. Does not change the verdict.
@@ -117,6 +127,7 @@ All heavy imports are deferred; importing this module costs nothing.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -124,7 +135,10 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable, Optional
+
+from orchestrator.processes import run as run_process
 
 # ---------------------------------------------------------------------------
 # Env gates
@@ -208,17 +222,18 @@ def gate_sim_strict() -> bool:
 
 
 def gate_sim_max_cycles() -> int:
-    """Reduced-stimulus cap: replay at most this many recorded cycles.
+    """Replay cap in recorded cycles; ``0`` = no cap (the default).
 
-    Gate sim is ~1-2 orders of magnitude slower than RTL sim, so a full-length
-    stimulus is usually not affordable per block per attempt. Truncating the
-    replay keeps the gate cheap; it never weakens the verdict for the cycles it
-    does compare, and a stub diverges within the first handful of output beats.
-    """
+    The default replays the whole recorded reference: a fixed 200000-cycle cap
+    turned a clean 273k-cycle chip reference into a ``bounded`` verdict (MCU+FFT
+    run 3) that the backend treated as a failure. The replay is bounded by the
+    time budget instead (``CORESMITH_GATE_SIM_TIMEOUT_S``). A positive
+    ``CORESMITH_GATE_SIM_MAX_CYCLES`` still caps it (an unparsable value means
+    no cap)."""
     try:
-        return max(1, int(os.environ.get("CORESMITH_GATE_SIM_MAX_CYCLES", "") or 200000))
+        return max(0, int(os.environ.get("CORESMITH_GATE_SIM_MAX_CYCLES", "") or 0))
     except ValueError:
-        return 200000
+        return 0
 
 
 def gate_sim_timeout_s() -> int:
@@ -688,7 +703,7 @@ def extract_vectors(
                     edge = True
         if edge:
             vec.reference_cycles += 1
-        if edge and len(rows) < max_cycles:
+        if edge and (max_cycles <= 0 or len(rows) < max_cycles):
             in_vals = [_fit(cur[n], widths[n]) for n in ins]
             out_vals = [_fit(cur[n], widths[n]) for n in outs]
             rows.append((in_vals, out_vals))
@@ -1340,6 +1355,242 @@ def macro_model_files(netlist_path: str | Path, work_dir: Path) -> tuple[list[st
 
 
 # ---------------------------------------------------------------------------
+# Unbound macro shells in the netlist
+# ---------------------------------------------------------------------------
+# A netlist synthesized with ``chparam -set MEM_IMPL "MACRO"`` but WITHOUT the
+# pre-synthesis binding (``macro_prebind``) carries each wrapped memory as a
+# derived ``$paramod$..\cs_mem_macro_shell`` leaf whose body is the library's
+# placeholder -- ``assign rdata = 0``, synthesized to ``conb`` LO cells. It
+# instantiates no macro, so :func:`macro_model_files` finds nothing to model and
+# the gate sim ran a chip whose every memory read returns zero. Observed on an
+# MCU+FFT SoC: the program byte 0xF0 (HALT) written into IMEM during reset read
+# back as 0x00, the netlist never halted, and the gate reported "cycle 15
+# mcu_halted_o expected 1 got 0" -- a divergence caused by the harness, not by
+# synthesis. (The cycle-accurate macro stand-in and ``cs_sram.v`` agree with the
+# PDK model on that stimulus; neither was ever instantiated.)
+#
+# The shell is by design a placeholder the physical flow replaces with the
+# concrete macro of its geometry (``backend_graph`` re-derives with the
+# pre-bound shell). The gate sim therefore binds each unbound shell to the SAME
+# macro the binder resolves (``macro_registry.resolve_shell``, no OpenRAM
+# generation) with the SAME pin mapping (``macro_prebind._ports_for``), and
+# simulates it through the cycle-accurate stand-in. A geometry that does not
+# resolve to a real macro is a FAIL, never zeros.
+# ``CORESMITH_GATE_SIM_BIND_SHELLS=0`` turns the binding off; an unbound shell is
+# then a FAIL that names the missing pre-synthesis binding.
+
+GATE_SIM_BIND_SHELLS_ENV = "CORESMITH_GATE_SIM_BIND_SHELLS"
+
+_NETLIST_MODULE_RE = re.compile(r"\bmodule\s+(\\\S+|[A-Za-z_][\w$]*)\s*\(")
+_NETLIST_INST_RE = re.compile(
+    r"^\s*(\\\S+|[A-Za-z_][\w$]*)\s+(\\\S+|[A-Za-z_][\w$]*)\s*\(", re.MULTILINE)
+_NETLIST_KEYWORDS = frozenset({
+    "input", "output", "inout", "wire", "reg", "assign", "module", "endmodule",
+    "always", "initial", "generate", "endgenerate", "supply0", "supply1",
+    "parameter", "localparam", "integer", "genvar", "begin", "end", "if", "else",
+})
+_NETLIST_RANGE_RE = re.compile(
+    r"\b(?:input|output)\b\s*(?:wire\s+)?\[\s*(\d+)\s*:\s*(\d+)\s*\]\s*(\w+)\s*;")
+
+
+def gate_sim_bind_shells() -> bool:
+    return _flag(GATE_SIM_BIND_SHELLS_ENV, True)
+
+
+@dataclass
+class ShellBinding:
+    module: str                  # the netlist's module name (possibly escaped)
+    kind: str = "sram"           # "sram" | "rom"
+    width: int = 0
+    depth: int = 0
+    nmask: int = 1
+    macro: str = ""              # bound macro name ("" = unresolved)
+    replacement: str = ""        # Verilog replacing the shell module
+    model: str = ""              # macro Verilog to model
+    error: str = ""
+    info: object = None          # the resolved MacroInfo
+
+
+def _module_span(text: str, start: int) -> tuple[int, int]:
+    end = text.find("endmodule", start)
+    return (start, len(text)) if end < 0 else (start, end + len("endmodule"))
+
+
+def unbound_macro_shells(netlist_text: str,
+                         cell_prefixes: tuple = ("sky130_fd_sc_",)) -> list[ShellBinding]:
+    """Every ``cs_mem_macro_shell`` / ``cs_rom_macro_shell`` module DEFINED in
+    the netlist whose body instantiates nothing but standard cells (the zero
+    placeholder). A shell that already instantiates a macro is bound and is not
+    returned."""
+    out: list[ShellBinding] = []
+    for m in _NETLIST_MODULE_RE.finditer(netlist_text):
+        name = m.group(1)
+        tail = name.rsplit("\\", 1)[-1]
+        kind = {"cs_mem_macro_shell": "sram", "cs_rom_macro_shell": "rom"}.get(tail)
+        if not kind:
+            continue
+        _s, e = _module_span(netlist_text, m.start())
+        body = netlist_text[m.end():e]
+        after_header = body[body.find(";") + 1:]
+        insts = [t for t, _i in _NETLIST_INST_RE.findall(after_header)
+                 if t not in _NETLIST_KEYWORDS]
+        if any(not t.lstrip("\\").startswith(tuple(cell_prefixes)) for t in insts):
+            continue                     # instantiates a macro: already bound
+        ranges = {n: abs(int(a) - int(b)) + 1 for a, b, n in _NETLIST_RANGE_RE.findall(body)}
+        width = ranges.get("wdata0") or ranges.get("rdata0") or ranges.get("rdata") or 0
+        aw = ranges.get("addr0") or ranges.get("addr") or 0
+        out.append(ShellBinding(module=name, kind=kind, width=width,
+                                depth=(1 << aw) if aw else 0,
+                                nmask=ranges.get("wmask0", 1)))
+    return out
+
+
+def _binding_manifest(path: str | Path, netlist_path: str | Path) -> tuple[dict | None, str]:
+    """Load and hash-check the pre-synthesis decision for this exact netlist."""
+    if not path:
+        return None, "no prebind manifest was supplied"
+    try:
+        doc = json.loads(Path(path).read_text())
+        if doc.get("version") != 1 or not isinstance(doc.get("bindings"), list):
+            return None, "prebind manifest has an unsupported shape"
+        bound = doc.get("netlist") or {}
+        actual = hashlib.sha256(Path(netlist_path).read_bytes()).hexdigest()
+        if bound.get("sha256") != actual:
+            return None, "prebind manifest netlist hash does not match the simulated netlist"
+        artifacts = list(doc.get("sources") or [])
+        if doc.get("bound_shell"):
+            artifacts.append(doc["bound_shell"])
+        for artifact in artifacts:
+            ap = Path(artifact.get("path", ""))
+            if (not ap.is_file()
+                    or hashlib.sha256(ap.read_bytes()).hexdigest() != artifact.get("sha256")):
+                return None, f"prebind artifact hash mismatch: {ap or '<missing path>'}"
+        for entry in doc["bindings"]:
+            model = entry.get("model") or {}
+            mp = Path(model.get("path", ""))
+            if not mp.is_file() or hashlib.sha256(mp.read_bytes()).hexdigest() != model.get("sha256"):
+                return None, f"prebind model hash mismatch for {entry.get('macro', '?')}"
+        return doc, ""
+    except (OSError, ValueError, TypeError) as exc:
+        return None, f"prebind manifest unreadable: {exc}"
+
+
+def bind_macro_shells_for_sim(shells: list[ShellBinding], manifest=None,
+                              registry=None) -> None:
+    """Apply exact, hash-verified prebind decisions; never infer a port count."""
+    try:
+        from orchestrator.langgraph.macro_prebind import _ports_for
+        from orchestrator.langgraph.macro_registry import ShellSpec
+    except Exception as exc:  # pragma: no cover - import guard
+        for sh in shells:
+            sh.error = f"macro binder unavailable: {exc!r}"
+        return
+    if not isinstance(manifest, dict):
+        for sh in shells:
+            sh.error = "no verified prebind manifest"
+        return
+    for sh in shells:
+        if sh.kind != "sram":
+            sh.error = ("an unbound ROM shell has no contents to simulate -- bind it "
+                        "before synthesis (macro_prebind)")
+            continue
+        if not sh.width or not sh.depth:
+            sh.error = "shell geometry (wdata0/addr0 widths) could not be read"
+            continue
+        matches = [b for b in manifest.get("bindings", [])
+                   if b.get("kind") == sh.kind
+                   and int(b.get("width", 0)) == sh.width
+                   and int(b.get("depth", 0)) == sh.depth
+                   and int(b.get("mask_lanes", 0)) == sh.nmask]
+        if len(matches) != 1:
+            sh.error = (f"prebind manifest has {len(matches)} exact entries for "
+                        f"{sh.kind} {sh.width}b x {sh.depth} with {sh.nmask} mask lane(s); "
+                        "port count cannot be inferred")
+            continue
+        b = matches[0]
+        spec = ShellSpec(kind=sh.kind, width=sh.width, depth=sh.depth,
+                         nport=int(b.get("nport", 0) or 0))
+        if spec.nport not in (1, 2):
+            sh.error = "prebind manifest has an invalid port count"
+            continue
+        model = (b.get("model") or {}).get("path", "")
+        macro = SimpleNamespace(
+            name=b.get("macro", ""), verilog=model, ports=b.get("ports", ""),
+            data_bits=int(b.get("data_bits", 0) or 0),
+            words=int(b.get("words", 0) or 0),
+            mask_bits=int(b.get("mask_bits", 0) or 0), kind=b.get("kind", "sram"))
+        if not macro.name or not macro.verilog:
+            sh.error = "prebind manifest entry is missing macro identity/model"
+            continue
+        conns = _ports_for(macro, spec, sh.nmask)
+        aw = max(1, (sh.depth - 1).bit_length())
+        hdr = (f"module {sh.module} (clk, ce0, we0, wmask0, addr0, wdata0, rdata0, "
+               f"ce1, addr1, rdata1);\n"
+               f"  input clk;\n  input ce0;\n  input we0;\n"
+               f"  input [{sh.nmask - 1}:0] wmask0;\n"
+               f"  input [{aw - 1}:0] addr0;\n  input [{sh.width - 1}:0] wdata0;\n"
+               f"  output [{sh.width - 1}:0] rdata0;\n  input ce1;\n"
+               f"  input [{aw - 1}:0] addr1;\n  output [{sh.width - 1}:0] rdata1;\n")
+        inst = ",\n".join(f"    .{p}({s})" for p, s in conns)
+        tail = "" if spec.nport >= 2 else "  assign rdata1 = rdata0;\n"
+        sh.macro = macro.name
+        sh.model = macro.verilog
+        sh.info = macro
+        sh.replacement = (
+            "// coresmith gate_sim: unbound macro shell bound to "
+            f"{macro.name} for simulation\n"
+            + hdr + f"  {macro.name} u_macro (\n{inst}\n  );\n" + tail + "endmodule")
+
+
+def netlist_with_bound_shells(netlist_text: str, shells: list[ShellBinding]) -> str:
+    """The netlist with each bound shell's placeholder definition replaced."""
+    out = netlist_text
+    for sh in shells:
+        if not sh.replacement:
+            continue
+        m = re.search(r"\bmodule\s+" + re.escape(sh.module) + r"\s*\(", out)
+        if not m:
+            continue
+        s, e = _module_span(out, m.start())
+        out = out[:s] + sh.replacement + out[e:]
+    return out
+
+
+def bound_shell_model_files(shells: list[ShellBinding], work_dir: Path,
+                            have: list[str]) -> tuple[list[str], list[str]]:
+    """Simulation models for the macros the shells were bound to (deduped
+    against ``have``, the files :func:`macro_model_files` already emitted).
+    Returns ``(files, unresolved)``."""
+    files: list[str] = []
+    unresolved: list[str] = []
+    done = {Path(f).name for f in have}
+    mode = gate_sim_macro_model_mode()
+    for sh in shells:
+        if not sh.macro:
+            continue
+        fname = f"{sh.macro}__gatesim.v"
+        if fname in done or (mode == "pdk" and sh.model in have):
+            continue
+        if mode == "pdk" and Path(sh.model).exists():
+            files.append(sh.model)
+            done.add(fname)
+            continue
+        info = sh.info
+        src = macro_model_source(
+            sh.macro, getattr(info, "ports", ""), int(getattr(info, "data_bits", 0) or 0),
+            int(getattr(info, "words", 0) or 0), int(getattr(info, "mask_bits", 0) or 0),
+            iface=macro_interface(sh.macro, sh.model))
+        if not src:
+            unresolved.append(sh.macro)
+            continue
+        out = work_dir / fname
+        write_if_changed(out, src)
+        files.append(str(out))
+        done.add(fname)
+    return files, unresolved
+
+
+# ---------------------------------------------------------------------------
 # Generated C++ driver
 # ---------------------------------------------------------------------------
 
@@ -1694,7 +1945,7 @@ def build_and_run_gate_sim(
     cmd += sources + [netlist_path, str(work_dir / "gate_sim_main.cpp")]
 
     try:
-        build = subprocess.run(cmd, capture_output=True, text=True,
+        build = run_process(cmd, capture_output=True, text=True,
                                timeout=timeout_s, cwd=str(work_dir))
     except subprocess.TimeoutExpired:
         return {"ok": False, "stage": "verilate",
@@ -1711,12 +1962,12 @@ def build_and_run_gate_sim(
                 "log": tail}
 
     try:
-        run = subprocess.run(
+        run = run_process(
             [str(exe), vectors_path, str(verdict_path)],
             capture_output=True, text=True, timeout=timeout_s, cwd=str(work_dir),
         )
     except subprocess.TimeoutExpired:
-        return {"ok": False, "stage": "run",
+        return {"ok": False, "stage": "run", "time_budget_exceeded": True, "timeout_s": timeout_s,
                 "error": f"gate simulation exceeded {timeout_s}s"}
     except OSError as exc:
         return {"ok": False, "stage": "run", "error": f"gate sim exec: {exc}"}
@@ -1758,6 +2009,7 @@ def check_gate_sim(
     work_root: str | Path | None = None,
     sim_runner: Optional[Callable] = None,
     pdk_root: str | Path | None = None,
+    binding_manifest_path: str | Path = "",
 ) -> GateSimResult:
     """Run the post-synthesis gate-level simulation for one subject.
 
@@ -1912,6 +2164,46 @@ def check_gate_sim(
             + " -- refusing to simulate a design whose memories are undriven"
         )
 
+    # --- unbound macro shells (placeholder memories that read zero) ----------
+    sim_netlist = netlist_path
+    bound_shells: list[dict] = []
+    shells = unbound_macro_shells(netlist_text, tuple(cell_prefixes) or ("sky130_fd_sc_",))
+    if shells:
+        names = ", ".join(f"{s.module.rsplit(chr(92), 1)[-1]} {s.width}b x {s.depth}"
+                          for s in shells)
+        if not gate_sim_bind_shells():
+            return _fail(
+                "the netlist's memories are UNBOUND macro shells whose read data is "
+                f"tied to zero ({names}); it was synthesized with MEM_IMPL=MACRO "
+                "without the pre-synthesis macro binding (macro_prebind), so no "
+                f"simulation of it can reproduce the RTL ({GATE_SIM_BIND_SHELLS_ENV}=0 "
+                "disabled binding them for simulation)")
+        manifest, manifest_error = _binding_manifest(
+            binding_manifest_path, netlist_path)
+        if manifest_error:
+            return _fail(
+                "the netlist carries unbound macro shell(s), but their exact "
+                f"pre-synthesis binding cannot be proven: {manifest_error}")
+        bind_macro_shells_for_sim(shells, manifest)
+        bad = [s for s in shells if not s.replacement]
+        if bad:
+            return _fail(
+                "the netlist carries unbound macro shell(s) that cannot be bound to a "
+                "concrete macro for simulation: "
+                + "; ".join(f"{s.module.rsplit(chr(92), 1)[-1]} {s.width}b x {s.depth}: "
+                            f"{s.error}" for s in bad)
+                + " -- refusing to simulate memories that read zero")
+        extra, unresolved = bound_shell_model_files(shells, work_dir, macro_files)
+        if unresolved:
+            return _fail(
+                "the macro(s) bound to the netlist's unbound shells have no "
+                "simulation model: " + ", ".join(unresolved))
+        macro_files = macro_files + extra
+        sim_netlist = str(work_dir / "netlist__shells_bound.v")
+        write_if_changed(Path(sim_netlist), netlist_with_bound_shells(netlist_text, shells))
+        bound_shells = [{"shell": s.module, "width": s.width, "depth": s.depth,
+                         "macro": s.macro} for s in shells]
+
     # --- reference RTL run (pinned seed, shallow trace) ----------------------
     if sim_runner is None:
         try:
@@ -1988,7 +2280,7 @@ def check_gate_sim(
 
     raw = build_and_run_gate_sim(
         top=top,
-        netlist_path=netlist_path,
+        netlist_path=sim_netlist,
         sources=[str(shim)] + macro_files + cells,
         vectors_path=str(vectors_path),
         work_dir=work_dir,
@@ -1997,6 +2289,18 @@ def check_gate_sim(
 
     if raw.get("tooling_missing"):
         return _not_run(raw.get("error", "toolchain missing"))
+    if raw.get("time_budget_exceeded"):
+        # The replay ran out of time: nothing was disproved, but the reference
+        # was not compared in full -- bounded, never a pass and never a fail.
+        return GateSimResult(
+            ran=True, ok=False, status=STATUS_BOUNDED,
+            reason=(f"gate replay exceeded its time budget ({raw.get('timeout_s')} s, "
+                    f"CORESMITH_GATE_SIM_TIMEOUT_S) before comparing all {vec.cycles} recorded cycles; "
+                    "raise the budget, or cap the replay with CORESMITH_GATE_SIM_MAX_CYCLES"),
+            netlist_path=netlist_path,
+            detail={"work_dir": str(work_dir), "recorded_cycles": vec.cycles,
+                    "reference_cycles": vec.reference_cycles, "timeout_s": raw.get("timeout_s")},
+        )
     if not raw.get("ok"):
         return _fail(raw.get("error", "gate simulation failed"),
                      stage=raw.get("stage", ""), log=raw.get("log", ""))
@@ -2018,6 +2322,8 @@ def check_gate_sim(
               "reference_cycles": vec.reference_cycles, "compared_cycles": cycles,
               "recorded_output_bits": expected_bits, "compared_output_bits": bits,
               "seed": seed}
+    if bound_shells:
+        detail["bound_macro_shells"] = bound_shells
     if rails:
         detail["power_rails_tied"] = [p.name for p in rails]
     # Present only when the run was built under CORESMITH_GATE_SIM_DEBUG: the
@@ -2071,6 +2377,9 @@ __all__ = [
     "udp_shim_source", "cell_model_files",
     "macro_interface", "macro_model_source",
     "macro_model_files", "render_driver_cpp", "build_and_run_gate_sim",
+    "GATE_SIM_BIND_SHELLS_ENV", "ShellBinding", "gate_sim_bind_shells",
+    "unbound_macro_shells", "bind_macro_shells_for_sim", "netlist_with_bound_shells",
+    "bound_shell_model_files",
     "write_if_changed",
     "check_gate_sim",
 ]

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from orchestrator.langgraph.ppa_check import (
+from orchestrator.langgraph.ppa_check import (  # noqa: I001
     strip_instance_parameters,
     strip_signed_declaration_qualifiers,
 )
@@ -38,8 +39,22 @@ def _unwrap_tcl_path(token: str) -> tuple[str, str, str]:
     return token, "", ""
 
 
+def _real_sta() -> str:
+    configured = os.environ.get("CORESMITH_REAL_STA", "sta-real").strip()
+    if not configured:
+        raise SystemExit(
+            "CORESMITH_REAL_STA is empty; set it to an OpenSTA executable path "
+            "or command available on PATH (for example sta-real)")
+    resolved = shutil.which(configured)
+    if not resolved:
+        raise SystemExit(
+            f"OpenSTA command {configured!r} is unavailable; set "
+            "CORESMITH_REAL_STA to an executable path or put that command on PATH")
+    return resolved
+
+
 def main() -> int:
-    real_sta = os.environ.get("CORESMITH_REAL_STA", "/usr/local/bin/sta")
+    real_sta = _real_sta()
     args = sys.argv[1:]
     script_index = next(
         (
@@ -95,7 +110,7 @@ def main() -> int:
             fh.write(normalized_script)
             normalized_tcl = Path(fh.name)
         args[script_index] = str(normalized_tcl)
-        return subprocess.run([real_sta, *args]).returncode
+        return subprocess.run([real_sta, *args], check=False).returncode
     finally:
         for path in [normalized_tcl, *temporary_paths]:
             if path is not None:

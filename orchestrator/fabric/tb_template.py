@@ -133,7 +133,8 @@ async def test_decode(dut):
         for s, (proto, base, size) in SLAVES.items():
             for addr in (base, base + size - DW // 8):
                 data = _word((mi, s, addr))
-                await env.masters[m].write(addr, data)
+                wr = await env.masters[m].write(addr, data)
+                assert wr.resp == AxiResp.OKAY, f"{{m}}->{{s}} @{{addr:#x}}: resp {{wr.resp}}"
                 rd = await env.masters[m].read(addr, len(data))
                 assert rd.resp == AxiResp.OKAY, f"{{m}}->{{s}} @{{addr:#x}}: resp {{rd.resp}}"
                 assert bytes(rd.data) == data, f"{{m}}->{{s}} @{{addr:#x}}: {{bytes(rd.data).hex()}} != {{data.hex()}}"
@@ -144,32 +145,37 @@ async def test_decode_error(dut):
     """An unmapped address answers DECERR and does not wedge the fabric."""
     env = Env(dut)
     await env.reset()
-    m = env.masters[MASTERS[0]]
-    rd = await m.read(UNMAPPED, DW // 8)
-    assert rd.resp == AxiResp.DECERR, f"unmapped read resp {{rd.resp}}"
-    wr = await m.write(UNMAPPED, bytes(DW // 8))
-    assert wr.resp == AxiResp.DECERR, f"unmapped write resp {{wr.resp}}"
-    s, (proto, base, size) = next(iter(SLAVES.items()))
-    data = _word(("after", s))
-    await m.write(base, data)
-    rd = await m.read(base, len(data))
-    assert bytes(rd.data) == data
+    for name in MASTERS:
+        m = env.masters[name]
+        rd = await m.read(UNMAPPED, DW // 8)
+        assert rd.resp == AxiResp.DECERR, f"{{name}} unmapped read resp {{rd.resp}}"
+        wr = await m.write(UNMAPPED, bytes(DW // 8))
+        assert wr.resp == AxiResp.DECERR, f"{{name}} unmapped write resp {{wr.resp}}"
+        for s, (proto, base, size) in SLAVES.items():
+            data = _word(("after", name, s))
+            wr = await m.write(base, data)
+            rd = await m.read(base, len(data))
+            assert wr.resp == rd.resp == AxiResp.OKAY
+            assert bytes(rd.data) == data
 
 
 @cocotb.test()
 async def test_bursts(dut):
-    """A 64-byte burst write/read round-trips through an AXI4 slave."""
+    """Full-width and narrow bursts traverse every AXI4 and AXI-Lite route."""
     env = Env(dut)
     await env.reset()
-    axi4 = [(s, v) for s, v in SLAVES.items() if v[0] == "axi4"]
-    if not axi4:
-        return
-    s, (proto, base, size) = axi4[0]
-    m = env.masters[MASTERS[0]]
-    data = bytes(random.getrandbits(8) for _ in range(min(64, size)))
-    await m.write(base, data)
-    rd = await m.read(base, len(data))
-    assert bytes(rd.data) == data
+    for name in MASTERS:
+        m = env.masters[name]
+        for s, (proto, base, size) in SLAVES.items():
+            if proto == "apb":
+                continue
+            for beat_size in (0, (DW // 8).bit_length() - 1):
+                rng = random.Random(repr((name, s, beat_size)))
+                data = bytes(rng.getrandbits(8) for _ in range(min(64, size)))
+                wr = await m.write(base, data, size=beat_size)
+                rd = await m.read(base, len(data), size=beat_size)
+                assert wr.resp == rd.resp == AxiResp.OKAY, f"{{name}}->{{s}} burst response"
+                assert bytes(rd.data) == data, f"{{name}}->{{s}} burst data"
 
 
 @cocotb.test()

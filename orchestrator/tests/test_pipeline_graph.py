@@ -129,6 +129,9 @@ def _setup_disk_fixtures(tmp_path, blocks: list[dict]) -> None:
     """
     for blk in blocks:
         name = blk["name"]
+        spec_path = tmp_path / "arch" / "uarch_specs" / f"{name}.md"
+        spec_path.parent.mkdir(parents=True, exist_ok=True)
+        spec_path.write_text(f"# {name}\n\n## Interfaces\nNo external ports.\n")
         rtl_path = tmp_path / blk["rtl_target"]
         rtl_path.parent.mkdir(parents=True, exist_ok=True)
         rtl_path.write_text(f"module {name}();\nendmodule\n")
@@ -898,13 +901,14 @@ class TestInternalNodes:
         pass
 
     @pytest.mark.asyncio
-    async def test_pipeline_complete(self):
+    async def test_pipeline_complete(self, tmp_path):
         # Per-block frontend completion sets frontend_complete, NOT pipeline_done
         # (fix #5): the deliverable is the verified chip_top, so pipeline_done
         # stays False until integration_dv + validation_dv (+ chip-top synth).
         # Setting pipeline_done here is the leak that let a parked-at-integration
-        # run report as "done".
-        state = {"completed_blocks": [{"name": "a", "success": True}]}
+        # run report as "done". (A project root without a database: the
+        # recorded-build receipts are checked only where a ledger exists.)
+        state = {"project_root": str(tmp_path), "completed_blocks": [{"name": "a", "success": True}]}
         result = await pipeline_complete_node(state)
         assert result["frontend_complete"] is True
         assert result.get("pipeline_done") is not True
@@ -937,7 +941,10 @@ class TestInternalNodes:
         assert result_off["pipeline_aborted"] is True
 
     @pytest.mark.asyncio
-    async def test_block_done_success(self, tmp_path):
+    async def test_block_done_without_a_recorded_build_is_not_a_success(self, tmp_path):
+        """sim + synth passed in memory, but the lifecycle carries no recorded
+        build and runs outside a checkpointed graph thread: nothing is
+        published and the block is not done (the staged-build contract)."""
         state = _block_state(_make_block("scrambler"), tmp_path=str(tmp_path))
         state["sim_passed"] = True
         state["synth_success"] = True
@@ -947,8 +954,9 @@ class TestInternalNodes:
         (block_dir / "constraints.json").write_text("[]")
         result = await block_done_node(state)
         assert len(result["completed_blocks"]) == 1
-        assert result["completed_blocks"][0]["success"] is True
-        assert result["completed_blocks"][0]["name"] == "scrambler"
+        done = result["completed_blocks"][0]
+        assert done["success"] is False and done["name"] == "scrambler"
+        assert done["persistence_failed"] is True and "BUILD_IDENTITY_MISSING" in done["error"]
 
     @pytest.mark.asyncio
     async def test_block_done_cannot_record_failed_timing_as_success(self, tmp_path):
@@ -2571,7 +2579,7 @@ class TestRouteAfterSynthGateSim:
 
     def test_gate_sim_pass_reaches_block_done(self):
         state = dict(self._BASE, gate_sim_ok=True, gate_sim_status="pass")
-        assert pipeline_graph.route_after_synth(state) == "block_done"
+        assert pipeline_graph.route_after_synth(state) == "evaluate_targets"
 
     def test_gate_sim_fail_routes_to_diagnose(self):
         state = dict(self._BASE, gate_sim_ok=False, gate_sim_status="fail")
@@ -2581,10 +2589,10 @@ class TestRouteAfterSynthGateSim:
         """None = the gate did not apply (disabled / no netlist / no toolchain).
         It must never block, exactly like ``ppa_ok`` of None."""
         state = dict(self._BASE, gate_sim_ok=None, gate_sim_status="not_run")
-        assert pipeline_graph.route_after_synth(state) == "block_done"
+        assert pipeline_graph.route_after_synth(state) == "evaluate_targets"
 
     def test_absent_key_is_legacy_behaviour(self):
-        assert pipeline_graph.route_after_synth(dict(self._BASE)) == "block_done"
+        assert pipeline_graph.route_after_synth(dict(self._BASE)) == "evaluate_targets"
 
     def test_synth_failure_still_wins(self):
         state = {"synth_success": False, "gate_sim_ok": True}

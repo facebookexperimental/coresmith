@@ -38,7 +38,7 @@ def test_prompts_follow_spec_reset():
     from pathlib import Path
     root = Path(pg.__file__).resolve().parent.parent
     # WP-48: the prompts name no chassis; they follow the spec's declared reset name and polarity
-    assert "name AND polarity" in (root / "langchain/prompts/rtl_generator.md").read_text()
+    assert "reset names, polarity" in (root / "langchain/prompts/rtl_generator.md").read_text()
     assert "polarity the RTL declares" in (root / "langchain/prompts/testbench_generator.md").read_text()
     assert "declared names and polarity" in (root / "langchain/prompts/uarch_spec_generator.md").read_text()
     assert "Use synchronous active-low reset (rst_n)." not in (root / "langchain/agents/rtl_generator.py").read_text()

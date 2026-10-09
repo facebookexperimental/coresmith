@@ -38,6 +38,8 @@ rather than silent in one.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -602,7 +604,7 @@ def strip_module(text: str, name: str) -> tuple[str, int]:
 
 
 def prepare_synth_sources(wrapper_lib: str, result: PrebindResult,
-                          work_dir) -> dict:
+                          work_dir, *, sources=()) -> dict:
     """Source set for a synthesis that should use real macros.
 
     Returns ``{"wrapper_lib", "bound_shell", "models"}``:
@@ -617,7 +619,8 @@ def prepare_synth_sources(wrapper_lib: str, result: PrebindResult,
     """
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
-    out = {"wrapper_lib": wrapper_lib, "bound_shell": "", "models": []}
+    out = {"wrapper_lib": wrapper_lib, "bound_shell": "", "models": [],
+           "manifest": ""}
     if not result.bindings:
         return out
 
@@ -635,7 +638,55 @@ def prepare_synth_sources(wrapper_lib: str, result: PrebindResult,
     out["bound_shell"] = write_bound_shell(
         result, work / "cs_mem_macro_shell__bound.v")
     out["models"] = result.model_paths()
+    out["manifest"] = write_prebind_manifest(
+        result, work / "manifest.json", sources=sources or [wrapper_lib],
+        bound_shell=out["bound_shell"])
     return out
+
+
+def _file_binding(path) -> dict:
+    p = Path(path).resolve()
+    return {"path": str(p), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
+
+
+def write_prebind_manifest(result: PrebindResult, out_path, *, sources=(),
+                           bound_shell="") -> str:
+    """Persist the exact prebind decision and hashes of every consumed artifact."""
+    bindings = []
+    for spec, macro in result.bindings:
+        model = _file_binding(macro.verilog)
+        bindings.append({
+            "kind": str(getattr(spec, "kind", "sram")),
+            "width": int(spec.width), "depth": int(spec.depth),
+            "nport": int(getattr(spec, "nport", 1) or 1),
+            "mask_lanes": int(result.mask_lanes.get(
+                (int(spec.width), int(spec.depth), int(getattr(spec, "nport", 1) or 1)), 0) or 0),
+            "macro": str(macro.name), "ports": str(getattr(macro, "ports", "")),
+            "data_bits": int(getattr(macro, "data_bits", 0) or 0),
+            "words": int(getattr(macro, "words", 0) or 0),
+            "mask_bits": int(getattr(macro, "mask_bits", 0) or 0),
+            "model": model,
+        })
+    doc = {
+        "version": 1,
+        "sources": [_file_binding(p) for p in sources if p and Path(p).is_file()],
+        "bound_shell": _file_binding(bound_shell) if bound_shell else None,
+        "bindings": bindings,
+        "netlist": None,
+    }
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+    return str(out)
+
+
+def bind_manifest_to_netlist(manifest_path, netlist_path) -> str:
+    """Bind a prebind manifest to the exact synthesized artifact it may repair."""
+    path = Path(manifest_path)
+    doc = json.loads(path.read_text())
+    doc["netlist"] = _file_binding(netlist_path)
+    path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+    return str(path)
 
 
 def write_bound_shell(result: PrebindResult, out_path) -> str:

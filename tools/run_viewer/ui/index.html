@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file:; style-src 'self' file:; img-src data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>CoreSmith run viewer</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header id="top">
+  <a class="brand" href="#/">CoreSmith run viewer</a>
+  <nav id="arms"></nav>
+  <nav id="tabs"></nav>
+  <form id="searchform" autocomplete="off"><input id="q" type="search" placeholder="Search CLI, builds, events, agents…" aria-label="Search"></form>
+</header>
+<div id="snapbar"></div>
+<main id="main"><p class="muted">Loading data…</p></main>
+<noscript>This viewer needs JavaScript (it reads the exported data shards with script tags).</noscript>
+<script src="app.js"></script>
+</body>
+</html>

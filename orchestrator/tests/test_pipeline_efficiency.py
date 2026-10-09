@@ -195,7 +195,6 @@ class TestRtlLintInPrompt:
         )
         content = prompt_path.read_text()
         assert "tool run_lint" in content
-        assert "LINT-CLEAN OUTPUT" in content
 
 
 # ═══════════════════════════════════════════════════════════════════════════

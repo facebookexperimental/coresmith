@@ -34,6 +34,7 @@ from orchestrator.langgraph.macro_registry import (
     discover_macros,
     macro_pin_clean,
 )
+from orchestrator.processes import run as run_process
 
 # Default place to install generated macros so discover_macros() finds them:
 # the same sram_macros leaf the pre-built ones live in.
@@ -418,7 +419,7 @@ def generate_openram_macro(
     _env.setdefault("PDK_ROOT", str(pdk_root))
     print(f"[OPENRAM] generating {name} ({words}x{data_bits}) ...")
     try:
-        r = subprocess.run(
+        r = run_process(
             cmd, capture_output=True, text=True, timeout=timeout_s,
             cwd=str(work), env=_env,
         )
@@ -716,7 +717,7 @@ output_path = "{out_dir}"
     env.setdefault("PDK_ROOT", str(pdk_root))
     print(f"[OPENROM] generating {name} ({words}x{data_bits} mask ROM) ...")
     try:
-        r = subprocess.run(
+        r = run_process(
             [sys.executable, str(compiler), str(cfg_path)],
             capture_output=True, text=True, timeout=timeout_s,
             cwd=str(work), env=env,

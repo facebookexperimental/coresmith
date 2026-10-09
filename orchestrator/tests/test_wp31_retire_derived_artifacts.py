@@ -35,8 +35,3 @@ def test_self_assembled_wrapper_is_kept(tmp_path):
 
 def test_no_integration_dir_is_noop(tmp_path):
     assert pg._retire_derived_integration_artifacts(str(tmp_path)) == []
-
-
-def test_prompt_rule_present():
-    from orchestrator.langchain.agents.chip_lead_agent import CHIP_LEAD_PROMPT
-    assert "DERIVED INTEGRATION ARTIFACTS ARE NOT EVIDENCE" in CHIP_LEAD_PROMPT

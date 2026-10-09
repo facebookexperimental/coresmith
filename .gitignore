@@ -56,7 +56,7 @@ node_modules/
 .pdk/
 .pdk
 
-# MkDocs rendered site (source under mkdocs-site/docs/ stays tracked)
+# MkDocs rendered site (source is docs/gitbook/)
 mkdocs-site/site/
 
 # Top-level pipeline run OUTPUT dirs ONLY (leading slash = repo root).

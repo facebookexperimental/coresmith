@@ -35,6 +35,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from orchestrator.processes import run as run_process
+
 # Reuse the memory characterizer's re-export of the DEPLOYMENT-resolved PDK
 # paths + OpenROAD binary (PR6), STA helper inputs, and PDK fingerprint so the
 # two characterizations share one cache key. mem_characterize now sources these
@@ -292,7 +294,7 @@ def _synth_comb(src_path: str, top: str, liberty: str,
         fh.write(script)
         ys = fh.name
     try:
-        r = subprocess.run([yosys, "-s", ys], capture_output=True, text=True,
+        r = run_process([yosys, "-s", ys], capture_output=True, text=True,
                            timeout=timeout_s)
     except subprocess.TimeoutExpired:
         return {"error": f"yosys timed out ({timeout_s}s)"}
@@ -346,7 +348,7 @@ def _comb_delay_ns(netlist: str, top: str, liberty: str,
             fh.write(script)
             tcl = fh.name
         try:
-            r = subprocess.run([OPENROAD_BIN, "-no_init", "-exit", tcl],
+            r = run_process([OPENROAD_BIN, "-no_init", "-exit", tcl],
                                capture_output=True, text=True, timeout=timeout_s)
         except (subprocess.TimeoutExpired, OSError):
             return None

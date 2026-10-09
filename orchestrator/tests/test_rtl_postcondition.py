@@ -2,20 +2,29 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Tests for the RTL-generation postcondition.
+"""The RTL-generation postcondition and the gate that validates the RTL.
 
-Regression: the check required a literal ``module <block_name>``, which
-rejected a correct, lint-clean block whose Verilog module name is fixed by an
-external contract. A Caravel harness mandates ``module user_project_wrapper``;
-the architecture names that block ``user_project_wrapper_io`` and encodes the
-mandated name in ``rtl_target``. The block was failed with "the agent likely
-wrote the wrong module name" and the flow stopped before testbench generation.
+``_assert_rtl_materialized`` checks PUBLICATION only: the bound RTL target is
+a regular, nonempty file. It has no module-name regex and no byte floor (both
+were heuristics that once failed a correct, lint-clean block whose module name
+is fixed by an external contract: a Caravel harness mandates
+``module user_project_wrapper`` while the architecture names the block
+``user_project_wrapper_io``). Whether the file is valid RTL for the block --
+the right top module, resolvable includes, synthesizable constructs -- is the
+lint/elaboration gate's job (``lint_rtl`` with the bound target's
+``--top-module``), and that is where those cases are covered here, with the
+real Verilator.
 """
 from __future__ import annotations
 
+import shutil
+
+import pytest
+
+from orchestrator.langgraph import pipeline_helpers as ph
 from orchestrator.langgraph.pipeline_helpers import _assert_rtl_materialized
 
-BODY = "\n".join(f"  wire w{i};" for i in range(60))  # push past the 200-byte floor
+BODY = "\n".join(f"  wire w{i};" for i in range(60))
 
 
 def _write(tmp_path, filename: str, module: str):
@@ -24,45 +33,108 @@ def _write(tmp_path, filename: str, module: str):
     return p
 
 
-class TestModuleNameMatching:
-    def test_ordinary_block_matches_block_name(self, tmp_path):
+class TestPublicationPostcondition:
+    """A regular, nonempty file is published; the name inside it is not the
+    postcondition's business."""
+
+    def test_ordinary_block_is_published(self, tmp_path):
         p = _write(tmp_path, "qspi_cdc_frontend.v", "qspi_cdc_frontend")
         assert _assert_rtl_materialized(p, "qspi_cdc_frontend") is None
 
-    def test_externally_mandated_module_name_is_accepted(self, tmp_path):
+    def test_externally_mandated_module_name_is_published(self, tmp_path):
         """The regression: block name != module name, and that is legitimate."""
         p = _write(tmp_path, "user_project_wrapper.v", "user_project_wrapper")
         assert _assert_rtl_materialized(p, "user_project_wrapper_io") is None
 
-    def test_wrong_block_rtl_still_rejected(self, tmp_path):
-        """The check must still catch a different block's RTL."""
+    def test_a_different_module_name_is_not_the_postconditions_call(self, tmp_path):
         p = _write(tmp_path, "zbuffer_sram.v", "framebuffer_sram")
-        err = _assert_rtl_materialized(p, "zbuffer_sram")
-        assert err is not None and "does not contain" in err
+        assert _assert_rtl_materialized(p, "zbuffer_sram") is None      # lint decides (below)
 
-    def test_error_names_both_acceptable_forms(self, tmp_path):
-        p = _write(tmp_path, "user_project_wrapper.v", "something_else")
-        err = _assert_rtl_materialized(p, "user_project_wrapper_io")
-        assert err is not None
-        assert "user_project_wrapper_io" in err and "user_project_wrapper" in err
-
-
-class TestOtherPostconditions:
-    def test_missing_file(self, tmp_path):
+    def test_missing_file_names_the_target_and_the_block(self, tmp_path):
         err = _assert_rtl_materialized(tmp_path / "nope.v", "nope")
-        assert err is not None and "did not write" in err
+        assert err is not None and "RTL target is not a file" in err
+        assert str(tmp_path / "nope.v") in err and "bind a file for nope" in err
 
-    def test_stub_too_small(self, tmp_path):
-        p = tmp_path / "stub.v"
-        p.write_text('`include "elsewhere.v"\n')
-        err = _assert_rtl_materialized(p, "stub")
-        assert err is not None and "bytes" in err
+    def test_a_directory_is_not_a_file(self, tmp_path):
+        (tmp_path / "dir.v").mkdir()
+        err = _assert_rtl_materialized(tmp_path / "dir.v", "dir")
+        assert err is not None and "not a file" in err
 
     def test_empty_file(self, tmp_path):
         p = tmp_path / "empty.v"
         p.write_text("")
         err = _assert_rtl_materialized(p, "empty")
-        assert err is not None
+        assert err is not None and "empty" in err and str(p) in err
+
+    def test_a_one_line_stub_is_published_and_left_to_lint(self, tmp_path):
+        """No byte floor: a nonempty stub is a file; its invalidity (an
+        include that does not exist) is lint's finding, see below."""
+        p = tmp_path / "stub.v"
+        p.write_text('`include "elsewhere.v"\n')
+        assert _assert_rtl_materialized(p, "stub") is None
+
+
+_HAS_VERILATOR = shutil.which("verilator") is not None
+
+
+@pytest.mark.skipif(not _HAS_VERILATOR, reason="Verilator not available")
+class TestRtlValidityIsTheLintGate:
+    """The real verification boundary for the cases the old heuristics
+    guessed at: ``lint_rtl`` drives Verilator with the bound target's
+    ``--top-module``, so the wrong block's RTL, a stub whose include is
+    missing, and a mandated (non-block-name) top are decided by the tool."""
+
+    @pytest.fixture
+    def project(self, tmp_path, monkeypatch):
+        from orchestrator.state_store.project_db import open_project
+        monkeypatch.setattr(ph, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(ph, "_LOG_DIR", tmp_path / ".coresmith" / "step_logs")
+        monkeypatch.setenv("CORESMITH_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setenv("CORESMITH_SRAM_GATE", "0")
+        open_project(tmp_path)
+        return tmp_path
+
+    @staticmethod
+    def _bind(root, block: str, top: str, source: str):
+        from orchestrator.harness.targets import bind
+        return bind(root, block, {"top": top, "sources": [source]})
+
+    def test_wrong_blocks_rtl_is_rejected_by_lint(self, project):
+        p = _write(project, "rtl/zbuffer_sram.v".replace("rtl/", "") , "framebuffer_sram")
+        self._bind(project, "zbuffer_sram", "zbuffer_sram", p.name)
+        res = ph.lint_rtl(str(p), "zbuffer_sram")
+        assert res["clean"] is False
+        assert "zbuffer_sram" in res["errors"] and "%Error" in res["errors"]   # the expected top is named
+
+    def test_externally_mandated_top_passes_lint(self, project):
+        """The regression, at the gate that matters: block
+        ``user_project_wrapper_io`` bound to top ``user_project_wrapper``."""
+        p = _write(project, "user_project_wrapper.v", "user_project_wrapper")
+        self._bind(project, "user_project_wrapper_io", "user_project_wrapper", p.name)
+        res = ph.lint_rtl(str(p), "user_project_wrapper_io")
+        assert res["clean"] is True, res
+
+    def test_a_stub_with_a_missing_include_is_refused_by_the_lint_job(self, project):
+        """The old byte floor guessed at this; the lint build job resolves the
+        bound target's dependencies first and refuses the missing include by
+        name (``CandidateError``), before Verilator runs."""
+        from orchestrator.harness.top_module import CandidateError
+        p = project / "stub.v"
+        p.write_text('`include "elsewhere.v"\n')
+        assert _assert_rtl_materialized(p, "stub") is None               # published ...
+        self._bind(project, "stub", "stub", p.name)
+        with pytest.raises(CandidateError, match="elsewhere.v"):          # ... refused by the build job
+            ph.lint_rtl(str(p), "stub")
+        p.write_text('`include "elsewhere.v"\nmodule stub(input clk); endmodule\n')
+        (project / "elsewhere.v").write_text("// present\n")
+        assert ph.lint_rtl(str(p), "stub")["clean"] is True               # resolvable: linted, clean
+
+    def test_unbound_block_is_linted_as_written(self, project):
+        """Without a bound target there is no --top-module: the file is
+        linted as a unit, so a wrong module name is caught later (TOPLEVEL in
+        simulation, the shell/integration elaboration), not by lint."""
+        p = _write(project, "ordinary.v", "ordinary")
+        assert ph.lint_rtl(str(p), "ordinary")["clean"] is True
 
 
 class TestRtlModuleNameResolver:

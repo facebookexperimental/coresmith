@@ -456,6 +456,29 @@ def _signal_names(edge: dict) -> list[str]:
     return [s["name"] for s in signal_specs(edge)]
 
 
+#: Signals that flow consumer->producer when the contract states no direction.
+_TO_PRODUCER_NAMES = ("tready", "drdy", "ready", "req_gnt", "gnt", "rsp_valid", "rvalid", "rdata", "pready",
+                      "prdata", "pslverr")
+
+
+def port_direction(role: str, sig_dir: str, name: str = "") -> str:
+    """The block-side Verilog direction (``input`` | ``output``) of one
+    contract signal: ``role`` is the block's end of the edge (``producer`` |
+    ``consumer``), ``sig_dir`` the signal's FLOW direction as the contract
+    states it (``producer->consumer`` / ``m2s`` or ``consumer->producer``;
+    empty: decided by the handshake name). A producer drives what flows to
+    the consumer and receives what flows back; a consumer the opposite. The
+    one mapping the shell assembler and every port-direction check use --
+    a flow direction is never compared with a Verilog direction directly."""
+    d = (sig_dir or "").lower()
+    to_producer = "consumer->producer" in d or (not d and name.lower() in _TO_PRODUCER_NAMES)
+    if d in ("producer->consumer", "m2s"):
+        to_producer = False
+    if role == "producer":
+        return "input" if to_producer else "output"
+    return "output" if to_producer else "input"
+
+
 def contract_port_rows(project_root, block_name: str) -> list[dict]:
     """The ports the contract DECLARES for one block, as canonical rows.
 

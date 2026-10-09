@@ -492,6 +492,13 @@ async def init_design_node(state: BackendState) -> dict:
     write_graph_event(pr, "Init Design", "graph_node_enter", {
         "design_name": design_name, "graph": "backend",
     })
+    try:  # best-effort: the run's stage machine enters 'backend'
+        from orchestrator.state_store import stages as _st
+        from orchestrator.state_store.project_db import open_project
+        if _st.project_db_exists(pr):
+            _st.record_entered(open_project(pr), pr, "backend")
+    except Exception as exc:  # noqa: BLE001
+        log(f"  [STAGE] could not record stage 'backend': {exc}", YELLOW)
 
     with _tracer.start_as_current_span(f"Init Design [{design_name}]") as span:
         span.set_attribute("design_name", design_name)
@@ -679,7 +686,8 @@ def find_integration_tb(root: Path, design_name: str) -> tuple[str, str]:
                 "the integration vectors as its reference stimulus")
 
 
-def _run_chip_top_gate_sim(state: "BackendState", netlist: str) -> tuple:
+def _run_chip_top_gate_sim(state: "BackendState", netlist: str,
+                           binding_manifest: str = "") -> tuple:
     """Replay the integration-DV vectors through the FLAT CHIP NETLIST.
 
     This is the artifact that becomes silicon. Every functional gate upstream
@@ -735,12 +743,15 @@ def _run_chip_top_gate_sim(state: "BackendState", netlist: str) -> tuple:
     log(f"  [CHIP-GATE-SIM] Replaying integration-DV vectors through the FLAT "
         f"chip netlist ({len(rtl_sources)} reference source file(s))...", YELLOW)
     try:
-        res = _gs.check_gate_sim(
+        _gate_kwargs = dict(
             block={"name": design, "is_chip_top": True},
             netlist_path=netlist,
             rtl_path=rtl_sources,
             tb_path=tb,
         )
+        if binding_manifest:
+            _gate_kwargs["binding_manifest_path"] = binding_manifest
+        res = _gs.check_gate_sim(**_gate_kwargs)
     except Exception as exc:  # noqa: BLE001 - never crash the backend
         reason = f"chip_top gate-sim plumbing error: {type(exc).__name__}: {exc}"
         log(f"  [CHIP-GATE-SIM] {reason}", RED)
@@ -842,6 +853,7 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
     # is the backend-only flip -- cocotb/Verilator DV keeps the default BEHAV.
     _sram_macro_directive = ""
     _sram_wrapper_lib = ""
+    _prebind_manifest = ""
     try:
         from orchestrator.langgraph.sram_wrapper import (
             backend_sram_macro_directive as _macro_directive,
@@ -892,14 +904,25 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
                     log(f"  [PREBIND] {_e}", RED)
                 for _u in _pb.unresolved:
                     log(f"  [PREBIND] unresolved geometry: {_u.describe()}", RED)
-            elif _pb.bindings and _sram_wrapper_lib:
+            elif _pb.bindings:
+                # Candidate closure may contain individual wrapper modules but
+                # omit the MACRO-only shell (RTL DV elaborates BEHAV). Prebind
+                # must still emit its explicit shell and manifest in that case.
+                _shell_sources = [_p for _p in _pb_srcs if re.search(
+                    r"\bmodule\s+cs_mem_macro_shell\b", Path(_p).read_text())]
+                if len(_shell_sources) > 1:
+                    raise ValueError("candidate contains multiple memory-shell definitions")
+                _shell_source = _shell_sources[0] if _shell_sources else ""
                 _pbs = _mp.prepare_synth_sources(
-                    _sram_wrapper_lib, _pb, Path(pr) / ".coresmith" / "prebind")
+                    _shell_source, _pb, Path(pr) / ".coresmith" / "prebind",
+                    sources=_pb_srcs)
                 input_lines = [_l for _l in input_lines
-                               if "SRAM wrapper library" not in _l]
+                               if "SRAM wrapper library" not in _l
+                               and _l != f"- Selected source: `{_shell_source}`"]
                 _sram_wrapper_lib = _pbs["wrapper_lib"]
-                input_lines.append(
-                    f"- SRAM wrapper library: `{_sram_wrapper_lib}`")
+                if _sram_wrapper_lib:
+                    input_lines.append(
+                        f"- SRAM wrapper library: `{_sram_wrapper_lib}`")
                 input_lines.append(
                     "- Bound macro shell (REPLACES the zero-driving "
                     f"cs_mem_macro_shell; read as a normal source): "
@@ -908,6 +931,7 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
                     input_lines.append(
                         "- Macro model -- read with `read_verilog -lib` so only "
                         f"its interface is taken and it is NOT synthesized: `{_m}`")
+                _prebind_manifest = _pbs.get("manifest", "")
                 log(f"  [PREBIND] bound {len(_pb.bindings)} memory geometry(ies) "
                     "to concrete macros before synthesis", YELLOW)
         except Exception as _exc:  # noqa: BLE001
@@ -993,6 +1017,14 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
 
     if result.get("success"):
         _netlist = result.get("netlist_path", "")
+        if _prebind_manifest:
+            try:
+                _mp.bind_manifest_to_netlist(_prebind_manifest, _netlist)
+            except Exception as _exc:  # noqa: BLE001
+                _reason = f"Could not bind macro prebind manifest to synthesized netlist: {_exc}"
+                log(f"  [FLAT-SYNTH] {_reason}", RED)
+                return {"phase": "synth", "previous_error": _reason,
+                        "flat_netlist_path": "", "flat_sdc_path": ""}
         from orchestrator.langgraph.backend_helpers import (
             verify_physical_constant_mapping,
         )
@@ -1056,7 +1088,19 @@ async def flat_top_synthesis_node(state: BackendState) -> dict:
                 "flat_netlist_path": "",
                 "flat_sdc_path": "",
             }
-        _gs_ok, _gs_status, _gs_reason = _run_chip_top_gate_sim(state, _netlist)
+        from orchestrator.harness.tools.block import CELL_METRICS, WNS_METRICS
+        _record_chip_checks(state, "synth", CELL_METRICS, result.get("gate_count"),
+                            f"flat synthesis of {design_name}: {result.get('gate_count')} cells "
+                            f"({result_json_path})")
+        if isinstance(result.get("wns_ns"), (int, float)):
+            _record_chip_checks(state, "sta", WNS_METRICS, result.get("wns_ns"),
+                                f"pre-layout STA of the flat {design_name} netlist @ {target_clock} MHz: "
+                                f"WNS {result.get('wns_ns')} ns ({result_json_path})")
+        if _prebind_manifest:
+            _gs_ok, _gs_status, _gs_reason = await asyncio.to_thread(_run_chip_top_gate_sim,
+                state, _netlist, _prebind_manifest)
+        else:
+            _gs_ok, _gs_status, _gs_reason = await asyncio.to_thread(_run_chip_top_gate_sim, state, _netlist)
         return {
             "phase": "synth",
             "synth_attempt_history": _synth_history,
@@ -1388,8 +1432,9 @@ async def run_pnr_node(state: BackendState) -> dict:
     from orchestrator.langgraph.backend_helpers import (
         CELL_LEF,
         LIBERTY,
-        OPENROAD_BIN,
         TECH_LEF,
+        backend_openroad_bin,
+        pnr_deadline_s,
         render_layout_image,
     )
 
@@ -1504,7 +1549,7 @@ async def run_pnr_node(state: BackendState) -> dict:
                 "tech_lef": str(TECH_LEF),
                 "cell_lef": str(CELL_LEF),
                 "liberty_path": str(LIBERTY),
-                "openroad_bin": str(OPENROAD_BIN),
+                "openroad_bin": str(backend_openroad_bin()),
                 "netlist_path": netlist_path,
                 "sdc_path": sdc_path,
                 "output_dir": output_dir,
@@ -1519,7 +1564,11 @@ async def run_pnr_node(state: BackendState) -> dict:
                 "tcl_path": tcl_path,
             },
             result_json_path=result_json_path,
-            timeout=_eda_timeout("CORESMITH_PNR_TIMEOUT", 1800),
+            # The worker deadline scales with the floorplan (die area, macro
+            # count): a fixed 30 min ended a 3.1 mm / 14-macro placement before
+            # routing. CORESMITH_PNR_DEADLINE_S (or CORESMITH_PNR_TIMEOUT) pins it.
+            timeout=_eda_timeout("CORESMITH_PNR_DEADLINE_S", pnr_deadline_s(
+                tcl_path, gate_count=int(gate_count or 0), utilization=float(utilization))),
         )
 
         pnr_ok = result.get("success", False)
@@ -1637,7 +1686,8 @@ async def run_pnr_node(state: BackendState) -> dict:
         "success": pnr_ok,
         "design_area_um2": result.get("design_area_um2", 0),
         "wns_ns": wns,
-        "total_power_mw": result.get("total_power_mw", 0),
+        "total_power_mw": result.get("total_power_mw"),
+        "power_basis": result.get("power_basis", "unavailable"),
         "graph": "backend",
     })
 
@@ -1665,7 +1715,13 @@ async def run_pnr_node(state: BackendState) -> dict:
             "via_count": result.get("via_count", 0),
         },
         "timing_result": {"met": timing_met, "wns_ns": wns, "tns_ns": result.get("tns_ns", 0)},
-        "power_result": {"success": True, "total_power_mw": result.get("total_power_mw", 0)},
+        # A vectorless OpenROAD power report is an ESTIMATE; no report is
+        # "unavailable" (NULL), never a measured zero.
+        "power_result": {"success": True, "total_power_mw": result.get("total_power_mw"),
+                         "dynamic_power_mw": result.get("dynamic_power_mw"),
+                         "leakage_power_mw": result.get("leakage_power_mw"),
+                         "power_basis": result.get("power_basis", "unavailable"),
+                         "activity_basis": "vectorless (no switching-activity file)"},
         "phase": "pnr",
         "routed_def_path": routed_def,
         "pnr_verilog_path": pnr_verilog,
@@ -2104,6 +2160,11 @@ async def timing_signoff_node(state: BackendState) -> dict:
     })
 
     result["target_clock_mhz"] = target_mhz
+    if isinstance(wns, (int, float)):
+        from orchestrator.harness.tools.block import WNS_METRICS
+        _record_chip_checks(state, "sta", WNS_METRICS, wns,
+                            f"post-route extracted STA of {block_name} @ {target_mhz} MHz: WNS {wns} ns "
+                            f"(sign-off {sign_off})")
 
     out: dict = {
         "timing_result": result,
@@ -2118,6 +2179,7 @@ async def timing_signoff_node(state: BackendState) -> dict:
             **(state.get("power_result") or {}),
             "success": met,
             "total_power_mw": result["total_power_mw"],
+            "power_basis": "estimated",
             "source": "post_route_extracted_sta",
             "activity_basis": "active deployment defaults",
         }
@@ -2585,6 +2647,37 @@ async def decide_node(state: BackendState) -> dict:
 # Node: ask_human  (INTERRUPT)
 # ---------------------------------------------------------------------------
 
+def _record_chip_checks(state: BackendState, kind: str, metrics, value, evidence: str) -> list[dict]:
+    """Chip-level numbers into the FRD: one ``kind`` check (``synth`` cell
+    count, ``sta`` WNS) with ``value`` on every bounded chip-level item whose
+    metric is in ``metrics``. ``CORESMITH_CHIP_ITEM_CHECKS=0`` disables.
+    Never raises."""
+    try:
+        from orchestrator.harness.tools.block import record_metric_checks
+        from orchestrator.state_store.project_db import DB_NAME, open_project
+        pr = _pr(state)
+        if not (Path(pr) / ".coresmith" / DB_NAME).is_file():
+            return []
+        rows = record_metric_checks(open_project(pr), kind=kind, metrics=metrics, value=value,
+                                    evidence=evidence, actor="backend")
+    except Exception:  # noqa: BLE001 - bookkeeping never fails a backend node
+        return []
+    if rows:
+        log("  [FRD] " + kind + " " + ", ".join(f"{r['item']}={r['value']:g} {r['status']}" for r in rows), CYAN)
+    return rows
+
+
+def _backend_park(payload: dict) -> dict:
+    """Backend parks go through the interrupts table like pipeline parks (an
+    ``interrupt_id``, a row ``coresmith interrupts`` shows the Architect).
+    Lazy import avoids a module cycle; any failure parks plainly."""
+    try:
+        from orchestrator.langgraph.pipeline_graph import _park
+    except ImportError:
+        return interrupt(payload)
+    return _park(payload, graph="backend", node="ask_human", interrupt_fn=interrupt)
+
+
 async def ask_human_node(state: BackendState) -> dict:
     """Pause the graph and surface failure details to the outer agent."""
     block = state["current_block"]
@@ -2639,7 +2732,7 @@ async def ask_human_node(state: BackendState) -> dict:
 
     if state.get("phase") == "candidate":
         payload["supported_actions"] = ["retry", "abort"]
-    response = interrupt(payload)
+    response = _backend_park(payload)
 
     write_graph_event(_pr(state), "Ask Human", "graph_node_exit", {
         "block": block_name, "action": response.get("action", "unknown"),
@@ -2786,9 +2879,11 @@ async def advance_block_node(state: BackendState) -> dict:
             "success": True,
             "waivers": waivers,
             "attempts": attempt,
-            "total_power_mw": power.get("total_power_mw", 0),
-            "dynamic_power_mw": power.get("dynamic_power_mw", 0),
-            "leakage_power_mw": power.get("leakage_power_mw", 0),
+            "total_power_mw": power.get("total_power_mw"),
+            "dynamic_power_mw": power.get("dynamic_power_mw"),
+            "leakage_power_mw": power.get("leakage_power_mw"),
+            "power_basis": (power.get("power_basis")
+                            or ("estimated" if isinstance(power.get("total_power_mw"), (int, float)) else "unavailable")),
             "timing_wns_ns": timing.get("wns_ns"),
             "timing_tns_ns": timing.get("tns_ns"),
             "setup_slack_ns": timing.get("setup_slack_ns"),
@@ -2870,6 +2965,14 @@ async def advance_block_node(state: BackendState) -> dict:
         )
         log(f"  [{block_name}] BACKEND {reason.upper()} after {attempt} attempts", RED)
 
+    # The backend signoff as a PPA row (probe=backend): the physical-stage
+    # numbers with their scope -- tool, PDK, clock, workload -- and the power
+    # figure's basis. ``ppa_ok`` is the signoff verdict (DRC + LVS + timing +
+    # chip gate-sim [+ precheck]); the stage machine's ``backend`` exit reads
+    # it. Power that was never reported stays NULL/unavailable: it is context,
+    # not the signoff.
+    _record_backend_ppa_row(state, block_name, attempt, result, timing)
+
     write_graph_event(_pr(state), "Advance Block", "graph_node_exit", {
         "block": block_name, "success": result["success"], "graph": "backend",
     })
@@ -2891,6 +2994,64 @@ async def advance_block_node(state: BackendState) -> dict:
 # ---------------------------------------------------------------------------
 # Node: backend_complete
 # ---------------------------------------------------------------------------
+
+def _record_backend_ppa_row(state: BackendState, block_name: str, attempt: int, result: dict, timing: dict) -> bool:
+    """One ``ppa_history`` row for the backend verdict of ``block_name``
+    (never raises; returns whether it was written)."""
+    try:
+        from orchestrator.state_store.project_db import open_project
+        from orchestrator.state_store.store import Scoreboard
+        pr = _pr(state)
+        power = state.get("power_result") or {}
+        power_mw = result.get("total_power_mw") if isinstance(result.get("total_power_mw"), (int, float)) else None
+        basis = result.get("power_basis") or power.get("power_basis") or "unavailable"
+        if power_mw is None:
+            basis = "unavailable"
+        elif basis not in ("measured", "estimated"):
+            basis = "estimated"
+        reasons = []
+        if not result.get("success"):
+            reasons.append("backend signoff not reached: " + str(result.get("error") or "")[:200])
+        if power_mw is None:
+            reasons.append("power: no report parsed (unavailable)")
+        else:
+            reasons.append(f"power: {basis} ({power.get('activity_basis') or 'vectorless'})")
+        liberty = ""
+        try:
+            from orchestrator.langgraph.pipeline_helpers import LIBERTY_FILE
+            liberty = LIBERTY_FILE.parents[3].name if LIBERTY_FILE.exists() else ""
+        except Exception:  # noqa: BLE001
+            liberty = ""
+        run_id, composition = "", None
+        try:
+            from orchestrator.state_store import builds as B
+            from orchestrator.state_store import stages as st
+            if st.project_db_exists(pr):
+                db = open_project(pr)
+                run_id = db.run_id() or ""
+                # the composition this signoff measured: every block's current
+                # recorded build, the integrated top (the latest snapshot's),
+                # the flat netlist and SDC it signed off, and the liberty/clock
+                # it ran under (a constraint change within the run re-opens it)
+                files = [p for p in (state.get("flat_netlist_path"), state.get("flat_sdc_path")) if p]
+                composition = B.composition_identity(
+                    db, pr, top_rtl_path=state.get("integration_top_path") or None, files=files,
+                    context={"liberty_sha256": B.file_sha256(LIBERTY_FILE) if liberty else None,
+                             "clock_mhz": state.get("target_clock_mhz")})["sha256"]
+        except Exception:  # noqa: BLE001
+            run_id, composition = run_id, None
+        return bool(Scoreboard(pr).record_ppa(
+            block=block_name, attempt=int(attempt or 0), source="gate", probe="backend",
+            area_um2=result.get("design_area_um2"), wns_ns=timing.get("wns_ns"), tns_ns=timing.get("tns_ns"),
+            elaborated=True, ppa_ok=bool(result.get("success")), reasons=reasons,
+            report_path=str(result.get("routed_def_path") or ""), run_id=run_id,
+            stage=str(state.get("phase") or "signoff"), tool="openroad",
+            pdk=liberty or "unknown", clock_mhz=state.get("target_clock_mhz"),
+            workload=str(power.get("activity_basis") or "vectorless"),
+            power_mw=power_mw, power_basis=basis, composition_sha=composition))
+    except Exception:  # noqa: BLE001 - a record, never a gate of the backend node
+        return False
+
 
 async def backend_complete_node(state: BackendState) -> dict:
     """Mark the backend pipeline as done and persist results for webview."""
@@ -2939,7 +3100,8 @@ async def backend_complete_node(state: BackendState) -> dict:
         }
         if blk.get("success"):
             entry.update({
-                "total_power_mw": blk.get("total_power_mw", 0),
+                "total_power_mw": blk.get("total_power_mw"),
+                "power_basis": blk.get("power_basis", "unavailable"),
                 "timing_wns_ns": blk.get("timing_wns_ns"),
                 "wns_ns": blk.get("timing_wns_ns"),
                 "tns_ns": blk.get("timing_tns_ns"),

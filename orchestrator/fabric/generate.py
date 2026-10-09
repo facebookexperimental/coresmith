@@ -13,6 +13,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from orchestrator.processes import run as run_process
+
 from .amba import ports_for
 from .spec import LATENCY_MODES, FabricSpec
 from .tb_template import render_testbench
@@ -60,7 +62,7 @@ def slang_available(yosys: str | None = None) -> bool:
     if not shutil.which(yb) and not Path(yb).exists():
         return False
     try:
-        p = subprocess.run([yb, "-q", "-p", "plugin -i slang"], capture_output=True, text=True,
+        p = run_process([yb, "-q", "-p", "plugin -i slang"], capture_output=True, text=True,
                            timeout=60)
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -329,7 +331,7 @@ def elaborate(spec: FabricSpec, out_dir, *, yosys: str | None = None, timeout_s:
               f"--top {spec.module_name} {srcs}; hierarchy -top {spec.module_name}; proc; "
               f"bwmuxmap; opt_clean; write_verilog -noattr {v}")
     log = out / f"{spec.module_name}.slang.log"
-    p = subprocess.run([yb, "-q", "-l", str(log), "-p", script], capture_output=True, text=True,
+    p = run_process([yb, "-q", "-l", str(log), "-p", script], capture_output=True, text=True,
                        timeout=timeout_s)
     if p.returncode != 0 or not v.exists():
         raise RuntimeError("fabric elaboration failed:\n" + (p.stdout + p.stderr)[-4000:])

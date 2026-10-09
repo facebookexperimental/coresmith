@@ -1,6 +1,5 @@
 """WP-66: policy dimensions cannot create an owner certification obligation."""
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -137,11 +136,3 @@ async def test_owner_declarations_still_require_successful_execution(project, st
         assert f"- Maximum geometry ({stage}): **pass**" in text
     else:
         assert dv["pending_decision"] is True
-
-
-def test_chip_lead_inputs_are_owner_immutable():
-    prompt = (Path(pg.__file__).parents[1] / "langchain/prompts/chip_lead.md").read_text()
-    text = " ".join(prompt.split())
-    assert "`inputs/` is owner-immutable" in text
-    assert "harness or task defect" in text
-    assert "abort" in text and "fix_tb" in text and "fix_rtl" in text

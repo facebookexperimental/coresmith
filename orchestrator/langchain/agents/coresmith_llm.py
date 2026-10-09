@@ -29,7 +29,6 @@ import os
 import queue
 import re as _re
 import shutil
-import signal
 import subprocess
 import tempfile
 import threading
@@ -37,6 +36,28 @@ import time as _time_mod
 from pathlib import Path
 
 from orchestrator._timeouts import scaled
+from orchestrator.processes import (
+    _PROCESS_SCOPE_ENV,  # noqa: F401 - compatibility import
+    _reap_process_group,
+)
+from orchestrator.processes import (
+    _active as _active_processes,  # noqa: F401 - compatibility import
+)
+from orchestrator.processes import (
+    _lock as _active_processes_lock,  # noqa: F401 - compatibility import
+)
+from orchestrator.processes import (
+    cancel as reap_active_cli_processes,
+)
+from orchestrator.processes import (
+    popen as owned_popen,
+)
+from orchestrator.processes import (
+    register as _register_process,  # noqa: F401 - compatibility import
+)
+from orchestrator.processes import (
+    unregister as _unregister_process,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,20 +135,6 @@ def _get_breaker(key: str = "") -> _CircuitBreaker:
 # Fix #11 -- Active subprocess registry for external kill capability
 # ---------------------------------------------------------------------------
 
-_active_processes_lock = threading.Lock()
-_active_processes: dict[int, subprocess.Popen] = {}  # thread-id -> Popen
-
-
-def _register_process(proc: subprocess.Popen) -> None:
-    """Register a running CLI subprocess so it can be killed externally."""
-    with _active_processes_lock:
-        _active_processes[threading.get_ident()] = proc
-
-
-def _unregister_process() -> None:
-    """Remove the current thread's subprocess from the registry."""
-    with _active_processes_lock:
-        _active_processes.pop(threading.get_ident(), None)
 
 
 def _worker_failure_evidence(project_root: str, pid: int, stdout: str,
@@ -152,133 +159,8 @@ def _worker_failure_evidence(project_root: str, pid: int, stdout: str,
         return ""
 
 
-def _killpg_safe(pgid: int, sig: int) -> None:
-    """os.killpg swallowing the benign 'group already gone' errors."""
-    try:
-        os.killpg(pgid, sig)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
-
-
-_PROCESS_SCOPE_ENV = "CORESMITH_CALL_PROCESS_SCOPE"
-
-
-def _signal_scoped_processes(scope: str, sig: int) -> int:
-    """Signal Linux descendants that escaped the CLI's process group.
-
-    Tool runners may start a new session, then orphan a scratch simulator.
-    A unique per-call inherited environment marker preserves ownership after
-    reparenting. Never match by command, working directory, or user alone.
-    pidfds pin the inspected process so PID reuse cannot target another job.
-    Environments are compared in memory and never logged.
-    """
-    if not isinstance(scope, str) or not scope or not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
-        return 0
-    needle = f"{_PROCESS_SCOPE_ENV}={scope}".encode()
-    count = 0
-    try:
-        entries = list(Path("/proc").iterdir())
-    except OSError:
-        return 0
-    for entry in entries:
-        if not entry.name.isdigit() or int(entry.name) == os.getpid():
-            continue
-        descriptor = None
-        try:
-            descriptor = os.pidfd_open(int(entry.name), 0)
-            if needle in (entry / "environ").read_bytes().split(b"\0"):
-                signal.pidfd_send_signal(descriptor, sig)
-                count += 1
-        except (OSError, ValueError):
-            continue
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-    return count
-
-
-def _reap_process_group(
-    process: subprocess.Popen, pgid: int, grace_s: float = 10.0
-) -> None:
-    """Terminate the child's process group so no grandchild survives the call.
-
-    The CLI is launched with ``start_new_session=True``, so the child is its
-    own session/group leader and ``pgid == child.pid`` at spawn. A grandchild
-    the CLI spawned (e.g. a sim process) shares that pgid and inherits our
-    stdout/stderr write-end; if it lives on after the CLI's final response, the
-    reader threads block on the still-open pipe until the hard-timeout deadline
-    (the observed ~45-min post-response exit stall).
-
-    We SIGTERM the group (releasing grandchildren gracefully), reap the direct
-    child within ``grace_s``, then SIGKILL any group survivors. Capturing
-    ``pgid`` at spawn (rather than re-deriving via ``os.getpgid`` after the
-    child may already be reaped) avoids the pid-reuse race.
-    """
-    scope = getattr(process, "_coresmith_process_scope", "")
-    _signal_scoped_processes(scope, signal.SIGTERM)
-    # Graceful: let the whole group wind down. If only the (already-exited)
-    # leader remains, this is a no-op ESRCH.
-    _killpg_safe(pgid, signal.SIGTERM)
-    # Make sure the direct child is reaped (poll() may already have done this;
-    # wait() then returns immediately with the cached returncode).
-    try:
-        process.wait(timeout=grace_s)
-    except subprocess.TimeoutExpired:
-        try:
-            process.kill()
-        except Exception:
-            pass
-        try:
-            process.wait(timeout=2)
-        except Exception:
-            pass
-    except Exception:
-        pass
-    # Hard-kill any grandchild that ignored SIGTERM and is still holding pipes.
-    _killpg_safe(pgid, signal.SIGKILL)
-    _signal_scoped_processes(scope, signal.SIGKILL)
-
-
 def kill_active_cli_processes() -> int:
-    """Cancel workers through the same descendant cleanup as the watchdog."""
     return reap_active_cli_processes()
-
-
-def reap_active_cli_processes(grace_s: float = 10.0) -> int:
-    """Reap the whole process GROUP of every active CLI subprocess.
-
-    Used by both cancellation entry points and the watchdog: terminate the
-    owned process group and detached descendants, then reap the direct child.
-
-    Each ``Popen`` was launched with ``start_new_session=True`` so it is its own
-    session/group leader (``pgid == pid`` at spawn); we use that captured pid as
-    the group id (never re-derive via ``os.getpgid`` -- pid-reuse race). The
-    watchdog thread owning each child is blocked in the reader loop; the group
-    reap makes its ``process.poll()`` return, so its own finally-path reap is a
-    harmless idempotent no-op (ESRCH) and ``_unregister_process`` a no-op pop.
-
-    Returns the number of live process groups reaped. Best-effort: a failure on
-    one child never blocks reaping the rest or the pause itself.
-    """
-    # Snapshot + clear under the lock, then reap OUTSIDE it: the grace-wait can
-    # take up to ``grace_s`` and must not hold the registry lock (that would
-    # block the owning watchdog thread's _unregister_process / other callers).
-    with _active_processes_lock:
-        procs = list(_active_processes.items())
-        _active_processes.clear()
-    reaped = 0
-    for tid, proc in procs:
-        try:
-            if proc.poll() is None or getattr(proc, "_coresmith_process_scope", ""):
-                logger.warning(
-                    "Reaping in-flight CLI process group pid=%d (thread %d) on pause",
-                    proc.pid, tid,
-                )
-                _reap_process_group(proc, proc.pid, grace_s=grace_s)
-                reaped += 1
-        except Exception:
-            logger.debug("reap of pid=%s failed", getattr(proc, "pid", "?"), exc_info=True)
-    return reaped
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +379,16 @@ def is_llm_error_response(content: object) -> bool:
         _LLM_ERROR_RESPONSE_PREFIX
     )
 
+
+def _failure_envelope(error_msg: str, partial_output: str = "") -> str:
+    """The text returned for a FAILED call: the error envelope first (so
+    ``is_llm_error_response`` recognises it), then whatever the provider
+    produced before failing. The partial output is diagnostics the caller may
+    use -- it is never a result."""
+    head = f"[ClaudeLLM error: {error_msg}]"
+    partial = (partial_output or "").strip()
+    return head + ("\n" + partial if partial else "")
+
 def _parse_stream_json(stdout: str) -> tuple[str, dict]:
     """Parse Claude CLI ``--output-format stream-json`` output.
 
@@ -514,12 +406,19 @@ def _parse_stream_json(stdout: str) -> tuple[str, dict]:
     callers can tell a clean finish from an ``error_max_turns``
     termination -- the latter carries no ``result`` text, so the returned
     text is indistinguishable from a normal (but truncated) answer.
+
+    A terminal ``result`` event that reports a failure (``is_error`` true,
+    or an ``error_*`` subtype) is NOT a success even though the CLI exits 0:
+    ``usage["result_error"]`` carries the provider's message and the
+    returned text is the assistant text that streamed before it (the usable
+    partial output), so the caller can wrap it in the error envelope.
     """
     final_text = ""
     usage: dict = {}
     cost_usd: float | None = None
     num_turns: int | None = None
     subtype: str = ""
+    result_error: str = ""
     fallback_chunks: list[str] = []
     for raw in stdout.splitlines():
         raw = raw.strip()
@@ -531,11 +430,22 @@ def _parse_stream_json(stdout: str) -> tuple[str, dict]:
             continue
         ev_type = obj.get("type")
         if ev_type == "result":
-            final_text = obj.get("result", "") or final_text
             usage = obj.get("usage") or {}
             cost_usd = obj.get("total_cost_usd")
             num_turns = obj.get("num_turns")
             subtype = obj.get("subtype") or subtype
+            failed = bool(obj.get("is_error")) or str(subtype).startswith("error")
+            if failed:
+                # The ``result`` text of a failed turn is the provider's
+                # diagnostic, not generated content: keep it apart from the
+                # partial assistant text.
+                _m = obj.get("result") or obj.get("error") or ""
+                if isinstance(_m, dict):
+                    _m = _m.get("message") or str(_m)
+                result_error = str(_m or subtype or "result is_error")
+            else:
+                result_error = ""                      # a later successful result supersedes
+                final_text = obj.get("result", "") or final_text
         elif ev_type == "assistant":
             msg = obj.get("message", {}) or {}
             for block in msg.get("content", []) or []:
@@ -550,6 +460,8 @@ def _parse_stream_json(stdout: str) -> tuple[str, dict]:
         out_usage["num_turns"] = num_turns
     if subtype:
         out_usage["result_subtype"] = subtype
+    if result_error:
+        out_usage["result_error"] = result_error[:600]
     return final_text, out_usage
 
 
@@ -566,11 +478,22 @@ def _parse_codex_json(stdout: str) -> tuple[str, dict]:
     can later ``codex exec resume <session_id> "<prompt>"`` to continue the
     same conversation (fixes retry thrashing where a rebuild has no memory
     of prior attempts).
+
+    Failure events (the CLI exits 0 for them): ``turn.failed`` is terminal
+    -- the turn did not complete, whatever agent text streamed before it --
+    and the returned text is the error envelope followed by that partial
+    text. An ``error`` event is a transport/provider notice: it is
+    recoverable when real output follows it (an ``agent_message`` or
+    ``turn.completed``), and terminal when it is the last word. The
+    provider's message is kept in ``usage["provider_error"]`` either way
+    (``provider_notices`` for the recovered ones).
     """
     final_text = ""
     usage: dict = {}
     session_id: str = ""
-    error_msgs: list[str] = []
+    pending_error: str = ""          # an ``error`` event not yet followed by real output
+    terminal_error: str = ""         # ``turn.failed``: the turn is over and did not complete
+    notices: list[str] = []          # recovered ``error`` events (kept for diagnostics)
     for raw in stdout.splitlines():
         raw = raw.strip()
         if not raw:
@@ -595,8 +518,14 @@ def _parse_codex_json(stdout: str) -> tuple[str, dict]:
             item = obj.get("item", {}) or {}
             if item.get("type") == "agent_message":
                 final_text = item.get("text", "") or final_text
+                if pending_error:
+                    notices.append(pending_error)
+                    pending_error = ""
         elif ev_type == "turn.completed":
             usage = obj.get("usage") or usage
+            if pending_error:
+                notices.append(pending_error)
+                pending_error = ""
         elif ev_type in ("error", "turn.failed"):
             # WP-15: codex reports provider/quota failures as an `error`
             # event and exits 0 with no agent_message (observed: "You've
@@ -606,16 +535,27 @@ def _parse_codex_json(stdout: str) -> tuple[str, dict]:
             _m = obj.get("message") or obj.get("error") or ""
             if isinstance(_m, dict):
                 _m = _m.get("message") or ""
-            if _m:
-                error_msgs.append(str(_m))
-    if not final_text and error_msgs:
-        final_text = ("[ClaudeLLM error: codex CLI reported: "
-                      + " | ".join(error_msgs)[:600] + "]")
-    if session_id:
+            _m = str(_m or ev_type)
+            if ev_type == "turn.failed":
+                terminal_error = _m
+            else:
+                pending_error = _m
+    error = terminal_error or pending_error
+    if error:
+        envelope = "[ClaudeLLM error: codex CLI reported: " + error[:600] + "]"
+        # The partial agent text is usable diagnostics, not a result: it
+        # follows the envelope so is_llm_error_response() still matches.
+        final_text = envelope + ("\n" + final_text if final_text else "")
+    if session_id or error or notices:
         # usage may be the raw turn.completed dict; copy so we don't mutate
         # a shared object, and stamp the session id onto it.
         usage = dict(usage) if usage else {}
+    if session_id:
         usage["session_id"] = session_id
+    if error:
+        usage["provider_error"] = error[:600]
+    if notices:
+        usage["provider_notices"] = [n[:300] for n in notices[:8]]
     return final_text, usage
 
 
@@ -624,7 +564,8 @@ def _parse_opencode_json(stdout: str) -> tuple[str, dict]:
 
     Each tool round has its own step_start/step_finish pair and usage. Earlier
     text is progress commentary, not part of the final structured response.
-    The complete trajectory is preserved separately by _log_opencode_turns.
+    The complete trajectory is streamed separately to ``opencode_turns.jsonl``
+    (``_append_turn`` in the stdout reader).
     """
     chunks: list[str] = []
     usage: dict = {}
@@ -719,82 +660,51 @@ def _parse_kimi_acp_json(stdout: str) -> tuple[str, dict]:
     return "".join(chunks), usage
 
 
-def _log_codex_turns(stdout: str, project_root: str, pid: int, wall_start: float) -> int:
-    """Append every Codex CLI turn to ``.coresmith/codex_turns.jsonl``.
+def _turns_log_path(project_root: str, provider: str) -> Path | None:
+    """The per-provider raw turn log (``codex_turns.jsonl`` /
+    ``opencode_turns.jsonl``) a running call streams its events into.
+    Codex (``exec --json``) and OpenCode (``run --format json``) emit one
+    JSON event per line: reasoning, tool calls, tool results, agent
+    messages. Each is persisted verbatim under a small identity header so
+    the trajectory viewer shows what the agent actually did, not only the
+    final response, and so the file can be ``jq``'d line by line."""
+    name = {"codex_cli": "codex_turns.jsonl", "opencode_cli": "opencode_turns.jsonl"}.get(provider)
+    if not name or not project_root:
+        return None
+    return Path(project_root) / ".coresmith" / name
 
-    Codex emits one JSON event per line on stdout when invoked with
-    ``--json``. We persist them verbatim (plus a synthetic ``pid``/``ts``
-    header) so the trajectory viewer can show the agent's actual
-    reasoning + tool calls instead of just the final response. Each line
-    stays a self-contained JSON object so callers can ``jq`` over the
-    file directly.
 
-    Returns the number of events written. Failures are swallowed so this
-    never breaks a live run.
-    """
+def _append_turn(path: Path, header: dict, raw: str) -> bool:
+    """Persist ONE provider event line the moment it arrives, with the call's
+    identity (``pid``, ``wall_start``, ``call_index``, ``run_name``,
+    ``process_scope``), so a call killed by its caller still leaves its
+    turns on disk. Non-JSON lines are ignored; failures never break a call.
+
+    Concurrent calls (block fan-out) append to the same file: the whole
+    record including its newline is ONE ``write(2)`` on an ``O_APPEND``
+    descriptor, so records from different processes/threads never
+    interleave inside a line."""
+    raw = raw.strip()
+    if not raw:
+        return False
     try:
-        log = Path(project_root) / ".coresmith" / "codex_turns.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        n = 0
-        with log.open("a", encoding="utf-8") as f:
-            for raw in stdout.splitlines():
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    obj = _json.loads(raw)
-                except _json.JSONDecodeError:
-                    continue
-                # Wrap each codex event with a small header so the webview
-                # can correlate by pid (-> llm_start's pid -> run_name).
-                rec = {
-                    "ts": _time_mod.time(),
-                    "wall_start": wall_start,
-                    "pid": pid,
-                    "event": obj,
-                }
-                f.write(_json.dumps(rec, default=str))
-                f.write("\n")
-                n += 1
-        return n
-    except Exception:
-        return 0
-
-
-def _log_opencode_turns(stdout: str, project_root: str, pid: int, wall_start: float) -> int:
-    """Append OpenCode NDJSON events to ``.coresmith/opencode_turns.jsonl``.
-
-    ``opencode run --thinking --format json`` emits exposed reasoning, text,
-    tool, and step events. Persist the complete valid-JSON event stream so a
-    run can be audited or replayed without mixing reasoning into the final
-    response returned to agents. Malformed lines and all logging failures are
-    deliberately non-fatal.
-    """
+        obj = _json.loads(raw)
+    except _json.JSONDecodeError:
+        return False
     try:
-        log = Path(project_root) / ".coresmith" / "opencode_turns.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        n = 0
-        with log.open("a", encoding="utf-8") as f:
-            for raw in stdout.splitlines():
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    obj = _json.loads(raw)
-                except _json.JSONDecodeError:
-                    continue
-                rec = {
-                    "ts": _time_mod.time(),
-                    "wall_start": wall_start,
-                    "pid": pid,
-                    "event": obj,
-                }
-                f.write(_json.dumps(rec, default=str))
-                f.write("\n")
-                n += 1
-        return n
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = (_json.dumps({"ts": _time_mod.time(), **header, "event": obj}, default=str) + "\n").encode("utf-8")
+        fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            view = memoryview(data)
+            while view:                       # a short write on a regular file is exceptional; finish it
+                n = os.write(fd, view)
+                view = view[n:]
+        finally:
+            os.close(fd)
+        return True
     except Exception:
-        return 0
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -917,6 +827,21 @@ def _is_muse_spark_model(resolved_model: str) -> bool:
     return (resolved_model or "").lower().rsplit("/", 1)[-1].startswith("muse-spark-")
 
 
+def _needs_meta_model_api_provider(resolved_model: str) -> bool:
+    """Whether a resolved OpenCode slug must be served by CoreSmith's injected
+    Meta Model API provider block (and therefore needs ``META_MODEL_API_KEY``).
+
+    ONLY a ``meta-model-api/...`` slug does -- that is the provider id the
+    block registers, and it is what the ``muse`` endpoint resolves to when no
+    explicit model is given. A Muse model on any other route
+    (``opencode/muse-spark-...`` hosted by OpenCode, ``openrouter/meta/...``)
+    is a provider OpenCode already knows: it is passed through untouched, with
+    no provider injection and no key demand. Unlike :func:`_is_muse_spark_model`
+    this keys on the provider prefix, not the model name.
+    """
+    return (resolved_model or "").strip().lower().startswith(MUSE_SPARK_PROVIDER_ID + "/")
+
+
 # Default model used by every agent unless overridden. Set the CORESMITH_MODEL
 # environment variable (to either a short name above or a full Claude CLI
 # model ID) to override at runtime without code changes -- useful when the
@@ -958,15 +883,17 @@ _OPENCODE_ENDPOINT_ALIASES = {
 }
 
 
-def _opencode_endpoint() -> str:
+def _opencode_endpoint(env=None) -> str:
     """Resolve ``CORESMITH_OPENCODE_ENDPOINT`` to a canonical endpoint name.
 
     Unset (or any "openrouter" alias) keeps the historical hosted-Kimi route.
     An unrecognised value raises rather than silently falling back: picking a
     different model than the operator asked for is the kind of thing that only
-    surfaces hours later in a token bill.
+    surfaces hours later in a token bill. ``env`` is the mapping read
+    (``os.environ`` by default).
     """
-    raw = os.environ.get("CORESMITH_OPENCODE_ENDPOINT", "").strip().lower()
+    env = os.environ if env is None else env
+    raw = (env.get("CORESMITH_OPENCODE_ENDPOINT") or "").strip().lower()
     try:
         return _OPENCODE_ENDPOINT_ALIASES[raw]
     except KeyError:
@@ -1173,44 +1100,59 @@ def _is_transient_opencode_failure(
     return any(sig in blob for sig in _OPENCODE_TRANSIENT_SIGNATURES)
 
 
-def _resolve_model(model: str, provider: str = "claude_cli") -> str:
+# The selector variables each provider's adapter reads for its model, in the
+# order of precedence ``_resolve_model`` applies (the provider-specific
+# variable first, then CORESMITH_MODEL; kimi's KIMI_MODEL_NAME outranks both
+# and selects the reserved runtime alias). The one table the adapter and the
+# build ledger's worker binding (state_store/builds.py) both read.
+MODEL_SELECTOR_VARS = {
+    "claude_cli": ("CORESMITH_MODEL",),
+    "codex_cli": ("CORESMITH_CODEX_MODEL", "CORESMITH_MODEL"),
+    "opencode_cli": ("CORESMITH_OPENCODE_MODEL", "CORESMITH_MODEL"),
+    "kimi_cli": ("KIMI_MODEL_NAME", "CORESMITH_KIMI_MODEL", "CORESMITH_MODEL"),
+    "agy_cli": ("CORESMITH_AGY_MODEL", "CORESMITH_MODEL"),
+}
+
+
+def selected_model_var(provider: str = "claude_cli", env=None) -> tuple[str, str]:
+    """``(variable, value)`` of the selector that decides ``provider``'s model
+    in ``env`` (``os.environ`` by default), or ``("", "")`` when none is set."""
+    env = os.environ if env is None else env
+    for var in MODEL_SELECTOR_VARS.get(provider, MODEL_SELECTOR_VARS["claude_cli"]):
+        value = (env.get(var) or "").strip()
+        if value:
+            return var, value
+    return "", ""
+
+
+def _resolve_model(model: str, provider: str = "claude_cli", env=None) -> str:
     """Map short model name to the selected CLI model ID.
 
-    Honours the ``CORESMITH_MODEL`` environment variable as a runtime
-    override: if set, it wins over whatever the caller passed in. Empty
-    or unset model strings fall back to ``DEFAULT_MODEL``.
+    Honours the provider's selector variables (``MODEL_SELECTOR_VARS``) as a
+    runtime override: if set, they win over whatever the caller passed in.
+    Empty or unset model strings fall back to the provider's default. ``env``
+    is the mapping the selectors are read from (``os.environ`` by default): a
+    pure resolver, so the build ledger can resolve the persisted run env
+    without mutating the process environment.
     """
+    var, env_override = selected_model_var(provider, env)
     if provider == "codex_cli":
-        env_override = (
-            os.environ.get("CORESMITH_CODEX_MODEL", "").strip()
-            or os.environ.get("CORESMITH_MODEL", "").strip()
-        )
         if env_override:
             return _CODEX_MODEL_MAP.get(env_override, env_override)
         if not model:
             return DEFAULT_CODEX_MODEL
         return _CODEX_MODEL_MAP.get(model, model)
 
-
     if provider == "kimi_cli":
         # The KIMI_MODEL_* provider is exposed under a reserved runtime alias.
-        if os.environ.get("KIMI_MODEL_NAME", "").strip():
+        if var == "KIMI_MODEL_NAME":
             return KIMI_ENV_MODEL_SENTINEL
-
-        env_override = (
-            os.environ.get("CORESMITH_KIMI_MODEL", "").strip()
-            or os.environ.get("CORESMITH_MODEL", "").strip()
-        )
         if env_override:
             return _KIMI_MODEL_MAP.get(env_override, env_override)
         if not model:
             return DEFAULT_KIMI_MODEL
         return _KIMI_MODEL_MAP.get(model, model)
     if provider == "agy_cli":
-        env_override = (
-            os.environ.get("CORESMITH_AGY_MODEL", "").strip()
-            or os.environ.get("CORESMITH_MODEL", "").strip()
-        )
         if env_override:
             return _AGY_MODEL_MAP.get(env_override, env_override)
         if not model:
@@ -1219,18 +1161,13 @@ def _resolve_model(model: str, provider: str = "claude_cli") -> str:
     if provider == "opencode_cli":
         # The endpoint picks which catalogue we resolve against; an explicit
         # CORESMITH_OPENCODE_MODEL still wins over both.
-        _model_map, _default_model = _opencode_endpoint_models(_opencode_endpoint())
-        env_override = (
-            os.environ.get("CORESMITH_OPENCODE_MODEL", "").strip()
-            or os.environ.get("CORESMITH_MODEL", "").strip()
-        )
+        _model_map, _default_model = _opencode_endpoint_models(_opencode_endpoint(env))
         if env_override:
             return _model_map.get(env_override, env_override)
         if not model:
             return _default_model
         return _model_map.get(model, model)
 
-    env_override = os.environ.get("CORESMITH_MODEL", "").strip()
     if env_override:
         model = env_override
     elif not model:
@@ -1297,14 +1234,16 @@ def _get_testing_backend(provider: str):
     return mod.get_backend()
 
 
-def _detect_provider() -> str:
+def _detect_provider(env=None) -> str:
     """Detect which LLM provider to use.
 
     Defaults to Claude CLI.  Set ``CORESMITH_LLM_PROVIDER=codex`` (or
     ``codex_cli``) to route calls through ``codex exec``. The test-only
     providers ``fault``/``replay`` route to ``orchestrator.testing`` backends.
+    ``env`` is the mapping the selector is read from (``os.environ`` by default).
     """
-    provider = os.environ.get("CORESMITH_LLM_PROVIDER", "").strip().lower()
+    env = os.environ if env is None else env
+    provider = (env.get("CORESMITH_LLM_PROVIDER") or "").strip().lower()
     if provider in {"codex", "codex_cli"}:
         return "codex_cli"
     if provider in {"opencode", "opencode_cli", "openrouter"}:
@@ -1678,14 +1617,20 @@ class ClaudeLLM:
             )
             _get_breaker(_breaker_context.get("")).record_success()
 
-            # Write llm_end event
-            self._write_llm_event(project_root, "llm_end", {
+            # Write llm_end event; a response that is the error envelope (empty
+            # response, timeout, stall, provider error) is announced as such so
+            # no reader mistakes it for generated content.
+            end_event = {
                 "model": _resolve_model(self.model, self._provider),
                 "provider": self._provider,
                 "run_name": run_name,
                 "output_chars": len(text),
                 "session_id": self.last_session_id,
-            })
+            }
+            if is_llm_error_response(text):
+                end_event["error"] = text[:500]
+                self._write_llm_event(project_root, "llm_error", dict(end_event))
+            self._write_llm_event(project_root, "llm_end", end_event)
 
             return text
         except CircuitBreakerOpen:
@@ -1939,10 +1884,17 @@ class ClaudeLLM:
                 f"Claude CLI exited with code {returncode}: {stderr_text[:500]}"
             )
 
+        # The call FAILS when the CLI exits non-zero, reports a failed result
+        # event (exit 0) or returns nothing: the caller gets the recognizable
+        # error envelope (``is_llm_error_response``), the partial output stays
+        # after it and in the call record, and an event is written.
+        error_msg = ""
         if not output:
             error_msg = (
                 f"[ClaudeLLM error: claude CLI returned empty response. "
-                f"exit_code={returncode}, stderr: {stderr_text[:500]}]"
+                f"exit_code={returncode}, stderr: {stderr_text[:500]}"
+                + (f", result: {usage['result_error'][:300]}" if usage.get("result_error") else "")
+                + "]"
             )
             output = error_msg
             logger.error(f"LLM empty response: {error_msg}")
@@ -1953,6 +1905,24 @@ class ClaudeLLM:
                 "stderr": stderr_text[:500],
                 "error": error_msg[:300],
             })
+        elif returncode != 0:
+            error_msg = f"claude CLI exited with code {returncode}: {stderr_text[:500]}"
+            self._write_llm_event(project_root, "llm_nonzero_exit", {
+                "model": resolved_model, "provider": "claude_cli", "exit_code": returncode,
+                "stderr": stderr_text[:500], "output_chars": len(output),
+            })
+            output = _failure_envelope(error_msg, output)
+        elif usage.get("result_error") and not hit_max_turns:
+            error_msg = (f"claude CLI result failed ({usage.get('result_subtype') or 'is_error'}): "
+                         f"{usage['result_error'][:500]}")
+            self._write_llm_event(project_root, "llm_result_error", {
+                "model": resolved_model, "provider": "claude_cli", "exit_code": returncode,
+                "subtype": usage.get("result_subtype"), "error": usage["result_error"][:300],
+                "output_chars": len(output),
+            })
+            output = _failure_envelope(error_msg, output)
+        elif hit_max_turns:
+            error_msg = f"claude CLI generation budget exhausted (max turns); partial output kept ({len(output)} chars)"
 
         _log_llm_call(
             model=resolved_model,
@@ -1962,6 +1932,7 @@ class ClaudeLLM:
             response=output,
             duration_s=elapsed,
             timeout=self.timeout,
+            error=error_msg,
             usage=usage,
             start_ts_ns=span_start_ns,
         )
@@ -2308,6 +2279,12 @@ class ClaudeLLM:
         if returncode != 0:
             logger.warning("Codex CLI exited with code %s: %s", returncode, stderr_text[:500])
 
+        # The call FAILS when the CLI exits non-zero, ends the turn with a
+        # failure event (exit 0: ``turn.failed`` / a trailing ``error``, already
+        # wrapped by _parse_codex_json) or returns nothing: the caller gets the
+        # recognizable error envelope, the partial output stays after it and in
+        # the call record, and an event is written.
+        error_msg = ""
         if not output:
             error_msg = (
                 f"[ClaudeLLM error: codex CLI returned empty response. "
@@ -2322,6 +2299,21 @@ class ClaudeLLM:
                 "stderr": stderr_text[:500],
                 "error": error_msg[:300],
             })
+        elif returncode != 0:
+            error_msg = f"codex CLI exited with code {returncode}: {stderr_text[:500]}"
+            self._write_llm_event(log_root, "llm_nonzero_exit", {
+                "model": resolved_model, "provider": "codex_cli", "exit_code": returncode,
+                "stderr": stderr_text[:500], "output_chars": len(output),
+            })
+            output = _failure_envelope(error_msg, output)
+        elif usage.get("provider_error"):
+            error_msg = f"codex CLI reported: {usage['provider_error'][:500]}"
+            self._write_llm_event(log_root, "llm_result_error", {
+                "model": resolved_model, "provider": "codex_cli", "exit_code": returncode,
+                "error": usage["provider_error"][:300], "output_chars": len(output),
+            })
+            if not is_llm_error_response(output):
+                output = _failure_envelope(error_msg, output)
 
         # Surface the codex session id (from the thread.started event, stashed
         # into usage by _parse_codex_json) so a later retry can resume it.
@@ -2340,11 +2332,13 @@ class ClaudeLLM:
             response=output,
             duration_s=elapsed,
             timeout=self.timeout,
+            error=error_msg,
             usage=usage,
             start_ts_ns=span_start_ns,
         )
 
         return output
+
     def _generate_via_kimi_cli(
         self,
         system_prompt: str,
@@ -2417,9 +2411,18 @@ class ClaudeLLM:
             )
             return output
 
+        error_msg = ""
         if not output:
             detail = stderr_text[:500] or f"ACP exited with code {returncode}"
-            output = f"[ClaudeLLM error: kimi CLI returned empty response. {detail}]"
+            error_msg = f"[ClaudeLLM error: kimi CLI returned empty response. {detail}]"
+            output = error_msg
+        elif returncode != 0:
+            error_msg = f"kimi CLI exited with code {returncode}: {stderr_text[:500]}"
+            self._write_llm_event(project_root, "llm_nonzero_exit", {
+                "model": resolved_model, "provider": "kimi_cli", "exit_code": returncode,
+                "stderr": stderr_text[:500], "output_chars": len(output),
+            })
+            output = _failure_envelope(error_msg, output)
 
         _log_llm_call(
             model=resolved_model,
@@ -2429,7 +2432,7 @@ class ClaudeLLM:
             response=output,
             duration_s=elapsed,
             timeout=self.timeout,
-            error=stderr_text if returncode != 0 else "",
+            error=error_msg,
             usage=usage,
             start_ts_ns=span_start_ns,
         )
@@ -2458,10 +2461,8 @@ class ClaudeLLM:
         t0: float,
     ) -> tuple[str, str, int, float, bool, bool, dict]:
         """Run one Kimi ACP session and capture its JSON-RPC transcript."""
-        import uuid
         child_env = os.environ.copy()
-        child_env[_PROCESS_SCOPE_ENV] = uuid.uuid4().hex
-        process = subprocess.Popen(
+        process = owned_popen(
             [self.kimi_path, "acp"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -2475,8 +2476,6 @@ class ClaudeLLM:
             # invariant reap_active_cli_processes relies on (pgid == pid).
             start_new_session=True,
         )
-        process._coresmith_process_scope = child_env[_PROCESS_SCOPE_ENV]
-        _register_process(process)
         # Captured while the child is guaranteed alive and the group leader;
         # re-deriving via os.getpgid() later would race a pid reuse.
         child_pgid = process.pid
@@ -2737,7 +2736,10 @@ class ClaudeLLM:
         # CoreSmith registers one inline rather than making every operator
         # hand-edit ~/.config/opencode/opencode.json. Merged (not clobbered) on
         # top of whatever the disable_tools branch above and the operator set.
-        if _is_muse_spark_model(resolved_model):
+        # Only a ``meta-model-api/...`` slug needs the block (and the key): an
+        # ``opencode/muse-spark-...`` or ``openrouter/...`` route is hosted by a
+        # provider OpenCode already has and is passed through untouched.
+        if _needs_meta_model_api_provider(resolved_model):
             if not process_env.get(MUSE_SPARK_API_KEY_ENV, "").strip():
                 raise RuntimeError(
                     f"{MUSE_SPARK_API_KEY_ENV} is not set, so OpenCode cannot "
@@ -3043,6 +3045,9 @@ class ClaudeLLM:
         if returncode != 0:
             logger.warning("agy CLI exited with code %s: %s", returncode, stderr_text[:500])
 
+        # Non-zero exit or empty output: the caller gets the error envelope
+        # (partial output after it and in the call record), an event is written.
+        error_msg = ""
         if not output:
             error_msg = (
                 f"[ClaudeLLM error: agy CLI returned empty response. "
@@ -3055,12 +3060,19 @@ class ClaudeLLM:
                 "exit_code": returncode, "stderr": stderr_text[:500],
                 "error": error_msg[:300],
             })
+        elif returncode != 0:
+            error_msg = f"agy CLI exited with code {returncode}: {stderr_text[:500]}"
+            self._write_llm_event(log_root, "llm_nonzero_exit", {
+                "model": resolved_model, "provider": "agy_cli", "exit_code": returncode,
+                "stderr": stderr_text[:500], "output_chars": len(output),
+            })
+            output = _failure_envelope(error_msg, output)
 
         _log_llm_call(
             model=resolved_model, provider="agy_cli",
             system_prompt=system_prompt, user_prompt=user_prompt,
             response=output, duration_s=elapsed, timeout=self.timeout,
-            usage=usage, start_ts_ns=span_start_ns,
+            error=error_msg, usage=usage, start_ts_ns=span_start_ns,
         )
         return output
 
@@ -3164,9 +3176,7 @@ class ClaudeLLM:
         child_env["CORESMITH_WORKER_DEADLINE_EPOCH"] = str(
             _time_mod.time() + self.timeout
         )
-        import uuid
-        child_env[_PROCESS_SCOPE_ENV] = uuid.uuid4().hex
-        process = subprocess.Popen(
+        process = owned_popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -3180,18 +3190,28 @@ class ClaudeLLM:
             # signal the daemon/pytest process itself.
             start_new_session=True,
         )
-        process._coresmith_process_scope = child_env[_PROCESS_SCOPE_ENV]
-        _register_process(process)
         # Capture the child's process-group id now, while it is guaranteed
         # alive and the group leader (pgid == pid). Re-deriving it later via
         # os.getpgid() would race a pid-reuse after poll() reaps the child.
         child_pgid = process.pid
+        wall_start = _time_mod.time()  # wall clock for event correlation
+        # The call's identity, snapshotted HERE (the reader threads do not
+        # inherit ContextVars): it heads every streamed turn record and the
+        # start event, so llm_calls.jsonl (call_index), the turn logs and the
+        # job/process records join without timestamps.
+        site = _call_site_context.get(None) or {}
+        process_scope = getattr(process, "_coresmith_process_scope", "")
+        turns_log = _turns_log_path(project_root, self._provider)
+        turn_header = {"wall_start": wall_start, "pid": process.pid, "call_index": site.get("call_index"),
+                       "run_name": site.get("run_name", ""), "process_scope": process_scope}
 
         self._write_llm_event(project_root, "llm_call_start", {
             "model": resolved_model,
             "timeout_s": self.timeout,
             "prompt_len": len(user_prompt),
             "pid": process.pid,
+            "call_index": site.get("call_index"),
+            "process_scope": process_scope,
         })
 
         stdout_chunks: list[str] = []
@@ -3200,13 +3220,16 @@ class ClaudeLLM:
         timed_out = False
         stalled = False
 
-        def _read_stream(stream, chunks: list[str]) -> None:
-            """Read lines from a stream, updating last_activity timestamp."""
+        def _read_stream(stream, chunks: list[str], turns: Path | None = None) -> None:
+            """Read lines from a stream, updating last_activity timestamp; the
+            stdout reader also streams each provider event to the turn log."""
             nonlocal last_activity
             try:
                 for line in stream:
                     chunks.append(line)
                     last_activity = _time_mod.monotonic()
+                    if turns is not None:
+                        _append_turn(turns, turn_header, line)
             except (ValueError, OSError):
                 pass  # stream closed
 
@@ -3220,7 +3243,7 @@ class ClaudeLLM:
 
         # Start reader threads for stdout and stderr BEFORE the prompt write:
         # a child that blocks on its own stdout would otherwise deadlock us.
-        t_out = threading.Thread(target=_read_stream, args=(process.stdout, stdout_chunks), daemon=True)
+        t_out = threading.Thread(target=_read_stream, args=(process.stdout, stdout_chunks, turns_log), daemon=True)
         t_err = threading.Thread(target=_read_stream, args=(process.stderr, stderr_chunks), daemon=True)
         t_out.start()
         t_err.start()
@@ -3238,7 +3261,6 @@ class ClaudeLLM:
         live_dir = Path(project_root) / ".coresmith" / "live_streams"
         live_dir.mkdir(parents=True, exist_ok=True)
         stream_path = live_dir / f"{process.pid}.json"
-        wall_start = _time_mod.time()  # wall clock for event correlation
 
         # Write initial stream file immediately so the webview can detect
         # a streaming call before the first poll cycle completes.
@@ -3375,36 +3397,14 @@ class ClaudeLLM:
 
         # Parse provider JSON output. On stall/timeout we fall back to
         # whatever assistant text leaked through.
+        # The provider's turns (reasoning, tool calls, tool results, agent
+        # messages) were streamed to codex_turns.jsonl / opencode_turns.jsonl
+        # as they arrived (``_append_turn`` in the stdout reader), so nothing
+        # is appended here and a killed call keeps what it produced.
         if self._provider == "codex_cli":
             response_text, usage = _parse_codex_json(stdout_text)
-            # Persist every codex turn (reasoning, tool calls, tool
-            # results, agent messages) so the trajectory viewer can show
-            # the agent's actual decision-making, not just the final
-            # answer. Keyed by pid so the webview can correlate to the
-            # llm_start event that carries the human-readable run_name.
-            try:
-                _log_codex_turns(
-                    stdout_text,
-                    project_root,
-                    process.pid if process.pid else 0,
-                    wall_start,
-                )
-            except Exception:
-                pass
         elif self._provider == "opencode_cli":
             response_text, usage = _parse_opencode_json(stdout_text)
-            # OpenCode stores sessions internally, but CoreSmith also keeps a
-            # project-local raw trajectory so exposed reasoning remains with
-            # the run artifacts and can be correlated by pid/run_name.
-            try:
-                _log_opencode_turns(
-                    stdout_text,
-                    project_root,
-                    process.pid if process.pid else 0,
-                    wall_start,
-                )
-            except Exception:
-                pass
         elif self._provider == "agy_cli":
             # agy --print emits the final answer as plain text (no JSON event
             # stream); the whole stdout IS the response. No token/cost usage is

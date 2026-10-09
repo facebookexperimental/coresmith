@@ -45,6 +45,24 @@ class TestSummarize:
         s = cov.summarize(tmp_path / "nope")
         assert s["points_total"] == 0
 
+    def test_verilator5_mixed_marker_is_an_executed_line(self, tmp_path):
+        """Verilator 5 renders a line that executed while some of its points
+        (a toggle) stayed below the minimum with a ``~`` prefix. It is a hit
+        for line coverage, counted as partial -- not "no points instrumented"
+        (the real-tool smoke read every row of a small module that way)."""
+        annotated = tmp_path / "cov"
+        annotated.mkdir()
+        (annotated / "tiny.v").write_text(
+            "//      // verilator_coverage annotation\n"
+            "~000010 module tiny(input clk, input rst_n, output reg [7:0] m_out);\n"
+            "~000010   always @(posedge clk) if (!rst_n) m_out <= 8'd0; else m_out <= m_out + 8'd1;\n"
+            " %000000 assign dead = 1'b0;\n"
+            "        endmodule\n"
+        )
+        s = cov.summarize(annotated)
+        assert s["points_total"] == 3 and s["points_hit"] == 2 and s["points_partial"] == 2
+        assert s["pct"] == round(200.0 / 3, 2) and [u["line"] for u in s["uncovered"]] == [4]
+
 
 class TestFindCoverageDat:
     def test_finds_top_and_nested(self, tmp_path):
@@ -62,7 +80,7 @@ class TestAnnotate:
         import subprocess as _sp
         monkeypatch.setattr(cov.shutil, "which", lambda name: "/usr/bin/" + name)
         monkeypatch.setattr(
-            cov.subprocess, "run",
+            cov, "run_process",
             lambda *a, **k: _sp.CompletedProcess(a[0], returncode, "", ""),
         )
 

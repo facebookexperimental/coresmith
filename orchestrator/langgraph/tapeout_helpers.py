@@ -53,6 +53,7 @@ from orchestrator.langgraph.pipeline_helpers import (
     _write_step_log,
     log,
 )
+from orchestrator.processes import run as run_process
 
 # ---------------------------------------------------------------------------
 # OpenFrame constants
@@ -655,7 +656,7 @@ write_verilog -noattr {out / "openframe_project_wrapper_netlist.v"}
 
     log("  [WRAPPER SYNTH] Running Yosys wrapper synthesis...", YELLOW)
     try:
-        result = subprocess.run(
+        result = run_process(
             ["yosys", "-s", str(script_path)],
             capture_output=True, text=True, timeout=timeout,
             cwd=str(PROJECT_ROOT),
@@ -1208,7 +1209,7 @@ end
     cmd = [KLAYOUT_BIN, "-b", "-r", str(drc_script)]
 
     try:
-        result = subprocess.run(
+        result = run_process(
             cmd, capture_output=True, text=True, timeout=timeout,
             cwd=str(PROJECT_ROOT),
         )

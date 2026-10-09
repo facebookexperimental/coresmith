@@ -1,0 +1,170 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 2022" width="960" height="2022" role="img" aria-labelledby="title desc" xml:space="preserve">
+<title id="title">Conversation, commands, evidence: an illustrative CoreSmith session in section</title>
+<desc id="desc">Excerpt of an illustrative session; interfaces, the SystemC model, the HDL target and the AREA-CPU-1 row already exist. Time runs down the page. Columns: the conversation between the human and the Architect, an LLM agent; the CoreSmith CLI, which validates, binds and stages; the record, the project database; and the engine, coresmithd running LangGraph with workers that implement RTL. The human asks for a CPU block at or under 1.25 cycles per op within 250,000 square microns. The Architect edits the uArch spec, the SystemC model and the acceptance test, then calls the CLI: frd add PERF-CPU-1 with its bound (recorded); frd verifier binding PERF-CPU-1 to the cocotb test test_throughput (recorded); stage next, refused with FRD_TARGET_UNBOUND for AREA-CPU-1, the stage held and its blockers recorded; frd verifier binding AREA-CPU-1 to the eda area measurement (recorded); stage next, uarch done, now blocks; build targets cpu, which reads the required targets PERF-CPU-1 and AREA-CPU-1; build module cpu, which records the build with its inputs and targets and dispatches a graph thread, returning a build id at once. In the engine: attempt 1, a worker writes the RTL; lint and assertions pass; DV fails on test_irq; triage (diagnose, then decide) chooses an RTL repair, looping back; attempt 2, the worker repairs the RTL; DV passes but coverage is below the floor; supplemental tests are added and the simulation re-runs until covered, a local loop; synthesis and timing pass; the targets are measured and met; block_done publishes and records the pass. build status reads engine state while it runs; build show reads the record: completed at attempt 2, PERF-CPU-1 1.18 of at most 1.25 cycles per op met, AREA-CPU-1 212,140 of at most 250,000 square microns met. The Architect reports back.</desc>
+<style>
+.s{font-family:Charter,'Bitstream Charter','Iowan Old Style','Sitka Text',Cambria,Georgia,serif}
+.f{font-family:'Helvetica Neue',Helvetica,Arial,'Liberation Sans','Nimbus Sans',sans-serif}
+.m{font-family:'JetBrains Mono','SF Mono',Menlo,Consolas,'Liberation Mono','DejaVu Sans Mono',monospace}
+.k{font-family:'Helvetica Neue',Helvetica,Arial,'Liberation Sans','Nimbus Sans',sans-serif;font-size:15px;letter-spacing:2.2px;fill:#5D636B}
+.ink{fill:#1B1D21}.gr{fill:#5D636B}.lt{fill:#8C9198}.ver{fill:#BC3F2A}.cob{fill:#2A4BA8}
+.it{font-style:italic}.b{font-weight:700}.sb{font-weight:600}
+</style>
+<rect width="960" height="2022" fill="#FAF8F3"/>
+<text x="40" y="58" class="k">CORESMITH  ·  PLATE 1</text>
+<text x="40" y="108" class="s ink" style="font-size:38px">Conversation, commands, evidence</text>
+<text x="40" y="146" class="s gr" style="font-size:19px">The Architect edits design files and calls the CoreSmith CLI.</text>
+<text x="40" y="171" class="s gr" style="font-size:19px">Each command is drawn to the depth it reaches. Time runs down.</text>
+<text x="40" y="226" class="k">CONVERSATION</text>
+<text x="40" y="249" class="s it gr" style="font-size:15.5px">human · Architect (an LLM agent)</text>
+<text x="490" y="226" class="k" text-anchor="middle">CLI</text>
+<text x="490" y="249" class="s it gr" style="font-size:15.5px" text-anchor="middle">validates,</text>
+<text x="490" y="268" class="s it gr" style="font-size:15.5px" text-anchor="middle">binds, stages</text>
+<text x="596" y="226" class="k" text-anchor="middle">RECORD</text>
+<text x="596" y="249" class="s it gr" style="font-size:15.5px" text-anchor="middle">project</text>
+<text x="596" y="268" class="s it gr" style="font-size:15.5px" text-anchor="middle">database</text>
+<text x="657" y="226" class="k" style="fill:#2A4BA8">ENGINE</text>
+<text x="657" y="249" class="s it gr" style="font-size:15.5px">coresmithd runs LangGraph;</text>
+<text x="657" y="268" class="s it gr" style="font-size:15.5px">workers implement RTL</text>
+<line x1="40" y1="290" x2="920" y2="290" stroke="#CBC6BB" stroke-width="1" stroke-linecap="butt"/>
+<rect x="642" y="1028.9" width="278" height="533.0" fill="#E6EAF5" fill-opacity="0.55"/>
+<line x1="490" y1="290" x2="490" y2="1807.5600000000002" stroke="#E7E2D7" stroke-width="1"/>
+<line x1="596" y1="290" x2="596" y2="1807.5600000000002" stroke="#E7E2D7" stroke-width="1"/>
+<line x1="664" y1="290" x2="664" y2="1807.5600000000002" stroke="#E7E2D7" stroke-width="1"/>
+<line x1="22" y1="330" x2="22" y2="1797.5600000000002" stroke="#CBC6BB" stroke-width="1"/>
+<path d="M17 1789.5600000000002L22 1799.5600000000002L27 1789.5600000000002" fill="none" stroke="#CBC6BB" stroke-width="1"/>
+<text transform="translate(18 324) rotate(-90)" class="k" style="font-size:11px" text-anchor="end">TIME</text>
+<text x="40" y="336" class="k" style="fill:#1B1D21">HUMAN</text>
+<text x="40" y="364" class="s ink it" style="font-size:21px">Add the CPU block. It must run at or under</text>
+<text x="40" y="392.98" class="s ink it" style="font-size:21px">1.25 cycles per op and fit in 250 000 µm².</text>
+<text x="40" y="439.96" class="k" style="fill:#BC3F2A">ARCHITECT</text>
+<text x="40" y="467.96" class="s ink" style="font-size:19px">I’ll write the spec and the acceptance test,</text>
+<text x="40" y="494.18" class="s ink" style="font-size:19px">bind both targets, then build.</text>
+<text x="40" y="522.4" class="s it gr" style="font-size:15.5px">edits</text>
+<text x="92" y="522.4" class="m ver" style="font-size:15.5px">arch/uarch_specs/cpu.md</text>
+<text x="92" y="543.4" class="m ver" style="font-size:15.5px">model/cpu_model.cpp</text>
+<text x="92" y="564.4" class="m ver" style="font-size:15.5px">tb/cocotb/test_cpu.py</text>
+<text x="337.2" y="522.4" class="s it ver" style="font-size:15.5px">fixed inputs,</text>
+<text x="337.2" y="542.4" class="s it ver" style="font-size:15.5px">owned by the</text>
+<text x="337.2" y="562.4" class="s it ver" style="font-size:15.5px">Architect</text>
+<text x="40" y="613.4" class="m" style="font-size:16.5px"><tspan class="ver">$ </tspan><tspan class="ink">coresmith frd add … --id PERF-CPU-1 \</tspan></text>
+<text x="40" y="636.4" class="m ink" style="font-size:16.5px">    --max 1.25 --owner cpu</text>
+<line x1="436.1" y1="607.9" x2="478" y2="607.9" stroke="#5D636B" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="1 4.5"/>
+<line x1="499" y1="607.9" x2="586" y2="607.9" stroke="#1B1D21" stroke-width="1.1" stroke-linecap="butt"/>
+<circle cx="490" cy="607.9" r="5" fill="#1B1D21"/>
+<rect x="590.5" y="602.4" width="11" height="11" fill="#1B1D21"/>
+<text x="40" y="683.4" class="m" style="font-size:16.5px"><tspan class="ver">$ </tspan><tspan class="ink">coresmith frd verifier PERF-CPU-1 \</tspan></text>
+<text x="40" y="706.4" class="m ink" style="font-size:16.5px">    --kind cocotb --entry test_throughput …</text>
+<line x1="416.3" y1="677.9" x2="478" y2="677.9" stroke="#5D636B" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="1 4.5"/>
+<line x1="499" y1="677.9" x2="586" y2="677.9" stroke="#1B1D21" stroke-width="1.1" stroke-linecap="butt"/>
+<circle cx="490" cy="677.9" r="5" fill="#1B1D21"/>
+<rect x="590.5" y="672.4" width="11" height="11" fill="#1B1D21"/>
+<text x="40" y="753.4" class="m" style="font-size:16.5px"><tspan class="ver">$ </tspan><tspan class="ink">coresmith stage next</tspan></text>
+<text x="40" y="778.4" class="m" style="font-size:15.5px"><tspan class="gr">stage uarch </tspan><tspan class="ink b">BLOCKED:</tspan></text>
+<text x="40" y="799.4" class="m gr" style="font-size:15.5px">  FRD_TARGET_UNBOUND … AREA-CPU-1</text>
+<line x1="267.8" y1="747.9" x2="478" y2="747.9" stroke="#5D636B" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="1 4.5"/>
+<line x1="499" y1="747.9" x2="586" y2="747.9" stroke="#1B1D21" stroke-width="1.1" stroke-linecap="butt"/>
+<line x1="484" y1="741.9" x2="496" y2="753.9" stroke="#1B1D21" stroke-width="2.2" stroke-linecap="round"/>
+<line x1="484" y1="753.9" x2="496" y2="741.9" stroke="#1B1D21" stroke-width="2.2" stroke-linecap="round"/>
+<rect x="590.5" y="742.4" width="11" height="11" fill="#1B1D21"/>
+<text x="612" y="741.9" class="s it gr" style="font-size:15.5px">stage held;</text>
+<text x="612" y="760.9" class="s it gr" style="font-size:15.5px">blockers recorded</text>
+<text x="40" y="842.4" class="m" style="font-size:16.5px"><tspan class="ver">$ </tspan><tspan class="ink">coresmith frd verifier AREA-CPU-1 \</tspan></text>
+<text x="40" y="865.4" class="m ink" style="font-size:16.5px">    --kind eda --entry area_um2</text>
+<line x1="416.3" y1="836.9" x2="478" y2="836.9" stroke="#5D636B" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="1 4.5"/>
+<line x1="499" y1="836.9" x2="586" y2="836.9" stroke="#1B1D21" stroke-width="1.1" stroke-linecap="butt"/>
+<circle cx="490" cy="836.9" r="5" fill="#1B1D21"/>
+<rect x="590.5" y="831.4" width="11" height="11" fill="#1B1D21"/>
+<text x="40" y="912.4" class="m" style="font-size:16.5px"><tspan class="ver">$ </tspan><tspan class="ink">coresmith stage next</tspan></text>
+<text x="40" y="937.4" class="m gr" style="font-size:15.5px">stage uarch DONE -&gt; now blocks</text>
+<line x1="267.8" y1="906.9" x2="478" y2="906.9" stroke="#5D636B" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="1 4.5"/>
+<line x1="499" y1="906.9" x2="586" y2="906.9" stroke="#1B1D21" stroke-width="1.1" stroke-linecap="butt"/>
+<circle cx="490" cy="906.9" r="5" fill="#1B1D21"/>
+<rect x="590.5" y="901.4" width="11" height="11" fill="#1B1D21"/>
+<text x="40" y="980.4" class="m" style="font-size:16.5px"><tspan class="ver">$ </tspan><tspan class="ink">coresmith build targets cpu</tspan></text>
+<text x="40" y="1005.4" class="m" style="font-size:15.5px"><tspan class="gr">required  </tspan><tspan class="ink">PERF-CPU-1  AREA-CPU-1</tspan></text>
+<line x1="337.1" y1="974.9" x2="478" y2="974.9" stroke="#5D636B" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="1 4.5"/>
+<line x1="499" y1="974.9" x2="586" y2="974.9" stroke="#1B1D21" stroke-width="1.1" stroke-linecap="butt" stroke-dasharray="5 4"/>
+<circle cx="490" cy="974.9" r="5" fill="#1B1D21"/>
+<rect x="591" y="969.9" width="10" height="10" fill="#FAF8F3" stroke="#1B1D21" stroke-width="1.6"/>
+<text x="40" y="1048.4" class="m" style="font-size:16.5px"><tspan class="ver">$ </tspan><tspan class="ink">coresmith build module cpu</tspan></text>
+<line x1="327.2" y1="1042.9" x2="478" y2="1042.9" stroke="#5D636B" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="1 4.5"/>
+<line x1="499" y1="1042.9" x2="654" y2="1042.9" stroke="#1B1D21" stroke-width="1.1" stroke-linecap="butt"/>
+<circle cx="490" cy="1042.9" r="5" fill="#1B1D21"/>
+<rect x="590.5" y="1037.4" width="11" height="11" fill="#1B1D21"/>
+<path d="M657 1036.9L671 1036.9L664 1049.9Z" fill="#2A4BA8"/>
+<text x="40" y="1099.4" class="s it gr" style="font-size:16.5px">The CLI returns a build id at once;</text>
+<text x="40" y="1121.4" class="s it gr" style="font-size:16.5px">the build runs in the engine.</text>
+<text x="684" y="1047.9" class="s ink" style="font-size:16.5px">build recorded with its inputs</text>
+<text x="684" y="1068.9" class="s ink" style="font-size:16.5px">and targets; thread starts</text>
+<rect x="660.5" y="1096.9" width="7" height="22" fill="#2A4BA8"/>
+<text x="684" y="1112.9" class="f" style="font-size:16.5px"><tspan class="ink sb">attempt 1</tspan></text>
+<text x="684" y="1132.9" class="s it gr" style="font-size:15.5px">a worker writes the RTL</text>
+<line x1="658" y1="1157.9" x2="670" y2="1157.9" stroke="#2A4BA8" stroke-width="1.4" stroke-linecap="butt"/>
+<text x="684" y="1162.9" class="f" style="font-size:16.5px"><tspan class="gr">lint, assertions pass</tspan></text>
+<line x1="658" y1="1189.9" x2="670" y2="1189.9" stroke="#2A4BA8" stroke-width="1.4" stroke-linecap="butt"/>
+<text x="684" y="1194.9" class="f" style="font-size:16.5px"><tspan class="ink">DV fails: </tspan><tspan class="ink sb">test_irq</tspan></text>
+<line x1="658" y1="1221.9" x2="670" y2="1221.9" stroke="#2A4BA8" stroke-width="1.4" stroke-linecap="butt"/>
+<text x="684" y="1226.9" class="f" style="font-size:16.5px"><tspan class="ink">triage: </tspan><tspan class="cob">repair the RTL</tspan></text>
+<text x="684" y="1246.9" class="s it gr" style="font-size:15.5px">diagnose, then decide</text>
+<rect x="660.5" y="1296.9" width="7" height="22" fill="#2A4BA8"/>
+<text x="684" y="1312.9" class="f" style="font-size:16.5px"><tspan class="ink sb">attempt 2</tspan></text>
+<text x="684" y="1332.9" class="s it gr" style="font-size:15.5px">the worker repairs the RTL</text>
+<line x1="658" y1="1357.9" x2="670" y2="1357.9" stroke="#2A4BA8" stroke-width="1.4" stroke-linecap="butt"/>
+<text x="684" y="1362.9" class="f" style="font-size:16.5px"><tspan class="gr">DV passes; coverage</tspan></text>
+<text x="684" y="1382.9" class="s it gr" style="font-size:15.5px">below the floor</text>
+<line x1="658" y1="1407.9" x2="670" y2="1407.9" stroke="#2A4BA8" stroke-width="1.4" stroke-linecap="butt"/>
+<text x="684" y="1412.9" class="f" style="font-size:16.5px"><tspan class="cob">supplemental tests,</tspan></text>
+<text x="684" y="1432.9" class="s it gr" style="font-size:15.5px">re-simulate: covered</text>
+<line x1="658" y1="1457.9" x2="670" y2="1457.9" stroke="#2A4BA8" stroke-width="1.4" stroke-linecap="butt"/>
+<text x="684" y="1462.9" class="f" style="font-size:16.5px"><tspan class="gr">synthesis, timing pass</tspan></text>
+<line x1="658" y1="1489.9" x2="670" y2="1489.9" stroke="#2A4BA8" stroke-width="1.4" stroke-linecap="butt"/>
+<text x="684" y="1494.9" class="f" style="font-size:16.5px"><tspan class="cob">targets measured: met</tspan></text>
+<circle cx="664" cy="1521.9" r="5.5" fill="#2A4BA8"/>
+<line x1="655" y1="1521.9" x2="606" y2="1521.9" stroke="#2A4BA8" stroke-width="1.6" stroke-linecap="butt"/>
+<rect x="590.5" y="1516.4" width="11" height="11" fill="#1B1D21"/>
+<text x="684" y="1526.9" class="f" style="font-size:16.5px"><tspan class="ink sb">publish</tspan></text>
+<text x="684" y="1546.9" class="s it gr" style="font-size:15.5px">block_done records the pass</text>
+<line x1="664" y1="1050.9" x2="664" y2="1521.9" stroke="#2A4BA8" stroke-width="2.2" stroke-linecap="butt"/>
+<path d="M656 1221.9C610 1221.9 610 1107.9 654 1107.9" fill="none" stroke="#2A4BA8" stroke-width="1.4"/>
+<path d="M656 1107.9L647 1103.4L647 1112.4Z" fill="#2A4BA8"/>
+<path d="M656 1407.9C630 1407.9 630 1357.9 654 1357.9" fill="none" stroke="#2A4BA8" stroke-width="1.4"/>
+<path d="M656 1357.9L647 1353.4L647 1362.4Z" fill="#2A4BA8"/>
+<text x="40" y="1272.9" class="m" style="font-size:16.5px"><tspan class="ver">$ </tspan><tspan class="ink">coresmith build status</tspan></text>
+<text x="40" y="1297.9" class="m gr" style="font-size:15.5px">running · generate_testbench</text>
+<line x1="287.6" y1="1267.4" x2="478" y2="1267.4" stroke="#5D636B" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="1 4.5"/>
+<line x1="499" y1="1267.4" x2="654" y2="1267.4" stroke="#1B1D21" stroke-width="1.1" stroke-linecap="butt" stroke-dasharray="5 4"/>
+<circle cx="490" cy="1267.4" r="5" fill="#1B1D21"/>
+<path d="M657.5 1261.9L670.5 1261.9L664 1273.9Z" fill="#FAF8F3" stroke="#2A4BA8" stroke-width="1.6"/>
+<text x="40" y="1576.9" class="m" style="font-size:16.5px"><tspan class="ver">$ </tspan><tspan class="ink">coresmith build show b-cpu-…</tspan></text>
+<text x="40" y="1601.9" class="m" style="font-size:15.5px"><tspan class="ink">completed  </tspan><tspan class="gr">attempt 2</tspan></text>
+<text x="40" y="1622.9" class="m" style="font-size:15.5px"><tspan class="ink">PERF-CPU-1  </tspan><tspan class="gr">1.18 ≤ 1.25 cycles/op  met</tspan></text>
+<text x="40" y="1643.9" class="m" style="font-size:15.5px"><tspan class="ink">AREA-CPU-1  </tspan><tspan class="gr">212 140 ≤ 250 000 um2  met</tspan></text>
+<line x1="347" y1="1571.4" x2="478" y2="1571.4" stroke="#5D636B" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="1 4.5"/>
+<line x1="499" y1="1571.4" x2="586" y2="1571.4" stroke="#1B1D21" stroke-width="1.1" stroke-linecap="butt" stroke-dasharray="5 4"/>
+<circle cx="490" cy="1571.4" r="5" fill="#1B1D21"/>
+<rect x="591" y="1566.4" width="10" height="10" fill="#FAF8F3" stroke="#1B1D21" stroke-width="1.6"/>
+<text x="40" y="1690.9" class="k" style="fill:#BC3F2A">ARCHITECT</text>
+<text x="40" y="1718.9" class="s ink" style="font-size:19px">Done: DV and coverage pass, and both targets</text>
+<text x="40" y="1745.12" class="s ink" style="font-size:19px">are met: 1.18 cycles per op, 212 140 µm².</text>
+<text x="40" y="1771.34" class="s ink" style="font-size:19px">Next: the DMA block?</text>
+<line x1="40" y1="1807.56" x2="920" y2="1807.56" stroke="#CBC6BB" stroke-width="1" stroke-linecap="butt"/>
+<circle cx="46" cy="1838.56" r="5" fill="#1B1D21"/>
+<text x="60" y="1843.56" class="f gr" style="font-size:15.5px">CLI ran it</text>
+<path d="M169.0 1831.5600000000002L176.0 1838.5600000000002L169.0 1845.5600000000002L162.0 1838.5600000000002Z" fill="#1B1D21"/>
+<text x="183" y="1843.56" class="f gr" style="font-size:15.5px">tool ran in the CLI</text>
+<line x1="357.1" y1="1832.56" x2="369.1" y2="1844.56" stroke="#1B1D21" stroke-width="2.2" stroke-linecap="round"/>
+<line x1="357.1" y1="1844.56" x2="369.1" y2="1832.56" stroke="#1B1D21" stroke-width="2.2" stroke-linecap="round"/>
+<text x="377.1" y="1843.56" class="f gr" style="font-size:15.5px">refused</text>
+<rect x="456.9" y="1833.06" width="11" height="11" fill="#1B1D21"/>
+<text x="476.4" y="1843.56" class="f gr" style="font-size:15.5px">recorded</text>
+<rect x="41" y="1861.56" width="10" height="10" fill="#FAF8F3" stroke="#1B1D21" stroke-width="1.6"/>
+<text x="60" y="1871.56" class="f gr" style="font-size:15.5px">read the record</text>
+<path d="M201.5 1860.5600000000002L215.5 1860.5600000000002L208.5 1873.5600000000002Z" fill="#2A4BA8"/>
+<text x="222.5" y="1871.56" class="f gr" style="font-size:15.5px">dispatched</text>
+<path d="M325.0 1861.0600000000002L338.0 1861.0600000000002L331.5 1873.0600000000002Z" fill="#FAF8F3" stroke="#2A4BA8" stroke-width="1.6"/>
+<text x="345.5" y="1871.56" class="f gr" style="font-size:15.5px">read engine state</text>
+<text x="40" y="1903.56" class="f" style="font-size:14.5px"><tspan class="ver sb">Vermilion</tspan><tspan class="gr"> Architect and its fixed inputs.  </tspan><tspan class="cob sb">Cobalt</tspan><tspan class="gr"> engine work: implementation and verification.  </tspan><tspan class="ink sb">Black</tspan><tspan class="gr"> the record.</tspan></text>
+<text x="40" y="1937.56" class="s it gr" style="font-size:14.5px">Excerpt: interfaces, the SystemC model, the HDL target and the AREA-CPU-1 row already exist.</text>
+<text x="40" y="1958.56" class="s it gr" style="font-size:14.5px">Illustrative: verbs and codes are real; output is abridged; ids and values are examples.</text>
+<text x="40" y="1979.56" class="s it gr" style="font-size:14.5px">A park stops the thread until the Architect answers it with build resume.</text>
+</svg>

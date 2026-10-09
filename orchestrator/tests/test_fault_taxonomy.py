@@ -191,8 +191,8 @@ class TestRealGuardIntegration:
         from orchestrator.langgraph.pipeline_helpers import generate_rtl
         fp.get_backend().set_schedule(FaultSchedule.single(FaultClass.NO_FILE_WRITTEN))
         res = asyncio.run(generate_rtl(dict(self._BLOCK), attempt=1))
-        assert res.get("error")
-        assert "did not write" in res["error"]
+        assert res.get("error") and res.get("postcondition_failed")
+        assert "RTL target is not a file" in res["error"] and "adder8" in res["error"]
 
     def test_json_disk_mismatch_guard_fires(self, rtl_env):
         from orchestrator.langgraph.pipeline_helpers import generate_rtl

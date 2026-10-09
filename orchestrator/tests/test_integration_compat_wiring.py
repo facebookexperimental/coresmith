@@ -177,6 +177,7 @@ async def test_deterministic_width_mismatch_flows_into_interrupt(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_gate_off_skips_deterministic_check(monkeypatch):
+    monkeypatch.setenv("CORESMITH_INTEGRATION_CHECK_PARK", "0")   # no accept park (covered elsewhere)
     monkeypatch.setenv("CORESMITH_DETERMINISTIC_INTEGRATION_CHECK", "0")
     state = _wire_two_block_design(monkeypatch, src_width=8, dst_width=16)
 
@@ -200,6 +201,7 @@ async def test_gate_off_skips_deterministic_check(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_matching_widths_no_false_positive(monkeypatch):
+    monkeypatch.setenv("CORESMITH_INTEGRATION_CHECK_PARK", "0")   # no accept park (covered elsewhere)
     monkeypatch.setenv("CORESMITH_DETERMINISTIC_INTEGRATION_CHECK", "1")
     state = _wire_two_block_design(monkeypatch, src_width=8, dst_width=8)
 

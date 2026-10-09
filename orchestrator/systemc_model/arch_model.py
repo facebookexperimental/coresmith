@@ -3,7 +3,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """The executable SAD: an abstract SystemC performance model of the SoC
-(architect sitting, step 2).
+(the Architect's step 2).
 
 Before decomposition, before any fabric is chosen, the architect describes
 the chip as *components* (initiators, targets, memories with a service
@@ -42,6 +42,8 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from orchestrator.processes import run as run_process
 
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -410,7 +412,7 @@ def build(md, *, timeout_s: int = 600) -> dict:
     if systemc_home():
         env["SYSTEMC_HOME"] = systemc_home()
     try:
-        p = subprocess.run(["make", "-s", "arch_model"], cwd=md, capture_output=True, text=True, timeout=timeout_s, env=env)
+        p = run_process(["make", "-s", "arch_model"], cwd=md, capture_output=True, text=True, timeout=timeout_s, env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "log": str(exc)}
     (Path(md) / "build.log").write_text(p.stdout + p.stderr)
@@ -422,7 +424,7 @@ def run(md, *, ns: int = 10000, timeout_s: int = 600) -> dict:
     if not exe.exists():
         return {"ok": False, "log": "arch_model not built", "stats": None}
     try:
-        p = subprocess.run([str(exe), "--ns", str(ns), "--stats", "stats.json"], cwd=md, capture_output=True, text=True, timeout=timeout_s)
+        p = run_process([str(exe), "--ns", str(ns), "--stats", "stats.json"], cwd=md, capture_output=True, text=True, timeout=timeout_s)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "log": str(exc), "stats": None}
     out = p.stdout + p.stderr

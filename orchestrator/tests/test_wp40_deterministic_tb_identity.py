@@ -35,8 +35,6 @@ def test_reuse_path_checks_identity():
 
 def test_prompts_drop_the_infallibility_claim():
     root = Path(pg.__file__).resolve().parent.parent
-    cl = (root / "langchain/prompts/chip_lead.md").read_text()
     ca = (root / "langchain/prompts/contract_audit.md").read_text()
-    assert "NEVER TESTBENCH PROBLEMS" not in cl and "ENGINE-OWNED" in cl
     assert "never a\nTESTBENCH_BUG" not in ca and "It is never a" not in ca
     assert "concrete BFM defect" in ca

@@ -15,9 +15,10 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
+
+from orchestrator.processes import run as run_process
 
 
 def coverage_enabled() -> bool:
@@ -204,7 +205,7 @@ def annotate(sim_dir: str | Path, *, timeout_s: int = 120) -> Path | None:
         # coverage gate silently no-ops (verdict None) even though a real
         # coverage.dat exists. dat/out_dir are absolute so cwd only affects the
         # source lookup.
-        proc = subprocess.run(
+        proc = run_process(
             [vcov, "--annotate", str(out_dir), str(dat)],
             capture_output=True, text=True, timeout=timeout_s,
             cwd=str(Path(sim_dir)),
@@ -218,23 +219,32 @@ def annotate(sim_dir: str | Path, *, timeout_s: int = 120) -> Path | None:
 
 
 # verilator_coverage --annotate prefixes each instrumented source line with a
-# hit count; an UNCOVERED point is rendered with a ``%000000`` marker.
+# hit count. An UNCOVERED line (every point on it below the minimum) is
+# rendered with a ``%`` marker (``%000000``); Verilator 5 renders a line whose
+# points are MIXED (some below the minimum, some above -- a toggle that never
+# fell while the line itself executed) with a ``~`` marker (``~000010``); a
+# fully covered line has the bare count. A ``~`` line executed: it is a hit
+# for line coverage and is reported separately as partial.
 _UNCOV_RE = re.compile(r"^\s*%0+\s")
-_COV_RE = re.compile(r"^\s*(%?\d+)\s")
+_PARTIAL_RE = re.compile(r"^\s*~\d+\s")
+_COV_RE = re.compile(r"^\s*([%~]?\d+)\s")
 
 
 def summarize(annotated_dir: str | Path, cap: int = 200) -> dict[str, Any]:
     """Summarize an annotated coverage tree.
 
-    Returns ``{points_total, points_hit, pct, uncovered}`` where ``uncovered``
-    is a capped list of ``{"file", "line", "text"}`` for the un-hit points.
+    Returns ``{points_total, points_hit, points_partial, pct, uncovered}``
+    where ``uncovered`` is a capped list of ``{"file", "line", "text"}`` for
+    the un-hit points and ``points_partial`` counts the executed lines with a
+    mixed (``~``) marker.
     """
     root = Path(annotated_dir)
     total = 0
     hit = 0
+    partial = 0
     uncovered: list[dict] = []
     if not root.exists():
-        return {"points_total": 0, "points_hit": 0, "pct": None, "uncovered": []}
+        return {"points_total": 0, "points_hit": 0, "points_partial": 0, "pct": None, "uncovered": []}
     for f in sorted(root.rglob("*")):
         if not f.is_file():
             continue
@@ -253,8 +263,10 @@ def summarize(annotated_dir: str | Path, cap: int = 200) -> dict[str, Any]:
                     })
             else:
                 hit += 1
+                if _PARTIAL_RE.match(ln):
+                    partial += 1
     pct = round(100.0 * hit / total, 2) if total else None
     return {
-        "points_total": total, "points_hit": hit, "pct": pct,
+        "points_total": total, "points_hit": hit, "points_partial": partial, "pct": pct,
         "uncovered": uncovered,
     }

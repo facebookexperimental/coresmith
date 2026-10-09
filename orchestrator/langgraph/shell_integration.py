@@ -13,9 +13,14 @@ assembled DETERMINISTICALLY from the frozen interface contracts:
   ``<channel>_<signal>`` names), outputs tied low;
 * ``assemble_top`` -- instantiates every block (real RTL or stub) and wires
   each contract edge signal by signal: the producer's ``<pchan>_<sig>`` to the
-  consumer's ``<cchan>_<sig>``. Ports on no edge become chip boundary ports
-  (a block whose module IS the declared top contributes its pins under their
-  own names; its instance is renamed ``<top>_core``);
+  consumer's ``<cchan>_<sig>``. With declared pins (the ``pins`` rows,
+  ``coresmith pin add``) the boundary IS the pin set: every pin is a top port
+  wired to its ``<block>.<port>`` (a stub grows that port), clock/reset pins
+  without a block name the clk/rst nets, and a block port on no edge and no
+  pin is refused (``SHELL_UNDECLARED_PORT``). Without pins -- or with
+  ``CORESMITH_SHELL_INFER_BOUNDARY=1`` -- ports on no edge become chip
+  boundary ports (a block whose module IS the declared top contributes its
+  pins under their own names; its instance is renamed ``<top>_core``);
 * the assembled top is elaborated with Verilator after every block passes,
   so interface drift is caught at the block that introduced it, not at the
   end.
@@ -26,6 +31,7 @@ declared or synthesized top.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -34,25 +40,27 @@ from pathlib import Path
 from orchestrator.langgraph.contract_conformance import (
     canonical_port,
     channel_base,
+    port_direction,
     signal_specs,
     strip_preprocessor,
 )
 
 _CLK_NAMES = ("clk", "clk_i", "clock")
 _RST_NAMES = ("rst_n", "rst_ni", "rst", "reset", "rst_i", "resetn", "reset_n")
+_PIN_DIR = {"in": "input", "out": "output", "inout": "inout"}
+
+
+def infer_boundary_enabled() -> bool:
+    """``CORESMITH_SHELL_INFER_BOUNDARY=1``: ports on no edge become boundary
+    ports even when pins are declared (the pre-pins behaviour)."""
+    return (os.environ.get("CORESMITH_SHELL_INFER_BOUNDARY", "0") or "0").strip().lower() \
+        in {"1", "true", "yes", "on"}
 
 
 def _dir_from_role(role: str, sig_dir: str, kind: str, name: str) -> str:
-    """The block-side direction of one contract signal (input|output)."""
-    d = (sig_dir or "").lower()
-    to_producer = ("consumer->producer" in d) or (name.lower() in ("tready", "drdy", "ready", "req_gnt", "gnt",
-                                                                     "rsp_valid", "rvalid", "rdata", "pready",
-                                                                     "prdata", "pslverr") and not d)
-    if d in ("producer->consumer", "m2s"):
-        to_producer = False
-    if role == "producer":
-        return "input" if to_producer else "output"
-    return "output" if to_producer else "input"
+    """The block-side direction of one contract signal (input|output):
+    :func:`contract_conformance.port_direction`, the shared mapping."""
+    return port_direction(role, sig_dir, name)
 
 
 @dataclass
@@ -138,6 +146,11 @@ def _rtl_ports(rtl_text: str, module: str | None = None) -> dict[str, PortSpec]:
     return out
 
 
+def _without_comments(text: str) -> str:
+    """Mask comments while preserving offsets for module declaration edits."""
+    return re.sub(r"/\*.*?\*/|//[^\n]*", lambda m: " " * len(m.group()), text, flags=re.S)
+
+
 def _non_ansi_ports(path, module: str) -> dict[str, PortSpec]:
     """Ports of a non-ANSI header (e.g. the generated fabric primitive)."""
     from orchestrator.langgraph.integration_helpers import parse_verilog_ports
@@ -148,9 +161,24 @@ def _non_ansi_ports(path, module: str) -> dict[str, PortSpec]:
     return {p.name: PortSpec(p.name, p.direction, p.width) for p in vm.ports}
 
 
-def _module_name(rtl_text: str) -> str | None:
-    m = re.search(r"\bmodule\s+(\w+)", strip_preprocessor(rtl_text or "", defines=()))
-    return m.group(1) if m else None
+def _module_name(project_root, block: str, path, rtl_text: str) -> str:
+    """Use the bound top; legacy sources must identify one unambiguous module."""
+    from orchestrator.harness.targets import load
+    target = load(project_root, block, require_files=False)
+    if target:
+        return target["top"]
+    from orchestrator.state_store.project_db import open_project
+    spec = next((b for b in open_project(project_root).block_specs() if b["name"] == block), {})
+    if spec.get("module_name"):
+        return spec["module_name"]
+    text = _without_comments(strip_preprocessor(rtl_text or "", defines=()))
+    names = re.findall(r"\bmodule\s+([A-Za-z_][A-Za-z0-9_$]*)", text)
+    for name in (block, Path(path).stem):
+        if name in names:
+            return name
+    if len(names) == 1:
+        return names[0]
+    raise ValueError(f"TARGET_UNBOUND: bind the HDL top for {block} with coresmith target bind")
 
 
 @dataclass
@@ -172,13 +200,29 @@ class Assembly:
 
 def assemble_top(project_root, *, top_name: str, blocks: list[str], edges: list[dict],
                  rtl_paths: dict[str, str], out_dir, clk: str = "clk", rst: str = "rst_n",
-                 boundary_block: str | None = None) -> Assembly:
+                 boundary_block: str | None = None, pins: list[dict] | None = None) -> Assembly:
     """Assemble ``top_name`` from real RTL (``rtl_paths``) and stubs for the rest.
 
     ``boundary_block``: a block whose module is the chip boundary (e.g. a
     locked pad adapter named like the top); its non-edge ports become the
     top's ports verbatim and its instance module is renamed ``<top>_core``.
+
+    ``pins``: the declared chip pins (``ProjectDB.pins()`` rows). When given
+    (and ``CORESMITH_SHELL_INFER_BOUNDARY`` is not ``1``) the boundary is
+    exactly the pin set: ``SHELL_UNDECLARED_PORT`` for a block port on no
+    edge and no pin, ``PIN_DOUBLE_DRIVEN`` for a pin whose port is on an edge
+    net, ``SHELL_BOUNDARY_MISMATCH`` when the top's ports differ from the pins.
     """
+    pins = [p for p in (pins or []) if p.get("name")]
+    enforce = bool(pins) and not infer_boundary_enabled()
+    top_clk, top_rst = clk, rst
+    for p in pins:
+        if not p.get("block"):
+            if p.get("kind") == "clock" and top_clk == clk:
+                top_clk = p["name"]
+            elif p.get("kind") == "reset" and top_rst == rst:
+                top_rst = p["name"]
+    pins_by_port = {(p["block"], p["port"]): p for p in pins if p.get("block") and p.get("port")}
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     stub_dir = out / "stubs"
@@ -194,7 +238,11 @@ def assemble_top(project_root, *, top_name: str, blocks: list[str], edges: list[
         path = rtl_paths.get(b)
         if path and Path(path).exists():
             text = Path(path).read_text(errors="replace")
-            mod = _module_name(text) or b
+            try:
+                mod = _module_name(project_root, b, path, text)
+            except ValueError as exc:
+                errors.append(f"{b}: {exc}")
+                mod = b
             rp = _rtl_ports(text, mod) or _non_ansi_ports(path, mod)
             if not rp:
                 errors.append(f"{b}: could not parse the module header of {path}")
@@ -206,7 +254,13 @@ def assemble_top(project_root, *, top_name: str, blocks: list[str], edges: list[
             if mod == top_name:
                 # the block is the chip boundary: rename its module for the instance
                 renamed = out / f"{mod}_core.v"
-                renamed.write_text(re.sub(rf"\bmodule\s+{re.escape(mod)}\b", f"module {mod}_core", text, count=1))
+                declaration = re.search(rf"\bmodule\s+({re.escape(mod)})\b", _without_comments(text))
+                if declaration is None:
+                    errors.append(f"{b}: bound module {mod!r} is missing from {path}")
+                    renamed.write_text(text)
+                else:
+                    start, end = declaration.span(1)
+                    renamed.write_text(text[:start] + f"{mod}_core" + text[end:])
                 sources.append(str(renamed))
                 block_sources[b] = str(renamed)
                 inst_module[b] = f"{mod}_core"
@@ -226,6 +280,13 @@ def assemble_top(project_root, *, top_name: str, blocks: list[str], edges: list[
             ports_by_block[b] = dict(cp.ports)
             ports_by_block[b].setdefault(clk, PortSpec(clk, "input", 1))
             ports_by_block[b].setdefault(rst, PortSpec(rst, "input", 1))
+            # a stub grows the ports its pins expose (a stub has only contract ports)
+            extra = {pport: PortSpec(pport, _PIN_DIR.get(str(p.get("dir")), "input"), max(1, int(p.get("width") or 1)))
+                     for (pb_, pport), p in pins_by_port.items() if pb_ == b and pport not in ports_by_block[b]}
+            if extra:
+                cp.ports.update(extra)
+                ports_by_block[b].update(extra)
+                sp.write_text(stub_module(b, cp, clk=clk, rst=rst))
 
     # ---- nets from the contract edges
     net_of: dict[tuple[str, str], str] = {}
@@ -247,8 +308,8 @@ def assemble_top(project_root, *, top_name: str, blocks: list[str], edges: list[
             if pp.dir == cp_.dir and pp.dir != "inout":
                 errors.append(f"edge {eid}: {pb}.{pport} and {cb}.{cport} are both {pp.dir}")
                 continue
-            if pp.width != cp_.width:
-                errors.append(f"edge {eid}: width mismatch {pb}.{pport}[{pp.width}] vs {cb}.{cport}[{cp_.width}]")
+            if pp.width != cp_.width or pp.width != int(s["width"]):
+                errors.append(f"edge {eid}: width mismatch {pb}.{pport}[{pp.width}] vs {cb}.{cport}[{cp_.width}]; contract requires {s['width']}")
                 continue
             # A producer output legitimately fans out to several consumers: the
             # first edge names the net, later edges join it. Two different
@@ -264,17 +325,58 @@ def assemble_top(project_root, *, top_name: str, blocks: list[str], edges: list[
             net_of[(cb, cport)] = net
             wires[net] = pp.width
 
-    # ---- boundary ports: unconnected block ports
+    # ---- declared pins: each is a top port wired to its block port
     boundary: list[dict] = []
+    clock_pins: list[dict] = []
+    for pin in pins:
+        pname, pb, pport = str(pin["name"]), pin.get("block"), pin.get("port")
+        pdir = _PIN_DIR.get(str(pin.get("dir") or ""), "input")
+        pw = max(1, int(pin.get("width") or 1))
+        if not pb:
+            if pin.get("kind") in ("clock", "reset") and pname in (top_clk, top_rst):
+                clock_pins.append({"name": pname, "dir": "input", "width": 1, "block": None, "port": None,
+                                   "kind": pin.get("kind")})
+            elif enforce:
+                errors.append(f"SHELL_PIN_UNBOUND {pname}: a {pin.get('kind') or 'signal'} pin with no block port "
+                              "(coresmith pin set <name> from <block>.<port>)")
+            continue
+        if pb not in ports_by_block:
+            if enforce:
+                errors.append(f"SHELL_PIN_UNKNOWN_BLOCK {pname}: {pb} is not instantiated in the top")
+            continue
+        bp = ports_by_block[pb].get(pport)
+        if bp is None:
+            errors.append(f"{pb}: pin {pname} port {pport!r} missing from the block"
+                          + (f" ({Path(rtl_paths[pb]).name})" if pb in rtl_paths else ""))
+            continue
+        if (pb, pport) in net_of:
+            errors.append(f"PIN_DOUBLE_DRIVEN {pb}.{pport}: pin {pname} and contract net {net_of[(pb, pport)]}")
+            continue
+        if bp.dir != pdir:
+            errors.append(f"{pb}: pin {pname} is {pin.get('dir')} but {pb}.{pport} is {bp.dir}")
+            continue
+        if bp.width != pw:
+            errors.append(f"{pb}: pin {pname} is {pw} bit(s) but {pb}.{pport} is {bp.width}")
+            continue
+        boundary.append({"name": pname, "dir": pdir, "width": pw, "block": pb, "port": pport,
+                         "kind": pin.get("kind") or "signal"})
+        net_of[(pb, pport)] = pname
+
+    # ---- the rest: clk/rst fan-out, then undeclared (refused) or inferred ports
+    undeclared: list[str] = []
     for b in blocks:
         for name, p in ports_by_block[b].items():
             if (b, name) in net_of:
                 continue
             if name in _CLK_NAMES:
-                net_of[(b, name)] = clk
+                net_of[(b, name)] = top_clk
                 continue
             if name in _RST_NAMES:
-                net_of[(b, name)] = rst
+                net_of[(b, name)] = top_rst
+                continue
+            if enforce:
+                undeclared.append(f"{b}.{name}")
+                net_of[(b, name)] = ""
                 continue
             if b == boundary_block:
                 top_port = name
@@ -282,14 +384,26 @@ def assemble_top(project_root, *, top_name: str, blocks: list[str], edges: list[
                 top_port = f"{b}_{name}"
             boundary.append({"name": top_port, "dir": p.dir, "width": p.width, "block": b, "port": name})
             net_of[(b, name)] = top_port
+    for u in undeclared:
+        errors.append(f"SHELL_UNDECLARED_PORT {u}: on no contract edge and no pin "
+                      "(coresmith pin add <name> --dir in|out --from " + u + ", or a contract edge)")
+    if enforce:
+        top_ports = {top_clk, top_rst} | {bp_["name"] for bp_ in boundary}
+        pin_names = {str(p["name"]) for p in pins}
+        # the synthesized clk/rst are accepted whether or not they are declared
+        extra = sorted(n for n in top_ports - pin_names if n not in (top_clk, top_rst))
+        missing = sorted(pin_names - top_ports)
+        if extra or missing:
+            errors.append("SHELL_BOUNDARY_MISMATCH the top's ports differ from the declared pins: "
+                          f"extra={extra} missing={missing}")
 
     # ---- emit
     L = [f"// {top_name}: deterministic shell assembly (A4). Real blocks: "
          f"{', '.join(x for x in blocks if x not in stubs) or '-'}; stubs: {', '.join(stubs) or '-'}.",
          "// Wired from the frozen interface contracts; regenerated as blocks pass. Do not edit.",
          f"module {top_name} ("]
-    decl = [f"  input  wire {clk}", f"  input  wire {rst}"]
-    seen = {clk, rst}
+    decl = [f"  input  wire {top_clk}", f"  input  wire {top_rst}"]
+    seen = {top_clk, top_rst}
     for bp in boundary:
         if bp["name"] in seen:
             errors.append(f"boundary port {bp['name']!r} declared twice")
@@ -309,9 +423,10 @@ def assemble_top(project_root, *, top_name: str, blocks: list[str], edges: list[
     L.append("endmodule")
     verilog = "\n".join(L) + "\n"
     rtl_path = out / f"{top_name}.v"
-    rtl_path.write_text(verilog)
-    return Assembly(verilog=verilog, module_name=top_name, rtl_path=str(rtl_path),
-                    instantiated=list(blocks), stubs=stubs, boundary_ports=boundary,
+    if not errors:
+        rtl_path.write_text(verilog)
+    return Assembly(verilog=verilog, module_name=top_name, rtl_path=str(rtl_path) if not errors else "",
+                    instantiated=list(blocks), stubs=stubs, boundary_ports=clock_pins + boundary,
                     wiring_errors=errors, wires=len(wires), sources=sources,
                     block_sources=block_sources, block_modules=dict(inst_module))
 
@@ -319,10 +434,14 @@ def assemble_top(project_root, *, top_name: str, blocks: list[str], edges: list[
 def elaborate(assembly: Assembly, *, timeout_s: int = 600) -> dict:
     """Verilator lint of the assembled top with its sources, plus the engine
     primitive library the blocks were verified against (cs_sram_* etc.)."""
+    if assembly.wiring_errors:
+        return {"ran": False, "ok": False, "errors": assembly.wiring_errors,
+                "reason": "unresolved connections; shell was not published"}
     import shutil
     import subprocess
 
     from orchestrator.langgraph.sram_wrapper import engine_lib_sources
+    from orchestrator.processes import run as run_process
     vb = shutil.which("verilator")
     if not vb:
         return {"ran": False, "ok": None, "reason": "verilator not installed"}
@@ -330,7 +449,7 @@ def elaborate(assembly: Assembly, *, timeout_s: int = 600) -> dict:
            "-Wno-PINMISSING", "-Wno-DECLFILENAME", "--top-module", assembly.module_name,
            assembly.rtl_path, *assembly.sources, *engine_lib_sources(assembly.sources)]
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        p = run_process(cmd, capture_output=True, text=True, timeout=timeout_s)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"ran": False, "ok": None, "reason": str(exc)}
     errs = [ln for ln in (p.stdout + p.stderr).splitlines() if "%Error" in ln]
@@ -368,7 +487,9 @@ def write_snapshot(project_root, assembly: Assembly, elab: dict, *, tier=None) -
     snap = {"ts": time.time(), "tier": tier, "top": assembly.module_name, "rtl_path": assembly.rtl_path,
             "real_blocks": [b for b in assembly.instantiated if b not in assembly.stubs],
             "stub_blocks": list(assembly.stubs), "wires": assembly.wires,
-            "boundary_ports": len(assembly.boundary_ports), "wiring_errors": assembly.wiring_errors,
+            "boundary_ports": len(assembly.boundary_ports),
+            "boundary": [str(b.get("name")) for b in assembly.boundary_ports],
+            "wiring_errors": assembly.wiring_errors,
             "elaborated": elab.get("ok"), "elab_errors": elab.get("errors") or []}
     try:
         from orchestrator.state_store.project_db import open_project

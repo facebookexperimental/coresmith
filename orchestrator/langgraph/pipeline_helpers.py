@@ -35,6 +35,7 @@ from pathlib import Path
 import yaml
 
 from orchestrator._timeouts import scaled
+from orchestrator.processes import run as run_process
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -75,12 +76,106 @@ LIBERTY_FILE = _find_liberty_file()
 # Preflight check -- validate PDK/EDA tools before burning retry budgets
 # ---------------------------------------------------------------------------
 
-def preflight_check(phases: list[str] | None = None) -> dict:
+# cocotb 2.0's Makefile.verilator refuses anything older ("cocotb requires
+# Verilator 5.036 or later").
+VERILATOR_MIN_FOR_COCOTB2 = (5, 36)
+_ENGINE_BIN = Path(__file__).resolve().parents[2] / "bin"
+
+
+def _cocotb_major() -> int | None:
+    try:
+        from importlib.metadata import version
+        return int(version("cocotb").split(".")[0])
+    except Exception:  # noqa: BLE001 - not installed / unparseable
+        return None
+
+
+def _verilator_version(binary: str) -> tuple[int, int] | None:
+    """(major, minor) from ``verilator --version`` ("Verilator 5.036 ..."),
+    or None when it cannot be run / parsed."""
+    try:
+        p = run_process([binary, "--version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"Verilator\s+(\d+)\.(\d+)", (p.stdout or "") + (p.stderr or ""))
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def _is_engine_sta_shim(path: str) -> bool:
+    try:
+        rp = Path(path).resolve()
+        if rp == (_ENGINE_BIN / "sta").resolve():
+            return True
+        return "CoreSmith OpenSTA compatibility shim" in rp.read_text(errors="replace")[:2000]
+    except (OSError, ValueError):
+        return False
+
+
+def _sta_problem() -> str | None:
+    """Why pre-layout STA cannot run (None when OpenSTA is reachable).
+
+    ppa_check runs ``sta`` from PATH; the engine's ``bin/sta`` shim execs
+    ``$CORESMITH_REAL_STA`` (default command name ``sta-real``)."""
+    sta = shutil.which("sta")
+    if not sta:
+        return (f"OpenSTA not reachable: no `sta` on PATH -- put the engine's bin/ on PATH "
+                f"(export PATH={_ENGINE_BIN}:$PATH) and point CORESMITH_REAL_STA at the "
+                "OpenSTA binary (e.g. export CORESMITH_REAL_STA=<openroad>/build/src/sta/sta)")
+    if _is_engine_sta_shim(sta):
+        real = os.environ.get("CORESMITH_REAL_STA", "sta-real").strip()
+        resolved = shutil.which(real) if real else None
+        if not resolved:
+            return (f"OpenSTA not reachable: {sta} (the engine's bin/sta shim) execs "
+                    f"CORESMITH_REAL_STA={real or '<empty>'}, which is not an executable path "
+                    "or command on PATH -- export CORESMITH_REAL_STA=<OpenSTA command or path> "
+                    "(for example sta-real); without it every block's timing "
+                    "is 'not measured' and block-done refuses")
+    return None
+
+
+def _declares_primitive_fabric(project_root) -> bool:
+    """Whether the project's block diagram / block queue declares a
+    ``kind: primitive`` block (the generated SoC fabric)."""
+    if not project_root:
+        return False
+    cdir = Path(project_root) / ".coresmith"
+    for name in ("block_diagram.json", "block_specs.json"):
+        try:
+            doc = json.loads((cdir / name).read_text())
+        except (OSError, ValueError):
+            continue
+        blocks = doc.get("blocks") if isinstance(doc, dict) else doc
+        for b in blocks or []:
+            if isinstance(b, dict) and str(b.get("kind") or "").lower() == "primitive":
+                return True
+    return False
+
+
+def _engine_bin_on_path() -> bool:
+    try:
+        target = _ENGINE_BIN.resolve()
+    except OSError:
+        return False
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            if Path(entry).resolve() == target:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def preflight_check(phases: list[str] | None = None, *, project_root=None) -> dict:
     """Validate that required PDK files and EDA tools exist.
 
     Args:
         phases: List of phases to check. Options: "pipeline", "backend".
             Defaults to ["pipeline"] if not specified.
+        project_root: the run directory (default ``$CORESMITH_PROJECT_ROOT``);
+            its block diagram decides whether the fabric generator's
+            yosys-slang is required.
 
     Returns:
         {"ok": True} or {"ok": False, "errors": [...], "warnings": [...]}
@@ -122,8 +217,24 @@ def preflight_check(phases: list[str] | None = None) -> dict:
             if not kimi_ok:
                 errors.append("Kimi Code CLI not found; install @moonshot-ai/kimi-code or set KIMI_CLI_PATH")
 
-        if not shutil.which("verilator"):
+        _verilator = shutil.which("verilator")
+        if not _verilator:
             errors.append("verilator not found on PATH")
+        elif (_cocotb_major() or 2) >= 2:
+            _vv = _verilator_version(_verilator)
+            _need = ".".join(f"{x:03d}" if i else str(x)
+                             for i, x in enumerate(VERILATOR_MIN_FOR_COCOTB2))
+            if _vv is None:
+                errors.append(
+                    f"could not read `{_verilator} --version`; cocotb 2.0 needs Verilator "
+                    f">= {_need} -- put a working one first on PATH "
+                    "(export PATH=<verilator-5.036+>/bin:$PATH)")
+            elif _vv < VERILATOR_MIN_FOR_COCOTB2:
+                errors.append(
+                    f"Verilator {_vv[0]}.{_vv[1]:03d} at {_verilator} is too old: cocotb 2.0 "
+                    f"requires Verilator >= {_need} (every block sim stops with 'cocotb "
+                    "requires Verilator 5.036 or later') -- put a newer one first on PATH, "
+                    "e.g. export PATH=<verilator-5.036+>/bin:$PATH")
         # Yosys always runs: with the sky130 Liberty/PDK present it maps to the
         # library; without it (or with CORESMITH_SYNTH_GENERIC=1) it runs the
         # PDK-free generic gate mapping. There is no way to skip synthesis.
@@ -186,6 +297,37 @@ def preflight_check(phases: list[str] | None = None) -> dict:
                     "other geometry will escalate rather than being tiled."
                 )
 
+        # Pre-layout STA: measured timing is a hard verdict (block-done
+        # refuses without a WNS), so OpenSTA must be reachable whenever the
+        # PDK-mapped flow runs. A PDK-free generic run has no liberty to time.
+        _sta_err = _sta_problem()
+        if _sta_err:
+            (warnings if (synth_generic or not LIBERTY_FILE.exists()) else errors).append(_sta_err)
+
+        # The generated SoC fabric (kind: primitive) is elaborated by
+        # yosys-slang; without it the primitive block fails at materialization.
+        _pr = project_root or os.environ.get("CORESMITH_PROJECT_ROOT", "").strip() or None
+        if _declares_primitive_fabric(_pr):
+            try:
+                from orchestrator.fabric.generate import slang_available, yosys_binary
+                _fy = yosys_binary()
+                if not slang_available(_fy):
+                    errors.append(
+                        f"yosys-slang is not available in {_fy}: the block diagram declares a "
+                        "`kind: primitive` fabric block, which the fabric generator elaborates "
+                        "with Yosys' slang plugin -- export CORESMITH_FABRIC_YOSYS=<oss-cad-suite>"
+                        "/bin/yosys (a Yosys that can `plugin -i slang`)")
+            except Exception as _fe:  # noqa: BLE001
+                errors.append(f"fabric generator probe failed ({_fe}); the block diagram "
+                              "declares a `kind: primitive` fabric block")
+
+        # Cluster workers shell to `coresmith` / `sta` by name.
+        if not _engine_bin_on_path():
+            warnings.append(
+                f"the engine's bin/ ({_ENGINE_BIN}) is not on PATH: cluster workers "
+                "invoke `coresmith` and the `sta` shim by name -- "
+                f"export PATH={_ENGINE_BIN}:$PATH")
+
     if "backend" in phases:
         from orchestrator.langgraph.backend_helpers import (
             CELL_GDS,
@@ -214,7 +356,7 @@ def preflight_check(phases: list[str] | None = None) -> dict:
             # Magic 8.3.105 package. Fail here instead of consuming a backend
             # attempt on a deterministic technology-file parse error.
             try:
-                _magic_v = subprocess.run(
+                _magic_v = run_process(
                     [MAGIC_BIN, "--version"], capture_output=True, text=True,
                     timeout=5,
                 )
@@ -290,15 +432,22 @@ _LOG_DIR = Path(
 )
 
 
+def _step_log_dir(project_root=None) -> Path:
+    if project_root is None:
+        return _LOG_DIR
+    return Path(os.environ.get("CORESMITH_LOG_DIR") or Path(project_root) / ".coresmith/step_logs")
+
+
 def _write_step_log(
     block_name: str,
     step: str,
     cmd: list[str],
     result: subprocess.CompletedProcess,
     attempt: int = 1,
+    *, project_root=None,
 ) -> str:
-    """Write full subprocess output to /tmp and return the log file path."""
-    log_dir = _LOG_DIR / block_name
+    """Write subprocess output to the caller's project and return its path."""
+    log_dir = _step_log_dir(project_root) / block_name
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / f"{step}_attempt{attempt}.log"
 
@@ -344,9 +493,10 @@ def _write_step_log_error(
     cmd: list[str],
     error_msg: str,
     attempt: int = 1,
+    *, project_root=None,
 ) -> str:
     """Write an error-only log file when subprocess didn't complete normally."""
-    log_dir = _LOG_DIR / block_name
+    log_dir = _step_log_dir(project_root) / block_name
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / f"{step}_attempt{attempt}.log"
 
@@ -892,6 +1042,18 @@ async def generate_uarch_spec(
     spec_dir = PROJECT_ROOT / ARCH_DOC_DIR / "uarch_specs"
     spec_dir.mkdir(parents=True, exist_ok=True)
     spec_path = spec_dir / f"{block['name']}.md"
+    # A failed worker may have written a partial file before returning its
+    # error. Restore the input and never adopt or register that partial output.
+    from orchestrator.langchain.agents.coresmith_llm import is_llm_error_response
+    if result.get("error") or is_llm_error_response(result.get("spec_text")):
+        if _spec_pre_mtime:
+            spec_path.write_text(_spec_pre)
+        else:
+            spec_path.unlink(missing_ok=True)
+        result["error"] = result.get("error") or result["spec_text"]
+        result["spec_text"] = _spec_pre
+        result["spec_path"] = str(spec_path)
+        return result
     # Disk-first: if the agent wrote a richer spec via its write/edit tool,
     # prefer that artifact over stdout. Codex may write inside an isolated
     # codex-call-* workdir and return only a path/status message, so recover
@@ -1193,6 +1355,8 @@ async def generate_uarch_specs_single_context(
                 if p.exists() and (name not in pre_mtime
                                    or p.stat().st_mtime_ns != pre_mtime[name]):
                     p.rename(p.with_name(f"{name}.md.rejected-{int(call_start)}"))
+                if name in previous_specs:
+                    p.write_text(previous_specs[name])
             except OSError:
                 pass
         raise
@@ -1299,10 +1463,17 @@ async def generate_rtl(
     The agent reads the uArch spec, ERS, constraints, golden model, and
     previous error from disk, and writes the Verilog to block["rtl_target"].
     """
+    from orchestrator.harness.targets import load as load_target
     from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
     from orchestrator.langchain.agents.rtl_generator import RTLGeneratorAgent
-
+    target = load_target(PROJECT_ROOT, block["name"], require_files=False)
+    if target:
+        block = {**block, "rtl_target": target["sources"][0], "module_name": target["top"]}
+    if not str(block.get("rtl_target") or "").strip():
+        return {"error": f"TARGET_UNBOUND: bind rtl_target for {block['name']} before generation"}
     rtl_path = PROJECT_ROOT / block["rtl_target"]
+    if rtl_path.is_dir():
+        return {"error": f"TARGET_INVALID: RTL target is a directory: {rtl_path}"}
     rtl_path.parent.mkdir(parents=True, exist_ok=True)
 
     agent = RTLGeneratorAgent(model=DEFAULT_MODEL, temperature=0.1)
@@ -1378,56 +1549,11 @@ def rtl_module_name(rtl_path: str | Path, block_name: str) -> str:
 
 
 def _assert_rtl_materialized(rtl_path: Path, block_name: str) -> str | None:
-    """Return None if rtl_path contains a real Verilog module; otherwise
-    return a one-line diagnostic explaining what's wrong.
-
-    Three checks: file exists; file is non-trivially-sized (manylinux empty
-    file is 0 bytes, an `include "<path>"` redirect stub is typically
-    < 200 bytes); and the file declares a module whose name is one we expect,
-    so we know the LLM didn't write the wrong block's RTL or a placeholder.
-
-    **An architectural block name is not always its Verilog module name.** A
-    block whose RTL module name is fixed by an external contract -- a Caravel
-    ``user_project_wrapper``, a vendor-locked top, a pad ring -- is declared in
-    the architecture with its own block name while ``rtl_target`` carries the
-    mandated file/module name. Requiring ``module <block_name>`` rejected such
-    a block even though its RTL was correct and lint-clean, stopping the flow
-    before testbench generation.
-
-    So the expected name is ``block_name`` OR the stem of ``rtl_target``. That
-    keeps the check strong: ``rtl_target`` comes from the block spec, which the
-    engine controls, not from the agent -- so this cannot be used to smuggle in
-    an arbitrarily-named module. Every ordinary block has
-    ``rtl_target == <...>/<block_name>.v``, making the two identical.
-    """
-    if not rtl_path.exists():
-        return (
-            f"agent did not write {rtl_path}. The RTL likely lives in a "
-            f"codex-call-*/ scratch workdir. Materialize it at "
-            f"{rtl_path} via your file-write tool before returning."
-        )
-    size = rtl_path.stat().st_size
-    if size < 200:
-        return (
-            f"{rtl_path} exists but is only {size} bytes -- likely a stub "
-            f"or `include` redirect, not real RTL. Write the full module "
-            f"body inline."
-        )
-    try:
-        text = rtl_path.read_text(encoding="utf-8")
-    except OSError as e:
-        return f"{rtl_path}: read failed ({e})"
-    expected = {block_name, rtl_path.stem}  # see rtl_module_name()
-    if not any(f"module {name}" in text for name in expected):
-        want = "` or `module ".join(sorted(expected))
-        return (
-            f"{rtl_path} ({size} bytes) does not contain `module {want}`. "
-            f"The agent likely wrote the wrong module name or a different "
-            f"block's RTL. The module declaration must use either the block "
-            f"name ({block_name}) or the rtl_target file stem "
-            f"({rtl_path.stem}) when the module name is fixed by an external "
-            f"contract."
-        )
+    """Check publication; the bound top is validated by elaboration/lint."""
+    if not rtl_path.is_file():
+        return f"RTL target is not a file: {rtl_path}; bind a file for {block_name}"
+    if not rtl_path.stat().st_size:
+        return f"RTL target is empty: {rtl_path}"
     return None
 
 
@@ -1435,6 +1561,57 @@ def _assert_rtl_materialized(rtl_path: Path, block_name: str) -> str | None:
 # Lint
 # ---------------------------------------------------------------------------
 
+def _build_job(kind):
+    """Serialize build outputs and attach evidence for the inputs actually checked."""
+    import functools
+    import hashlib
+    import inspect
+
+    from orchestrator.harness.targets import load, revision
+    from orchestrator.processes import output_lock
+
+    def decorate(fn):
+        signature = inspect.signature(fn)
+
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            values = bound.arguments
+            root = Path(values.get("project_root") or PROJECT_ROOT)
+            name = values["block_name"] if kind == "lint" else values["block"]["name"]
+            directory = None
+            if kind == "sim":
+                directory = root / "sim_build" / (values.get("sim_subdir") or name)
+            elif kind == "synth":
+                directory = Path(values.get("output_dir") or root / "syn/output" / name)
+            with output_lock(directory):
+                target = load(root, name)
+                before = revision(target) if target else None
+                tb = Path(values["tb_path"]) if target and kind == "sim" else None
+                tb_hash = hashlib.sha256(tb.read_bytes()).hexdigest() if tb else None
+                result = fn(*args, **kwargs)
+                if before:
+                    result["input_revision"] = before
+                    if tb:
+                        result["testbench_sha256"] = tb_hash
+                    try:
+                        unchanged = revision(load(root, name)) == before
+                        if tb:
+                            unchanged &= hashlib.sha256(tb.read_bytes()).hexdigest() == tb_hash
+                    except (ValueError, OSError):
+                        unchanged = False
+                    if not unchanged:
+                        passed, error = {"lint": ("clean", "errors"), "sim": ("passed", "log"),
+                                         "synth": ("success", "log")}[kind]
+                        result[passed] = False
+                        result[error] = "TARGET_CHANGED: inputs changed during this check; rerun.\n" + result.get(error, "")
+                return result
+        return wrapped
+    return decorate
+
+
+@_build_job("lint")
 def lint_rtl(
     rtl_path: str, block_name: str, attempt: int = 1,
     *, extra_rtl_paths: list[str] | None = None,
@@ -1445,6 +1622,11 @@ def lint_rtl(
     Uses -Wno-fatal so style warnings (unused signals, EOF newline, etc.)
     don't block the pipeline.  Real errors (%Error) still cause failure.
     """
+    from orchestrator.harness.targets import load as load_target
+    from orchestrator.harness.targets import verilator_args
+    target = load_target(PROJECT_ROOT, block_name)
+    if target:
+        rtl_path, *extra_rtl_paths = target["sources"]
     rtl_text = Path(rtl_path).read_text() if Path(rtl_path).exists() else ""
 
     cmd = [
@@ -1467,13 +1649,16 @@ def lint_rtl(
                     _wrapper_lib_path()]
     except Exception:
         pass
+    if target:
+        cmd += verilator_args(target)
     cmd.append(rtl_path)
     cmd.extend(extra_rtl_paths or [])
 
     try:
-        result = subprocess.run(
+        result = run_process(
             cmd, capture_output=True, text=True,
             timeout=timeout_s if timeout_s is not None else scaled(60),
+            cwd=target["cwd"] if target else str(PROJECT_ROOT),
         )
         log_path = _write_step_log(block_name, "lint", cmd, result, attempt)
         stderr = result.stderr.strip()
@@ -1521,10 +1706,11 @@ async def generate_testbench(
     callbacks: list = None,
 ) -> dict:
     """Generate cocotb testbench -- disk-first, agent reads/writes all files."""
+    from orchestrator.harness.targets import load as load_target
     from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL
     from orchestrator.langchain.agents.testbench_generator import TestbenchGeneratorAgent
-
-    rtl_path = str(PROJECT_ROOT / block["rtl_target"])
+    target = load_target(PROJECT_ROOT, block["name"])
+    rtl_path = target["sources"][0] if target else str(PROJECT_ROOT / block["rtl_target"])
     tb_path_str = str(PROJECT_ROOT / block["testbench"])
     Path(tb_path_str).parent.mkdir(parents=True, exist_ok=True)
 
@@ -1778,12 +1964,23 @@ def _normalize_cocotb_timing_keywords(tb_file: Path) -> None:
         tb_file.write_text(normalized, encoding="utf-8")
 
 
+@_build_job("sim")
 def run_simulation(block: dict, rtl_path, tb_path: str, attempt: int = 1,
                    extra_defines: list | None = None,
                    sim_subdir: str | None = None,
                    extra_args: list | None = None,
-                   project_root=None) -> dict:
+                   project_root=None,
+                   extra_tb_paths: list | None = None,
+                   clock_mhz: float | None = None) -> dict:
     """Run cocotb simulation with Verilator.
+
+    ``extra_tb_paths`` are further cocotb test modules run in the SAME
+    simulation after ``tb_path`` (a module build's supplemental tests next to
+    the fixed acceptance testbench), each under its own file stem. The run
+    writes ``results.xml`` and ``measurements.jsonl``
+    (``CORESMITH_MEASUREMENTS``) fresh into its sim dir; ``clock_mhz`` is
+    exported as ``CORESMITH_CLOCK_MHZ`` for a testbench that reports a
+    time-based rate.
 
     ``extra_defines`` (e.g. ``["SYNTHESIS"]``) are added as Verilator ``-D``
     preprocessor defines, and ``sim_subdir`` overrides the ``sim_build/<name>``
@@ -1823,6 +2020,15 @@ def run_simulation(block: dict, rtl_path, tb_path: str, attempt: int = 1,
     # why the chip_top gate-sim could only ever report not_run. A plain string
     # is normalized to a 1-element list, so " ".join() reproduces it exactly and
     # every existing caller's Makefile is byte-identical.
+    from orchestrator.harness.targets import load as load_target
+    from orchestrator.harness.targets import verilator_args
+    target = load_target(root, block_name)
+    if target:
+        import shlex
+        rtl_path = target["sources"]
+        # These options cross both make and the shell (unlike lint's argv).
+        extra_args = [*(extra_args or []),
+                      *[shlex.quote(a).replace("$", "$$") for a in verilator_args(target)]]
     _srcs = [rtl_path] if isinstance(rtl_path, str) else [str(p) for p in rtl_path]
     _srcs = [p for p in _srcs if p]
     # The FIRST source is the primary: it is the file whose declared module the
@@ -1890,17 +2096,31 @@ def run_simulation(block: dict, rtl_path, tb_path: str, attempt: int = 1,
 
     # TOPLEVEL must be the module Verilator will find with --top-module, which
     # is not always the architectural block name (locked Caravel/vendor tops).
-    _toplevel = rtl_module_name(_primary, block_name)
+    _toplevel = target["top"] if target else rtl_module_name(_primary, block_name)
     if _toplevel != block_name:
         log(f"  [SIM] TOPLEVEL={_toplevel} (block {block_name} declares an "
             f"externally-mandated module name)", CYAN)
 
+    runtime_config = ""
+    if target:
+        import shlex
+
+        from orchestrator.harness.targets import revision
+        runtime_config = (
+            f"# target revision: {revision(target)}\n"
+            f"SIM_BUILD = {sim_dir.resolve()}/sim_build\n"
+            f"COCOTB_RESULTS_FILE = {sim_dir.resolve()}/results.xml\n"
+            f"export COCOTB_RESULTS_FILE\n"
+            f"SIM_CMD_PREFIX = env --chdir={shlex.quote(target['cwd'])}\n"
+            f"SIM_ARGS += --trace-file {sim_dir.resolve()}/dump.vcd +verilator+coverage+file+{sim_dir.resolve()}/coverage.dat\n")
+    _extra_tbs = [Path(p) for p in (extra_tb_paths or []) if p and Path(p).is_file()]
+    _modules = ",".join([f"test_{block_name}"] + [p.stem for p in _extra_tbs])
     makefile_content = f"""
-SIM = verilator
+{runtime_config}SIM = verilator
 TOPLEVEL_LANG = verilog
 VERILOG_SOURCES = {_verilog_sources}
 TOPLEVEL = {_toplevel}
-MODULE = test_{block_name}
+MODULE = {_modules}
 WAVES = 1
 EXTRA_ARGS += --trace --trace-structs
 EXTRA_ARGS += --build-jobs {_build_jobs}
@@ -1915,6 +2135,17 @@ EXTRA_ARGS += -Wno-fatal
     sim_tb_path = sim_dir / f"test_{block_name}.py"
     shutil.copy2(tb_path, sim_tb_path)
     _normalize_cocotb_timing_keywords(sim_tb_path)
+    for _xtb in _extra_tbs:
+        shutil.copy2(_xtb, sim_dir / _xtb.name)
+        _normalize_cocotb_timing_keywords(sim_dir / _xtb.name)
+    # This run's evidence is written fresh: a results.xml or a measurement
+    # left by an earlier run must never be read as this run's.
+    _measurements = sim_dir / "measurements.jsonl"
+    for _stale in (sim_dir / "results.xml", _measurements):
+        try:
+            _stale.unlink()
+        except OSError:
+            pass
 
     create_golden_model_wrapper(block_name, block.get("python_source", ""),
                                 project_root=root)
@@ -1929,7 +2160,14 @@ EXTRA_ARGS += -Wno-fatal
     env["SHELL"] = shutil.which("bash") or "/bin/bash"
     # ``.coresmith`` on the path makes ``from vip.<edge> import ...`` resolve
     # to the generated interface VIPs (A2).
-    env["PYTHONPATH"] = f"{sim_dir}:{root}:{Path(root) / '.coresmith'}:{env.get('PYTHONPATH', '')}"
+    # The testbench's own directory resolves the local modules it imports
+    # (the helpers a build records as part of the testbench's identity).
+    _tb_dir = str(Path(tb_path).resolve().parent) if tb_path else ""
+    env["PYTHONPATH"] = (f"{sim_dir}:{root}:{Path(root) / '.coresmith'}:" + (f"{_tb_dir}:" if _tb_dir else "")
+                         + env.get("PYTHONPATH", ""))
+    env["CORESMITH_MEASUREMENTS"] = str(_measurements.resolve())
+    if clock_mhz:
+        env["CORESMITH_CLOCK_MHZ"] = str(clock_mhz)
 
     # ANTI-MEMORIZATION DV SEED (engine fix, 2026-06-21).
     # Per-block DV stimulus must be UNPREDICTABLE at RTL-generation time, so a
@@ -1950,6 +2188,7 @@ EXTRA_ARGS += -Wno-fatal
             block_name, "dv_seed",
             ["CORESMITH_DV_SEED", _dv_seed],
             f"per-run DV seed for {block_name}: {_dv_seed}", attempt,
+            project_root=root,
         )
     except Exception:  # noqa: BLE001
         pass
@@ -2007,43 +2246,19 @@ EXTRA_ARGS += -Wno-fatal
             f"resolved sim timeout for {block_name}: {_sim_timeout}s "
             f"(src={_sim_to_src} env={_sim_to_env} declared={_sim_to_decl} "
             f"prior_timeouts={_prior_timeouts} cap={_sim_to_cap})", attempt,
+            project_root=root,
         )
     except Exception:  # noqa: BLE001
         pass
 
+    if target:
+        env["PYTHONPATH"] = str(sim_dir.resolve()) + os.pathsep + env.get("PYTHONPATH", "")
     env["MAKEFLAGS"] = (env.get("MAKEFLAGS", "") + " -j2").strip()
     try:
-        # Run the build+sim in its OWN process group (start_new_session) so a
-        # timeout can kill the ENTIRE tree -- make -> verilator -> all the
-        # parallel g++/cc1plus. subprocess.run()/proc.kill() SIGKILL only the
-        # direct `make` child, orphaning the compilers (reparented to PID 1);
-        # combined with the retry loop those orphans piled up into thousands of
-        # processes -> OOM-killed the daemon (engine fix 2026-06-24).
-        import uuid
-
-        from orchestrator.langchain.agents.coresmith_llm import (
-            _PROCESS_SCOPE_ENV,
-            _reap_process_group,
-        )
-        env = dict(env, **{_PROCESS_SCOPE_ENV: uuid.uuid4().hex})
-        _proc = subprocess.Popen(
-            [make_bin, "-C", str(sim_dir)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-            start_new_session=True,
-        )
-        _proc._coresmith_process_scope = env[_PROCESS_SCOPE_ENV]
-        try:
-            _out, _err = _proc.communicate(timeout=_sim_timeout)
-        finally:
-            # Also reap tools that created their own session, including on cancel.
-            _reap_process_group(_proc, _proc.pid, grace_s=1.0)
-        result = subprocess.CompletedProcess(
-            [make_bin, "-C", str(sim_dir)], _proc.returncode, _out, _err,
-        )
-        log_path = _write_step_log(block_name, "simulate", [make_bin, "-C", str(sim_dir)], result, attempt)
+        result = run_process([make_bin, "-C", str(sim_dir)], capture_output=True,
+                             text=True, env=env, timeout=_sim_timeout)
+        log_path = _write_step_log(block_name, "simulate", [make_bin, "-C", str(sim_dir)], result, attempt,
+                                   project_root=root)
         full_output = result.stdout + "\n" + result.stderr
         output = full_output[-5000:]
         no_tests = "No tests were discovered" in output
@@ -2161,7 +2376,7 @@ EXTRA_ARGS += -Wno-fatal
                     # prior DV run's number on the retry path) is ignored and
                     # re-measured, not trusted.
                     throughput_record = evaluate_block_throughput(
-                        str(root), block_name, sim_dir, rtl_path
+                        str(root), block_name, sim_dir, _primary
                     )
                 else:
                     throughput_record = {
@@ -2207,6 +2422,9 @@ EXTRA_ARGS += -Wno-fatal
             "throughput_gate_failed": throughput_gate_failed,
             "throughput_needs_tb": throughput_needs_tb,
             "throughput": throughput_record,
+            "sim_dir": str(sim_dir),
+            "results_xml": str(sim_dir / "results.xml"),
+            "measurements_path": str(_measurements),
         }
     except subprocess.TimeoutExpired as exc:
         cmd = [make_bin, "-C", str(sim_dir)]
@@ -2231,12 +2449,13 @@ EXTRA_ARGS += -Wno-fatal
             stderr = stderr.decode(errors="replace")
         _msg += "\nLast simulation output:\n" + (partial + "\n" + stderr)[-12000:]
         _msg += f"\nSimulation artifacts: {sim_dir}"
-        log_path = _write_step_log_error(block_name, "simulate", cmd, _msg, attempt)
+        log_path = _write_step_log_error(block_name, "simulate", cmd, _msg, attempt, project_root=root)
         return {"passed": False, "log": _msg, "log_path": log_path,
                 "sim_timed_out": True, "sim_timeout_s": _sim_timeout}
     except FileNotFoundError as e:
         cmd = [make_bin, "-C", str(sim_dir)]
-        log_path = _write_step_log_error(block_name, "simulate", cmd, f"Tool not found: {e}", attempt)
+        log_path = _write_step_log_error(block_name, "simulate", cmd, f"Tool not found: {e}", attempt,
+                                         project_root=root)
         return {"passed": False, "log": f"Tool not found: {e}", "log_path": log_path}
 
 
@@ -2493,6 +2712,7 @@ def _resolve_synth_yosys() -> str:
     return "yosys"
 
 
+@_build_job("synth")
 def synthesize_block(
     block: dict, rtl_path: str, target_clock_mhz: float = 50.0,
     attempt: int = 1,
@@ -2506,7 +2726,11 @@ def synthesize_block(
     # always the block name (externally-mandated tops carry theirs in
     # rtl_target) -- the same resolution lint, the RTL postcondition and
     # cocotb's TOPLEVEL already use.
-    top_module = rtl_module_name(rtl_path, block_name)
+    from orchestrator.harness.targets import load as load_target
+    target = load_target(PROJECT_ROOT, block_name)
+    if target:
+        rtl_path, *extra_rtl_paths = target["sources"]
+    top_module = target["top"] if target else rtl_module_name(rtl_path, block_name)
     output_dir = (Path(output_dir) if output_dir is not None else
                   PROJECT_ROOT / "syn" / "output" / block_name)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -2516,6 +2740,13 @@ def synthesize_block(
     # primary source in both the legacy argument and the new source list.
     rtl_paths = list(dict.fromkeys(rtl_paths))
     read_verilog_sources = " ".join(f'"{p}"' for p in rtl_paths)
+    parameter_commands = ""
+    if target:
+        read_verilog_sources = " ".join([
+            *[f'-I{p}' for p in target["include_dirs"]],
+            *[f"-D{k}={v}" for k, v in target["defines"].items()], read_verilog_sources])
+        parameter_commands = "".join(f"chparam -set {k} {v} {top_module}\n"
+                                     for k, v in target["parameters"].items())
 
     yosys_bin = _resolve_synth_yosys()
     liberty = str(LIBERTY_FILE)
@@ -2582,7 +2813,7 @@ def synthesize_block(
         # is real, finite, loop-free logic.
         script = f"""# Auto-generated GENERIC synthesis script for {block_name}
 read_verilog -sv {read_verilog_sources}
-{_wrapper_read}hierarchy -top {top_module}
+{_wrapper_read}{parameter_commands}hierarchy -top {top_module}
 proc
 flatten
 opt
@@ -2597,8 +2828,8 @@ write_verilog -noattr {netlist_path}
 """
     else:
         script = f"""# Auto-generated synthesis script for {block_name}
-read_verilog {read_verilog_sources}
-{_wrapper_read}hierarchy -top {top_module}
+read_verilog -sv {read_verilog_sources}
+{_wrapper_read}{parameter_commands}hierarchy -top {top_module}
 proc
 flatten
 opt
@@ -2636,9 +2867,9 @@ write_verilog -noattr {netlist_path}
         # daemon happened to be started in -- so the image was unreadable at
         # block synth even though the identical path worked in DV. Both flat
         # synth and the memory-flop probe already run rooted at the project.
-        result = subprocess.run(
+        result = run_process(
             [yosys_bin, "-s", str(script_path)],
-            cwd=str(PROJECT_ROOT.resolve()),
+            cwd=target["cwd"] if target else str(PROJECT_ROOT.resolve()),
             capture_output=True,
             text=True,
             timeout=_synth_timeout,
@@ -2704,15 +2935,9 @@ write_verilog -noattr {netlist_path}
         }
     except subprocess.TimeoutExpired:
         cmd = [yosys_bin, "-s", str(script_path)]
-        _msg = (
-            f"SYNTH FAILED: Yosys did not terminate within {_synth_timeout}s "
-            f"(CORESMITH_SYNTH_TIMEOUT_S). This is an UNSYNTHESIZABLE design "
-            f"signal -- typically a combinational loop or an enormous unrolled "
-            f"combinational cloud (e.g. an un-pipelined RD-search encoder) that "
-            f"never maps to finite gates. Pipeline/FSM-sequentialize it."
-        )
+        _msg = f"SYNTH_TIMEOUT: Yosys exceeded {_synth_timeout}s; no synthesis verdict. Inspect the tool log or retry with a different budget."
         log_path = _write_step_log_error(block_name, "synthesize", cmd, _msg, attempt)
-        return {"success": False, "log": _msg, "log_path": log_path}
+        return {"success": False, "timed_out": True, "log": _msg, "log_path": log_path}
     except FileNotFoundError:
         cmd = [yosys_bin, "-s", str(script_path)]
         log_path = _write_step_log_error(block_name, "synthesize", cmd, "Yosys not installed", attempt)
@@ -2880,14 +3105,63 @@ async def fix_synth_errors(
 # Testbench Fixer (local LLM iteration for sim failures)
 # ---------------------------------------------------------------------------
 
+async def author_supplemental_tests(
+    block_name: str, rtl_path: str, acceptance_path: str, supplemental_path: str, sim_log_path: str,
+    callbacks: list = None,
+) -> bool | None:
+    """One helper call that writes (or extends) a module build's SUPPLEMENTAL
+    cocotb tests: the Architect's acceptance testbench passed but did not
+    close coverage, so the worker adds stimulus for the uncovered behaviour
+    in ``supplemental_path`` -- never in the fixed acceptance file. True when
+    the file exists afterwards with at least one ``@cocotb.test``."""
+    from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
+    system_prompt = (
+        "You are an expert verification engineer closing functional coverage of an RTL module. The module's "
+        "acceptance testbench is the Architect's FIXED oracle: you never edit, copy-and-weaken, skip or replace "
+        "it. You write ADDITIONAL cocotb tests in a separate supplemental file that drive the behaviour the "
+        "acceptance tests leave uncovered, with expected values derived from the reference model / spec, never "
+        "from the RTL itself. Supplemental tests never record measurements (no orchestrator.harness.measure, no "
+        "measurements.jsonl): requirement targets are measured only by the acceptance tests.")
+    user_message = (
+        f"Block: {block_name}\n\n"
+        f"## Working Files\n"
+        f"- Acceptance testbench (READ-ONLY oracle, reuse its helpers by reading it): {acceptance_path}\n"
+        f"- Supplemental tests (write/extend THIS file only): {supplemental_path}\n"
+        f"- RTL Verilog: {rtl_path}\n"
+        f"- Simulation log with the uncovered regions: {sim_log_path}\n"
+        f"- uArch Spec: arch/uarch_specs/{block_name}.md\n"
+        f"- Build targets brief: .coresmith/blocks/{block_name}/build_targets.md\n"
+        f"- DV Rules: arch/DV_RULES.md (if it exists)\n\n"
+        f"The supplemental file runs in the same simulation as a second cocotb module (its own tests reset and "
+        f"drive the DUT). Add tests that exercise the uncovered lines/branches the log lists, with real checks. "
+        f"Use distinct test names (prefix them test_supp_)."
+    )
+    from orchestrator.state_store.rulings import rulings_section_env
+    user_message += rulings_section_env(consumer="testbench", block=block_name)
+    llm = ClaudeLLM(model=DEFAULT_MODEL, timeout=scaled(900, env="CORESMITH_TB_FIX_TIMEOUT"))
+    try:
+        await llm.call(system=system_prompt, prompt=user_message,
+                       run_name=f"Supplemental Tests [{block_name.replace('_', ' ').title()}]")
+    except Exception as e:  # noqa: BLE001
+        log(f"  [TB-SUPP] LLM error: {e}", RED)
+        return None
+    p = Path(supplemental_path)
+    if not p.is_file() or not re.search(r"@cocotb\.test", p.read_text(errors="replace")):
+        log(f"  [TB-SUPP] no supplemental tests written to {supplemental_path}", RED)
+        return None
+    return True
+
+
 async def fix_testbench_errors(
     block_name: str, rtl_path: str, tb_path: str, sim_log_path: str,
-    callbacks: list = None,
+    callbacks: list = None, guard: str = "",
 ) -> bool | None:
     """Call an LLM to fix simulation errors by editing the testbench.
 
     Disk-first: the agent reads the testbench, RTL, sim log, uArch spec,
     and DV rules from disk, uses the Edit tool to fix in-place.
+    ``guard`` is appended to the request (a module build's fixed acceptance
+    testbench: which file must not be touched).
     Returns True if the agent modified the file, None if it couldn't fix.
     """
     from orchestrator.langchain.agents.coresmith_llm import DEFAULT_MODEL, ClaudeLLM
@@ -2923,6 +3197,8 @@ async def fix_testbench_errors(
         f"Read the simulation log to understand the failure, then read the "
         f"testbench and RTL. Fix the testbench in-place using the Edit tool."
     )
+    if guard:
+        user_message += "\n\n" + guard
     from orchestrator.state_store.rulings import rulings_section_env
     user_message += rulings_section_env(consumer="fix_testbench", block=block_name)
 

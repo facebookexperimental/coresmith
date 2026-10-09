@@ -199,7 +199,7 @@ def test_pre_layout_sta_persists_report(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, stdout=(
             "Startpoint: a_reg (rising edge-triggered flip-flop clocked by clk)\n"
             "Endpoint: b_reg\n  slack (MET)  1.25\nwns max 1.25\ntns max 0.00\n"), stderr="")
-    monkeypatch.setattr(ppa_check.subprocess, "run", fake_run)
+    monkeypatch.setattr(ppa_check, "run_process", fake_run)
     rpt = tmp_path / "syn" / "output" / "top" / "top_sta.rpt"
     out = ppa_check.run_pre_layout_sta(str(netlist), str(sdc), str(lib), "top", report_path=str(rpt))
     assert out["wns_ns"] == 1.25 and out["tns_ns"] == 0.0

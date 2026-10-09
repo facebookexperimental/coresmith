@@ -1,0 +1,4 @@
+/* Give the technical plates room at desktop reading sizes. */
+@media (min-width: 76.25em) {
+  .md-grid { max-width: 76rem; }
+}

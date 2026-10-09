@@ -1,0 +1,218 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 2319" width="960" height="2319" role="img" aria-labelledby="title desc" xml:space="preserve">
+<title id="title">Forty-seven CoreSmith CLI commands, by purpose and by reach</title>
+<desc id="desc">Every top-level command from coresmith --help, numbered in help order, in a grid. Columns: reads (the record or a schema, only queries); writes (validates, then records; a refusal may still record state, such as a stage's blockers); runs here (tools or generators in the CLI's process); engine (asks coresmithd, which runs the graphs). Define the chip — reads: 25 schema; writes: 13 register, 42 prd, 43 frd, 44 contract, 45 fabric, 46 pin, 41 target; runs here: 26 vip, 27 shell. Model and implement — reads: 40 pdk; runs here: 21 model, 22 harness, 10 verify, 39 tool; engine: 06 build, 04 architecture, 03 run, 05 backend. Inspect evidence — reads: 20 status, 23 block-status, 29 blocks, 32 block, 30 results, 33 attempts, 35 dv-status, 36 ppa, 37 coverage, 38 contracts, 31 settings; writes: 19 stage. Trace requirements — reads: 14 item, 34 constraints; writes: 15 link, 16 unlink, 17 check, 18 question, 11 ruling. Operate and recover — reads: 28 leases, 12 interrupts, 09 logs, 47 actions; runs here: 24 block-done; engine: 01 daemon, 02 supervisor, 07 state, 08 resume. build targets, list, show, compare and lineage read the record; stage status and target show read; state write writes views and state check reads. model author and harness author make one explicit helper call. block-done is a diagnostic; build module completes a module.</desc>
+<style>
+.s{font-family:Charter,'Bitstream Charter','Iowan Old Style','Sitka Text',Cambria,Georgia,serif}
+.f{font-family:'Helvetica Neue',Helvetica,Arial,'Liberation Sans','Nimbus Sans',sans-serif}
+.m{font-family:'JetBrains Mono','SF Mono',Menlo,Consolas,'Liberation Mono','DejaVu Sans Mono',monospace}
+.k{font-family:'Helvetica Neue',Helvetica,Arial,'Liberation Sans','Nimbus Sans',sans-serif;font-size:15px;letter-spacing:2.2px;fill:#5D636B}
+.ink{fill:#1B1D21}.gr{fill:#5D636B}.lt{fill:#8C9198}.ver{fill:#BC3F2A}.cob{fill:#2A4BA8}
+.it{font-style:italic}.b{font-weight:700}.sb{font-weight:600}
+</style>
+<rect width="960" height="2319" fill="#FAF8F3"/>
+<text x="40" y="58" class="k">CORESMITH  ·  PLATE 3</text>
+<text x="40" y="108" class="s ink" style="font-size:38px">Forty-seven commands, by reach</text>
+<text x="40" y="146" class="s gr" style="font-size:19px">Every top-level command, numbered in coresmith --help order.</text>
+<text x="40" y="171" class="s gr" style="font-size:19px">Rows group them by purpose; columns by how far they reach.</text>
+<rect x="49" y="222" width="10" height="10" fill="#FAF8F3" stroke="#1B1D21" stroke-width="1.6"/>
+<text x="70" y="232" class="k">READS</text>
+<text x="70" y="257" class="s it gr" style="font-size:16px">record, schema or</text>
+<text x="70" y="277" class="s it gr" style="font-size:16px">deployment only</text>
+<rect x="268.5" y="221.5" width="11" height="11" fill="#1B1D21"/>
+<text x="290" y="232" class="k">WRITES</text>
+<text x="290" y="257" class="s it gr" style="font-size:16px">validates, records;</text>
+<text x="290" y="277" class="s it gr" style="font-size:16px">refusals may record too</text>
+<path d="M494.0 220L501.0 227L494.0 234L487.0 227Z" fill="#1B1D21"/>
+<text x="510" y="232" class="k">RUNS HERE</text>
+<text x="510" y="257" class="s it gr" style="font-size:16px">tools, generators or</text>
+<text x="510" y="277" class="s it gr" style="font-size:16px">one helper call</text>
+<path d="M707.0 221L721.0 221L714.0 234Z" fill="#2A4BA8"/>
+<text x="730" y="232" class="k" style="fill:#2A4BA8">ENGINE</text>
+<text x="730" y="257" class="s it gr" style="font-size:16px">drives coresmithd,</text>
+<text x="730" y="277" class="s it gr" style="font-size:16px">which runs graphs</text>
+<line x1="40" y1="304" x2="920" y2="304" stroke="#1B1D21" stroke-width="1.2" stroke-linecap="butt"/>
+<text x="40" y="338" class="s" style="font-size:21px"><tspan class="ink">Define the chip</tspan><tspan class="gr">   10</tspan></text>
+<text x="62" y="380" class="f lt" style="font-size:14px" text-anchor="end">25</text>
+<text x="70" y="380" class="m ink sb" style="font-size:18px">schema</text>
+<text x="70" y="400" class="s it gr" style="font-size:16px">shapes register accepts</text>
+<text x="282" y="380" class="f lt" style="font-size:14px" text-anchor="end">13</text>
+<text x="290" y="380" class="m ink sb" style="font-size:18px">register</text>
+<text x="386.4" y="380" class="m gr" style="font-size:15.5px">prd frd</text>
+<text x="290" y="400" class="m gr" style="font-size:15.5px">uarch …</text>
+<text x="282" y="430" class="f lt" style="font-size:14px" text-anchor="end">42</text>
+<text x="290" y="430" class="m ink sb" style="font-size:18px">prd</text>
+<text x="332.4" y="430" class="m gr" style="font-size:15.5px">add edit …</text>
+<text x="282" y="460" class="f lt" style="font-size:14px" text-anchor="end">43</text>
+<text x="290" y="460" class="m ink sb" style="font-size:18px">frd</text>
+<text x="332.4" y="460" class="m gr" style="font-size:15.5px">add</text>
+<text x="290" y="480" class="m gr" style="font-size:15.5px">verifier …</text>
+<text x="282" y="510" class="f lt" style="font-size:14px" text-anchor="end">44</text>
+<text x="290" y="510" class="m ink sb" style="font-size:18px">contract</text>
+<text x="386.4" y="510" class="m gr" style="font-size:15.5px">add</text>
+<text x="290" y="530" class="m gr" style="font-size:15.5px">lock …</text>
+<text x="282" y="560" class="f lt" style="font-size:14px" text-anchor="end">45</text>
+<text x="290" y="560" class="m ink sb" style="font-size:18px">fabric</text>
+<text x="364.8" y="560" class="m gr" style="font-size:15.5px">init</text>
+<text x="290" y="580" class="m gr" style="font-size:15.5px">slave …</text>
+<text x="282" y="610" class="f lt" style="font-size:14px" text-anchor="end">46</text>
+<text x="290" y="610" class="m ink sb" style="font-size:18px">pin</text>
+<text x="332.4" y="610" class="m gr" style="font-size:15.5px">add lock …</text>
+<text x="282" y="640" class="f lt" style="font-size:14px" text-anchor="end">41</text>
+<text x="290" y="640" class="m ink sb" style="font-size:18px">target</text>
+<text x="364.8" y="640" class="m gr" style="font-size:15.5px">bind</text>
+<rect x="290" y="650.5" width="10" height="10" fill="#FAF8F3" stroke="#1B1D21" stroke-width="1.6"/>
+<text x="306" y="660" class="m gr" style="font-size:15.5px">show</text>
+<text x="502" y="380" class="f lt" style="font-size:14px" text-anchor="end">26</text>
+<text x="510" y="380" class="m ink sb" style="font-size:18px">vip</text>
+<text x="552.4" y="380" class="m gr" style="font-size:15.5px">generate</text>
+<text x="502" y="410" class="f lt" style="font-size:14px" text-anchor="end">27</text>
+<text x="510" y="410" class="m ink sb" style="font-size:18px">shell</text>
+<text x="574" y="410" class="m gr" style="font-size:15.5px">assemble</text>
+<line x1="40" y1="686" x2="920" y2="686" stroke="#CBC6BB" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="720" class="s" style="font-size:21px"><tspan class="ink">Model and implement</tspan><tspan class="gr">   9</tspan></text>
+<text x="62" y="762" class="f lt" style="font-size:14px" text-anchor="end">40</text>
+<text x="70" y="762" class="m ink sb" style="font-size:18px">pdk</text>
+<text x="112.4" y="762" class="m gr" style="font-size:15.5px">info</text>
+<text x="502" y="762" class="f lt" style="font-size:14px" text-anchor="end">21</text>
+<text x="510" y="762" class="m ink sb" style="font-size:18px">model</text>
+<text x="574" y="762" class="m gr" style="font-size:15.5px">build</text>
+<text x="510" y="782" class="m gr" style="font-size:15.5px">eval …</text>
+<text x="510" y="802" class="s ink" style="font-size:16px">†</text>
+<text x="526" y="802" class="m gr" style="font-size:15.5px">author</text>
+<text x="502" y="832" class="f lt" style="font-size:14px" text-anchor="end">22</text>
+<text x="510" y="832" class="m ink sb" style="font-size:18px">harness</text>
+<text x="510" y="852" class="s ink" style="font-size:16px">†</text>
+<text x="526" y="852" class="m gr" style="font-size:15.5px">author</text>
+<text x="502" y="882" class="f lt" style="font-size:14px" text-anchor="end">10</text>
+<text x="510" y="882" class="m ink sb" style="font-size:18px">verify</text>
+<text x="584.8" y="882" class="m gr" style="font-size:15.5px">rtl synth</text>
+<text x="510" y="902" class="m gr" style="font-size:15.5px">chip</text>
+<text x="502" y="932" class="f lt" style="font-size:14px" text-anchor="end">39</text>
+<text x="510" y="932" class="m ink sb" style="font-size:18px">tool</text>
+<text x="510" y="952" class="s it gr" style="font-size:16px">deployment EDA verbs</text>
+<text x="722" y="762" class="f lt" style="font-size:14px" text-anchor="end">06</text>
+<text x="730" y="762" class="m ink sb" style="font-size:18px;fill:#2A4BA8">build</text>
+<text x="794" y="762" class="m gr" style="font-size:15.5px">module</text>
+<text x="730" y="782" class="m gr" style="font-size:15.5px">status …</text>
+<rect x="730" y="792.5" width="10" height="10" fill="#FAF8F3" stroke="#1B1D21" stroke-width="1.6"/>
+<text x="746" y="802" class="m gr" style="font-size:15.5px">targets show …</text>
+<text x="722" y="832" class="f lt" style="font-size:14px" text-anchor="end">04</text>
+<text x="730" y="832" class="m ink sb" style="font-size:18px;fill:#2A4BA8">architecture</text>
+<text x="730" y="852" class="m gr" style="font-size:15.5px">start resume …</text>
+<text x="722" y="882" class="f lt" style="font-size:14px" text-anchor="end">03</text>
+<text x="730" y="882" class="m ink sb" style="font-size:18px;fill:#2A4BA8">run</text>
+<text x="772.4" y="882" class="m gr" style="font-size:15.5px">start pause …</text>
+<text x="722" y="912" class="f lt" style="font-size:14px" text-anchor="end">05</text>
+<text x="730" y="912" class="m ink sb" style="font-size:18px;fill:#2A4BA8">backend</text>
+<text x="815.6" y="912" class="m gr" style="font-size:15.5px">start</text>
+<text x="730" y="932" class="m gr" style="font-size:15.5px">state …</text>
+<line x1="40" y1="978" x2="920" y2="978" stroke="#CBC6BB" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="1012" class="s" style="font-size:21px"><tspan class="ink">Inspect evidence</tspan><tspan class="gr">   12</tspan></text>
+<text x="62" y="1054" class="f lt" style="font-size:14px" text-anchor="end">20</text>
+<text x="70" y="1054" class="m ink sb" style="font-size:18px">status</text>
+<text x="70" y="1074" class="s it gr" style="font-size:16px">one-screen run status</text>
+<text x="62" y="1104" class="f lt" style="font-size:14px" text-anchor="end">23</text>
+<text x="70" y="1104" class="m ink sb" style="font-size:18px">block-status</text>
+<text x="70" y="1124" class="s it gr" style="font-size:16px">one block’s files</text>
+<text x="62" y="1154" class="f lt" style="font-size:14px" text-anchor="end">29</text>
+<text x="70" y="1154" class="m ink sb" style="font-size:18px">blocks</text>
+<text x="70" y="1174" class="s it gr" style="font-size:16px">the block queue</text>
+<text x="62" y="1204" class="f lt" style="font-size:14px" text-anchor="end">32</text>
+<text x="70" y="1204" class="m ink sb" style="font-size:18px">block</text>
+<text x="70" y="1224" class="s it gr" style="font-size:16px">one block, in full</text>
+<text x="62" y="1254" class="f lt" style="font-size:14px" text-anchor="end">30</text>
+<text x="70" y="1254" class="m ink sb" style="font-size:18px">results</text>
+<text x="155.6" y="1254" class="s it gr" style="font-size:16px">gate results</text>
+<text x="62" y="1284" class="f lt" style="font-size:14px" text-anchor="end">33</text>
+<text x="70" y="1284" class="m ink sb" style="font-size:18px">attempts</text>
+<text x="70" y="1304" class="s it gr" style="font-size:16px">attempt history</text>
+<text x="62" y="1334" class="f lt" style="font-size:14px" text-anchor="end">35</text>
+<text x="70" y="1334" class="m ink sb" style="font-size:18px">dv-status</text>
+<text x="70" y="1354" class="s it gr" style="font-size:16px">DV scoreboard</text>
+<text x="62" y="1384" class="f lt" style="font-size:14px" text-anchor="end">36</text>
+<text x="70" y="1384" class="m ink sb" style="font-size:18px">ppa</text>
+<text x="112.4" y="1384" class="s it gr" style="font-size:16px">FF, area, cells</text>
+<text x="62" y="1414" class="f lt" style="font-size:14px" text-anchor="end">37</text>
+<text x="70" y="1414" class="m ink sb" style="font-size:18px">coverage</text>
+<text x="70" y="1434" class="s it gr" style="font-size:16px">coverage summary</text>
+<text x="62" y="1464" class="f lt" style="font-size:14px" text-anchor="end">38</text>
+<text x="70" y="1464" class="m ink sb" style="font-size:18px">contracts</text>
+<text x="70" y="1484" class="s it gr" style="font-size:16px">a block’s edges</text>
+<text x="62" y="1514" class="f lt" style="font-size:14px" text-anchor="end">31</text>
+<text x="70" y="1514" class="m ink sb" style="font-size:18px">settings</text>
+<text x="70" y="1534" class="s it gr" style="font-size:16px">run settings</text>
+<text x="282" y="1054" class="f lt" style="font-size:14px" text-anchor="end">19</text>
+<text x="290" y="1054" class="m ink sb" style="font-size:18px">stage</text>
+<text x="354" y="1054" class="m gr" style="font-size:15.5px">next</text>
+<rect x="290" y="1064.5" width="10" height="10" fill="#FAF8F3" stroke="#1B1D21" stroke-width="1.6"/>
+<text x="306" y="1074" class="m gr" style="font-size:15.5px">status</text>
+<line x1="40" y1="1560" x2="920" y2="1560" stroke="#CBC6BB" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="1594" class="s" style="font-size:21px"><tspan class="ink">Trace requirements</tspan><tspan class="gr">   7</tspan></text>
+<text x="62" y="1636" class="f lt" style="font-size:14px" text-anchor="end">14</text>
+<text x="70" y="1636" class="m ink sb" style="font-size:18px">item</text>
+<text x="123.2" y="1636" class="m gr" style="font-size:15.5px">list show</text>
+<text x="70" y="1656" class="m gr" style="font-size:15.5px">status</text>
+<text x="62" y="1686" class="f lt" style="font-size:14px" text-anchor="end">34</text>
+<text x="70" y="1686" class="m ink sb" style="font-size:18px">constraints</text>
+<text x="70" y="1706" class="s it gr" style="font-size:16px">constraint ledger</text>
+<text x="282" y="1636" class="f lt" style="font-size:14px" text-anchor="end">15</text>
+<text x="290" y="1636" class="m ink sb" style="font-size:18px">link</text>
+<text x="343.2" y="1636" class="s it gr" style="font-size:16px">from to relation</text>
+<text x="282" y="1666" class="f lt" style="font-size:14px" text-anchor="end">16</text>
+<text x="290" y="1666" class="m ink sb" style="font-size:18px">unlink</text>
+<text x="290" y="1686" class="s it gr" style="font-size:16px">from to relation</text>
+<text x="282" y="1716" class="f lt" style="font-size:14px" text-anchor="end">17</text>
+<text x="290" y="1716" class="m ink sb" style="font-size:18px">check</text>
+<text x="354" y="1716" class="m gr" style="font-size:15.5px">add list</text>
+<text x="282" y="1746" class="f lt" style="font-size:14px" text-anchor="end">18</text>
+<text x="290" y="1746" class="m ink sb" style="font-size:18px">question</text>
+<text x="386.4" y="1746" class="m gr" style="font-size:15.5px">add</text>
+<text x="290" y="1766" class="m gr" style="font-size:15.5px">answer …</text>
+<text x="282" y="1796" class="f lt" style="font-size:14px" text-anchor="end">11</text>
+<text x="290" y="1796" class="m ink sb" style="font-size:18px">ruling</text>
+<text x="364.8" y="1796" class="m gr" style="font-size:15.5px">add list</text>
+<text x="290" y="1816" class="m gr" style="font-size:15.5px">revoke</text>
+<line x1="40" y1="1842" x2="920" y2="1842" stroke="#CBC6BB" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="1876" class="s" style="font-size:21px"><tspan class="ink">Operate and recover</tspan><tspan class="gr">   9</tspan></text>
+<text x="62" y="1918" class="f lt" style="font-size:14px" text-anchor="end">28</text>
+<text x="70" y="1918" class="m ink sb" style="font-size:18px">leases</text>
+<text x="144.8" y="1918" class="s it gr" style="font-size:16px">process leases</text>
+<text x="62" y="1948" class="f lt" style="font-size:14px" text-anchor="end">12</text>
+<text x="70" y="1948" class="m ink sb" style="font-size:18px">interrupts</text>
+<text x="70" y="1968" class="s it gr" style="font-size:16px">parked interrupts</text>
+<text x="62" y="1998" class="f lt" style="font-size:14px" text-anchor="end">09</text>
+<text x="70" y="1998" class="m ink sb" style="font-size:18px">logs</text>
+<text x="123.2" y="1998" class="s it gr" style="font-size:16px">tail graph events</text>
+<text x="62" y="2028" class="f lt" style="font-size:14px" text-anchor="end">47</text>
+<text x="70" y="2028" class="m ink sb" style="font-size:18px">actions</text>
+<text x="70" y="2048" class="s it gr" style="font-size:16px">audit log of CLI verbs</text>
+<text x="502" y="1918" class="f lt" style="font-size:14px" text-anchor="end">24</text>
+<text x="510" y="1918" class="m ink sb" style="font-size:18px">block-done</text>
+<text x="510" y="1938" class="s it gr" style="font-size:16px">diagnostic only</text>
+<text x="722" y="1918" class="f lt" style="font-size:14px" text-anchor="end">01</text>
+<text x="730" y="1918" class="m ink sb" style="font-size:18px;fill:#2A4BA8">daemon</text>
+<text x="804.8" y="1918" class="m gr" style="font-size:15.5px">start stop</text>
+<text x="730" y="1938" class="m gr" style="font-size:15.5px">status</text>
+<text x="722" y="1968" class="f lt" style="font-size:14px" text-anchor="end">02</text>
+<text x="730" y="1968" class="m ink sb" style="font-size:18px;fill:#2A4BA8">supervisor</text>
+<text x="730" y="1988" class="m gr" style="font-size:15.5px">status check …</text>
+<text x="722" y="2018" class="f lt" style="font-size:14px" text-anchor="end">07</text>
+<text x="730" y="2018" class="m ink sb" style="font-size:18px;fill:#2A4BA8">state</text>
+<text x="794" y="2018" class="s it gr" style="font-size:16px">pipeline state</text>
+<rect x="729.5" y="2028" width="11" height="11" fill="#1B1D21"/>
+<text x="746" y="2038" class="m gr" style="font-size:15.5px">write</text>
+<rect x="730" y="2048.5" width="10" height="10" fill="#FAF8F3" stroke="#1B1D21" stroke-width="1.6"/>
+<text x="746" y="2058" class="m gr" style="font-size:15.5px">check</text>
+<text x="722" y="2088" class="f lt" style="font-size:14px" text-anchor="end">08</text>
+<text x="730" y="2088" class="m ink sb" style="font-size:18px;fill:#2A4BA8">resume</text>
+<text x="730" y="2108" class="s it gr" style="font-size:16px">answer a frontend park</text>
+<line x1="40" y1="2134" x2="920" y2="2134" stroke="#CBC6BB" stroke-width="1" stroke-linecap="butt"/>
+<line x1="252" y1="304" x2="252" y2="2134" stroke="#E7E2D7" stroke-width="1" stroke-linecap="butt"/>
+<line x1="472" y1="304" x2="472" y2="2134" stroke="#E7E2D7" stroke-width="1" stroke-linecap="butt"/>
+<line x1="692" y1="304" x2="692" y2="2134" stroke="#E7E2D7" stroke-width="1" stroke-linecap="butt"/>
+<text x="40" y="2174" class="s" style="font-size:15px"><tspan class="ink">…</tspan><tspan class="gr"> more subcommands exist; those shown are representative. </tspan><tspan class="ink">coresmith &lt;command&gt; --help</tspan><tspan class="gr"> lists all.</tspan></text>
+<text x="40" y="2197" class="s" style="font-size:15px"><tspan class="ink">□ ■</tspan><tspan class="gr"> before a subcommand: its reach differs from its column’s.   </tspan><tspan class="ink">†</tspan><tspan class="gr"> one explicit helper call.</tspan></text>
+<text x="40" y="2220" class="s" style="font-size:15px"><tspan class="gr">Reads with a write flag: </tspan><tspan class="ink">constraints --add</tspan><tspan class="gr">, </tspan><tspan class="ink">settings --set</tspan><tspan class="gr">, </tspan><tspan class="ink">leases --steal</tspan><tspan class="gr">, </tspan><tspan class="ink">interrupts --resolve</tspan><tspan class="gr">.</tspan></text>
+<text x="40" y="2243" class="s" style="font-size:15px"><tspan class="ink">block-done</tspan><tspan class="gr"> publishes nothing a stage accepts; </tspan><tspan class="ink">build module</tspan><tspan class="gr"> completes a module. </tspan><tspan class="ink">tool</tspan><tspan class="gr"> verbs come from the deployment.</tspan></text>
+<text x="40" y="2266" class="s" style="font-size:15px"><tspan class="gr">Every verb, including a refused one, is logged in </tspan><tspan class="ink">actions</tspan><tspan class="gr">.</tspan></text>
+</svg>
