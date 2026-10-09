@@ -611,7 +611,7 @@ class TestRunPreLayoutStaLoud:
 
 class TestRouteAfterSynthPpaGate:
     """route_after_synth must preserve current behavior unless the gate is
-    enabled (CLAUDE.md both-branch env-gating convention)."""
+    enabled (AGENTS.md both-branch env-gating convention)."""
 
     def _state(self, **kw):
         base = {"synth_success": True, "ppa_ok": False}

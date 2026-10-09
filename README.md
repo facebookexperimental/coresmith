@@ -46,7 +46,7 @@ See [SETUP.md](SETUP.md) (Docker/RunPod, Nix, or OSS-CAD-Suite), then run `make 
 
 ## Usage
 
-Open the repo in Claude Code or Codex and describe your chip. [CLAUDE.md](CLAUDE.md)
+Open the repo in Claude Code or Codex and describe your chip. [AGENTS.md](AGENTS.md)
 tells the agent how to drive CoreSmith.
 
 To drive it by hand (one project root per chip):
@@ -71,7 +71,7 @@ For a read-only live dashboard, see [docs/WEBVIEW.md](docs/WEBVIEW.md).
 ## Docs
 
 - **[The CoreSmith book](docs/gitbook/README.md)**: start here
-- [CLAUDE.md](CLAUDE.md): agent decision contract, run conventions
+- [AGENTS.md](AGENTS.md): how a coding agent drives CoreSmith (also loaded via `CLAUDE.md`)
 - [docs/migration.md](docs/migration.md): task acceptance (`task_adapter.py`)
 - [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) · [LOCAL-DEV](docs/LOCAL-DEV.md) · [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) · [RUNPOD](docs/RUNPOD.md) · [WEBVIEW](docs/WEBVIEW.md)
 

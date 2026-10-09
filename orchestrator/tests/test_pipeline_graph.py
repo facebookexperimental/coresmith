@@ -2348,7 +2348,7 @@ class TestRevalidateIncompleteGate:
     On a `retry` resume at the pipeline_incomplete gate, the graph should
     re-validate failed/missing blocks against the outer controller's on-disk RTL
     fixes (re-run rtl-phase tiers, recount) instead of dead-ending — bounded so a
-    truly-failing block aborts. Both env branches covered per CLAUDE.md.
+    truly-failing block aborts. Both env branches covered per AGENTS.md.
     """
 
     # ---- pure routing decision ----
@@ -2467,7 +2467,7 @@ class TestRevalidateIncompleteGate:
 
 class TestChipModelStaleRegen:
     """Engine fix: revise_uarch must re-compose, not reuse a stale _chip_model.py
-    (CORESMITH_REGEN_STALE_CHIP_MODEL). Both env branches per CLAUDE.md."""
+    (CORESMITH_REGEN_STALE_CHIP_MODEL). Both env branches per AGENTS.md."""
     import os as _os
 
     def _setup(self, tmp_path):
