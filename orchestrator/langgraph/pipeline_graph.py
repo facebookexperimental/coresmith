@@ -10069,7 +10069,7 @@ async def _approve_integration_check(state: OrchestratorState, bundle: dict) -> 
 
     if _integration_check_park_enabled():
         # Lint-clean is NOT functionally-correct: the assembled chip_top parks
-        # for an explicit `accept` before integration DV (CLAUDE.md: the
+        # for an explicit `accept` before integration DV (AGENTS.md: the
         # Architect drives integration_check with `coresmith resume`).
         log("  [INTEGRATION] chip_top assembled and lint-clean -- parking for accept", CYAN)
         response = await _resolve_interrupt({

@@ -18,7 +18,7 @@ EDA tools, so it runs in the nightly Docker image, never in PR CI. It shells out
 to ``bin/coresmith`` (the tested CLI) rather than importing the daemon so it
 exercises the same control surface an operator uses.
 
-Default-answer policy (mirrors CLAUDE.md's outer-agent contract):
+Default-answer policy (mirrors AGENTS.md's outer-agent contract):
   uarch_spec_review / uarch_integration_review -> approve
   integration_check                            -> accept (else approve)
   integration_dv / validation_dv (failure)    -> stop (abort/skip) + FAIL verdict
@@ -318,7 +318,7 @@ def run_canary(*, project_root: str, blocks_file: str, timeout_s: float,
     # Success = the frontend completed without erroring AND no DV failure /
     # resume error was seen. A failed integration_dv/validation_dv interrupt
     # (dv_failed) hard-fails the run even if pipeline_done is True -- the per-block
-    # frontend can be done while the CHIP is unverified (see CLAUDE.md "What
+    # frontend can be done while the CHIP is unverified (see AGENTS.md "What
     # 'done' means"), so pipeline_done alone is NOT sufficient.
     ok = (
         not dv_failed
