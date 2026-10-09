@@ -33,7 +33,7 @@ from orchestrator.langgraph.integration_helpers import (
 )
 
 # ---------------------------------------------------------------------------
-# Env-var gate: both branches (CLAUDE.md convention)
+# Env-var gate: both branches (AGENTS.md convention)
 # ---------------------------------------------------------------------------
 
 def test_caravel_gate_default_on(monkeypatch):

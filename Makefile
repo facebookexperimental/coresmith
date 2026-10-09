@@ -26,7 +26,7 @@
 #
 # There is no `make pipeline` headless auto-approver any more. coresmith is
 # a daemon (orchestrator/daemon/server.py) driven by `bin/coresmith` and
-# fed decisions by an outer agent (Claude on cron). See CLAUDE.md.
+# fed decisions by an outer agent. See AGENTS.md.
 # =============================================================================
 
 PROJECT_ROOT := $(shell pwd)
@@ -157,7 +157,7 @@ demo:
 	@echo "  Launches coresmithd against this directory and starts a pipeline run."
 	@echo "  After the daemon parks at an interrupt, use 'bin/coresmith state' and"
 	@echo "  'bin/coresmith resume --action approve' to drive it. Or wire up the"
-	@echo "  cron-Claude autochecker described in CLAUDE.md."
+	@echo "  supervisor described in docs/SUPERVISOR.md."
 	@echo ""
 	bin/coresmith daemon start --project-root $(PROJECT_ROOT)
 	bin/coresmith run start \

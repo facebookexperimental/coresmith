@@ -44,7 +44,7 @@ make demo                            # 8-bit adder, ~5-10 min
 - `.coresmith/pipeline_results.json` — final status
 - `.coresmith/traces.db` — OpenTelemetry spans (`make traces` to inspect)
 
-For your own design, drop a `blocks:` stanza into `orchestrator/config.yaml` (or pass `--blocks-file` to `coresmith run start`) and drive a run through the daemon (see [CLAUDE.md](../CLAUDE.md)).
+For your own design, drop a `blocks:` stanza into `orchestrator/config.yaml` (or pass `--blocks-file` to `coresmith run start`) and drive a run through the daemon (see [AGENTS.md](../AGENTS.md)).
 
 ---
 

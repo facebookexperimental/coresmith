@@ -58,7 +58,7 @@ make mcp
 bin/coresmith daemon start --project-root $(pwd)
 bin/coresmith run start --project-root $(pwd)
 # Then `bin/coresmith state` / `bin/coresmith resume --action approve`,
-# or wire up the cron-Claude autochecker described in CLAUDE.md.
+# or wire up the supervisor described in docs/SUPERVISOR.md.
 ```
 
 Backend (post-synthesis) steps need Nix with flakes on `$PATH`. The
