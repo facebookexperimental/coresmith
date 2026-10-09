@@ -28,7 +28,7 @@ pydantic>=2.0.0
 # resolves to a version where the MCP server cannot even be imported (and
 # every test in tests/test_mcp_server.py errors at collection).
 # requirements-lock.txt pins the validated 1.27.0.
-mcp>=1.0.0,<2
+mcp>=1.28.1,<2
 
 # Orchestrator -- coresmithd HTTP daemon (orchestrator/daemon/server.py)
 fastapi>=0.115.0
