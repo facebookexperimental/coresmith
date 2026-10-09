@@ -26,11 +26,11 @@ permissions:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # ubuntu-latest gives ~14 GB free; the openlane2 base + nix-channel
       # update + Sky130 PDK push past that. Free ~25 GB up-front by

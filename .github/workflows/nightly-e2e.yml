@@ -25,10 +25,10 @@ on:
 jobs:
   docker-build:
     name: Build container
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # ubuntu-latest gives ~14 GB free; the openlane2 base (~4 GB extracted)
       # + nix-channel update + Sky130 PDK (~2 GB) already push past that, and
@@ -37,7 +37,7 @@ jobs:
       # dies with
       #   #28 importing to docker
       #   ERROR: write /blobs/sha256/...: no space left on device
-      # publish-image.yml and test-mcu3.yml already carry this step; it was
+      # publish-image.yml already carries this step; it was
       # simply never added here. Frees ~25 GB up front.
       - name: Free runner disk
         run: |
@@ -87,17 +87,17 @@ jobs:
 
   stage-fixtures:
     name: Stage fixtures (strict)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     # Package C, C6: re-run the T1 stage-fixture gate in STRICT mode so a
     # checkpoint that has drifted out of schema sync (topology/state/langgraph
     # change) hard-fails the nightly instead of silently skipping like it does
     # on PRs. No Docker / EDA / live LLM needed -- pure Python.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -120,14 +120,14 @@ jobs:
 
   e2e-demo:
     name: Run make demo on adder8
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: docker-build
     timeout-minutes: 30
     # Skip the LLM-driven leg if the auth secret isn't configured -- avoids
     # noisy red CI on forks that haven't wired up a token.
     if: ${{ github.repository == 'facebookexperimental/coresmith' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Same headroom problem as docker-build: `load: true` needs room for
       # the image twice over. See the comment on that job's copy of this step.

@@ -12,7 +12,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # main's CI has run 2.5-6 h for months and run 30994350130 was cancelled at
     # GitHub's 6 h ceiling, which reports as an unexplained red. A ceiling of
     # our own well under that turns a runaway into a fast, legible failure.
@@ -25,10 +25,10 @@ jobs:
         python-version: ["3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
