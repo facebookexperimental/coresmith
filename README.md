@@ -3,6 +3,7 @@
 [![CI](https://github.com/facebookexperimental/coresmith/actions/workflows/ci.yml/badge.svg)](https://github.com/facebookexperimental/coresmith/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.11 | 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](requirements.txt)
+[![Docs](https://img.shields.io/badge/docs-CoreSmith%20book-indigo.svg)](https://facebookexperimental.github.io/coresmith/)
 [![Version](https://img.shields.io/github/v/tag/facebookexperimental/coresmith?label=version&sort=semver)](https://github.com/facebookexperimental/coresmith/tags)
 
 Coresmith converts prompts to silicon. It uses LangGraph to drive the full RTL-to-GDS flow: architecture specification, RTL generation, verification, synthesis, and physical design. You start Coresmith through your agent (Claude or Codex), and it works as a daemon that manages the chip lifecycle and spawns subagents for you until the GDS is created or your input is required.
@@ -70,7 +71,7 @@ For a read-only live dashboard, see [docs/WEBVIEW.md](docs/WEBVIEW.md).
 
 ## Docs
 
-- **[The CoreSmith book](docs/gitbook/README.md)**: start here
+- **[The CoreSmith book](https://facebookexperimental.github.io/coresmith/)**: start here ([source](docs/gitbook/README.md))
 - [CLAUDE.md](CLAUDE.md): agent decision contract, run conventions
 - [docs/migration.md](docs/migration.md): task acceptance (`task_adapter.py`)
 - [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) · [LOCAL-DEV](docs/LOCAL-DEV.md) · [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) · [RUNPOD](docs/RUNPOD.md) · [WEBVIEW](docs/WEBVIEW.md)

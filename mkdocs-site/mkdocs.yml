@@ -1,6 +1,6 @@
 site_name: CoreSmith
 site_description: Architect, CLI, module builds, and evidence
-site_url: ""
+site_url: https://facebookexperimental.github.io/coresmith/
 use_directory_urls: false
 
 docs_dir: ../docs/gitbook
