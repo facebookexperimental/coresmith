@@ -51,7 +51,7 @@ pcpp==1.30
 pluggy==1.6.0
 pycparser==3.0
 pydantic==2.13.3
-pydantic-settings==2.14.0
+pydantic-settings==2.14.2
 pydantic_core==2.46.3
 pygltflib==1.16.5
 Pygments==2.20.0
