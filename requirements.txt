@@ -15,7 +15,7 @@ langgraph-checkpoint-sqlite>=3.1.1
 
 # Orchestrator -- telemetry
 opentelemetry-sdk>=1.20.0
-opentelemetry-api>=1.20.0
+opentelemetry-api>=1.45.1
 
 # Orchestrator -- config & templating
 pyyaml>=6.0
